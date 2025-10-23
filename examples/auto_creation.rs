@@ -11,13 +11,13 @@ fn main() {
     println!("1. Adding edge to missing node (auto-created):");
     let mut dag = DAG::new();
     dag.add_node(1, "Defined");
-    dag.add_edge(1, 2);  // Node 2 doesn't exist - will be auto-created
+    dag.add_edge(1, 2); // Node 2 doesn't exist - will be auto-created
     println!("{}\n", dag.render());
 
     // Example 2: Both nodes missing
     println!("2. Both nodes missing (both auto-created):");
     let mut dag = DAG::new();
-    dag.add_edge(10, 20);  // Neither node exists - both will be auto-created
+    dag.add_edge(10, 20); // Neither node exists - both will be auto-created
     println!("{}\n", dag.render());
 
     // Example 3: Mixed explicit and auto-created
@@ -25,8 +25,8 @@ fn main() {
     let mut dag = DAG::new();
     dag.add_node(1, "Start");
     dag.add_node(3, "End");
-    dag.add_edge(1, 2);  // Node 2 auto-created
-    dag.add_edge(2, 3);  // Node 2 already auto-created, Node 3 exists
+    dag.add_edge(1, 2); // Node 2 auto-created
+    dag.add_edge(2, 3); // Node 2 already auto-created, Node 3 exists
     println!("{}\n", dag.render());
 
     // Example 4: Complex graph with some auto-created nodes
@@ -34,11 +34,11 @@ fn main() {
     let mut dag = DAG::new();
     dag.add_node(1, "Root");
     dag.add_node(5, "Leaf");
-    dag.add_edge(1, 2);  // 2 auto-created
-    dag.add_edge(1, 3);  // 3 auto-created
-    dag.add_edge(2, 4);  // 4 auto-created
-    dag.add_edge(3, 4);  // 4 already auto-created
-    dag.add_edge(4, 5);  // 5 exists
+    dag.add_edge(1, 2); // 2 auto-created
+    dag.add_edge(1, 3); // 3 auto-created
+    dag.add_edge(2, 4); // 4 auto-created
+    dag.add_edge(3, 4); // 4 already auto-created
+    dag.add_edge(4, 5); // 5 exists
     println!("{}\n", dag.render());
 
     println!("Note: Nodes with ⟨⟩ brackets were auto-created.");

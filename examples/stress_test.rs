@@ -14,10 +14,10 @@ fn main() {
             (5, "C"),
         ],
         &[
-            (1, 2),  // Short -> Long
-            (2, 3),  // Long -> Short
-            (3, 4),  // Short -> Long
-            (4, 5),  // Long -> Short
+            (1, 2), // Short -> Long
+            (2, 3), // Long -> Short
+            (3, 4), // Short -> Long
+            (4, 5), // Long -> Short
         ],
     );
     println!("{}\n", dag.render());
@@ -36,7 +36,7 @@ fn main() {
     dag.add_node(9, "E9");
     dag.add_node(10, "E10");
     dag.add_node(11, "Final");
-    
+
     for i in 1..=10 {
         dag.add_edge(i, 11);
     }
@@ -47,12 +47,24 @@ fn main() {
     let dag = DAG::from_edges(
         &[
             (1, "Root"),
-            (2, "Child1"), (3, "Child2"), (4, "Child3"), (5, "Child4"),
-            (6, "Child5"), (7, "Child6"), (8, "Child7"), (9, "Child8"),
+            (2, "Child1"),
+            (3, "Child2"),
+            (4, "Child3"),
+            (5, "Child4"),
+            (6, "Child5"),
+            (7, "Child6"),
+            (8, "Child7"),
+            (9, "Child8"),
         ],
         &[
-            (1, 2), (1, 3), (1, 4), (1, 5),
-            (1, 6), (1, 7), (1, 8), (1, 9),
+            (1, 2),
+            (1, 3),
+            (1, 4),
+            (1, 5),
+            (1, 6),
+            (1, 7),
+            (1, 8),
+            (1, 9),
         ],
     );
     println!("{}\n", dag.render());
@@ -61,18 +73,30 @@ fn main() {
     println!("4. Complex Multi-Layer DAG:");
     let dag = DAG::from_edges(
         &[
-            (1, "L1A"), (2, "L1B"), (3, "L1C"),      // Layer 1: 3 nodes
-            (4, "L2A"), (5, "L2B"),                  // Layer 2: 2 nodes
-            (6, "L3A"), (7, "L3B"), (8, "L3C"),      // Layer 3: 3 nodes
-            (9, "Final"),                             // Layer 4: 1 node
+            (1, "L1A"),
+            (2, "L1B"),
+            (3, "L1C"), // Layer 1: 3 nodes
+            (4, "L2A"),
+            (5, "L2B"), // Layer 2: 2 nodes
+            (6, "L3A"),
+            (7, "L3B"),
+            (8, "L3C"),   // Layer 3: 3 nodes
+            (9, "Final"), // Layer 4: 1 node
         ],
         &[
             // Layer 1 -> Layer 2
-            (1, 4), (2, 4), (3, 5),
+            (1, 4),
+            (2, 4),
+            (3, 5),
             // Layer 2 -> Layer 3
-            (4, 6), (4, 7), (5, 7), (5, 8),
+            (4, 6),
+            (4, 7),
+            (5, 7),
+            (5, 8),
             // Layer 3 -> Layer 4
-            (6, 9), (7, 9), (8, 9),
+            (6, 9),
+            (7, 9),
+            (8, 9),
         ],
     );
     println!("{}\n", dag.render());
@@ -87,20 +111,13 @@ fn main() {
 
     // Test 6: Empty label (edge case)
     println!("6. Empty/Minimal Labels:");
-    let dag = DAG::from_edges(
-        &[(1, ""), (2, "X"), (3, "")],
-        &[(1, 2), (2, 3)],
-    );
+    let dag = DAG::from_edges(&[(1, ""), (2, "X"), (3, "")], &[(1, 2), (2, 3)]);
     println!("{}\n", dag.render());
 
     // Test 7: Unicode in labels
     println!("7. Unicode Characters in Labels:");
     let dag = DAG::from_edges(
-        &[
-            (1, "🔴 Error"),
-            (2, "⚠️ Warning"),
-            (3, "✓ Fixed"),
-        ],
+        &[(1, "🔴 Error"), (2, "⚠️ Warning"), (3, "✓ Fixed")],
         &[(1, 2), (2, 3)],
     );
     println!("{}\n", dag.render());
@@ -115,12 +132,7 @@ fn main() {
             (4, "AnotherVeryLongDiagnosticNameHereForTesting"),
             (5, "Result"),
         ],
-        &[
-            (1, 5),
-            (2, 5),
-            (3, 5),
-            (4, 5),
-        ],
+        &[(1, 5), (2, 5), (3, 5), (4, 5)],
     );
     println!("{}\n", dag.render());
 
@@ -128,12 +140,27 @@ fn main() {
     println!("9. Deep Nesting (10 levels):");
     let dag = DAG::from_edges(
         &[
-            (1, "Level1"), (2, "Level2"), (3, "Level3"), (4, "Level4"), (5, "Level5"),
-            (6, "Level6"), (7, "Level7"), (8, "Level8"), (9, "Level9"), (10, "Level10"),
+            (1, "Level1"),
+            (2, "Level2"),
+            (3, "Level3"),
+            (4, "Level4"),
+            (5, "Level5"),
+            (6, "Level6"),
+            (7, "Level7"),
+            (8, "Level8"),
+            (9, "Level9"),
+            (10, "Level10"),
         ],
         &[
-            (1, 2), (2, 3), (3, 4), (4, 5),
-            (5, 6), (6, 7), (7, 8), (8, 9), (9, 10),
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 8),
+            (8, 9),
+            (9, 10),
         ],
     );
     println!("{}\n", dag.render());
@@ -142,18 +169,33 @@ fn main() {
     println!("10. Wide Graph (5 parallel chains):");
     let dag = DAG::from_edges(
         &[
-            (1, "C0L0"), (2, "C0L1"), (3, "C0L2"),
-            (4, "C1L0"), (5, "C1L1"), (6, "C1L2"),
-            (7, "C2L0"), (8, "C2L1"), (9, "C2L2"),
-            (10, "C3L0"), (11, "C3L1"), (12, "C3L2"),
-            (13, "C4L0"), (14, "C4L1"), (15, "C4L2"),
+            (1, "C0L0"),
+            (2, "C0L1"),
+            (3, "C0L2"),
+            (4, "C1L0"),
+            (5, "C1L1"),
+            (6, "C1L2"),
+            (7, "C2L0"),
+            (8, "C2L1"),
+            (9, "C2L2"),
+            (10, "C3L0"),
+            (11, "C3L1"),
+            (12, "C3L2"),
+            (13, "C4L0"),
+            (14, "C4L1"),
+            (15, "C4L2"),
         ],
         &[
-            (1, 2), (2, 3),
-            (4, 5), (5, 6),
-            (7, 8), (8, 9),
-            (10, 11), (11, 12),
-            (13, 14), (14, 15),
+            (1, 2),
+            (2, 3),
+            (4, 5),
+            (5, 6),
+            (7, 8),
+            (8, 9),
+            (10, 11),
+            (11, 12),
+            (13, 14),
+            (14, 15),
         ],
     );
     println!("{}\n", dag.render());
@@ -163,18 +205,26 @@ fn main() {
     let dag = DAG::from_edges(
         &[
             (1, "Root"),
-            (2, "L1"), (3, "R1"),
-            (4, "L2"), (5, "R2"),
-            (6, "L3"), (7, "R3"),
+            (2, "L1"),
+            (3, "R1"),
+            (4, "L2"),
+            (5, "R2"),
+            (6, "L3"),
+            (7, "R3"),
             (8, "Merge1"),
             (9, "Merge2"),
         ],
         &[
-            (1, 2), (1, 3),      // Root splits
-            (2, 4), (2, 5),      // Left splits
-            (3, 6), (3, 7),      // Right splits
-            (4, 8), (5, 8),      // Left converges
-            (6, 9), (7, 9),      // Right converges
+            (1, 2),
+            (1, 3), // Root splits
+            (2, 4),
+            (2, 5), // Left splits
+            (3, 6),
+            (3, 7), // Right splits
+            (4, 8),
+            (5, 8), // Left converges
+            (6, 9),
+            (7, 9), // Right converges
         ],
     );
     println!("{}\n", dag.render());

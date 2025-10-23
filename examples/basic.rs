@@ -5,10 +5,7 @@ fn main() {
 
     // Example 1: Simple chain
     println!("1. Simple Chain (A -> B -> C):");
-    let dag = DAG::from_edges(
-        &[(1, "A"), (2, "B"), (3, "C")],
-        &[(1, 2), (2, 3)],
-    );
+    let dag = DAG::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (2, 3)]);
     println!("{}\n", dag.render());
 
     // Example 2: Diamond pattern
