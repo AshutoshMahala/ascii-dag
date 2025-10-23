@@ -1,0 +1,37 @@
+[package]
+name = "ascii-dag"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ash"]
+license = "MIT OR Apache-2.0"
+description = "Lightweight ASCII DAG (Directed Acyclic Graph) renderer for error chains and dependency visualization"
+repository = "https://github.com/AshutoshMahala/ascii-dag"
+keywords = ["dag", "graph", "ascii", "visualization", "errors"]
+categories = ["data-structures", "visualization", "no-std"]
+readme = "README.md"
+# Zero dependencies by default
+
+[features]
+default = ["std"]
+std = []
+warnings = ["std"]
+
+[dev-dependencies]
+
+[lib]
+name = "ascii_dag"
+path = "src/lib.rs"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[example]]
+name = "error_chain"
+path = "examples/error_chain.rs"
+
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true          # Enable Link Time Optimization
+codegen-units = 1   # Better optimization
+strip = true        # Strip symbols

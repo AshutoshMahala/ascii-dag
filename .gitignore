@@ -1,0 +1,35 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Build artifacts
+/target/
+/Cargo.lock
+
+# Documentation
+/doc/
+
+# Test artifacts
+/tests/target/
+
+# Backup files
+*.tmp
+*.bak
