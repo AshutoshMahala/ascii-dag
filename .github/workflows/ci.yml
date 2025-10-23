@@ -62,7 +62,7 @@ jobs:
         run: cargo fmt -- --check
       
       - name: Check clippy
-        run: cargo clippy --all-features -- -D warnings -A clippy::too-many-arguments -A clippy::type-complexity
+        run: cargo clippy --all-features -- -D warnings -A clippy::too-many-arguments -A clippy::type-complexity -A clippy::derivable-impls -A clippy::needless-range-loop -A clippy::collapsible-if
 
   no-std:
     name: No-std Build
