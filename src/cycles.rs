@@ -34,7 +34,7 @@
 pub mod generic;
 
 use crate::graph::DAG;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 impl<'a> DAG<'a> {
     /// Check if the graph contains cycles (making it not a valid DAG).

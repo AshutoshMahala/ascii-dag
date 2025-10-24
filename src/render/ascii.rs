@@ -1,7 +1,7 @@
 //! ASCII rendering implementation for DAG visualization.
 
 use crate::graph::{DAG, RenderMode};
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use core::fmt::Write;
 
 // Box drawing characters (Unicode)

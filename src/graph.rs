@@ -375,13 +375,21 @@ impl<'a> DAG<'a> {
     }
 
     /// Get children indices directly (no ID conversion) - faster for internal use.
+    ///
+    /// Reserved for future optimization. Currently unused but available for
+    /// performance-critical paths that work with node indices directly.
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn get_children_indices(&self, node_idx: usize) -> &[usize] {
         &self.children[node_idx]
     }
 
     /// Get parent indices directly (no ID conversion) - faster for internal use.
+    ///
+    /// Reserved for future optimization. Currently unused but available for
+    /// performance-critical paths that work with node indices directly.
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn get_parents_indices(&self, node_idx: usize) -> &[usize] {
         &self.parents[node_idx]
     }

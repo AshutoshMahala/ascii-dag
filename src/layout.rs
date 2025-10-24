@@ -11,7 +11,7 @@
 pub mod generic;
 
 use crate::graph::DAG;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 impl<'a> DAG<'a> {
     /// Calculate hierarchical levels for all nodes in the graph.
