@@ -4,24 +4,29 @@
 [![Documentation](https://docs.rs/ascii-dag/badge.svg)](https://docs.rs/ascii-dag)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
-Lightweight ASCII DAG (Directed Acyclic Graph) renderer for error chains, build systems, and dependency visualization.
+Modular ASCII DAG (Directed Acyclic Graph) renderer and generic cycle detection library for error chains, build systems, and dependency visualization.
 
 Perfect for:
 - 📋 Error diagnostic visualization (Rust errors, etc.)
 - 🔧 Build dependency graphs
 - 📊 Task scheduling visualization
+- 🔄 Generic cycle detection in any data structure
 - 🌐 IoT/WASM error analysis (no_std compatible)
 
 ## Features
 
-- ✅ **Tiny**: ~77KB compiled, zero dependencies
-- ✅ **Fast**: Zero-copy rendering, batch construction
+- ✅ **Tiny**: ~77KB WASM (minimal example with release optimizations), zero dependencies
+- ✅ **Fast**: O(log n) grouping with binary search, zero-copy rendering
 - ✅ **no_std**: Works in embedded/WASM environments
-- ✅ **Flexible**: Builder API or batch construction
+- ✅ **Modular**: Use DAG rendering, cycle detection, or both independently
+- ✅ **Generic**: Cycle detection, topological sorting, and dependency analysis work on any data structure
+- ✅ **Rich Analysis**: Root finding, impact analysis, graph metrics
 - ✅ **Safe**: Cycle detection built-in
 - ✅ **Beautiful**: Clean ASCII art with Unicode box drawing
 
 ## Quick Start
+
+### DAG Rendering
 
 ```rust
 use ascii_dag::DAG;
@@ -47,6 +52,30 @@ Output:
    ↓
   [Error3]
 
+```
+
+### Generic Cycle Detection
+
+Detect cycles in **any data structure** using higher-order functions:
+
+```rust
+use ascii_dag::cycles::generic::detect_cycle_fn;
+
+// Example: Check for circular dependencies in a package manager
+let get_deps = |package: &str| match package {
+    "app" => vec!["lib-a", "lib-b"],
+    "lib-a" => vec!["lib-c"],
+    "lib-b" => vec!["lib-c"],
+    "lib-c" => vec![],  // No cycle
+    _ => vec![],
+};
+
+let packages = ["app", "lib-a", "lib-b", "lib-c"];
+if let Some(cycle) = detect_cycle_fn(&packages, get_deps) {
+    panic!("Circular dependency: {:?}", cycle);
+} else {
+    println!("✓ No cycles detected");
+}
 ```
 
 ## Usage
@@ -115,6 +144,8 @@ dag.render_to(&mut buffer);  // No allocation!
 ### Cycle Detection
 
 ```rust
+use ascii_dag::DAG;
+
 let mut dag = DAG::new();
 dag.add_node(1, "A");
 dag.add_node(2, "B");
@@ -127,6 +158,71 @@ dag.add_edge(3, 1);  // Cycle!
 if dag.has_cycle() {
     eprintln!("Error: Circular dependency detected!");
 }
+```
+
+### Generic Cycle Detection for Custom Types
+
+Use the trait-based API for cleaner code:
+
+```rust
+use ascii_dag::cycles::generic::CycleDetectable;
+
+struct ErrorRegistry {
+    errors: HashMap<usize, Error>,
+}
+
+impl CycleDetectable for ErrorRegistry {
+    type Id = usize;
+    
+    fn get_children(&self, id: &usize) -> Vec<usize> {
+        self.errors.get(id)
+            .map(|e| e.caused_by.clone())
+            .unwrap_or_default()
+    }
+}
+
+// Now just call:
+if registry.has_cycle() {
+    panic!("Circular error chain detected!");
+}
+```
+
+### Root Finding & Impact Analysis
+
+```rust
+use ascii_dag::cycles::generic::roots::find_roots_fn;
+use ascii_dag::layout::generic::impact::compute_descendants_fn;
+
+let get_deps = |pkg: &&str| match *pkg {
+    "app" => vec!["lib-a", "lib-b"],
+    "lib-a" => vec!["core"],
+    "lib-b" => vec!["core"],
+    "core" => vec![],
+    _ => vec![],
+};
+
+let packages = ["app", "lib-a", "lib-b", "core"];
+
+// Find packages with no dependencies (can build first)
+let roots = find_roots_fn(&packages, get_deps);
+// roots = ["core"]
+
+// What breaks if "core" changes?
+let impacted = compute_descendants_fn(&packages, &"core", get_deps);
+// impacted = ["lib-a", "lib-b", "app"]
+```
+
+### Graph Metrics
+
+```rust
+use ascii_dag::layout::generic::metrics::GraphMetrics;
+
+let metrics = GraphMetrics::compute(&packages, get_deps);
+println!("Total packages: {}", metrics.node_count());
+println!("Dependencies: {}", metrics.edge_count());
+println!("Max depth: {}", metrics.max_depth());
+println!("Avg dependencies: {:.2}", metrics.avg_dependencies());
+println!("Is tree: {}", metrics.is_tree());
 ```
 
 ## Supported Patterns
@@ -196,8 +292,13 @@ pub fn render_errors() -> String {
 
 ## API Reference
 
+### Core Modules
+
+The library is organized into focused, independently-usable modules:
+
+#### `ascii_dag::graph` - DAG Structure
 ```rust
-pub struct DAG<'a> { /* ... */ }
+use ascii_dag::graph::DAG;  // or just `use ascii_dag::DAG;` for backward compat
 
 impl<'a> DAG<'a> {
     // Construction
@@ -217,6 +318,34 @@ impl<'a> DAG<'a> {
     pub fn has_cycle(&self) -> bool;
 }
 ```
+
+#### `ascii_dag::cycles::generic` - Generic Cycle Detection
+```rust
+use ascii_dag::cycles::generic::{detect_cycle_fn, CycleDetectable};
+
+// Function-based API
+pub fn detect_cycle_fn<Id, F>(
+    all_ids: &[Id],
+    get_children: F
+) -> Option<Vec<Id>>
+where
+    Id: Clone + Eq + Hash,
+    F: Fn(&Id) -> Vec<Id>;
+
+// Trait-based API
+pub trait CycleDetectable {
+    type Id: Clone + Eq + Hash;
+    fn get_children(&self, id: &Self::Id) -> Vec<Self::Id>;
+    fn has_cycle(&self) -> bool { /* ... */ }
+    fn find_cycle(&self) -> Option<Vec<Self::Id>> { /* ... */ }
+}
+```
+
+#### `ascii_dag::layout` - Graph Layout
+Sugiyama hierarchical layout algorithm for positioning nodes.
+
+#### `ascii_dag::render` - ASCII Rendering
+Vertical, horizontal, and cycle visualization modes.
 
 ## Size Comparison
 
@@ -267,14 +396,72 @@ Run examples:
 ```bash
 cargo run --example basic
 cargo run --example error_chain
+cargo run --example generic_cycles      # Generic cycle detection
+cargo run --example error_registry      # Error chain with cycle detection
+cargo run --example topological_sort    # Dependency ordering
+cargo run --example dependency_analysis # Full dependency analysis suite
 ```
+
+## Performance & Configuration
+
+### Optimizations
+
+The library is optimized for both performance and bundle size:
+
+- **Cached Adjacency Lists**: O(1) child/parent lookups instead of O(E) iteration
+- **Zero-Copy Rendering**: Direct buffer writes without intermediate allocations
+- **Cached Node Widths**: Pre-computed to avoid repeated string formatting
+- **HashMap Indexing**: O(1) ID→index lookups instead of O(N) scans
+
+### Feature Flags
+
+Control bundle size by enabling only what you need:
+
+```toml
+[dependencies]
+ascii-dag = { version = "0.1", default-features = false, features = ["std"] }
+```
+
+Available features:
+- `std` (default): Standard library support
+- `generic` (default): Generic cycle detection, topological sort, impact analysis, and metrics
+- `warnings`: Enable debug warnings for auto-created nodes
+
+**Bundle Size Impact**:
+- Core renderer only (`--no-default-features --features std`): ~41KB WASM
+- With generic features (default): ~77KB WASM
+
+### Resource Limits
+
+**Tested configurations**:
+- ✅ Up to 1,000 nodes with acceptable performance
+- ✅ Dense graphs (high edge count) handled efficiently via cached adjacency lists
+- ⚠️ Very large graphs (>10,000 nodes) may experience slower layout computation
+
+**Memory usage**:
+- Base overhead: ~100 bytes per node (cached data structures)
+- Adjacency lists: ~16 bytes per edge (index storage)
+- Rendering buffers: Pre-allocated based on graph size estimate
+
+**Performance characteristics**:
+- Node/edge insertion: O(1) amortized
+- Cycle detection: O(V + E) with early termination
+- Rendering: O(V log V + E) for layout, O(V) for output generation
+
+**Security considerations**:
+- No unsafe code
+- Deterministic execution
+- For untrusted input, consider limiting graph size to prevent resource exhaustion
+- Maximum node ID is `usize::MAX` (formatted as up to 20 digits)
 
 ## Use Cases
 
-- **Error Diagnostics**: Visualize error dependency chains
-- **Build Systems**: Show compilation dependencies
-- **Task Scheduling**: Display task ordering
-- **Data Pipelines**: Illustrate data flow
+- **Error Diagnostics**: Visualize error dependency chains with cycle prevention
+- **Build Systems**: Show compilation dependencies and detect circular imports
+- **Task Scheduling**: Display task ordering and validate DAG structure
+- **Data Pipelines**: Illustrate data flow and check for feedback loops
+- **Package Managers**: Detect circular dependencies in packages
+- **Generic Cycle Detection**: Apply to any tree/graph structure via closures
 - **IoT**: Lightweight error reporting
 - **WASM**: Client-side error visualization
 

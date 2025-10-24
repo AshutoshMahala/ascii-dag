@@ -1,4 +1,4 @@
-use ascii_dag::DAG;
+use ascii_dag::graph::DAG;
 use std::time::Instant;
 
 fn main() {

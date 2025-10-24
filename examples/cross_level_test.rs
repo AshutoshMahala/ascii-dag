@@ -1,5 +1,5 @@
 // Clear test case for cross-level edges
-use ascii_dag::DAG;
+use ascii_dag::graph::DAG;
 
 fn main() {
     println!("=== Testing Cross-Level Edge Rendering ===\n");

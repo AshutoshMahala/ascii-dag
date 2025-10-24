@@ -1,4 +1,4 @@
-use ascii_dag::DAG;
+use ascii_dag::graph::DAG;
 
 fn main() {
     // Create a graph where a level's children are clustered on opposite sides

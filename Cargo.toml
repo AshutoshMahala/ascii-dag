@@ -1,7 +1,7 @@
 [package]
 name = "ascii-dag"
-version = "0.1.0"
-edition = "2021"
+version = "0.2.0"
+edition = "2024"
 authors = ["Ash"]
 license = "MIT OR Apache-2.0"
 description = "Lightweight ASCII DAG (Directed Acyclic Graph) renderer for error chains and dependency visualization"
@@ -12,9 +12,12 @@ readme = "README.md"
 # Zero dependencies by default
 
 [features]
-default = ["std"]
+default = ["std", "generic"]
 std = []
 warnings = ["std"]
+# Optional modules for bundle size reduction
+generic = []  # Enable generic cycle detection, topological sort, impact analysis, metrics
+serde = []    # Future: serialization support
 
 [dev-dependencies]
 
@@ -29,6 +32,26 @@ path = "examples/basic.rs"
 [[example]]
 name = "error_chain"
 path = "examples/error_chain.rs"
+
+[[example]]
+name = "generic_cycles"
+path = "examples/generic_cycles.rs"
+required-features = ["generic"]
+
+[[example]]
+name = "error_registry"
+path = "examples/error_registry.rs"
+required-features = ["generic"]
+
+[[example]]
+name = "topological_sort"
+path = "examples/topological_sort.rs"
+required-features = ["generic"]
+
+[[example]]
+name = "dependency_analysis"
+path = "examples/dependency_analysis.rs"
+required-features = ["generic"]
 
 [profile.release]
 opt-level = "z"     # Optimize for size

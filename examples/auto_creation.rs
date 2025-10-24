@@ -2,7 +2,7 @@
 // When you add edges to nodes that don't exist, they are automatically created
 // and shown with angle brackets ⟨⟩ instead of square brackets []
 
-use ascii_dag::DAG;
+use ascii_dag::graph::DAG;
 
 fn main() {
     println!("=== Auto-Creation Feature Examples ===\n");

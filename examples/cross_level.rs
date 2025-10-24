@@ -2,7 +2,7 @@
 // Previously, edges that skipped levels were silently dropped
 // Now they render correctly
 
-use ascii_dag::DAG;
+use ascii_dag::graph::DAG;
 
 fn main() {
     println!("=== Cross-Level Edge Examples ===\n");
