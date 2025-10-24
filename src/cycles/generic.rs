@@ -9,11 +9,11 @@
 
 pub mod roots;
 
+#[cfg(not(feature = "std"))]
+use alloc::collections::BTreeMap as HashMap;
 use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
-#[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap as HashMap;
 
 /// A trait for types that can be checked for cycles.
 ///
@@ -74,10 +74,7 @@ pub trait CycleDetectable {
 /// let all_ids = vec![1, 2, 3];
 /// assert!(detect_cycle_fn(&all_ids, get_dependencies).is_some());
 /// ```
-pub fn detect_cycle_fn<Id, F>(
-    all_ids: &[Id],
-    get_dependencies: F,
-) -> Option<Vec<Id>>
+pub fn detect_cycle_fn<Id, F>(all_ids: &[Id], get_dependencies: F) -> Option<Vec<Id>>
 where
     Id: Eq + core::hash::Hash + Clone,
     F: Fn(&Id) -> Vec<Id>,
@@ -171,10 +168,7 @@ where
     T: CycleDetectable,
 {
     let all_ids: Vec<T::Id> = items.iter().map(|item| item.id()).collect();
-    let id_to_item: HashMap<T::Id, &T> = items
-        .iter()
-        .map(|item| (item.id(), item))
-        .collect();
+    let id_to_item: HashMap<T::Id, &T> = items.iter().map(|item| (item.id(), item)).collect();
 
     detect_cycle_fn(&all_ids, |id| {
         id_to_item
@@ -212,7 +206,7 @@ mod tests {
         let all_ids = vec![1, 2, 3];
         let cycle = detect_cycle_fn(&all_ids, get_deps);
         assert!(cycle.is_some());
-        
+
         let cycle_path = cycle.unwrap();
         assert!(!cycle_path.is_empty());
     }

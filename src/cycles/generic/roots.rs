@@ -96,7 +96,7 @@ where
     F: Fn(&Id) -> Vec<Id>,
 {
     let mut leaves = Vec::new();
-    
+
     'outer: for candidate in items {
         // Check if any other item depends on this candidate
         for item in items {
@@ -109,7 +109,7 @@ where
         // No one depends on this candidate - it's a leaf!
         leaves.push(candidate.clone());
     }
-    
+
     leaves
 }
 
@@ -277,7 +277,7 @@ mod tests {
         deps.insert(3, vec![1]);
 
         let graph = SimpleGraph { deps };
-        
+
         assert_eq!(graph.find_roots(), vec![1]);
         assert!(graph.is_single_rooted());
         assert!(graph.is_tree_like());

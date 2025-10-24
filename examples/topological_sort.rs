@@ -1,4 +1,4 @@
-use ascii_dag::layout::generic::{topological_sort_fn, TopologicallySortable};
+use ascii_dag::layout::generic::{TopologicallySortable, topological_sort_fn};
 use std::collections::HashMap;
 
 fn main() {
@@ -30,7 +30,7 @@ fn example_build_tasks() {
     };
 
     let tasks = ["deploy", "test", "build", "compile"];
-    
+
     match topological_sort_fn(&tasks, get_deps) {
         Ok(sorted) => {
             println!("   Execution order:");
@@ -98,7 +98,7 @@ fn example_trait_based() {
     let schedule = CourseSchedule {
         courses: vec![
             "CS301".to_string(),
-            "CS101".to_string(), 
+            "CS101".to_string(),
             "CS201".to_string(),
         ],
         prerequisites: prereqs,

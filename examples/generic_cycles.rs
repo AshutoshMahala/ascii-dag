@@ -3,7 +3,7 @@
 //! This demonstrates how to use the higher-order cycle detection
 //! with a custom error type that has a `caused_by` relationship.
 
-use ascii_dag::cycles::generic::{detect_cycle_fn, CycleDetectable};
+use ascii_dag::cycles::generic::{CycleDetectable, detect_cycle_fn};
 
 // Custom error type with causal relationships
 #[derive(Debug, Clone)]
@@ -56,9 +56,9 @@ fn example_closure_based() {
     // Define error relationships using a closure
     let get_caused_by = |error_id: &usize| -> Vec<usize> {
         match error_id {
-            1 => vec![2],      // ParseError caused by FileReadError
-            2 => vec![3],      // FileReadError caused by PermissionError
-            3 => vec![],       // PermissionError is root cause
+            1 => vec![2], // ParseError caused by FileReadError
+            2 => vec![3], // FileReadError caused by PermissionError
+            3 => vec![],  // PermissionError is root cause
             _ => vec![],
         }
     };
@@ -134,9 +134,9 @@ fn example_complex_chain() {
     ];
 
     println!("   Checking error chain for circular dependencies...");
-    
+
     let cycle = ascii_dag::cycles::generic::detect_cycle(&errors);
-    
+
     if let Some(path) = cycle {
         println!("   ❌ CRITICAL: Circular error dependency detected!");
         println!("   Cycle path: {:?}", path);

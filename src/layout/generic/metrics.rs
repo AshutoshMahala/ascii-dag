@@ -88,7 +88,7 @@ impl GraphMetrics {
         F: Fn(&Id) -> Vec<Id> + Clone,
     {
         let node_count = items.len();
-        
+
         // Count edges and total dependencies
         let mut edge_count = 0;
         let mut total_dependencies = 0;
@@ -102,7 +102,7 @@ impl GraphMetrics {
         // Find roots and leaves
         let roots = find_roots_fn(items, get_dependencies.clone());
         let root_count = roots.len();
-        
+
         let mut leaf_count = 0;
         for candidate in items {
             let mut is_leaf = true;

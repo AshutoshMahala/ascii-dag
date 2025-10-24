@@ -1,7 +1,9 @@
-use ascii_dag::cycles::generic::roots::{find_roots_fn, find_leaves_fn, RootFindable};
-use ascii_dag::layout::generic::impact::{compute_descendants_fn, compute_blast_radius_fn, ImpactAnalyzable};
-use ascii_dag::layout::generic::metrics::GraphMetrics;
+use ascii_dag::cycles::generic::roots::{RootFindable, find_leaves_fn, find_roots_fn};
 use ascii_dag::graph::DAG;
+use ascii_dag::layout::generic::impact::{
+    ImpactAnalyzable, compute_blast_radius_fn, compute_descendants_fn,
+};
+use ascii_dag::layout::generic::metrics::GraphMetrics;
 use std::collections::HashMap;
 
 fn main() {
@@ -83,7 +85,8 @@ fn example_trait_based_registry() {
         }
 
         fn get_dependencies(&self, id: &String) -> Vec<String> {
-            self.errors.get(id)
+            self.errors
+                .get(id)
                 .map(|e| e.caused_by.clone())
                 .unwrap_or_default()
         }
@@ -97,7 +100,8 @@ fn example_trait_based_registry() {
         }
 
         fn get_dependencies(&self, id: &String) -> Vec<String> {
-            self.errors.get(id)
+            self.errors
+                .get(id)
                 .map(|e| e.caused_by.clone())
                 .unwrap_or_default()
         }
@@ -105,21 +109,30 @@ fn example_trait_based_registry() {
 
     // Create error registry
     let mut errors = HashMap::new();
-    errors.insert("E001".to_string(), ErrorDef {
-        id: "E001".to_string(),
-        message: "Invalid configuration".to_string(),
-        caused_by: vec![],
-    });
-    errors.insert("E002".to_string(), ErrorDef {
-        id: "E002".to_string(),
-        message: "Database connection failed".to_string(),
-        caused_by: vec!["E001".to_string()],
-    });
-    errors.insert("E003".to_string(), ErrorDef {
-        id: "E003".to_string(),
-        message: "Transaction rollback".to_string(),
-        caused_by: vec!["E002".to_string()],
-    });
+    errors.insert(
+        "E001".to_string(),
+        ErrorDef {
+            id: "E001".to_string(),
+            message: "Invalid configuration".to_string(),
+            caused_by: vec![],
+        },
+    );
+    errors.insert(
+        "E002".to_string(),
+        ErrorDef {
+            id: "E002".to_string(),
+            message: "Database connection failed".to_string(),
+            caused_by: vec!["E001".to_string()],
+        },
+    );
+    errors.insert(
+        "E003".to_string(),
+        ErrorDef {
+            id: "E003".to_string(),
+            message: "Transaction rollback".to_string(),
+            caused_by: vec!["E002".to_string()],
+        },
+    );
 
     let registry = ErrorRegistry { errors };
 
@@ -157,8 +170,7 @@ fn example_metrics_dashboard() {
     };
 
     let files = [
-        "app.exe", "main.o", "utils.o", "io.o",
-        "main.c", "utils.c", "io.c", "types.h",
+        "app.exe", "main.o", "utils.o", "io.o", "main.c", "utils.c", "io.c", "types.h",
     ];
 
     let metrics = GraphMetrics::compute(&files, get_deps);
@@ -191,7 +203,7 @@ fn example_metrics_dashboard() {
     dag.add_edge(2, 3);
     dag.add_edge(1, 3);
     dag.add_edge(3, 4);
-    
+
     println!("{}", dag.render());
 
     // Find the most impactful file
@@ -204,8 +216,10 @@ fn example_metrics_dashboard() {
             most_impactful = file;
         }
     }
-    
-    println!("   ⚡ Most impactful file: '{}' (affects {} other files)", 
-             most_impactful, max_impact);
+
+    println!(
+        "   ⚡ Most impactful file: '{}' (affects {} other files)",
+        most_impactful, max_impact
+    );
     println!();
 }

@@ -242,9 +242,11 @@ impl<'a> DAG<'a> {
         self.ensure_node_exists(from);
         self.ensure_node_exists(to);
         self.edges.push((from, to));
-        
+
         // Update adjacency lists (O(1) lookups)
-        if let (Some(&from_idx), Some(&to_idx)) = (self.id_to_index.get(&from), self.id_to_index.get(&to)) {
+        if let (Some(&from_idx), Some(&to_idx)) =
+            (self.id_to_index.get(&from), self.id_to_index.get(&to))
+        {
             self.children[from_idx].push(to_idx);
             self.parents[to_idx].push(from_idx);
         }

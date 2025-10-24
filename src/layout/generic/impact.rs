@@ -16,7 +16,7 @@
 //! };
 //!
 //! let files = ["app.exe", "main.o", "utils.o", "main.c", "utils.c"];
-//! 
+//!
 //! // What needs to be rebuilt if utils.c changes?
 //! let impacted = compute_descendants_fn(&files, &"utils.c", get_deps);
 //! assert!(impacted.contains(&"utils.o"));
@@ -26,10 +26,10 @@
 use alloc::vec::Vec;
 use core::hash::Hash;
 
-#[cfg(feature = "std")]
-use std::collections::{HashSet, VecDeque};
 #[cfg(not(feature = "std"))]
 use alloc::collections::{BTreeSet as HashSet, VecDeque};
+#[cfg(feature = "std")]
+use std::collections::{HashSet, VecDeque};
 
 /// Compute all nodes that (transitively) depend on a given starting node.
 ///
@@ -64,11 +64,7 @@ use alloc::collections::{BTreeSet as HashSet, VecDeque};
 /// let impacted = compute_descendants_fn(&packages, &"lib-core", get_deps);
 /// assert_eq!(impacted.len(), 3);  // lib-a, lib-b, app all depend on it
 /// ```
-pub fn compute_descendants_fn<Id, F>(
-    items: &[Id],
-    start: &Id,
-    get_dependencies: F,
-) -> Vec<Id>
+pub fn compute_descendants_fn<Id, F>(items: &[Id], start: &Id, get_dependencies: F) -> Vec<Id>
 where
     Id: Clone + Eq + Hash,
     F: Fn(&Id) -> Vec<Id>,
@@ -129,11 +125,7 @@ where
 /// assert!(prerequisites.contains(&"test"));
 /// assert!(prerequisites.contains(&"build"));
 /// ```
-pub fn compute_ancestors_fn<Id, F>(
-    _items: &[Id],
-    start: &Id,
-    get_dependencies: F,
-) -> Vec<Id>
+pub fn compute_ancestors_fn<Id, F>(_items: &[Id], start: &Id, get_dependencies: F) -> Vec<Id>
 where
     Id: Clone + Eq + Hash,
     F: Fn(&Id) -> Vec<Id>,
@@ -180,7 +172,7 @@ where
 ///
 /// let items = [1, 2, 3, 4];
 /// let (ancestors, descendants) = compute_blast_radius_fn(&items, &2, get_deps);
-/// 
+///
 /// assert_eq!(ancestors.len(), 1);      // Depends on: 1
 /// assert_eq!(descendants.len(), 2);    // Impacts: 3, 4
 /// ```
@@ -281,7 +273,7 @@ mod tests {
 
         let items = [1, 2, 3];
         let descendants = compute_descendants_fn(&items, &1, get_deps);
-        
+
         assert_eq!(descendants.len(), 2);
         assert!(descendants.contains(&2));
         assert!(descendants.contains(&3));
@@ -299,7 +291,7 @@ mod tests {
 
         let items = [1, 2, 3, 4];
         let descendants = compute_descendants_fn(&items, &1, get_deps);
-        
+
         assert_eq!(descendants.len(), 3);
         assert!(descendants.contains(&2));
         assert!(descendants.contains(&3));
@@ -317,7 +309,7 @@ mod tests {
 
         let items = [1, 2, 3];
         let ancestors = compute_ancestors_fn(&items, &3, get_deps);
-        
+
         assert_eq!(ancestors.len(), 2);
         assert!(ancestors.contains(&1));
         assert!(ancestors.contains(&2));
@@ -335,7 +327,7 @@ mod tests {
 
         let items = [1, 2, 3, 4];
         let (ancestors, descendants) = compute_blast_radius_fn(&items, &2, get_deps);
-        
+
         assert_eq!(ancestors.len(), 1);
         assert!(ancestors.contains(&1));
         assert_eq!(descendants.len(), 2);
@@ -383,7 +375,7 @@ mod tests {
         deps.insert(3, vec![2]);
 
         let graph = SimpleGraph { deps };
-        
+
         assert_eq!(graph.compute_descendants(&1).len(), 2);
         assert_eq!(graph.compute_ancestors(&3).len(), 2);
         assert_eq!(graph.impact_count(&1), 2);

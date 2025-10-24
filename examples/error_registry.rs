@@ -49,7 +49,7 @@ impl ErrorRegistry {
     /// Register an error, checking for cycles
     pub fn register(&mut self, error: ChainableError) -> Result<(), String> {
         let code = error.code;
-        
+
         // Temporarily add the error to check for cycles
         self.errors.insert(code, error);
 
@@ -57,7 +57,7 @@ impl ErrorRegistry {
         if self.has_cycle() {
             // Remove the error that caused the cycle
             self.errors.remove(code);
-            
+
             // Find the cycle path for error message
             let cycle = self.find_cycle();
             if let Some(path) = cycle {
@@ -75,7 +75,7 @@ impl ErrorRegistry {
     fn has_cycle(&self) -> bool {
         let all_codes: Vec<&'static str> = self.errors.keys().copied().collect();
         let errors_clone: HashMap<_, _> = self.errors.clone();
-        
+
         let get_dependencies = move |err_code: &&'static str| -> Vec<&'static str> {
             errors_clone
                 .get(err_code)
@@ -89,7 +89,7 @@ impl ErrorRegistry {
     fn find_cycle(&self) -> Option<Vec<&'static str>> {
         let all_codes: Vec<&'static str> = self.errors.keys().copied().collect();
         let errors_clone: HashMap<_, _> = self.errors.clone();
-        
+
         let get_dependencies = move |err_code: &&'static str| -> Vec<&'static str> {
             errors_clone
                 .get(err_code)
@@ -123,11 +123,11 @@ impl ErrorRegistry {
                 return; // Prevent infinite loops (shouldn't happen due to validation)
             }
             visited.insert(error.code);
-            
+
             for &cause_code in &error.caused_by {
                 self.collect_chain(cause_code, chain, visited);
             }
-            
+
             chain.push(error);
         }
     }
@@ -166,18 +166,18 @@ fn main() {
     println!("2. Attempting to register circular dependency...\n");
 
     // Current chain: ERR_PARSE → ERR_FILE_READ → ERR_PERMISSION
-    
+
     // Register ERR_RETRY that depends on ERR_PARSE
     registry
         .register(ChainableError::new("ERR_RETRY", "Retry failed").with_cause("ERR_PARSE"))
         .unwrap();
-    
+
     println!("   ✓ Added ERR_RETRY → ERR_PARSE");
     println!("   Chain is now: ERR_RETRY → ERR_PARSE → ERR_FILE_READ → ERR_PERMISSION\n");
 
     // Now try to make ERR_PERMISSION depend on ERR_RETRY - this creates a cycle!
     // ERR_RETRY → ERR_PARSE → ERR_FILE_READ → ERR_PERMISSION → ERR_RETRY (CYCLE!)
-    
+
     let cyclic_error = ChainableError::new("ERR_PERMISSION", "Permission error with retry")
         .with_cause("ERR_RETRY"); // This would create: ... → ERR_PERMISSION → ERR_RETRY → ERR_PARSE → ...
 
@@ -188,11 +188,11 @@ fn main() {
 
     // Show the valid error chain
     println!("3. Querying error chain:\n");
-    
+
     if let Some(chain) = registry.errors.get("ERR_PARSE") {
         println!("   Error: {}", chain.message);
         let full_chain = registry.get_chain("ERR_PARSE");
-        
+
         println!("   Causal chain:");
         for (i, error) in full_chain.iter().enumerate() {
             println!("     {}. [{}] {}", i + 1, error.code, error.message);

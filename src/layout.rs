@@ -42,7 +42,10 @@ impl<'a> DAG<'a> {
     }
 
     /// Calculate levels for a specific subgraph.
-    pub(crate) fn calculate_levels_for_subgraph(&self, subgraph_indices: &[usize]) -> Vec<(usize, usize)> {
+    pub(crate) fn calculate_levels_for_subgraph(
+        &self,
+        subgraph_indices: &[usize],
+    ) -> Vec<(usize, usize)> {
         let subgraph_node_ids: Vec<usize> = subgraph_indices
             .iter()
             .map(|&idx| self.nodes[idx].0)
@@ -178,7 +181,11 @@ impl<'a> DAG<'a> {
     ///
     /// Positions nodes horizontally to minimize edge length while
     /// maintaining the ordering from crossing reduction.
-    pub(crate) fn assign_x_coordinates(&self, levels: &mut [Vec<usize>], max_level: usize) -> Vec<usize> {
+    pub(crate) fn assign_x_coordinates(
+        &self,
+        levels: &mut [Vec<usize>],
+        max_level: usize,
+    ) -> Vec<usize> {
         let mut x_coords = vec![0usize; self.nodes.len()];
 
         // Start with left-to-right layout within each level, preserving crossing reduction order
@@ -354,15 +361,13 @@ mod tests {
 
     #[test]
     fn test_calculate_levels() {
-        let dag = DAG::from_edges(
-            &[(1, "A"), (2, "B"), (3, "C")],
-            &[(1, 2), (2, 3)]
-        );
+        let dag = DAG::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (2, 3)]);
 
         let levels = dag.calculate_levels();
-        
+
         // Find levels for each node
-        let level_map: std::collections::HashMap<_, _> = levels.into_iter()
+        let level_map: std::collections::HashMap<_, _> = levels
+            .into_iter()
             .map(|(idx, level)| (dag.nodes[idx].0, level))
             .collect();
 
@@ -375,11 +380,12 @@ mod tests {
     fn test_diamond_layout() {
         let dag = DAG::from_edges(
             &[(1, "Top"), (2, "Left"), (3, "Right"), (4, "Bottom")],
-            &[(1, 2), (1, 3), (2, 4), (3, 4)]
+            &[(1, 2), (1, 3), (2, 4), (3, 4)],
         );
 
         let levels = dag.calculate_levels();
-        let level_map: std::collections::HashMap<_, _> = levels.into_iter()
+        let level_map: std::collections::HashMap<_, _> = levels
+            .into_iter()
             .map(|(idx, level)| (dag.nodes[idx].0, level))
             .collect();
 

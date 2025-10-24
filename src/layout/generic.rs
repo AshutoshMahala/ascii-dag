@@ -210,7 +210,7 @@ mod tests {
 
         let items = [4, 3, 2, 1]; // Unsorted
         let sorted = topological_sort_fn(&items, get_deps).unwrap();
-        
+
         // 1 must come first
         assert_eq!(sorted[0], 1);
         // 4 must come last
@@ -244,10 +244,16 @@ mod tests {
 
         let items = [3, 2, 1];
         let sorted = topological_sort_fn(&items, get_deps).unwrap();
-        
+
         // 1 and 2 must come before 3
-        assert!(sorted.iter().position(|&x| x == 1).unwrap() < sorted.iter().position(|&x| x == 3).unwrap());
-        assert!(sorted.iter().position(|&x| x == 2).unwrap() < sorted.iter().position(|&x| x == 3).unwrap());
+        assert!(
+            sorted.iter().position(|&x| x == 1).unwrap()
+                < sorted.iter().position(|&x| x == 3).unwrap()
+        );
+        assert!(
+            sorted.iter().position(|&x| x == 2).unwrap()
+                < sorted.iter().position(|&x| x == 3).unwrap()
+        );
     }
 
     #[test]

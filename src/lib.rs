@@ -115,8 +115,8 @@
 extern crate alloc;
 
 // Core modules (always available)
-pub mod graph;
 pub mod cycles;
+pub mod graph;
 pub mod layout;
 pub mod render;
 
