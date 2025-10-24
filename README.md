@@ -347,13 +347,6 @@ Sugiyama hierarchical layout algorithm for positioning nodes.
 #### `ascii_dag::render` - ASCII Rendering
 Vertical, horizontal, and cycle visualization modes.
 
-## Size Comparison
-
-| Library | Compiled Size | Dependencies |
-|---------|---------------|--------------|
-| ascii-dag | ~2-3KB | 0 |
-| petgraph | ~200KB+ | Many |
-
 ## Limitations & Design Choices (v0.1.x)
 
 This is an **initial 0.x release** focused on simplicity and zero dependencies. Current limitations:
