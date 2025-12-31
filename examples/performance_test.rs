@@ -13,8 +13,8 @@ fn main() {
 
     // Add 100 nodes
     let start = Instant::now();
-    for i in 0..100 {
-        dag.add_node(i, label_strs[i]);
+    for (i, &label) in label_strs.iter().enumerate().take(100) {
+        dag.add_node(i, label);
     }
     println!("✓ Added 100 nodes in {:?}", start.elapsed());
 

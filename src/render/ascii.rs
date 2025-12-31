@@ -4,6 +4,9 @@ use crate::graph::{DAG, RenderMode};
 use alloc::{string::String, vec, vec::Vec};
 use core::fmt::Write;
 
+// Type alias for connection groups to reduce complexity
+type ConnectionGroup = (usize, Vec<(usize, usize, usize)>);
+
 // Box drawing characters (Unicode)
 pub(crate) const V_LINE: char = '│';
 pub(crate) const H_LINE: char = '─';
@@ -296,6 +299,7 @@ impl<'a> DAG<'a> {
     }
 
     /// PASS 4: Draw connections with Manhattan routing.
+    #[allow(clippy::too_many_arguments)]
     fn draw_connections_sugiyama(
         &self,
         output: &mut String,
@@ -669,7 +673,7 @@ impl<'a> DAG<'a> {
 
         // Group connections by target to find convergence patterns
         // Using sorted Vec with binary search for O(log n) lookup
-        let mut target_groups: Vec<(usize, Vec<(usize, usize, usize)>)> = Vec::new();
+        let mut target_groups: Vec<ConnectionGroup> = Vec::new();
 
         for &conn in &connections {
             // Binary search to find existing group or insertion point
@@ -683,7 +687,7 @@ impl<'a> DAG<'a> {
         let has_any_convergence = target_groups.iter().any(|(_, v)| v.len() > 1);
 
         // Group connections by source to find divergence patterns
-        let mut source_groups: Vec<(usize, Vec<(usize, usize, usize)>)> = Vec::new();
+        let mut source_groups: Vec<ConnectionGroup> = Vec::new();
 
         for &conn in &connections {
             match source_groups.binary_search_by_key(&conn.0, |(k, _)| *k) {
@@ -714,7 +718,7 @@ impl<'a> DAG<'a> {
     fn draw_multiple_convergences(
         &self,
         output: &mut String,
-        target_groups: &[(usize, Vec<(usize, usize, usize)>)],
+        target_groups: &[ConnectionGroup],
     ) {
         // Find all unique source and target positions
         let all_connections: Vec<_> = target_groups
@@ -761,11 +765,10 @@ impl<'a> DAG<'a> {
                     char_at_pos = CORNER_DL; // ┘
                 } else if sources.contains(&&i) {
                     char_at_pos = TEE_UP; // ┴
-                } else if i > min_source && i < max_source {
-                    if char_at_pos == ' ' {
+                } else if i > min_source && i < max_source
+                    && char_at_pos == ' ' {
                         char_at_pos = H_LINE; // ─
                     }
-                }
             }
 
             output.push(char_at_pos);
@@ -786,7 +789,7 @@ impl<'a> DAG<'a> {
     fn draw_multiple_divergences(
         &self,
         output: &mut String,
-        source_groups: &[(usize, Vec<(usize, usize, usize)>)],
+        source_groups: &[ConnectionGroup],
     ) {
         let all_connections: Vec<_> = source_groups
             .iter()
@@ -835,11 +838,10 @@ impl<'a> DAG<'a> {
                         char_at_pos = CORNER_UL; // ┐
                     } else if targets.contains(&&i) {
                         char_at_pos = TEE_DOWN; // ┬
-                    } else if i > min_target && i < max_target {
-                        if char_at_pos == ' ' {
+                    } else if i > min_target && i < max_target
+                        && char_at_pos == ' ' {
                             char_at_pos = H_LINE; // ─
                         }
-                    }
                 }
             }
 

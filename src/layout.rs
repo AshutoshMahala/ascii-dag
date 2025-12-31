@@ -26,15 +26,14 @@ impl<'a> DAG<'a> {
             changed = false;
             for &(from, to) in &self.edges {
                 // Guard against missing nodes - O(1) HashMap lookups
-                if let Some(from_idx) = self.node_index(from) {
-                    if let Some(to_idx) = self.node_index(to) {
+                if let Some(from_idx) = self.node_index(from)
+                    && let Some(to_idx) = self.node_index(to) {
                         let new_level = levels[from_idx] + 1;
                         if new_level > levels[to_idx] {
                             levels[to_idx] = new_level;
                             changed = true;
                         }
                     }
-                }
             }
         }
 
@@ -63,15 +62,14 @@ impl<'a> DAG<'a> {
                 }
 
                 // Guard against missing nodes - O(1) HashMap lookups
-                if let Some(from_idx) = self.node_index(from) {
-                    if let Some(to_idx) = self.node_index(to) {
+                if let Some(from_idx) = self.node_index(from)
+                    && let Some(to_idx) = self.node_index(to) {
                         let new_level = levels[from_idx] + 1;
                         if new_level > levels[to_idx] {
                             levels[to_idx] = new_level;
                             changed = true;
                         }
                     }
-                }
             }
         }
 
@@ -202,6 +200,7 @@ impl<'a> DAG<'a> {
         // But maintain relative order within levels
         for _ in 0..2 {
             // Top-down: center under parents where possible
+            #[allow(clippy::needless_range_loop)]
             for level_idx in 1..=max_level {
                 for &idx in &levels[level_idx] {
                     let node_id = self.nodes[idx].0;
@@ -229,6 +228,7 @@ impl<'a> DAG<'a> {
                 }
 
                 // Re-compact this level to remove overlaps and reorder to match x-coords
+                #[allow(clippy::needless_range_loop)]
                 self.compact_level(&mut x_coords, &mut levels[level_idx]);
             }
         }

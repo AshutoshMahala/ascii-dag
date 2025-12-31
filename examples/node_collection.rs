@@ -3,7 +3,7 @@
 //! This demonstrates the `collect_all_nodes_fn` utility for traversing
 //! graphs and collecting all reachable nodes while handling cycles.
 
-use ascii_dag::layout::generic::traversal::{collect_all_nodes_fn, collect_all_nodes_dfs_fn};
+use ascii_dag::layout::generic::traversal::{collect_all_nodes_dfs_fn, collect_all_nodes_fn};
 
 fn main() {
     println!("=== Node Collection Examples ===\n");
@@ -117,7 +117,7 @@ fn main() {
         caused_by: Vec<usize>,
     }
 
-    let diagnostics = vec![
+    let diagnostics = [
         ErrorDiagnostic {
             id: 1,
             message: "Failed to authenticate user@example.com".to_string(),
@@ -162,5 +162,8 @@ fn main() {
         println!("     {}: {}", id, redacted);
     }
 
-    println!("\n   All {} diagnostics processed (including nested causes)", all_diagnostic_ids.len());
+    println!(
+        "\n   All {} diagnostics processed (including nested causes)",
+        all_diagnostic_ids.len()
+    );
 }

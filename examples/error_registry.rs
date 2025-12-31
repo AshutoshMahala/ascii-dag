@@ -28,6 +28,7 @@ impl ChainableError {
         self
     }
 
+    #[allow(dead_code)]
     fn with_causes(mut self, causes: Vec<&'static str>) -> Self {
         self.caused_by.extend(causes);
         self
@@ -37,6 +38,12 @@ impl ChainableError {
 /// Error registry that validates no circular dependencies
 pub struct ErrorRegistry {
     errors: HashMap<&'static str, ChainableError>,
+}
+
+impl Default for ErrorRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ErrorRegistry {

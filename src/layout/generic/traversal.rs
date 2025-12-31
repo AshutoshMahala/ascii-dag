@@ -310,8 +310,8 @@ mod tests {
             _ => vec![],
         };
 
-        let bfs = collect_all_nodes_fn(&[1], &get_children);
-        let dfs = collect_all_nodes_dfs_fn(&[1], &get_children);
+        let bfs = collect_all_nodes_fn(&[1], get_children);
+        let dfs = collect_all_nodes_dfs_fn(&[1], get_children);
 
         // Both should contain all nodes
         assert_eq!(bfs.len(), 4);

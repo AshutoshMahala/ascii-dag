@@ -106,14 +106,13 @@ where
         // Find all items that depend on the current item
         for candidate in items {
             let deps = get_dependencies(candidate);
-            if deps.contains(&item) {
-                if let Some(degree) = in_degree.get_mut(candidate) {
+            if deps.contains(&item)
+                && let Some(degree) = in_degree.get_mut(candidate) {
                     *degree -= 1;
                     if *degree == 0 {
                         queue.push(candidate.clone());
                     }
                 }
-            }
         }
     }
 

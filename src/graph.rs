@@ -33,6 +33,7 @@ use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
 
 /// Rendering mode for the DAG visualization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum RenderMode {
     /// Render chains vertically (takes more vertical space)
     Vertical,
@@ -41,13 +42,8 @@ pub enum RenderMode {
     Horizontal,
 
     /// Auto-detect: horizontal for simple chains, vertical for complex graphs
+    #[default]
     Auto,
-}
-
-impl Default for RenderMode {
-    fn default() -> Self {
-        RenderMode::Auto
-    }
 }
 
 /// A Directed Acyclic Graph (DAG) with ASCII rendering capabilities.
@@ -67,6 +63,7 @@ impl Default for RenderMode {
 /// assert!(output.contains("End"));
 /// ```
 #[derive(Clone)]
+#[derive(Default)]
 pub struct DAG<'a> {
     pub(crate) nodes: Vec<(usize, &'a str)>,
     pub(crate) edges: Vec<(usize, usize)>,
@@ -76,21 +73,6 @@ pub struct DAG<'a> {
     pub(crate) node_widths: Vec<usize>,      // Cached formatted widths
     pub(crate) children: Vec<Vec<usize>>,    // Adjacency list: children[idx] = child indices
     pub(crate) parents: Vec<Vec<usize>>,     // Adjacency list: parents[idx] = parent indices
-}
-
-impl<'a> Default for DAG<'a> {
-    fn default() -> Self {
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            render_mode: RenderMode::default(),
-            auto_created: HashSet::new(),
-            id_to_index: HashMap::new(),
-            node_widths: Vec::new(),
-            children: Vec::new(),
-            parents: Vec::new(),
-        }
-    }
 }
 
 impl<'a> DAG<'a> {

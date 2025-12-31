@@ -129,8 +129,8 @@ where
     let deps = get_dependencies(current_id);
 
     for dep_id in deps {
-        if let Some(&dep_idx) = id_to_index.get(&dep_id) {
-            if let Some(mut cycle) = has_cycle_util_fn(
+        if let Some(&dep_idx) = id_to_index.get(&dep_id)
+            && let Some(mut cycle) = has_cycle_util_fn(
                 dep_idx,
                 all_ids,
                 get_dependencies,
@@ -142,7 +142,6 @@ where
                 cycle.push(current_id.clone());
                 return Some(cycle);
             }
-        }
     }
 
     rec_stack[idx] = false;

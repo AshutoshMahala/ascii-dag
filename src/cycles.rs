@@ -80,11 +80,10 @@ impl<'a> DAG<'a> {
         for &(from, to) in &self.edges {
             if from == node_id {
                 // O(1) HashMap lookup instead of O(n) scan
-                if let Some(child_idx) = self.node_index(to) {
-                    if self.has_cycle_util(child_idx, visited, rec_stack) {
+                if let Some(child_idx) = self.node_index(to)
+                    && self.has_cycle_util(child_idx, visited, rec_stack) {
                         return true;
                     }
-                }
             }
         }
 
@@ -134,11 +133,10 @@ impl<'a> DAG<'a> {
         for &(from, to) in &self.edges {
             if from == node_id {
                 // O(1) HashMap lookup instead of O(n) scan
-                if let Some(child_idx) = self.node_index(to) {
-                    if let Some(cycle) = self.find_cycle_from(child_idx, visited, path) {
+                if let Some(child_idx) = self.node_index(to)
+                    && let Some(cycle) = self.find_cycle_from(child_idx, visited, path) {
                         return Some(cycle);
                     }
-                }
             }
         }
 

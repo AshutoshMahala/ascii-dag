@@ -67,6 +67,7 @@ fn example_trait_based_registry() {
     println!("   Using traits for cleaner API\n");
 
     #[derive(Debug, Clone)]
+    #[allow(dead_code)]
     struct ErrorDef {
         id: String,
         message: String,
