@@ -22,6 +22,42 @@ pub(crate) const TEE_UP: char = '┴'; // T pointing up
 pub(crate) const CORNER_UR: char = '┌'; // Up-Right corner
 pub(crate) const CORNER_UL: char = '┐'; // Up-Left corner
 
+/// A virtual node in the layout - either a real node or a dummy for edge routing.
+/// Memory: ~24 bytes per node (1 byte enum tag + padding + 16 bytes data)
+#[derive(Clone, Copy, Debug)]
+enum VirtualNode {
+    /// A real node from the DAG (stores index into DAG.nodes)
+    Real(usize),
+    /// A dummy node for routing skip-level edges (stores skip edge index)
+    Dummy(usize),
+}
+
+impl VirtualNode {
+    fn is_real(&self) -> bool {
+        matches!(self, VirtualNode::Real(_))
+    }
+
+    fn real_index(&self) -> Option<usize> {
+        match self {
+            VirtualNode::Real(idx) => Some(*idx),
+            VirtualNode::Dummy(_) => None,
+        }
+    }
+}
+
+/// Virtual layout with dummy nodes for proper edge routing.
+/// Memory cost: O(N + E*D) where N=nodes, E=skip edges, D=avg level span
+struct VirtualLayout {
+    /// Virtual nodes at each level
+    levels: Vec<Vec<VirtualNode>>,
+    /// X-coordinate for each virtual node (indexed by level, then position in level)
+    x_coords: Vec<Vec<usize>>,
+    /// Width of each virtual node
+    widths: Vec<Vec<usize>>,
+    /// Edges between adjacent levels: (from_level, from_pos, to_level, to_pos)
+    edges: Vec<(usize, usize, usize, usize)>,
+}
+
 impl<'a> DAG<'a> {
     /// Render the DAG to an ASCII string.
     ///
@@ -73,9 +109,10 @@ impl<'a> DAG<'a> {
         }
 
         // Determine actual render mode
+        let is_chain = self.is_simple_chain();
         let mode = match self.render_mode {
             RenderMode::Auto => {
-                if self.is_simple_chain() {
+                if is_chain {
                     RenderMode::Horizontal
                 } else {
                     RenderMode::Vertical
@@ -201,7 +238,7 @@ impl<'a> DAG<'a> {
         writeln!(output).ok();
     }
 
-    /// Render in vertical mode (Sugiyama layout).
+    /// Render in vertical mode (Sugiyama layout with dummy nodes for skip-level edges).
     fn render_vertical(&self, output: &mut String) {
         // Detect if we have multiple disconnected subgraphs
         let subgraphs = self.find_subgraphs();
@@ -217,28 +254,222 @@ impl<'a> DAG<'a> {
             return;
         }
 
-        // Single connected graph - 4-Pass Sugiyama-inspired layout
+        // Build virtual layout with dummy nodes
+        let layout = self.build_virtual_layout();
+        self.render_virtual_layout(output, &layout);
+    }
+
+    /// Build a virtual layout with dummy nodes for skip-level edges.
+    /// Memory: O(N + E*D) where N=nodes, E=skip edges, D=avg level span
+    fn build_virtual_layout(&self) -> VirtualLayout {
+        // Step 1: Calculate levels for real nodes
         let level_data = self.calculate_levels();
         let max_level = level_data.iter().map(|(_, l)| *l).max().unwrap_or(0);
 
-        // Group nodes by level
-        let mut levels: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
+        // Create level mapping for real nodes
+        let mut node_levels: Vec<usize> = vec![0; self.nodes.len()];
         for (idx, level) in &level_data {
-            levels[*level].push(*idx);
+            node_levels[*idx] = *level;
         }
 
-        // === PASS 1: Crossing Reduction (Median Heuristic) ===
-        self.reduce_crossings(&mut levels, max_level);
+        // Step 2: Group real nodes by level
+        let mut levels: Vec<Vec<VirtualNode>> = vec![Vec::new(); max_level + 1];
+        for (idx, level) in &level_data {
+            levels[*level].push(VirtualNode::Real(*idx));
+        }
 
-        // === PASS 2: Character-Level Coordinate Assignment ===
-        let node_x_coords = self.assign_x_coordinates(&mut levels, max_level);
+        // Step 3: Identify skip-level edges and insert dummy nodes
+        // We use the edge_idx in Dummy nodes so we can find them after reordering
+        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+            if let Some(from_idx) = self.node_index(from_id)
+                && let Some(to_idx) = self.node_index(to_id)
+            {
+                let from_level = node_levels[from_idx];
+                let to_level = node_levels[to_idx];
 
-        // === PASS 3: Calculate Canvas Width and Centering ===
-        let (level_widths, max_canvas_width) =
-            self.calculate_canvas_dimensions(&levels, &node_x_coords);
+                if to_level > from_level + 1 {
+                    // This is a skip edge - insert dummy nodes at intermediate levels
+                    for level in &mut levels[(from_level + 1)..to_level] {
+                        level.push(VirtualNode::Dummy(edge_idx));
+                    }
+                }
+            }
+        }
 
-        // === PASS 4: Render with Manhattan Routing ===
-        for (current_level, level_nodes) in levels.iter().enumerate() {
+        // Step 4: Apply crossing reduction on virtual levels
+        // Convert to indices for the existing reduce_crossings logic
+        let mut real_levels: Vec<Vec<usize>> = levels
+            .iter()
+            .map(|level| {
+                level
+                    .iter()
+                    .filter_map(|vn| vn.real_index())
+                    .collect()
+            })
+            .collect();
+
+        self.reduce_crossings(&mut real_levels, max_level);
+
+        // Rebuild levels with proper ordering (real nodes in optimized order, dummies at end)
+        for (level_idx, real_order) in real_levels.iter().enumerate() {
+            let dummies: Vec<_> = levels[level_idx]
+                .iter()
+                .filter(|vn| !vn.is_real())
+                .copied()
+                .collect();
+
+            levels[level_idx].clear();
+            for &idx in real_order {
+                levels[level_idx].push(VirtualNode::Real(idx));
+            }
+            levels[level_idx].extend(dummies);
+        }
+
+        // Step 5: Assign x-coordinates
+        let (x_coords, widths) = self.assign_virtual_x_coordinates(&levels, &node_levels);
+
+        // Step 6: Build edge list between adjacent levels (using edge_idx to find dummies)
+        let edges = self.build_virtual_edges(&levels, &node_levels);
+
+        VirtualLayout {
+            levels,
+            x_coords,
+            widths,
+            edges,
+        }
+    }
+
+    /// Assign x-coordinates to virtual nodes (real + dummy).
+    /// Dummies are positioned at the end of each level, giving them their own column
+    /// for skip edge visualization.
+    fn assign_virtual_x_coordinates(
+        &self,
+        levels: &[Vec<VirtualNode>],
+        _node_levels: &[usize],
+    ) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+        let mut x_coords: Vec<Vec<usize>> = Vec::with_capacity(levels.len());
+        let mut widths: Vec<Vec<usize>> = Vec::with_capacity(levels.len());
+
+        for level_nodes in levels {
+            let mut level_x = Vec::with_capacity(level_nodes.len());
+            let mut level_w = Vec::with_capacity(level_nodes.len());
+            let mut x = 0;
+
+            for vnode in level_nodes {
+                let width = match vnode {
+                    VirtualNode::Real(idx) => self.get_node_width(*idx),
+                    VirtualNode::Dummy(_) => 1, // Dummy nodes are 1 char wide (just a vertical line)
+                };
+
+                level_x.push(x);
+                level_w.push(width);
+                x += width + 3; // Standard spacing
+            }
+
+            x_coords.push(level_x);
+            widths.push(level_w);
+        }
+
+        // Note: We intentionally DON'T center dummies over their source.
+        // By keeping dummies at their natural position (end of each level),
+        // they get their own column which makes skip edges visible.
+
+        (x_coords, widths)
+    }
+
+    /// Build edges between adjacent levels in the virtual layout.
+    fn build_virtual_edges(
+        &self,
+        levels: &[Vec<VirtualNode>],
+        node_levels: &[usize],
+    ) -> Vec<(usize, usize, usize, usize)> {
+        let mut edges = Vec::new();
+
+        // Process each DAG edge
+        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+            if let Some(from_idx) = self.node_index(from_id)
+                && let Some(to_idx) = self.node_index(to_id)
+            {
+                let from_level = node_levels[from_idx];
+                let to_level = node_levels[to_idx];
+
+                if to_level == from_level + 1 {
+                    // Direct adjacent edge
+                    if let Some(from_pos) = levels[from_level]
+                        .iter()
+                        .position(|vn| matches!(vn, VirtualNode::Real(i) if *i == from_idx))
+                        && let Some(to_pos) = levels[to_level]
+                            .iter()
+                            .position(|vn| matches!(vn, VirtualNode::Real(i) if *i == to_idx))
+                    {
+                        edges.push((from_level, from_pos, to_level, to_pos));
+                    }
+                } else if to_level > from_level + 1 {
+                    // Skip edge - route through dummies identified by edge_idx
+                    // Find source position
+                    if let Some(from_pos) = levels[from_level]
+                        .iter()
+                        .position(|vn| matches!(vn, VirtualNode::Real(i) if *i == from_idx))
+                    {
+                        // Find first dummy at from_level + 1
+                        if let Some(first_dummy_pos) = levels[from_level + 1]
+                            .iter()
+                            .position(|vn| matches!(vn, VirtualNode::Dummy(ei) if *ei == edge_idx))
+                        {
+                            // Edge from source to first dummy
+                            edges.push((from_level, from_pos, from_level + 1, first_dummy_pos));
+
+                            // Edges between consecutive dummies
+                            for level in (from_level + 1)..(to_level - 1) {
+                                if let Some(curr_pos) = levels[level]
+                                    .iter()
+                                    .position(|vn| matches!(vn, VirtualNode::Dummy(ei) if *ei == edge_idx))
+                                    && let Some(next_pos) = levels[level + 1]
+                                        .iter()
+                                        .position(|vn| matches!(vn, VirtualNode::Dummy(ei) if *ei == edge_idx))
+                                {
+                                    edges.push((level, curr_pos, level + 1, next_pos));
+                                }
+                            }
+
+                            // Edge from last dummy to target
+                            if let Some(last_dummy_pos) = levels[to_level - 1]
+                                .iter()
+                                .position(|vn| matches!(vn, VirtualNode::Dummy(ei) if *ei == edge_idx))
+                                && let Some(to_pos) = levels[to_level]
+                                    .iter()
+                                    .position(|vn| matches!(vn, VirtualNode::Real(i) if *i == to_idx))
+                            {
+                                edges.push((to_level - 1, last_dummy_pos, to_level, to_pos));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        edges
+    }
+
+    /// Render the virtual layout to output.
+    fn render_virtual_layout(&self, output: &mut String, layout: &VirtualLayout) {
+        // Calculate canvas dimensions
+        let level_widths: Vec<usize> = layout
+            .x_coords
+            .iter()
+            .zip(layout.widths.iter())
+            .map(|(xs, ws)| {
+                xs.iter()
+                    .zip(ws.iter())
+                    .map(|(x, w)| x + w)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        let max_canvas_width = *level_widths.iter().max().unwrap_or(&0);
+
+        for (current_level, level_nodes) in layout.levels.iter().enumerate() {
             if level_nodes.is_empty() {
                 continue;
             }
@@ -251,17 +482,10 @@ impl<'a> DAG<'a> {
                 0
             };
 
-            // Find minimum x-coordinate in this level
-            let min_x = level_nodes
-                .iter()
-                .map(|&idx| node_x_coords[idx])
-                .min()
-                .unwrap_or(0);
-
             // Render nodes at their assigned x-coordinates
             let mut current_col = 0;
-            for &idx in level_nodes {
-                let node_x = node_x_coords[idx] - min_x + level_offset;
+            for (pos, vnode) in level_nodes.iter().enumerate() {
+                let node_x = layout.x_coords[current_level][pos] + level_offset;
 
                 // Add spacing to reach this node's position
                 while current_col < node_x {
@@ -269,15 +493,23 @@ impl<'a> DAG<'a> {
                     current_col += 1;
                 }
 
-                let (id, label) = self.nodes[idx];
-                // Write directly to avoid intermediate allocation
-                self.write_node(output, id, label);
-                current_col += self.get_node_width(idx); // Use cached width
+                match vnode {
+                    VirtualNode::Real(idx) => {
+                        let (id, label) = self.nodes[*idx];
+                        self.write_node(output, id, label);
+                        current_col += layout.widths[current_level][pos];
+                    }
+                    VirtualNode::Dummy(_) => {
+                        // Dummy nodes are invisible in the node row
+                        output.push(' ');
+                        current_col += 1;
+                    }
+                }
             }
             writeln!(output).ok();
 
             // Draw connections if not last level
-            if current_level < max_level {
+            if current_level < layout.levels.len() - 1 {
                 let next_level_width = level_widths[current_level + 1];
                 let next_level_offset = if max_canvas_width > next_level_width {
                     (max_canvas_width - next_level_width) / 2
@@ -285,12 +517,10 @@ impl<'a> DAG<'a> {
                     0
                 };
 
-                self.draw_connections_sugiyama(
+                self.draw_virtual_connections(
                     output,
-                    level_nodes,
-                    &levels[current_level + 1],
-                    &node_x_coords,
-                    min_x,
+                    layout,
+                    current_level,
                     level_offset,
                     next_level_offset,
                 );
@@ -298,140 +528,263 @@ impl<'a> DAG<'a> {
         }
     }
 
-    /// PASS 4: Draw connections with Manhattan routing.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_connections_sugiyama(
+    /// Draw connections between adjacent levels in the virtual layout.
+    fn draw_virtual_connections(
         &self,
         output: &mut String,
-        current_nodes: &[usize],
-        next_nodes: &[usize],
-        x_coords: &[usize],
-        current_min_x: usize,
+        layout: &VirtualLayout,
+        current_level: usize,
         current_offset: usize,
         next_offset: usize,
     ) {
-        if current_nodes.is_empty() || next_nodes.is_empty() {
+        let next_level = current_level + 1;
+
+        // Find all edges from current_level to next_level
+        let level_edges: Vec<_> = layout
+            .edges
+            .iter()
+            .filter(|(fl, _, tl, _)| *fl == current_level && *tl == next_level)
+            .collect();
+
+        if level_edges.is_empty() {
             return;
         }
 
-        // Calculate center positions
-        let current_centers: Vec<(usize, usize)> = current_nodes
-            .iter()
-            .map(|&idx| {
-                let width = self.get_node_width(idx);
-                let center = x_coords[idx] - current_min_x + current_offset + width / 2;
-                (idx, center)
-            })
-            .collect();
+        // Calculate center positions for connections
+        let mut connections: Vec<(usize, usize, bool, bool)> = Vec::new(); // (from_x, to_x, from_is_dummy, to_is_dummy)
 
-        let next_min_x = next_nodes
-            .iter()
-            .map(|&idx| x_coords[idx])
-            .min()
-            .unwrap_or(0);
-        let next_centers: Vec<(usize, usize)> = next_nodes
-            .iter()
-            .map(|&idx| {
-                let width = self.get_node_width(idx);
-                let center = x_coords[idx] - next_min_x + next_offset + width / 2;
-                (idx, center)
-            })
-            .collect();
+        for &&(_, from_pos, _, to_pos) in &level_edges {
+            let from_x = layout.x_coords[current_level][from_pos]
+                + layout.widths[current_level][from_pos] / 2
+                + current_offset;
+            let to_x = layout.x_coords[next_level][to_pos]
+                + layout.widths[next_level][to_pos] / 2
+                + next_offset;
 
-        // Find connections
-        let mut connections: Vec<(usize, usize)> = Vec::new();
-        for &(curr_idx, from_pos) in &current_centers {
-            let node_id = self.nodes[curr_idx].0;
-            for child_id in self.get_children(node_id) {
-                if let Some(&(_, to_pos)) = next_centers
-                    .iter()
-                    .find(|(idx, _)| self.nodes[*idx].0 == child_id)
-                {
-                    connections.push((from_pos, to_pos));
-                }
+            let from_is_dummy = !layout.levels[current_level][from_pos].is_real();
+            let to_is_dummy = !layout.levels[next_level][to_pos].is_real();
+
+            connections.push((from_x, to_x, from_is_dummy, to_is_dummy));
+        }
+
+        // Group by target for convergence detection
+        let mut target_groups: Vec<(usize, Vec<(usize, bool)>)> = Vec::new();
+        for &(from_x, to_x, from_is_dummy, _) in &connections {
+            match target_groups.binary_search_by_key(&to_x, |(k, _)| *k) {
+                Ok(idx) => target_groups[idx].1.push((from_x, from_is_dummy)),
+                Err(idx) => target_groups.insert(idx, (to_x, vec![(from_x, from_is_dummy)])),
             }
         }
 
-        if connections.is_empty() {
-            return;
-        }
-
-        // Group by target/source for convergence/divergence detection
-        let mut target_groups: Vec<(usize, Vec<usize>)> = Vec::new();
-        for &(from, to) in &connections {
-            match target_groups.binary_search_by_key(&to, |(k, _)| *k) {
-                Ok(idx) => target_groups[idx].1.push(from),
-                Err(idx) => target_groups.insert(idx, (to, vec![from])),
-            }
-        }
-
-        let mut source_groups: Vec<(usize, Vec<usize>)> = Vec::new();
-        for &(from, to) in &connections {
-            match source_groups.binary_search_by_key(&from, |(k, _)| *k) {
-                Ok(idx) => source_groups[idx].1.push(to),
-                Err(idx) => source_groups.insert(idx, (from, vec![to])),
+        // Group by source for divergence detection
+        let mut source_groups: Vec<(usize, Vec<(usize, bool)>)> = Vec::new();
+        for &(from_x, to_x, _, to_is_dummy) in &connections {
+            match source_groups.binary_search_by_key(&from_x, |(k, _)| *k) {
+                Ok(idx) => source_groups[idx].1.push((to_x, to_is_dummy)),
+                Err(idx) => source_groups.insert(idx, (from_x, vec![(to_x, to_is_dummy)])),
             }
         }
 
         let has_convergence = target_groups.iter().any(|(_, v)| v.len() > 1);
         let has_divergence = source_groups.iter().any(|(_, v)| v.len() > 1);
 
-        // Find the range we need to draw - always start from 0 since nodes are positioned from 0
-        let min_pos = 0;
         let max_pos = connections
             .iter()
-            .flat_map(|(f, t)| [*f, *t])
+            .flat_map(|(f, t, _, _)| [*f, *t])
             .max()
             .unwrap_or(0);
 
-        // Draw based on pattern
-        if has_convergence && !has_divergence {
-            self.draw_convergence_manhattan(output, &target_groups, min_pos, max_pos);
-        } else if has_divergence && !has_convergence {
-            self.draw_divergence_manhattan(output, &source_groups, min_pos, max_pos);
+        // Draw based on pattern - now with proper handling of mixed cases
+        if has_convergence && has_divergence {
+            // Mixed case: draw with proper crossing handling
+            self.draw_mixed_connections(output, &connections, max_pos);
+        } else if has_convergence {
+            self.draw_convergence_connections(output, &target_groups, max_pos);
+        } else if has_divergence {
+            self.draw_divergence_connections(output, &source_groups, max_pos);
         } else {
-            self.draw_simple_manhattan(output, &connections, min_pos, max_pos);
+            // Simple 1-to-1 connections
+            self.draw_simple_connections(output, &connections, max_pos);
         }
     }
 
-    fn draw_convergence_manhattan(
+    /// Draw mixed convergence and divergence (the previously broken case).
+    #[allow(clippy::needless_range_loop)]
+    fn draw_mixed_connections(
         &self,
         output: &mut String,
-        target_groups: &[(usize, Vec<usize>)],
-        min_pos: usize,
+        connections: &[(usize, usize, bool, bool)],
+        max_pos: usize,
+    ) {
+        let sources: Vec<usize> = connections.iter().map(|(f, _, _, _)| *f).collect();
+        let targets: Vec<usize> = connections.iter().map(|(_, t, _, _)| *t).collect();
+
+        // Classify connections
+        let mut straight_down: Vec<usize> = Vec::new();  // from_x == to_x
+        let mut going_right: Vec<(usize, usize)> = Vec::new();  // from_x < to_x
+        let mut going_left: Vec<(usize, usize)> = Vec::new();   // from_x > to_x
+
+        for &(from_x, to_x, _, _) in connections {
+            if from_x == to_x {
+                straight_down.push(from_x);
+            } else if from_x < to_x {
+                going_right.push((from_x, to_x));
+            } else {
+                going_left.push((from_x, to_x));
+            }
+        }
+
+        // Check if we have true crossings (both going_left and going_right with overlapping spans)
+        let has_crossings = !going_right.is_empty() && !going_left.is_empty();
+
+        // Line 1: Vertical drops from all sources
+        for i in 0..=max_pos {
+            output.push(if sources.contains(&i) { V_LINE } else { ' ' });
+        }
+        writeln!(output).ok();
+
+        if has_crossings {
+            // Complex case: draw divergence first (sources branching out)
+            // Line 2a: Divergence from sources
+            let mut line2a: Vec<char> = vec![' '; max_pos + 1];
+            
+            // Draw all going_right and going_left as divergence
+            for &(from_x, to_x) in &going_right {
+                for i in from_x..=to_x {
+                    if i == from_x {
+                        line2a[i] = if line2a[i] == CORNER_UL { TEE_DOWN } else { CORNER_UR };
+                    } else if i == to_x {
+                        line2a[i] = CORNER_UL;
+                    } else if line2a[i] == ' ' {
+                        line2a[i] = H_LINE;
+                    }
+                }
+            }
+            for &(from_x, to_x) in &going_left {
+                for i in to_x..=from_x {
+                    if i == from_x {
+                        line2a[i] = if line2a[i] == CORNER_UR { TEE_DOWN } else { CORNER_UL };
+                    } else if i == to_x {
+                        line2a[i] = if line2a[i] == CORNER_UL { TEE_DOWN } else { CORNER_UR };
+                    } else if line2a[i] == ' ' {
+                        line2a[i] = H_LINE;
+                    }
+                }
+            }
+            // Add straight down
+            for &x in &straight_down {
+                if line2a[x] == ' ' {
+                    line2a[x] = V_LINE;
+                } else if line2a[x] == H_LINE {
+                    line2a[x] = TEE_DOWN;
+                }
+            }
+
+            for ch in &line2a {
+                output.push(*ch);
+            }
+            writeln!(output).ok();
+
+            // Line 2b: Vertical continuation
+            for i in 0..=max_pos {
+                output.push(if targets.contains(&i) || straight_down.contains(&i) { V_LINE } else { ' ' });
+            }
+            writeln!(output).ok();
+        } else {
+            // Simpler case: single routing line
+            let mut line2: Vec<char> = vec![' '; max_pos + 1];
+            
+            for &(from_x, to_x) in &going_right {
+                for i in from_x..=to_x {
+                    if i == from_x {
+                        line2[i] = CORNER_DR;
+                    } else if i == to_x {
+                        line2[i] = match line2[i] {
+                            CORNER_DR => TEE_UP,
+                            _ => CORNER_DL,
+                        };
+                    } else if line2[i] == ' ' {
+                        line2[i] = H_LINE;
+                    }
+                }
+            }
+
+            for &(from_x, to_x) in &going_left {
+                for i in to_x..=from_x {
+                    if i == from_x {
+                        line2[i] = match line2[i] {
+                            CORNER_DR => TEE_UP,
+                            _ => CORNER_DL,
+                        };
+                    } else if i == to_x {
+                        line2[i] = match line2[i] {
+                            CORNER_DL => TEE_UP,
+                            H_LINE => TEE_UP,
+                            _ => CORNER_DR,
+                        };
+                    } else if line2[i] == ' ' {
+                        line2[i] = H_LINE;
+                    }
+                }
+            }
+
+            for &x in &straight_down {
+                if line2[x] == ' ' {
+                    line2[x] = V_LINE;
+                } else if line2[x] == H_LINE {
+                    line2[x] = TEE_UP;
+                }
+            }
+
+            for ch in &line2 {
+                output.push(*ch);
+            }
+            writeln!(output).ok();
+        }
+
+        // Final line: Arrows at targets
+        for i in 0..=max_pos {
+            output.push(if targets.contains(&i) { ARROW_DOWN } else { ' ' });
+        }
+        writeln!(output).ok();
+    }
+
+    /// Draw pure convergence pattern.
+    fn draw_convergence_connections(
+        &self,
+        output: &mut String,
+        target_groups: &[(usize, Vec<(usize, bool)>)],
         max_pos: usize,
     ) {
         let all_sources: Vec<usize> = target_groups
             .iter()
-            .flat_map(|(_, sources)| sources.iter().copied())
+            .flat_map(|(_, sources)| sources.iter().map(|(x, _)| *x))
             .collect();
 
         // Line 1: Vertical drops
-        for i in min_pos..=max_pos {
-            output.push(if all_sources.contains(&i) {
-                V_LINE
-            } else {
-                ' '
-            });
+        for i in 0..=max_pos {
+            output.push(if all_sources.contains(&i) { V_LINE } else { ' ' });
         }
         writeln!(output).ok();
 
-        // Line 2: Horizontal convergence └──┴──┘
-        for i in min_pos..=max_pos {
+        // Line 2: Horizontal convergence
+        for i in 0..=max_pos {
             let mut ch = ' ';
             for (_, sources) in target_groups.iter() {
                 if sources.len() <= 1 {
                     continue;
                 }
-                let min_src = *sources.iter().min().unwrap();
-                let max_src = *sources.iter().max().unwrap();
+                let source_xs: Vec<usize> = sources.iter().map(|(x, _)| *x).collect();
+                let min_src = *source_xs.iter().min().unwrap();
+                let max_src = *source_xs.iter().max().unwrap();
+
                 if i == min_src {
                     ch = CORNER_DR;
                 } else if i == max_src {
                     ch = CORNER_DL;
-                } else if sources.contains(&i) {
+                } else if source_xs.contains(&i) {
                     ch = TEE_UP;
-                } else if i > min_src && i < max_src {
+                } else if i > min_src && i < max_src && ch == ' ' {
                     ch = H_LINE;
                 }
             }
@@ -439,52 +792,50 @@ impl<'a> DAG<'a> {
         }
         writeln!(output).ok();
 
-        // Line 3: Arrows down
-        for i in min_pos..=max_pos {
-            output.push(if target_groups.iter().any(|(t, _)| *t == i) {
-                ARROW_DOWN
+        // Line 3: Arrows
+        for i in 0..=max_pos {
+            if target_groups.iter().any(|(t, _)| *t == i) {
+                output.push(ARROW_DOWN);
             } else {
-                ' '
-            });
+                output.push(' ');
+            }
         }
         writeln!(output).ok();
     }
 
-    fn draw_divergence_manhattan(
+    /// Draw pure divergence pattern.
+    fn draw_divergence_connections(
         &self,
         output: &mut String,
-        source_groups: &[(usize, Vec<usize>)],
-        min_pos: usize,
+        source_groups: &[(usize, Vec<(usize, bool)>)],
         max_pos: usize,
     ) {
         let all_sources: Vec<usize> = source_groups.iter().map(|(s, _)| *s).collect();
 
         // Line 1: Vertical from sources
-        for i in min_pos..=max_pos {
-            output.push(if all_sources.contains(&i) {
-                V_LINE
-            } else {
-                ' '
-            });
+        for i in 0..=max_pos {
+            output.push(if all_sources.contains(&i) { V_LINE } else { ' ' });
         }
         writeln!(output).ok();
 
-        // Line 2: Horizontal divergence ┌──┬──┐
-        for i in min_pos..=max_pos {
+        // Line 2: Horizontal divergence
+        for i in 0..=max_pos {
             let mut ch = ' ';
             for (_, targets) in source_groups.iter() {
                 if targets.len() <= 1 {
                     continue;
                 }
-                let min_tgt = *targets.iter().min().unwrap();
-                let max_tgt = *targets.iter().max().unwrap();
+                let target_xs: Vec<usize> = targets.iter().map(|(x, _)| *x).collect();
+                let min_tgt = *target_xs.iter().min().unwrap();
+                let max_tgt = *target_xs.iter().max().unwrap();
+
                 if i == min_tgt {
                     ch = CORNER_UR;
                 } else if i == max_tgt {
                     ch = CORNER_UL;
-                } else if targets.contains(&i) {
+                } else if target_xs.contains(&i) {
                     ch = TEE_DOWN;
-                } else if i > min_tgt && i < max_tgt {
+                } else if i > min_tgt && i < max_tgt && ch == ' ' {
                     ch = H_LINE;
                 }
             }
@@ -492,45 +843,35 @@ impl<'a> DAG<'a> {
         }
         writeln!(output).ok();
 
-        // Line 3: Arrows down
+        // Line 3: Arrows at targets
         let all_targets: Vec<usize> = source_groups
             .iter()
-            .flat_map(|(_, t)| t.iter().copied())
+            .flat_map(|(_, t)| t.iter().map(|(x, _)| *x))
             .collect();
-        for i in min_pos..=max_pos {
-            output.push(if all_targets.contains(&i) {
-                ARROW_DOWN
-            } else {
-                ' '
-            });
+        for i in 0..=max_pos {
+            output.push(if all_targets.contains(&i) { ARROW_DOWN } else { ' ' });
         }
         writeln!(output).ok();
     }
 
-    fn draw_simple_manhattan(
+    /// Draw simple 1-to-1 connections.
+    fn draw_simple_connections(
         &self,
         output: &mut String,
-        connections: &[(usize, usize)],
-        min_pos: usize,
+        connections: &[(usize, usize, bool, bool)],
         max_pos: usize,
     ) {
+        let sources: Vec<usize> = connections.iter().map(|(f, _, _, _)| *f).collect();
+
         // Line 1: Vertical
-        for i in min_pos..=max_pos {
-            output.push(if connections.iter().any(|(f, _)| *f == i) {
-                V_LINE
-            } else {
-                ' '
-            });
+        for i in 0..=max_pos {
+            output.push(if sources.contains(&i) { V_LINE } else { ' ' });
         }
         writeln!(output).ok();
 
-        // Line 2: Arrows
-        for i in min_pos..=max_pos {
-            output.push(if connections.iter().any(|(f, _)| *f == i) {
-                ARROW_DOWN
-            } else {
-                ' '
-            });
+        // Line 2: Arrows (straight down for 1-to-1)
+        for i in 0..=max_pos {
+            output.push(if sources.contains(&i) { ARROW_DOWN } else { ' ' });
         }
         writeln!(output).ok();
     }

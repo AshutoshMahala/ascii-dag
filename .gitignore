@@ -30,6 +30,15 @@ Thumbs.db
 # Test artifacts
 /tests/target/
 
+# Debug output files
+algo_analysis.txt
+clippy_output.txt
+debug_layout.txt
+debug_output.txt
+rendering_issues_output.txt
+test_output.txt
+*.debug.txt
+
 # Backup files
 *.tmp
 *.bak

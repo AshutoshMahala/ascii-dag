@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2024-12-31
+
+### Added
+- **Dummy node insertion for skip-level edges**: Classic Sugiyama algorithm improvement
+  - `VirtualNode` enum: `Real(usize)` for actual nodes, `Dummy(usize)` for edge routing
+  - `VirtualLayout` struct for managing virtual nodes during rendering
+  - Skip-level edges (spanning 2+ levels) now route through dummy nodes for visibility
+  - Memory cost: ~24 bytes per dummy node, O(N + E*D) total
+- **Mixed convergence/divergence handling**: K2,2 bipartite patterns now render correctly
+  - `draw_mixed_connections()` with multi-line routing for crossing patterns
+  - Proper separation of divergence and convergence lines
+- **New example files**:
+  - `test_dummy_nodes.rs` - Tests for skip-level edge rendering
+  - `k22_analysis.rs` - K2,2 bipartite graph analysis
+  - `analyze_algo.rs` - Algorithm behavior analysis
+  - `debug_layout.rs`, `debug_skip.rs` - Layout debugging utilities
+  - `rendering_issues.rs`, `edge_cases.rs`, `complex_graphs.rs` - Comprehensive tests
+- **Algorithm analysis documentation**: `docs/ALGORITHM_ANALYSIS.md`
+  - Documents the 4-pass Sugiyama layout approach
+  - Explains identified issues and solutions
+  - ASCII art limitations and acceptable simplifications
+
+### Changed
+- **Rendering algorithm refactored** to use virtual layout system:
+  - `render_vertical()` now delegates to `build_virtual_layout()` + `render_virtual_layout()`
+  - `build_virtual_edges()` routes edges through dummies using edge index lookup
+  - `assign_virtual_x_coordinates()` positions dummies at end of level for visibility
+- Connection drawing methods updated to work with virtual layout:
+  - `draw_virtual_connections()` replaces `draw_connections_sugiyama()`
+  - `draw_convergence_connections()`, `draw_divergence_connections()`, `draw_simple_connections()`
+
+### Removed
+- **Dead code cleanup** from previous rendering implementation:
+  - Removed `draw_connections_sugiyama()` and related Manhattan routing methods
+  - Removed unused `assign_x_coordinates()`, `compact_level()`, `calculate_canvas_dimensions()` from layout.rs
+
+### Fixed
+- Skip-level edges now visible (previously rendered in same column as source node)
+- K2,2 and similar cross-connection patterns no longer fall through to simple vertical lines
+- Dummy node positions properly tracked after crossing reduction reordering
+
 ## [0.3.1] - 2025-10-30
 
 ### Added
