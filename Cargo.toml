@@ -1,6 +1,6 @@
 [package]
 name = "ascii-dag"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 authors = ["Ash"]
 license = "MIT OR Apache-2.0"
@@ -9,7 +9,12 @@ repository = "https://github.com/AshutoshMahala/ascii-dag"
 keywords = ["dag", "graph", "ascii", "visualization", "errors"]
 categories = ["data-structures", "visualization", "no-std"]
 readme = "README.md"
+rust-version = "1.92"
 # Zero dependencies by default
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["std", "generic"]

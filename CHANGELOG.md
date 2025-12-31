@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2024-12-31
+
+### Added
+- docs.rs metadata configuration for proper documentation builds
+- `rust-version` field specifying MSRV of 1.85
+- `#![cfg_attr(docsrs, feature(doc_cfg))]` for docs.rs feature annotations
+
+### Fixed
+- Documentation build configuration for docs.rs compatibility
+
 ## [0.4.0] - 2024-12-31
 
 ### Added
