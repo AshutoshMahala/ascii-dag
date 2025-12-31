@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - docs.rs metadata configuration for proper documentation builds
-- `rust-version` field specifying MSRV of 1.85
+- `rust-version` field specifying MSRV of 1.92
 - `#![cfg_attr(docsrs, feature(doc_cfg))]` for docs.rs feature annotations
 
 ### Fixed
