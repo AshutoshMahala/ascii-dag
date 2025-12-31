@@ -7,6 +7,7 @@
 //!
 //! - [`impact`] - Impact analysis (descendants, ancestors, blast radius)
 //! - [`metrics`] - Graph metrics and statistics
+//! - [`traversal`] - Node collection and traversal utilities
 //!
 //! # Examples
 //!
@@ -32,6 +33,7 @@
 
 pub mod impact;
 pub mod metrics;
+pub mod traversal;
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Graph traversal utilities**: New `layout::generic::traversal` module
+  - `collect_all_nodes_fn()` - BFS traversal collecting all reachable nodes
+  - `collect_all_nodes_dfs_fn()` - DFS variant for memory-efficient deep traversal
+  - `NodeCollectable` trait for convenient traversal methods
+  - Automatic cycle handling with visited tracking
+  - Useful for PII redaction, node processing, and graph analysis
+
 ## [0.2.0] - 2025-10-23
 
 ### Added

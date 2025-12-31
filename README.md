@@ -212,6 +212,28 @@ let impacted = compute_descendants_fn(&packages, &"core", get_deps);
 // impacted = ["lib-a", "lib-b", "app"]
 ```
 
+### Node Collection and Traversal
+
+```rust
+use ascii_dag::layout::generic::traversal::collect_all_nodes_fn;
+
+// Collect all reachable nodes (handles cycles automatically)
+let all_nodes = collect_all_nodes_fn(&["start"], |node| {
+    // Return children for each node
+    get_children(node)
+});
+
+// Use case: PII redaction in error diagnostics
+let error_ids = collect_all_nodes_fn(&[root_error], |&id| {
+    get_related_errors(id)  // Includes caused_by and related
+});
+
+// Now redact PII from all errors in the chain
+for error_id in error_ids {
+    redact_pii(&mut diagnostics[error_id]);
+}
+```
+
 ### Graph Metrics
 
 ```rust
