@@ -107,12 +107,13 @@ where
         for candidate in items {
             let deps = get_dependencies(candidate);
             if deps.contains(&item)
-                && let Some(degree) = in_degree.get_mut(candidate) {
-                    *degree -= 1;
-                    if *degree == 0 {
-                        queue.push(candidate.clone());
-                    }
+                && let Some(degree) = in_degree.get_mut(candidate)
+            {
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push(candidate.clone());
                 }
+            }
         }
     }
 

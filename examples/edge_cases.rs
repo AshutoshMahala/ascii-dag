@@ -49,9 +49,9 @@ fn test_asymmetric_diamond() {
         &[
             (1, 2),
             (1, 3),
-            (2, 5),  // short path
+            (2, 5), // short path
             (3, 4),
-            (4, 5),  // long path
+            (4, 5), // long path
         ],
     );
     println!("{}", dag.render());
@@ -61,17 +61,12 @@ fn test_asymmetric_diamond() {
 fn test_skip_level() {
     println!("2. Skip-Level Connections (A→D skipping B,C):");
     let dag = DAG::from_edges(
-        &[
-            (1, "A"),
-            (2, "B"),
-            (3, "C"),
-            (4, "D"),
-        ],
+        &[(1, "A"), (2, "B"), (3, "C"), (4, "D")],
         &[
             (1, 2),
             (2, 3),
             (3, 4),
-            (1, 4),  // skip connection
+            (1, 4), // skip connection
         ],
     );
     println!("{}", dag.render());
@@ -93,8 +88,14 @@ fn test_very_wide() {
             (8, "N8"),
         ],
         &[
-            (0, 1), (0, 2), (0, 3), (0, 4),
-            (0, 5), (0, 6), (0, 7), (0, 8),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (0, 4),
+            (0, 5),
+            (0, 6),
+            (0, 7),
+            (0, 8),
         ],
     );
     println!("{}", dag.render());
@@ -104,17 +105,12 @@ fn test_very_wide() {
 fn test_cross_connections() {
     println!("4. Cross Connections (A1→B2, A2→B1):");
     let dag = DAG::from_edges(
+        &[(1, "A1"), (2, "A2"), (3, "B1"), (4, "B2")],
         &[
-            (1, "A1"),
-            (2, "A2"),
-            (3, "B1"),
-            (4, "B2"),
-        ],
-        &[
-            (1, 3),  // A1 → B1
-            (1, 4),  // A1 → B2
-            (2, 3),  // A2 → B1
-            (2, 4),  // A2 → B2
+            (1, 3), // A1 → B1
+            (1, 4), // A1 → B2
+            (2, 3), // A2 → B1
+            (2, 4), // A2 → B2
         ],
     );
     println!("{}", dag.render());
@@ -124,16 +120,10 @@ fn test_cross_connections() {
 fn test_disconnected_subgraphs() {
     println!("5. Disconnected Subgraphs (2 separate DAGs):");
     let dag = DAG::from_edges(
-        &[
-            (1, "X1"),
-            (2, "X2"),
-            (3, "X3"),
-            (10, "Y1"),
-            (11, "Y2"),
-        ],
+        &[(1, "X1"), (2, "X2"), (3, "X3"), (10, "Y1"), (11, "Y2")],
         &[
             (1, 2),
-            (2, 3),  // X chain
+            (2, 3),   // X chain
             (10, 11), // Y chain
         ],
     );
@@ -152,10 +142,13 @@ fn test_highway_with_exits() {
             (5, "End"),
         ],
         &[
-            (1, 2), (2, 3), (3, 4), (4, 5),  // main path
-            (1, 3),  // skip 1
-            (2, 4),  // skip 1
-            (1, 5),  // skip all
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5), // main path
+            (1, 3), // skip 1
+            (2, 4), // skip 1
+            (1, 5), // skip all
         ],
     );
     println!("{}", dag.render());
@@ -176,11 +169,16 @@ fn test_nested_diamonds() {
             (8, "Bot"),
         ],
         &[
-            (1, 2), (1, 3),         // outer top
-            (2, 4), (2, 5),         // left branch splits
-            (3, 6), (3, 7),         // right branch splits
-            (4, 8), (5, 8),         // left merges
-            (6, 8), (7, 8),         // right merges
+            (1, 2),
+            (1, 3), // outer top
+            (2, 4),
+            (2, 5), // left branch splits
+            (3, 6),
+            (3, 7), // right branch splits
+            (4, 8),
+            (5, 8), // left merges
+            (6, 8),
+            (7, 8), // right merges
         ],
     );
     println!("{}", dag.render());
@@ -202,12 +200,16 @@ fn test_partial_grid() {
             (9, "C3"),
         ],
         &[
-            (1, 4),         // A1 → B1 only
-            (2, 4), (2, 5), (2, 6),  // A2 → all B
-            (3, 6),         // A3 → B3 only
-            (4, 7), (4, 8),  // B1 → C1, C2
-            (5, 8),         // B2 → C2 only
-            (6, 8), (6, 9),  // B3 → C2, C3
+            (1, 4), // A1 → B1 only
+            (2, 4),
+            (2, 5),
+            (2, 6), // A2 → all B
+            (3, 6), // A3 → B3 only
+            (4, 7),
+            (4, 8), // B1 → C1, C2
+            (5, 8), // B2 → C2 only
+            (6, 8),
+            (6, 9), // B3 → C2, C3
         ],
     );
     println!("{}", dag.render());
@@ -227,8 +229,12 @@ fn test_hourglass() {
             (7, "Out3"),
         ],
         &[
-            (1, 4), (2, 4), (3, 4),  // fan-in
-            (4, 5), (4, 6), (4, 7),  // fan-out
+            (1, 4),
+            (2, 4),
+            (3, 4), // fan-in
+            (4, 5),
+            (4, 6),
+            (4, 7), // fan-out
         ],
     );
     println!("{}", dag.render());
@@ -251,14 +257,18 @@ fn test_build_pipeline() {
             (10, "Deploy"),
         ],
         &[
-            (1, 2),           // Checkout → Install
-            (2, 3), (2, 4), (2, 5),  // Install → Lint, Test, Build
-            (3, 9),           // Lint → Package (if lint passes)
-            (4, 6), (4, 7),   // Test → UnitTests, IntegTests
-            (5, 9),           // Build → Package
-            (6, 8), (7, 8),   // Tests → Coverage
-            (8, 9),           // Coverage → Package
-            (9, 10),          // Package → Deploy
+            (1, 2), // Checkout → Install
+            (2, 3),
+            (2, 4),
+            (2, 5), // Install → Lint, Test, Build
+            (3, 9), // Lint → Package (if lint passes)
+            (4, 6),
+            (4, 7), // Test → UnitTests, IntegTests
+            (5, 9), // Build → Package
+            (6, 8),
+            (7, 8),  // Tests → Coverage
+            (8, 9),  // Coverage → Package
+            (9, 10), // Package → Deploy
         ],
     );
     println!("{}", dag.render());

@@ -27,13 +27,14 @@ impl<'a> DAG<'a> {
             for &(from, to) in &self.edges {
                 // Guard against missing nodes - O(1) HashMap lookups
                 if let Some(from_idx) = self.node_index(from)
-                    && let Some(to_idx) = self.node_index(to) {
-                        let new_level = levels[from_idx] + 1;
-                        if new_level > levels[to_idx] {
-                            levels[to_idx] = new_level;
-                            changed = true;
-                        }
+                    && let Some(to_idx) = self.node_index(to)
+                {
+                    let new_level = levels[from_idx] + 1;
+                    if new_level > levels[to_idx] {
+                        levels[to_idx] = new_level;
+                        changed = true;
                     }
+                }
             }
         }
 
@@ -63,13 +64,14 @@ impl<'a> DAG<'a> {
 
                 // Guard against missing nodes - O(1) HashMap lookups
                 if let Some(from_idx) = self.node_index(from)
-                    && let Some(to_idx) = self.node_index(to) {
-                        let new_level = levels[from_idx] + 1;
-                        if new_level > levels[to_idx] {
-                            levels[to_idx] = new_level;
-                            changed = true;
-                        }
+                    && let Some(to_idx) = self.node_index(to)
+                {
+                    let new_level = levels[from_idx] + 1;
+                    if new_level > levels[to_idx] {
+                        levels[to_idx] = new_level;
+                        changed = true;
                     }
+                }
             }
         }
 

@@ -32,8 +32,7 @@ use std::collections::{HashMap, HashSet};
 use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
 
 /// Rendering mode for the DAG visualization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
     /// Render chains vertically (takes more vertical space)
     Vertical,
@@ -62,8 +61,7 @@ pub enum RenderMode {
 /// assert!(output.contains("Start"));
 /// assert!(output.contains("End"));
 /// ```
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DAG<'a> {
     pub(crate) nodes: Vec<(usize, &'a str)>,
     pub(crate) edges: Vec<(usize, usize)>,

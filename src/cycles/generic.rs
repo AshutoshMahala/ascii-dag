@@ -137,11 +137,12 @@ where
                 id_to_index,
                 visited,
                 rec_stack,
-            ) {
-                // Add current node to the cycle path
-                cycle.push(current_id.clone());
-                return Some(cycle);
-            }
+            )
+        {
+            // Add current node to the cycle path
+            cycle.push(current_id.clone());
+            return Some(cycle);
+        }
     }
 
     rec_stack[idx] = false;

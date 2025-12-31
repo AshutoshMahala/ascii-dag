@@ -12,7 +12,7 @@ fn main() {
     output.push_str("Test 1: Skip span of 2 (A->B->C + A->C)\n");
     let dag = DAG::from_edges(
         &[(1, "A"), (2, "B"), (3, "C")],
-        &[(1, 2), (2, 3), (1, 3)],  // A->B->C + A->C
+        &[(1, 2), (2, 3), (1, 3)], // A->B->C + A->C
     );
     output.push_str(&dag.render());
     output.push_str("\n\n");
@@ -21,7 +21,7 @@ fn main() {
     output.push_str("Test 2: Skip span of 3 (A->B->C->D + A->D)\n");
     let dag = DAG::from_edges(
         &[(1, "A"), (2, "B"), (3, "C"), (4, "D")],
-        &[(1, 2), (2, 3), (3, 4), (1, 4)],  // A->B->C->D + A->D
+        &[(1, 2), (2, 3), (3, 4), (1, 4)], // A->B->C->D + A->D
     );
     output.push_str(&dag.render());
     output.push_str("\n\n");
@@ -40,9 +40,11 @@ fn main() {
             (5, "End"),
         ],
         &[
-            (1, 2), (1, 3),  // Root splits
-            (2, 5),          // Short path: Root->Short->End (skip!)
-            (3, 4), (4, 5),  // Long path: Root->Long1->Long2->End
+            (1, 2),
+            (1, 3), // Root splits
+            (2, 5), // Short path: Root->Short->End (skip!)
+            (3, 4),
+            (4, 5), // Long path: Root->Long1->Long2->End
         ],
     );
     output.push_str(&dag.render());
@@ -51,16 +53,14 @@ fn main() {
     // Test 4: Wide graph with skip
     output.push_str("Test 4: Wide graph with skip\n");
     let dag = DAG::from_edges(
+        &[(1, "Top"), (2, "L"), (3, "M"), (4, "R"), (5, "Bottom")],
         &[
-            (1, "Top"),
-            (2, "L"),
-            (3, "M"),
-            (4, "R"),
-            (5, "Bottom"),
-        ],
-        &[
-            (1, 2), (1, 3), (1, 4),  // Top diverges
-            (2, 5), (3, 5), (4, 5),  // All converge (L and R skip level!)
+            (1, 2),
+            (1, 3),
+            (1, 4), // Top diverges
+            (2, 5),
+            (3, 5),
+            (4, 5), // All converge (L and R skip level!)
         ],
     );
     output.push_str(&dag.render());

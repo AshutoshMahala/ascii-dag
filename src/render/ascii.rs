@@ -300,12 +300,7 @@ impl<'a> DAG<'a> {
         // Convert to indices for the existing reduce_crossings logic
         let mut real_levels: Vec<Vec<usize>> = levels
             .iter()
-            .map(|level| {
-                level
-                    .iter()
-                    .filter_map(|vn| vn.real_index())
-                    .collect()
-            })
+            .map(|level| level.iter().filter_map(|vn| vn.real_index()).collect())
             .collect();
 
         self.reduce_crossings(&mut real_levels, max_level);
@@ -421,24 +416,21 @@ impl<'a> DAG<'a> {
 
                             // Edges between consecutive dummies
                             for level in (from_level + 1)..(to_level - 1) {
-                                if let Some(curr_pos) = levels[level]
-                                    .iter()
-                                    .position(|vn| matches!(vn, VirtualNode::Dummy(ei) if *ei == edge_idx))
-                                    && let Some(next_pos) = levels[level + 1]
-                                        .iter()
-                                        .position(|vn| matches!(vn, VirtualNode::Dummy(ei) if *ei == edge_idx))
-                                {
+                                if let Some(curr_pos) = levels[level].iter().position(
+                                    |vn| matches!(vn, VirtualNode::Dummy(ei) if *ei == edge_idx),
+                                ) && let Some(next_pos) = levels[level + 1].iter().position(
+                                    |vn| matches!(vn, VirtualNode::Dummy(ei) if *ei == edge_idx),
+                                ) {
                                     edges.push((level, curr_pos, level + 1, next_pos));
                                 }
                             }
 
                             // Edge from last dummy to target
-                            if let Some(last_dummy_pos) = levels[to_level - 1]
+                            if let Some(last_dummy_pos) = levels[to_level - 1].iter().position(
+                                |vn| matches!(vn, VirtualNode::Dummy(ei) if *ei == edge_idx),
+                            ) && let Some(to_pos) = levels[to_level]
                                 .iter()
-                                .position(|vn| matches!(vn, VirtualNode::Dummy(ei) if *ei == edge_idx))
-                                && let Some(to_pos) = levels[to_level]
-                                    .iter()
-                                    .position(|vn| matches!(vn, VirtualNode::Real(i) if *i == to_idx))
+                                .position(|vn| matches!(vn, VirtualNode::Real(i) if *i == to_idx))
                             {
                                 edges.push((to_level - 1, last_dummy_pos, to_level, to_pos));
                             }
@@ -620,9 +612,9 @@ impl<'a> DAG<'a> {
         let targets: Vec<usize> = connections.iter().map(|(_, t, _, _)| *t).collect();
 
         // Classify connections
-        let mut straight_down: Vec<usize> = Vec::new();  // from_x == to_x
-        let mut going_right: Vec<(usize, usize)> = Vec::new();  // from_x < to_x
-        let mut going_left: Vec<(usize, usize)> = Vec::new();   // from_x > to_x
+        let mut straight_down: Vec<usize> = Vec::new(); // from_x == to_x
+        let mut going_right: Vec<(usize, usize)> = Vec::new(); // from_x < to_x
+        let mut going_left: Vec<(usize, usize)> = Vec::new(); // from_x > to_x
 
         for &(from_x, to_x, _, _) in connections {
             if from_x == to_x {
@@ -647,12 +639,16 @@ impl<'a> DAG<'a> {
             // Complex case: draw divergence first (sources branching out)
             // Line 2a: Divergence from sources
             let mut line2a: Vec<char> = vec![' '; max_pos + 1];
-            
+
             // Draw all going_right and going_left as divergence
             for &(from_x, to_x) in &going_right {
                 for i in from_x..=to_x {
                     if i == from_x {
-                        line2a[i] = if line2a[i] == CORNER_UL { TEE_DOWN } else { CORNER_UR };
+                        line2a[i] = if line2a[i] == CORNER_UL {
+                            TEE_DOWN
+                        } else {
+                            CORNER_UR
+                        };
                     } else if i == to_x {
                         line2a[i] = CORNER_UL;
                     } else if line2a[i] == ' ' {
@@ -663,9 +659,17 @@ impl<'a> DAG<'a> {
             for &(from_x, to_x) in &going_left {
                 for i in to_x..=from_x {
                     if i == from_x {
-                        line2a[i] = if line2a[i] == CORNER_UR { TEE_DOWN } else { CORNER_UL };
+                        line2a[i] = if line2a[i] == CORNER_UR {
+                            TEE_DOWN
+                        } else {
+                            CORNER_UL
+                        };
                     } else if i == to_x {
-                        line2a[i] = if line2a[i] == CORNER_UL { TEE_DOWN } else { CORNER_UR };
+                        line2a[i] = if line2a[i] == CORNER_UL {
+                            TEE_DOWN
+                        } else {
+                            CORNER_UR
+                        };
                     } else if line2a[i] == ' ' {
                         line2a[i] = H_LINE;
                     }
@@ -687,13 +691,17 @@ impl<'a> DAG<'a> {
 
             // Line 2b: Vertical continuation
             for i in 0..=max_pos {
-                output.push(if targets.contains(&i) || straight_down.contains(&i) { V_LINE } else { ' ' });
+                output.push(if targets.contains(&i) || straight_down.contains(&i) {
+                    V_LINE
+                } else {
+                    ' '
+                });
             }
             writeln!(output).ok();
         } else {
             // Simpler case: single routing line
             let mut line2: Vec<char> = vec![' '; max_pos + 1];
-            
+
             for &(from_x, to_x) in &going_right {
                 for i in from_x..=to_x {
                     if i == from_x {
@@ -744,7 +752,11 @@ impl<'a> DAG<'a> {
 
         // Final line: Arrows at targets
         for i in 0..=max_pos {
-            output.push(if targets.contains(&i) { ARROW_DOWN } else { ' ' });
+            output.push(if targets.contains(&i) {
+                ARROW_DOWN
+            } else {
+                ' '
+            });
         }
         writeln!(output).ok();
     }
@@ -763,7 +775,11 @@ impl<'a> DAG<'a> {
 
         // Line 1: Vertical drops
         for i in 0..=max_pos {
-            output.push(if all_sources.contains(&i) { V_LINE } else { ' ' });
+            output.push(if all_sources.contains(&i) {
+                V_LINE
+            } else {
+                ' '
+            });
         }
         writeln!(output).ok();
 
@@ -814,7 +830,11 @@ impl<'a> DAG<'a> {
 
         // Line 1: Vertical from sources
         for i in 0..=max_pos {
-            output.push(if all_sources.contains(&i) { V_LINE } else { ' ' });
+            output.push(if all_sources.contains(&i) {
+                V_LINE
+            } else {
+                ' '
+            });
         }
         writeln!(output).ok();
 
@@ -849,7 +869,11 @@ impl<'a> DAG<'a> {
             .flat_map(|(_, t)| t.iter().map(|(x, _)| *x))
             .collect();
         for i in 0..=max_pos {
-            output.push(if all_targets.contains(&i) { ARROW_DOWN } else { ' ' });
+            output.push(if all_targets.contains(&i) {
+                ARROW_DOWN
+            } else {
+                ' '
+            });
         }
         writeln!(output).ok();
     }
@@ -871,7 +895,11 @@ impl<'a> DAG<'a> {
 
         // Line 2: Arrows (straight down for 1-to-1)
         for i in 0..=max_pos {
-            output.push(if sources.contains(&i) { ARROW_DOWN } else { ' ' });
+            output.push(if sources.contains(&i) {
+                ARROW_DOWN
+            } else {
+                ' '
+            });
         }
         writeln!(output).ok();
     }
@@ -1056,11 +1084,7 @@ impl<'a> DAG<'a> {
         }
     }
 
-    fn draw_multiple_convergences(
-        &self,
-        output: &mut String,
-        target_groups: &[ConnectionGroup],
-    ) {
+    fn draw_multiple_convergences(&self, output: &mut String, target_groups: &[ConnectionGroup]) {
         // Find all unique source and target positions
         let all_connections: Vec<_> = target_groups
             .iter()
@@ -1106,10 +1130,9 @@ impl<'a> DAG<'a> {
                     char_at_pos = CORNER_DL; // ┘
                 } else if sources.contains(&&i) {
                     char_at_pos = TEE_UP; // ┴
-                } else if i > min_source && i < max_source
-                    && char_at_pos == ' ' {
-                        char_at_pos = H_LINE; // ─
-                    }
+                } else if i > min_source && i < max_source && char_at_pos == ' ' {
+                    char_at_pos = H_LINE; // ─
+                }
             }
 
             output.push(char_at_pos);
@@ -1127,11 +1150,7 @@ impl<'a> DAG<'a> {
         writeln!(output).ok();
     }
 
-    fn draw_multiple_divergences(
-        &self,
-        output: &mut String,
-        source_groups: &[ConnectionGroup],
-    ) {
+    fn draw_multiple_divergences(&self, output: &mut String, source_groups: &[ConnectionGroup]) {
         let all_connections: Vec<_> = source_groups
             .iter()
             .flat_map(|(_, v)| v.iter().copied())
@@ -1179,10 +1198,9 @@ impl<'a> DAG<'a> {
                         char_at_pos = CORNER_UL; // ┐
                     } else if targets.contains(&&i) {
                         char_at_pos = TEE_DOWN; // ┬
-                    } else if i > min_target && i < max_target
-                        && char_at_pos == ' ' {
-                            char_at_pos = H_LINE; // ─
-                        }
+                    } else if i > min_target && i < max_target && char_at_pos == ' ' {
+                        char_at_pos = H_LINE; // ─
+                    }
                 }
             }
 

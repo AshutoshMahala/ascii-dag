@@ -71,9 +71,11 @@ fn issue_asymmetric_paths(output: &mut String) {
             (5, "End"),
         ],
         &[
-            (1, 2), (1, 3),  // Root splits
-            (2, 5),          // Short path (skip!)
-            (3, 4), (4, 5),  // Long path
+            (1, 2),
+            (1, 3), // Root splits
+            (2, 5), // Short path (skip!)
+            (3, 4),
+            (4, 5), // Long path
         ],
     );
     output.push_str(&dag.render());
