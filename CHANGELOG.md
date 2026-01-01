@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-01-01
+
+### Added
+- **New examples**:
+  - `benchmark.rs` - Memory-tracking performance benchmark with custom allocator
+  - `embedded_proof.rs` - Compilation proof for `no_std` environments
+  - `readme_hero.rs` - Hero example demonstrating fan-out/fan-in pattern
+- **Benchmark results documentation** with time/memory metrics for 50-1000 nodes
+
+### Changed
+- **README overhaul**:
+  - New hero ASCII art showcasing real rendering output
+  - Added algorithm comparison table (Sugiyama vs ascii-dag tradeoffs)
+  - Updated benchmark results with detailed metrics table
+  - Improved feature descriptions and "Why ascii-dag" section
+- **Keywords updated** to `sugiyama`, `terminal`, `layout` for better discoverability
+- **stress_test.rs refactored** into modular test functions with deterministic RNG
+- Added `panic = "abort"` to dev profile for better `no_std` example compatibility
+
+### Fixed
+- Minor documentation clarifications
+
 ## [0.4.1] - 2024-12-31
 
 ### Added
