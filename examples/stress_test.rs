@@ -1,233 +1,213 @@
 use ascii_dag::graph::DAG;
 
-fn main() {
-    println!("=== Stress Test: Breaking the Renderer ===\n");
+// Simple Linear Congruential Generator to avoid adding 'rand' dependency
+struct SimpleRng {
+    state: u64,
+}
 
-    // Test 1: Very long vs very short labels
-    println!("1. Mixed Label Lengths:");
-    let dag = DAG::from_edges(
-        &[
-            (1, "A"),
-            (2, "VeryVeryVeryLongErrorNameThatShouldBreakAlignment"),
-            (3, "B"),
-            (4, "AnotherExtremelyLongDiagnosticMessageHere"),
-            (5, "C"),
-        ],
-        &[
-            (1, 2), // Short -> Long
-            (2, 3), // Long -> Short
-            (3, 4), // Short -> Long
-            (4, 5), // Long -> Short
-        ],
-    );
-    println!("{}\n", dag.render());
-
-    // Test 2: Extreme convergence (many -> one)
-    println!("2. Extreme Convergence (10 errors -> 1):");
-    let mut dag = DAG::new();
-    dag.add_node(1, "E1");
-    dag.add_node(2, "E2");
-    dag.add_node(3, "E3");
-    dag.add_node(4, "E4");
-    dag.add_node(5, "E5");
-    dag.add_node(6, "E6");
-    dag.add_node(7, "E7");
-    dag.add_node(8, "E8");
-    dag.add_node(9, "E9");
-    dag.add_node(10, "E10");
-    dag.add_node(11, "Final");
-
-    for i in 1..=10 {
-        dag.add_edge(i, 11);
+impl SimpleRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
     }
-    println!("{}\n", dag.render());
 
-    // Test 3: Extreme divergence (one -> many)
-    println!("3. Extreme Divergence (1 -> 8):");
-    let dag = DAG::from_edges(
-        &[
-            (1, "Root"),
-            (2, "Child1"),
-            (3, "Child2"),
-            (4, "Child3"),
-            (5, "Child4"),
-            (6, "Child5"),
-            (7, "Child6"),
-            (8, "Child7"),
-            (9, "Child8"),
-        ],
-        &[
-            (1, 2),
-            (1, 3),
-            (1, 4),
-            (1, 5),
-            (1, 6),
-            (1, 7),
-            (1, 8),
-            (1, 9),
-        ],
-    );
-    println!("{}\n", dag.render());
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        self.state
+    }
 
-    // Test 4: Complex multi-layer DAG
-    println!("4. Complex Multi-Layer DAG:");
-    let dag = DAG::from_edges(
-        &[
-            (1, "L1A"),
-            (2, "L1B"),
-            (3, "L1C"), // Layer 1: 3 nodes
-            (4, "L2A"),
-            (5, "L2B"), // Layer 2: 2 nodes
-            (6, "L3A"),
-            (7, "L3B"),
-            (8, "L3C"),   // Layer 3: 3 nodes
-            (9, "Final"), // Layer 4: 1 node
-        ],
-        &[
-            // Layer 1 -> Layer 2
-            (1, 4),
-            (2, 4),
-            (3, 5),
-            // Layer 2 -> Layer 3
-            (4, 6),
-            (4, 7),
-            (5, 7),
-            (5, 8),
-            // Layer 3 -> Layer 4
-            (6, 9),
-            (7, 9),
-            (8, 9),
-        ],
-    );
-    println!("{}\n", dag.render());
+    fn gen_range(&mut self, min: usize, max: usize) -> usize {
+        let range = (max - min) as u64;
+        let random = self.next_u64();
+        min + (random % range) as usize
+    }
+}
 
-    // Test 5: Single character labels
-    println!("5. Single Character Labels:");
-    let dag = DAG::from_edges(
-        &[(1, "A"), (2, "B"), (3, "C"), (4, "D"), (5, "E")],
-        &[(1, 3), (2, 3), (3, 4), (3, 5)],
-    );
-    println!("{}\n", dag.render());
+fn main() {
+    println!("=== ASCII DAG Stress Test Suite ===\n");
 
-    // Test 6: Empty label (edge case)
-    println!("6. Empty/Minimal Labels:");
-    let dag = DAG::from_edges(&[(1, ""), (2, "X"), (3, "")], &[(1, 2), (2, 3)]);
-    println!("{}\n", dag.render());
+    let tests = [
+        ("The Double Helix", test_double_helix as fn() -> DAG<'static>),
+        ("The Skyscraper", test_skyscraper),
+        ("The Wide Fan", test_wide_fan),
+        ("The Diamond Lattice", test_diamond_lattice),
+        ("The Disconnected Islands", test_disconnected_islands),
+        ("The Random Hairball", test_random_hairball),
+        ("The Skip-Level Nightmare", test_skip_level_nightmare),
+        ("The Verbose Logger", test_verbose_logger),
+        ("The Ouroboros", test_ouroboros),
+    ];
 
-    // Test 7: Unicode in labels
-    println!("7. Unicode Characters in Labels:");
-    let dag = DAG::from_edges(
-        &[(1, "🔴 Error"), (2, "⚠️ Warning"), (3, "✓ Fixed")],
-        &[(1, 2), (2, 3)],
-    );
-    println!("{}\n", dag.render());
+    for (name, test_fn) in tests {
+        println!("\n>>> RUNNING: {} <<<\n", name);
+        let dag = test_fn();
+        let start = std::time::Instant::now();
+        let output = dag.render();
+        let duration = start.elapsed();
+        
+        println!("{}", output);
+        println!(">>> Rendered in {:?} <<<\n", duration);
+        println!("------------------------------------------------------------");
+    }
+}
 
-    // Test 8: Mixed long and short with convergence
-    println!("8. Mixed Lengths + Convergence:");
-    let dag = DAG::from_edges(
-        &[
-            (1, "ShortError1"),
-            (2, "ThisIsAnExtremelyLongErrorMessageThatGoesOnAndOn"),
-            (3, "Err3"),
-            (4, "AnotherVeryLongDiagnosticNameHereForTesting"),
-            (5, "Result"),
-        ],
-        &[(1, 5), (2, 5), (3, 5), (4, 5)],
-    );
-    println!("{}\n", dag.render());
+fn test_double_helix() -> DAG<'static> {
+    let mut dag = DAG::new();
+    // Two intertwined chains
+    for i in 0..10 {
+        dag.add_node(i * 2, "A");
+        dag.add_node(i * 2 + 1, "B");
+        
+        if i > 0 {
+            dag.add_edge((i-1) * 2, i * 2);         // A -> A
+            dag.add_edge((i-1) * 2 + 1, i * 2 + 1); // B -> B
+            
+            // Cross connections
+            if i % 2 == 0 {
+                dag.add_edge((i-1) * 2, i * 2 + 1); // A -> B
+                dag.add_edge((i-1) * 2 + 1, i * 2); // B -> A
+            }
+        }
+    }
+    dag
+}
 
-    // Test 9: Deep nesting
-    println!("9. Deep Nesting (10 levels):");
-    let dag = DAG::from_edges(
-        &[
-            (1, "Level1"),
-            (2, "Level2"),
-            (3, "Level3"),
-            (4, "Level4"),
-            (5, "Level5"),
-            (6, "Level6"),
-            (7, "Level7"),
-            (8, "Level8"),
-            (9, "Level9"),
-            (10, "Level10"),
-        ],
-        &[
-            (1, 2),
-            (2, 3),
-            (3, 4),
-            (4, 5),
-            (5, 6),
-            (6, 7),
-            (7, 8),
-            (8, 9),
-            (9, 10),
-        ],
-    );
-    println!("{}\n", dag.render());
+fn test_skyscraper() -> DAG<'static> {
+    let mut dag = DAG::new();
+    // Very deep, narrow graph to test vertical spacing
+    for i in 0..50 {
+        dag.add_node(i, Box::leak(format!("Floor {}", i).into_boxed_str()));
+        if i > 0 {
+            dag.add_edge(i-1, i);
+        }
+    }
+    dag
+}
 
-    // Test 10: Wide graph (5 parallel chains)
-    println!("10. Wide Graph (5 parallel chains):");
-    let dag = DAG::from_edges(
-        &[
-            (1, "C0L0"),
-            (2, "C0L1"),
-            (3, "C0L2"),
-            (4, "C1L0"),
-            (5, "C1L1"),
-            (6, "C1L2"),
-            (7, "C2L0"),
-            (8, "C2L1"),
-            (9, "C2L2"),
-            (10, "C3L0"),
-            (11, "C3L1"),
-            (12, "C3L2"),
-            (13, "C4L0"),
-            (14, "C4L1"),
-            (15, "C4L2"),
-        ],
-        &[
-            (1, 2),
-            (2, 3),
-            (4, 5),
-            (5, 6),
-            (7, 8),
-            (8, 9),
-            (10, 11),
-            (11, 12),
-            (13, 14),
-            (14, 15),
-        ],
-    );
-    println!("{}\n", dag.render());
+fn test_wide_fan() -> DAG<'static> {
+    let mut dag = DAG::new();
+    dag.add_node(0, "Source");
+    dag.add_node(1000, "Sink");
 
-    // Test 11: Diamond within diamond
-    println!("11. Diamond within Diamond:");
-    let dag = DAG::from_edges(
-        &[
-            (1, "Root"),
-            (2, "L1"),
-            (3, "R1"),
-            (4, "L2"),
-            (5, "R2"),
-            (6, "L3"),
-            (7, "R3"),
-            (8, "Merge1"),
-            (9, "Merge2"),
-        ],
-        &[
-            (1, 2),
-            (1, 3), // Root splits
-            (2, 4),
-            (2, 5), // Left splits
-            (3, 6),
-            (3, 7), // Right splits
-            (4, 8),
-            (5, 8), // Left converges
-            (6, 9),
-            (7, 9), // Right converges
-        ],
-    );
-    println!("{}\n", dag.render());
+    // 50 parallel nodes
+    for i in 1..51 {
+        dag.add_node(i, Box::leak(format!("Worker {}", i).into_boxed_str()));
+        dag.add_edge(0, i);
+        dag.add_edge(i, 1000);
+    }
+    dag
+}
 
-    println!("=== Stress Test Complete ===");
+fn test_diamond_lattice() -> DAG<'static> {
+    let mut dag = DAG::new();
+    let width = 5;
+    let height = 10;
+
+    for y in 0..height {
+        for x in 0..width {
+            let id = y * width + x;
+            dag.add_node(id, "♦");
+            
+            if y > 0 {
+                // Connect to parents
+                let p_id = (y - 1) * width + x;
+                dag.add_edge(p_id, id);
+                
+                // Cross connections
+                if x > 0 {
+                    dag.add_edge((y - 1) * width + (x - 1), id);
+                }
+                if x < width - 1 {
+                    dag.add_edge((y - 1) * width + (x + 1), id);
+                }
+            }
+        }
+    }
+    dag
+}
+
+fn test_disconnected_islands() -> DAG<'static> {
+    let mut dag = DAG::new();
+    
+    // Create 5 separate small graphs
+    for island in 0..5 {
+        let base = island * 10;
+        dag.add_node(base, "Island");
+        dag.add_node(base + 1, "Palm");
+        dag.add_node(base + 2, "Coconuts");
+        
+        dag.add_edge(base, base + 1);
+        dag.add_edge(base + 1, base + 2);
+    }
+    dag
+}
+
+fn test_random_hairball() -> DAG<'static> {
+    let mut dag = DAG::new();
+    let mut rng = SimpleRng::new(42);
+    let nodes = 30;
+    
+    for i in 0..nodes {
+        dag.add_node(i, Box::leak(format!("N{}", i).into_boxed_str()));
+    }
+
+    // Add random edges, ensuring no cycles (i < j rule)
+    for i in 0..nodes {
+        let num_edges = rng.gen_range(1, 4);
+        for _ in 0..num_edges {
+            let target = rng.gen_range(i + 1, nodes + 5); // +5 allows some out of bounds (ignored) or valid
+            if target < nodes {
+                dag.add_edge(i, target);
+            }
+        }
+    }
+    dag
+}
+
+fn test_skip_level_nightmare() -> DAG<'static> {
+    let mut dag = DAG::new();
+    // Root
+    dag.add_node(0, "Root");
+    
+    // Levels 1, 2, 3, 4, 5
+    for i in 1..6 {
+        dag.add_node(i, Box::leak(format!("L{}", i).into_boxed_str()));
+        dag.add_edge(i-1, i); // Normal connection
+    }
+    
+    // Skip edges: 0->2, 0->3, 0->4, 0->5
+    for i in 2..6 {
+        dag.add_edge(0, i);
+    }
+    
+    // Nested skips: 1->3, 2->5
+    dag.add_edge(1, 3);
+    dag.add_edge(2, 5);
+    
+    dag
+}
+
+fn test_verbose_logger() -> DAG<'static> {
+    let mut dag = DAG::new();
+    dag.add_node(1, "A");
+    dag.add_node(2, "B");
+    // Long text to test centering
+    dag.add_node(3, Box::leak("Error: NullPointerException at line 55 (Critical Failure in Module X)".to_string().into_boxed_str())); 
+    dag.add_node(4, "C");
+    
+    dag.add_edge(1, 2);
+    dag.add_edge(1, 3);
+    dag.add_edge(3, 4);
+    dag
+}
+
+fn test_ouroboros() -> DAG<'static> {
+    let mut dag = DAG::new();
+    dag.add_node(1, "Head");
+    dag.add_node(2, "Body");
+    dag.add_node(3, "Tail");
+
+    dag.add_edge(1, 2);
+    dag.add_edge(2, 3);
+    dag.add_edge(3, 1); // Cycle!
+    dag
 }

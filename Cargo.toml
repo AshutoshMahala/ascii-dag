@@ -6,7 +6,7 @@ authors = ["Ash"]
 license = "MIT OR Apache-2.0"
 description = "Lightweight ASCII DAG (Directed Acyclic Graph) renderer for error chains and dependency visualization"
 repository = "https://github.com/AshutoshMahala/ascii-dag"
-keywords = ["dag", "graph", "ascii", "visualization", "errors"]
+keywords = ["tree", "graph", "sugiyama", "terminal", "layout"]
 categories = ["data-structures", "visualization", "no-std"]
 readme = "README.md"
 rust-version = "1.92"
@@ -63,3 +63,6 @@ opt-level = "z"     # Optimize for size
 lto = true          # Enable Link Time Optimization
 codegen-units = 1   # Better optimization
 strip = true        # Strip symbols
+
+[profile.dev]
+panic = "abort"     # Required for no_std examples on some targets
