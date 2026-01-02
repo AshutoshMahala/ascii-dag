@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-01-01
+
+### Fixed
+- **Divergence bracket connections**: Source nodes now properly connect to divergence brackets
+  - Brackets span from source through all targets (not just between targets)
+  - Nested diamond patterns now render with continuous connections
+  - Uses correct corner characters (`└`, `┘`, `┴`) based on source/target positions
+- **Skip-edge dummy node positioning**: Dummies now placed in gaps between real nodes
+  - Previously dummies were always pushed to the right of all real nodes
+  - Now finds nearest available gap to align with source node's center
+  - Skip-edge lines integrate naturally with horizontal merge brackets
+- **Convergence bracket extension**: Horizontal lines now span all sources including pass-through
+  - Pass-through dummy connections join the main convergence line
+  - Eliminates floating vertical lines disconnected from merge brackets
+
+### Changed
+- **Improved visual continuity** for complex DAGs with skip-level edges
+  - Build pipeline patterns now show clean integrated routing
+  - Highway-with-exits patterns have properly connected pass-through lines
+
 ## [0.4.2] - 2026-01-01
 
 ### Added
