@@ -476,10 +476,10 @@ Available features:
 
 | Nodes | Build Time | **Render Time** | Peak RAM | Output |
 | :--- | :--- | :--- | :--- | :--- |
-| **50** | 64µs | **0.6ms** | ~103 KB | 29 KB |
-| **100** | 70µs | **2.0ms** | ~352 KB | 94 KB |
-| **500** | 0.35ms | **37ms** | ~5.8 MB | 1.6 MB |
-| **1000** | 0.7ms | **190ms** | ~23 MB | 6.4 MB |
+| **50** | 55µs | **0.8ms** | ~95 KB | 29 KB |
+| **100** | 71µs | **2.5ms** | ~327 KB | 94 KB |
+| **500** | 0.35ms | **36ms** | ~5.5 MB | 1.6 MB |
+| **1000** | 0.7ms | **225ms** | ~21 MB | 6.4 MB |
 
 *Measured via `cargo run --example benchmark --release`*
 
