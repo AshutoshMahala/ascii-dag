@@ -23,6 +23,89 @@ pub(crate) const CORNER_UR: char = '┌'; // Up-Right corner
 pub(crate) const CORNER_UL: char = '┐'; // Up-Left corner
 pub(crate) const CROSS: char = '┼'; // Cross junction
 
+/// Packed bitmap for memory-efficient boolean storage.
+/// Stores 64 booleans per u64, reducing memory by 64x compared to Vec<bool>.
+/// This is particularly beneficial for no-alloc environments with fixed-size arrays.
+struct BitSet {
+    bits: Vec<u64>,
+    len: usize,
+}
+
+impl BitSet {
+    fn new() -> Self {
+        Self { bits: Vec::new(), len: 0 }
+    }
+
+    /// Prepare the bitmap for a given size (clear and resize)
+    #[inline]
+    fn prepare(&mut self, size: usize) {
+        self.len = size;
+        let words_needed = (size + 63) / 64;
+        self.bits.clear();
+        self.bits.resize(words_needed, 0);
+    }
+
+    /// Set a bit to true
+    #[inline]
+    fn set(&mut self, idx: usize) {
+        debug_assert!(idx < self.len);
+        let word = idx / 64;
+        let bit = idx % 64;
+        self.bits[word] |= 1u64 << bit;
+    }
+
+    /// Get a bit value
+    #[inline]
+    fn get(&self, idx: usize) -> bool {
+        debug_assert!(idx < self.len);
+        let word = idx / 64;
+        let bit = idx % 64;
+        (self.bits[word] >> bit) & 1 != 0
+    }
+}
+
+/// Reusable buffers for rendering to avoid repeated allocations.
+/// Uses packed bitmaps (64 bools per u64) for 64x memory reduction on boolean arrays.
+struct RenderBuffers {
+    /// Packed bitmap for source positions
+    is_source: BitSet,
+    /// Packed bitmap for target positions  
+    is_target: BitSet,
+    /// Additional packed bitmap (pass-through, straight, etc.)
+    bitmap_aux: BitSet,
+    /// Character line buffer
+    line_chars: Vec<char>,
+}
+
+impl RenderBuffers {
+    fn new() -> Self {
+        Self {
+            is_source: BitSet::new(),
+            is_target: BitSet::new(),
+            bitmap_aux: BitSet::new(),
+            line_chars: Vec::new(),
+        }
+    }
+
+    /// Resize and fill a char buffer with spaces
+    #[inline]
+    fn prepare_chars(&mut self, size: usize) {
+        self.line_chars.clear();
+        self.line_chars.resize(size, ' ');
+    }
+
+    /// Prepare source and target bitmaps
+    fn prepare_bitmaps(&mut self, size: usize) {
+        self.is_source.prepare(size);
+        self.is_target.prepare(size);
+    }
+    
+    /// Prepare aux bitmap
+    fn prepare_aux(&mut self, size: usize) {
+        self.bitmap_aux.prepare(size);
+    }
+}
+
 /// A virtual node in the layout - either a real node or a dummy for edge routing.
 /// Memory: 8 bytes using tagged pointer (high bit = is_dummy flag)
 /// This is 3x smaller than the naive enum representation.
@@ -77,10 +160,21 @@ struct VirtualLayout {
     levels: Vec<Vec<VirtualNode>>,
     /// X-coordinate for each virtual node (indexed by level, then position in level)
     x_coords: Vec<Vec<usize>>,
-    /// Width of each virtual node
-    widths: Vec<Vec<usize>>,
     /// Edges grouped by source level for O(1) lookup: edges_by_level[level] = [(from_pos, to_pos), ...]
     edges_by_level: Vec<Vec<(usize, usize)>>,
+}
+
+impl VirtualLayout {
+    /// Get width of a virtual node: 1 for dummies, node_width for real nodes
+    #[inline]
+    fn get_width<'a>(&self, dag: &DAG<'a>, level: usize, pos: usize) -> usize {
+        let vnode = &self.levels[level][pos];
+        if vnode.is_real() {
+            dag.get_node_width(vnode.index())
+        } else {
+            1 // Dummy nodes are always width 1
+        }
+    }
 }
 
 impl<'a> DAG<'a> {
@@ -350,7 +444,7 @@ impl<'a> DAG<'a> {
         self.reposition_dummies(&mut levels, &node_levels);
 
         // Step 5: Assign x-coordinates
-        let (x_coords, widths) = self.assign_virtual_x_coordinates(&levels, &node_levels);
+        let x_coords = self.assign_virtual_x_coordinates(&levels, &node_levels);
 
         // Step 6: Build edge list grouped by source level for O(1) lookup during rendering
         let edges_by_level = self.build_virtual_edges_by_level(&levels, &node_levels);
@@ -358,7 +452,6 @@ impl<'a> DAG<'a> {
         VirtualLayout {
             levels,
             x_coords,
-            widths,
             edges_by_level,
         }
     }
@@ -370,8 +463,9 @@ impl<'a> DAG<'a> {
         &self,
         levels: &[Vec<VirtualNode>],
         node_levels: &[usize],
-    ) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+    ) -> Vec<Vec<usize>> {
         let mut x_coords: Vec<Vec<usize>> = Vec::with_capacity(levels.len());
+        // Track widths locally for x-coordinate calculation (not stored in VirtualLayout)
         let mut widths: Vec<Vec<usize>> = Vec::with_capacity(levels.len());
 
         // First pass: assign x-coordinates to all nodes sequentially
@@ -453,7 +547,7 @@ impl<'a> DAG<'a> {
             }
         }
 
-        (x_coords, widths)
+        x_coords
     }
 
     /// Reposition dummy nodes in the level arrays.
@@ -587,21 +681,27 @@ impl<'a> DAG<'a> {
 
     /// Render the virtual layout to output.
     fn render_virtual_layout(&self, output: &mut String, layout: &VirtualLayout) {
-        // Calculate canvas dimensions
+        // Calculate canvas dimensions - compute width on-demand
         let level_widths: Vec<usize> = layout
-            .x_coords
+            .levels
             .iter()
-            .zip(layout.widths.iter())
-            .map(|(xs, ws)| {
-                xs.iter()
-                    .zip(ws.iter())
-                    .map(|(x, w)| x + w)
+            .enumerate()
+            .map(|(level_idx, level_nodes)| {
+                level_nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(pos, _)| {
+                        layout.x_coords[level_idx][pos] + layout.get_width(self, level_idx, pos)
+                    })
                     .max()
                     .unwrap_or(0)
             })
             .collect();
 
         let max_canvas_width = *level_widths.iter().max().unwrap_or(&0);
+        
+        // Create reusable buffers for connection drawing
+        let mut buffers = RenderBuffers::new();
 
         for (current_level, level_nodes) in layout.levels.iter().enumerate() {
             if level_nodes.is_empty() {
@@ -630,7 +730,7 @@ impl<'a> DAG<'a> {
                 if vnode.is_real() {
                     let (id, label) = self.nodes[vnode.index()];
                     self.write_node(output, id, label);
-                    current_col += layout.widths[current_level][pos];
+                    current_col += layout.get_width(self, current_level, pos);
                 } else {
                     // Dummy nodes show as vertical line to indicate skip-level edge passing through
                     output.push(V_LINE);
@@ -654,6 +754,7 @@ impl<'a> DAG<'a> {
                     current_level,
                     level_offset,
                     next_level_offset,
+                    &mut buffers,
                 );
             }
         }
@@ -667,6 +768,7 @@ impl<'a> DAG<'a> {
         current_level: usize,
         current_offset: usize,
         next_offset: usize,
+        buffers: &mut RenderBuffers,
     ) {
         let next_level = current_level + 1;
 
@@ -682,10 +784,10 @@ impl<'a> DAG<'a> {
 
         for &(from_pos, to_pos) in level_edges {
             let from_x = layout.x_coords[current_level][from_pos]
-                + layout.widths[current_level][from_pos] / 2
+                + layout.get_width(self, current_level, from_pos) / 2
                 + current_offset;
             let to_x = layout.x_coords[next_level][to_pos]
-                + layout.widths[next_level][to_pos] / 2
+                + layout.get_width(self, next_level, to_pos) / 2
                 + next_offset;
 
             let from_is_dummy = !layout.levels[current_level][from_pos].is_real();
@@ -724,33 +826,33 @@ impl<'a> DAG<'a> {
         // Draw based on pattern - now with proper handling of mixed cases
         if has_convergence && has_divergence {
             // Mixed case: draw with proper crossing handling
-            self.draw_mixed_connections(output, &connections, max_pos);
+            self.draw_mixed_connections(output, &connections, max_pos, buffers);
         } else if has_convergence {
-            self.draw_convergence_connections(output, &target_groups, max_pos);
+            self.draw_convergence_connections(output, &target_groups, max_pos, buffers);
         } else if has_divergence {
-            self.draw_divergence_connections(output, &source_groups, max_pos);
+            self.draw_divergence_connections(output, &source_groups, max_pos, buffers);
         } else {
             // Simple 1-to-1 connections
-            self.draw_simple_connections(output, &connections, max_pos);
+            self.draw_simple_connections(output, &connections, max_pos, buffers);
         }
     }
 
     /// Draw mixed convergence and divergence (the previously broken case).
-    /// Optimized with O(1) position lookups using boolean arrays.
+    /// Optimized with O(1) position lookups using reusable boolean arrays.
     #[allow(clippy::needless_range_loop)]
     fn draw_mixed_connections(
         &self,
         output: &mut String,
         connections: &[(usize, usize, bool, bool)],
         max_pos: usize,
+        buffers: &mut RenderBuffers,
     ) {
-        // Use boolean arrays for O(1) lookups instead of Vec::contains O(n)
-        let mut is_source = vec![false; max_pos + 1];
-        let mut is_target = vec![false; max_pos + 1];
+        // Use reusable boolean arrays for O(1) lookups
+        buffers.prepare_bitmaps(max_pos + 1);
         
         for &(from_x, to_x, _, _) in connections {
-            is_source[from_x] = true;
-            is_target[to_x] = true;
+            buffers.is_source.set(from_x);
+            buffers.is_target.set(to_x);
         }
 
         // Classify connections
@@ -773,7 +875,7 @@ impl<'a> DAG<'a> {
 
         // Line 1: Vertical drops from all sources
         for i in 0..=max_pos {
-            output.push(if is_source[i] { V_LINE } else { ' ' });
+            output.push(if buffers.is_source.get(i) { V_LINE } else { ' ' });
         }
         writeln!(output).ok();
 
@@ -796,70 +898,71 @@ impl<'a> DAG<'a> {
             let min_x = *all_positions.iter().min().unwrap_or(&0);
             let max_x = *all_positions.iter().max().unwrap_or(&0);
             
-            let mut line2a: Vec<char> = vec![' '; max_pos + 1];
+            // Reuse line buffer
+            buffers.prepare_chars(max_pos + 1);
 
             // First, draw the horizontal line across the entire span
             for i in min_x..=max_x {
-                line2a[i] = H_LINE;
+                buffers.line_chars[i] = H_LINE;
             }
             
             // Mark source positions (where lines come down from above) with ┴
             for i in min_x..=max_x {
-                if is_source[i] {
-                    line2a[i] = TEE_UP; // ┴ - line comes from above
+                if buffers.is_source.get(i) {
+                    buffers.line_chars[i] = TEE_UP; // ┴ - line comes from above
                 }
             }
             
             // Mark target positions (where lines go down to) with ┬
             // If already ┴ (source), upgrade to ┼ (cross)
             for i in min_x..=max_x {
-                if is_target[i] {
-                    line2a[i] = match line2a[i] {
+                if buffers.is_target.get(i) {
+                    buffers.line_chars[i] = match buffers.line_chars[i] {
                         TEE_UP => CROSS,  // Both source and target → cross
                         H_LINE => TEE_DOWN, // Only target → ┬
-                        _ => line2a[i],
+                        _ => buffers.line_chars[i],
                     };
                 }
             }
             
             // Fix the endpoints based on whether they're source or target
             // Left endpoint
-            if min_x < line2a.len() {
-                line2a[min_x] = if is_source[min_x] && is_target[min_x] {
+            if min_x < buffers.line_chars.len() {
+                buffers.line_chars[min_x] = if buffers.is_source.get(min_x) && buffers.is_target.get(min_x) {
                     CROSS // Both
-                } else if is_source[min_x] {
+                } else if buffers.is_source.get(min_x) {
                     CORNER_DR // └ - source only (line from above)
-                } else if is_target[min_x] {
+                } else if buffers.is_target.get(min_x) {
                     CORNER_UR // ┌ - target only (line goes down)
                 } else {
-                    line2a[min_x]
+                    buffers.line_chars[min_x]
                 };
             }
             // Right endpoint
-            if max_x < line2a.len() {
-                line2a[max_x] = if is_source[max_x] && is_target[max_x] {
+            if max_x < buffers.line_chars.len() {
+                buffers.line_chars[max_x] = if buffers.is_source.get(max_x) && buffers.is_target.get(max_x) {
                     CROSS // Both
-                } else if is_source[max_x] {
+                } else if buffers.is_source.get(max_x) {
                     CORNER_DL // ┘ - source only (line from above)
-                } else if is_target[max_x] {
+                } else if buffers.is_target.get(max_x) {
                     CORNER_UL // ┐ - target only (line goes down)
                 } else {
-                    line2a[max_x]
+                    buffers.line_chars[max_x]
                 };
             }
 
-            for ch in &line2a {
+            for ch in &buffers.line_chars {
                 output.push(*ch);
             }
             writeln!(output).ok();
 
-            // Line 2b: Vertical continuation - use bitmap for straight_down too
-            let mut is_straight = vec![false; max_pos + 1];
+            // Line 2b: Vertical continuation - reuse bitmap_aux for straight_down
+            buffers.prepare_aux(max_pos + 1);
             for &x in &straight_down {
-                is_straight[x] = true;
+                buffers.bitmap_aux.set(x);
             }
             for i in 0..=max_pos {
-                output.push(if is_target[i] || is_straight[i] {
+                output.push(if buffers.is_target.get(i) || buffers.bitmap_aux.get(i) {
                     V_LINE
                 } else {
                     ' '
@@ -867,20 +970,20 @@ impl<'a> DAG<'a> {
             }
             writeln!(output).ok();
         } else {
-            // Simpler case: single routing line
-            let mut line2: Vec<char> = vec![' '; max_pos + 1];
+            // Simpler case: single routing line - reuse line buffer
+            buffers.prepare_chars(max_pos + 1);
 
             for &(from_x, to_x) in &going_right {
                 for i in from_x..=to_x {
                     if i == from_x {
-                        line2[i] = CORNER_DR;
+                        buffers.line_chars[i] = CORNER_DR;
                     } else if i == to_x {
-                        line2[i] = match line2[i] {
+                        buffers.line_chars[i] = match buffers.line_chars[i] {
                             CORNER_DR => TEE_UP,
                             _ => CORNER_DL,
                         };
-                    } else if line2[i] == ' ' {
-                        line2[i] = H_LINE;
+                    } else if buffers.line_chars[i] == ' ' {
+                        buffers.line_chars[i] = H_LINE;
                     }
                 }
             }
@@ -888,31 +991,31 @@ impl<'a> DAG<'a> {
             for &(from_x, to_x) in &going_left {
                 for i in to_x..=from_x {
                     if i == from_x {
-                        line2[i] = match line2[i] {
+                        buffers.line_chars[i] = match buffers.line_chars[i] {
                             CORNER_DR => TEE_UP,
                             _ => CORNER_DL,
                         };
                     } else if i == to_x {
-                        line2[i] = match line2[i] {
+                        buffers.line_chars[i] = match buffers.line_chars[i] {
                             CORNER_DL => TEE_UP,
                             H_LINE => TEE_UP,
                             _ => CORNER_DR,
                         };
-                    } else if line2[i] == ' ' {
-                        line2[i] = H_LINE;
+                    } else if buffers.line_chars[i] == ' ' {
+                        buffers.line_chars[i] = H_LINE;
                     }
                 }
             }
 
             for &x in &straight_down {
-                if line2[x] == ' ' {
-                    line2[x] = V_LINE;
-                } else if line2[x] == H_LINE {
-                    line2[x] = TEE_UP;
+                if buffers.line_chars[x] == ' ' {
+                    buffers.line_chars[x] = V_LINE;
+                } else if buffers.line_chars[x] == H_LINE {
+                    buffers.line_chars[x] = TEE_UP;
                 }
             }
 
-            for ch in &line2 {
+            for ch in &buffers.line_chars {
                 output.push(*ch);
             }
             writeln!(output).ok();
@@ -920,7 +1023,7 @@ impl<'a> DAG<'a> {
 
         // Final line: Arrows at targets
         for i in 0..=max_pos {
-            output.push(if is_target[i] {
+            output.push(if buffers.is_target.get(i) {
                 ARROW_DOWN
             } else {
                 ' '
@@ -930,36 +1033,38 @@ impl<'a> DAG<'a> {
     }
 
     /// Draw pure convergence pattern.
-    /// Optimized with O(1) position lookups.
+    /// Optimized with O(1) position lookups using reusable buffers.
     fn draw_convergence_connections(
         &self,
         output: &mut String,
         target_groups: &[(usize, Vec<(usize, bool)>)],
         max_pos: usize,
+        buffers: &mut RenderBuffers,
     ) {
-        // Build source bitmap for O(1) lookup
-        let mut is_source = vec![false; max_pos + 1];
+        // Prepare reusable bitmaps
+        buffers.prepare_bitmaps(max_pos + 1);
+        buffers.prepare_aux(max_pos + 1);
+        
+        // Build source bitmap
         for (_, sources) in target_groups {
             for (x, _) in sources {
-                is_source[*x] = true;
+                buffers.is_source.set(*x);
             }
         }
         
         // Identify 1-to-1 connections (targets with only 1 source) - these are "pass-through"
-        let mut is_pass_through_src = vec![false; max_pos + 1];
         for (_, sources) in target_groups.iter().filter(|(_, s)| s.len() == 1) {
-            is_pass_through_src[sources[0].0] = true;
+            buffers.bitmap_aux.set(sources[0].0); // is_pass_through_src
         }
         
         // Build target bitmap
-        let mut is_target = vec![false; max_pos + 1];
         for (target, _) in target_groups {
-            is_target[*target] = true;
+            buffers.is_target.set(*target);
         }
 
         // Line 1: Vertical drops
         for i in 0..=max_pos {
-            output.push(if is_source[i] { V_LINE } else { ' ' });
+            output.push(if buffers.is_source.get(i) { V_LINE } else { ' ' });
         }
         writeln!(output).ok();
 
@@ -987,7 +1092,7 @@ impl<'a> DAG<'a> {
             }
             
             // If this position is a pass-through and not already part of convergence line
-            if is_pass_through_src[i] && ch == ' ' {
+            if buffers.bitmap_aux.get(i) && ch == ' ' {
                 ch = V_LINE;
             }
             
@@ -997,37 +1102,39 @@ impl<'a> DAG<'a> {
 
         // Line 3: Arrows
         for i in 0..=max_pos {
-            output.push(if is_target[i] { ARROW_DOWN } else { ' ' });
+            output.push(if buffers.is_target.get(i) { ARROW_DOWN } else { ' ' });
         }
         writeln!(output).ok();
     }
 
     /// Draw pure divergence pattern.
     /// Uses top corners (┌, ┐) because lines go DOWN from the horizontal routing line.
-    /// Optimized with O(1) position lookups.
+    /// Optimized with O(1) position lookups using reusable buffers.
     fn draw_divergence_connections(
         &self,
         output: &mut String,
         source_groups: &[(usize, Vec<(usize, bool)>)],
         max_pos: usize,
+        buffers: &mut RenderBuffers,
     ) {
+        // Prepare reusable bitmaps
+        buffers.prepare_bitmaps(max_pos + 1);
+        
         // Build source bitmap
-        let mut is_source = vec![false; max_pos + 1];
         for (s, _) in source_groups {
-            is_source[*s] = true;
+            buffers.is_source.set(*s);
         }
         
         // Build target bitmap
-        let mut is_target = vec![false; max_pos + 1];
         for (_, targets) in source_groups {
             for (x, _) in targets {
-                is_target[*x] = true;
+                buffers.is_target.set(*x);
             }
         }
 
         // Line 1: Vertical from sources
         for i in 0..=max_pos {
-            output.push(if is_source[i] { V_LINE } else { ' ' });
+            output.push(if buffers.is_source.get(i) { V_LINE } else { ' ' });
         }
         writeln!(output).ok();
 
@@ -1058,34 +1165,36 @@ impl<'a> DAG<'a> {
 
         // Line 3: Arrows at targets
         for i in 0..=max_pos {
-            output.push(if is_target[i] { ARROW_DOWN } else { ' ' });
+            output.push(if buffers.is_target.get(i) { ARROW_DOWN } else { ' ' });
         }
         writeln!(output).ok();
     }
 
     /// Draw simple 1-to-1 connections.
-    /// Optimized with O(1) position lookups.
+    /// Optimized with O(1) position lookups using reusable buffers.
     fn draw_simple_connections(
         &self,
         output: &mut String,
         connections: &[(usize, usize, bool, bool)],
         max_pos: usize,
+        buffers: &mut RenderBuffers,
     ) {
-        // Build source bitmap
-        let mut is_source = vec![false; max_pos + 1];
+        // Prepare reusable bitmap (only need source for simple connections)
+        buffers.is_source.prepare(max_pos + 1);
+        
         for (f, _, _, _) in connections {
-            is_source[*f] = true;
+            buffers.is_source.set(*f);
         }
 
         // Line 1: Vertical
         for i in 0..=max_pos {
-            output.push(if is_source[i] { V_LINE } else { ' ' });
+            output.push(if buffers.is_source.get(i) { V_LINE } else { ' ' });
         }
         writeln!(output).ok();
 
         // Line 2: Arrows (straight down for 1-to-1)
         for i in 0..=max_pos {
-            output.push(if is_source[i] { ARROW_DOWN } else { ' ' });
+            output.push(if buffers.is_source.get(i) { ARROW_DOWN } else { ' ' });
         }
         writeln!(output).ok();
     }
