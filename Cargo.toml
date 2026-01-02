@@ -4,7 +4,7 @@ version = "0.4.2"
 edition = "2024"
 authors = ["Ash"]
 license = "MIT OR Apache-2.0"
-description = "Lightweight ASCII DAG (Directed Acyclic Graph) renderer for error chains and dependency visualization"
+description = "Zero-dependency, no_std compatible ASCII DAG renderer. Visualize error chains, dependency trees, and graphs in the terminal."
 repository = "https://github.com/AshutoshMahala/ascii-dag"
 keywords = ["tree", "graph", "sugiyama", "terminal", "layout"]
 categories = ["data-structures", "visualization", "no-std"]
@@ -63,6 +63,7 @@ opt-level = "z"     # Optimize for size
 lto = true          # Enable Link Time Optimization
 codegen-units = 1   # Better optimization
 strip = true        # Strip symbols
+panic = "abort"     # Remove unwinding code for smaller binaries
 
 [profile.dev]
 panic = "abort"     # Required for no_std examples on some targets
