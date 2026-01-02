@@ -413,8 +413,21 @@ impl<'a> DAG<'a> {
     /// dag.render_to(&mut buffer);
     /// ```
     pub fn estimate_size(&self) -> usize {
-        // Rough estimate: nodes * avg_label_size + edges * connection_chars + box
-        self.nodes.len() * 25 + self.edges.len() * 15 + 200
+        // Estimate based on empirical measurements:
+        // - Each level takes ~width characters (canvas can be very wide)
+        // - Vertical layouts have many levels with connection lines
+        // - For layered graphs with skip-edges, canvas can be quite wide
+        // 
+        // Vertical layout: nodes spread across canvas width + connection lines
+        // Each node level line + ~5 connection lines per level
+        // Canvas width roughly: nodes_per_level * 15 chars
+        // Height roughly: levels * 6 lines
+        let n = self.nodes.len();
+        let est_levels = ((n as f32).sqrt() as usize).max(1);
+        let est_width = (n / est_levels) * 15;
+        let est_height = est_levels * 6;
+        let base = est_width * est_height * 3; // UTF-8 chars average ~3 bytes
+        base.max(n * 100) // Ensure minimum sensible estimate
     }
 
     /// Compute the layout intermediate representation for this DAG.
