@@ -40,10 +40,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-#[cfg(feature = "std")]
-use std::collections::HashMap;
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap as HashMap;
+#[cfg(feature = "std")]
+use std::collections::HashMap;
 
 /// A node in the laid-out graph with computed position and dimensions.
 #[derive(Debug, Clone)]
@@ -239,22 +239,22 @@ impl<'a> LayoutIR<'a> {
     /// Find the node at a given coordinate (for mouse interaction).
     /// Returns None if no node is at that position.
     pub fn node_at(&self, x: usize, y: usize) -> Option<&LayoutNode<'a>> {
-        self.nodes.iter().find(|node| {
-            x >= node.x && x < node.x + node.width && y == node.y
-        })
+        self.nodes
+            .iter()
+            .find(|node| x >= node.x && x < node.x + node.width && y == node.y)
     }
 
     /// Get edges that connect nodes at a specific level to the next level.
     /// Returns (from_center_x, to_center_x) pairs for drawing connections.
     pub fn edges_between_levels(&self, from_level: usize) -> Vec<(usize, usize)> {
         let to_level = from_level + 1;
-        
+
         self.edges
             .iter()
             .filter_map(|edge| {
                 let from_node = self.node_by_id(edge.from_id)?;
                 let to_node = self.node_by_id(edge.to_id)?;
-                
+
                 if from_node.level == from_level && to_node.level == to_level {
                     Some((from_node.center_x, to_node.center_x))
                 } else {
@@ -313,7 +313,7 @@ impl<'a> LayoutIRBuilder<'a> {
         let level = node.level;
         let idx = self.nodes.len();
         self.nodes.push(node);
-        
+
         // Track nodes by level
         if level < self.levels.len() {
             self.levels[level].push(idx);
@@ -334,7 +334,8 @@ impl<'a> LayoutIRBuilder<'a> {
     /// Build the final LayoutIR.
     pub fn build(self) -> LayoutIR<'a> {
         // Build id-to-index map for O(1) lookups
-        let id_to_index: HashMap<usize, usize> = self.nodes
+        let id_to_index: HashMap<usize, usize> = self
+            .nodes
             .iter()
             .enumerate()
             .map(|(idx, node)| (node.id, idx))

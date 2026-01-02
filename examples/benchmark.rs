@@ -1,7 +1,7 @@
+use ascii_dag::graph::DAG;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
-use ascii_dag::graph::DAG;
 
 // --- Memory Tracking Allocator ---
 struct TrackingAllocator;
@@ -50,18 +50,18 @@ impl SimpleRng {
     fn new(seed: u64) -> Self {
         Self { state: seed }
     }
-    
+
     fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
         self.state
     }
-    
+
     fn gen_range(&mut self, min: usize, max: usize) -> usize {
         let range = (max - min) as u64;
         let random = self.next_u64();
         min + (random % range) as usize
     }
-    
+
     // Returns true with probability p_true/100
     fn chance(&mut self, p_true: usize) -> bool {
         self.gen_range(0, 100) < p_true
@@ -79,16 +79,17 @@ fn generate_layered_graph<'a>(dag: &mut DAG<'a>, node_count: usize, rng: &mut Si
 
     // Connect them in layers to simulate a realistic DAG
     // (Random graphs often cycle, so we force i -> j where i < j)
-    let edges_per_node = 2; 
-    
+    let edges_per_node = 2;
+
     for i in 0..node_count.saturating_sub(1) {
         // Always connect to a nearby forward node to ensure connectivity
         let jump = rng.gen_range(1, 5.min(node_count - i));
         dag.add_edge(i, i + jump);
-        
+
         // Add random extra edges
         for _ in 0..edges_per_node {
-            if rng.chance(40) { // 40% chance of extra edge
+            if rng.chance(40) {
+                // 40% chance of extra edge
                 let target_jump = rng.gen_range(1, 20.min(node_count - i));
                 dag.add_edge(i, i + target_jump);
             }
@@ -99,30 +100,30 @@ fn generate_layered_graph<'a>(dag: &mut DAG<'a>, node_count: usize, rng: &mut Si
 fn run_benchmark(count: usize) {
     reset_metrics();
     println!("benchmarking {} nodes...", count);
-    
+
     let mut rng = SimpleRng::new(12345);
-    
+
     // Phase 1: Construction
     let start_build = Instant::now();
     let mut dag = DAG::new();
     generate_layered_graph(&mut dag, count, &mut rng);
     let build_time = start_build.elapsed();
-    
+
     // Phase 2: Rendering
     // We measure render_to because standard render() allocates a string which puts noise in our memory metric
     // We want to measure the *algorithm's* memory usage, not the output buffer size (which is unavoidable).
     let start_render = Instant::now();
     let mut output = String::with_capacity(count * 100); // Pre-allocate output to minimize buffer noise
     let reset_mem_before_render = get_peak_memory(); // Snapshot memory before algorithm runs
-    
+
     dag.render_to(&mut output);
-    
+
     let render_time = start_render.elapsed();
     let peak_mem = get_peak_memory();
-    
+
     // Note: This Peak Mem includes the Graph structure itself + Algorithms + Output Buffer growth
     // It is an "Total Integration" cost.
-    
+
     println!("  Nodes: {}", count);
     println!("  Build: {:?}", build_time);
     println!("  Render: {:?}", render_time);
@@ -133,12 +134,12 @@ fn run_benchmark(count: usize) {
 
 fn main() {
     println!("=== Performance Benchmark (Time & Heap) ===\n");
-    
+
     let sizes = [50, 100, 500, 1000];
-    
+
     for &size in &sizes {
         run_benchmark(size);
     }
-    
+
     println!("Done.");
 }

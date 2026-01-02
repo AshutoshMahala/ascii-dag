@@ -27,10 +27,10 @@ Draw DAGs in your terminal. **Fast.** Zero dependencies.
 ## Why?
 - **Zero Dependencies**: Drop it into any `no_std`, WASM, or embedded project.
 - **Visual Error Chains**: Show users *why* their build failed (Cycle detected? Dependency missing?).
-- **Fast**: Renders 1000 nodes in ~300ms with full layout computation.
+- **Fast**: Renders 1000 nodes in ~185ms with full layout computation.
 
 ## Features at a Glance
-- 📦 **Tiny**: ~77KB (WASM release).
+- 📦 **Tiny**: ~51KB (WASM release).
 - ⚡ **Fast**: Optimized iterative layout via custom side-channel routing.
 - 🔗 **Robust**: Handles diamonds, cycles (detected safely), and skip-level edges.
 - 🎨 **Beautiful**: Uses Unicode box-drawing characters for clean TUI output.
@@ -476,10 +476,10 @@ Available features:
 
 | Nodes | Build Time | **Render Time** | Peak RAM | Output |
 | :--- | :--- | :--- | :--- | :--- |
-| **50** | 55µs | **0.8ms** | ~95 KB | 29 KB |
-| **100** | 71µs | **2.5ms** | ~327 KB | 94 KB |
-| **500** | 0.35ms | **36ms** | ~5.5 MB | 1.6 MB |
-| **1000** | 0.7ms | **225ms** | ~21 MB | 6.4 MB |
+| **50** | 62µs | **0.7ms** | ~101 KB | 30 KB |
+| **100** | 69µs | **2.5ms** | ~352 KB | 98 KB |
+| **500** | 0.34ms | **36ms** | ~5.9 MB | 1.9 MB |
+| **1000** | 0.69ms | **182ms** | ~23 MB | 7.5 MB |
 
 *Measured via `cargo run --example benchmark --release`*
 

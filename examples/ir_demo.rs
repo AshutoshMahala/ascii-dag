@@ -43,7 +43,10 @@ fn main() {
 
     // === Node Positions ===
     println!("Node Positions:");
-    println!("  {:15} {:>5} {:>5} {:>7} {:>7}", "Label", "X", "Y", "Width", "Center");
+    println!(
+        "  {:15} {:>5} {:>5} {:>7} {:>7}",
+        "Label", "X", "Y", "Width", "Center"
+    );
     println!("  {}", "-".repeat(45));
     for node in ir.nodes() {
         println!(
@@ -58,24 +61,25 @@ fn main() {
     for edge in ir.edges() {
         let from_node = ir.node_by_id(edge.from_id).map(|n| n.label).unwrap_or("?");
         let to_node = ir.node_by_id(edge.to_id).map(|n| n.label).unwrap_or("?");
-        
+
         let path_desc = match &edge.path {
             EdgePath::Direct => "Direct".to_string(),
             EdgePath::Corner { horizontal_y } => format!("Corner @ y={}", horizontal_y),
-            EdgePath::SideChannel { channel_x, start_y, end_y } => {
+            EdgePath::SideChannel {
+                channel_x,
+                start_y,
+                end_y,
+            } => {
                 format!("SideChannel x={} y={}..{}", channel_x, start_y, end_y)
             }
             EdgePath::MultiSegment { waypoints } => {
                 format!("MultiSegment ({} waypoints)", waypoints.len())
             }
         };
-        
+
         println!(
             "  {} -> {}: ({},{}) -> ({},{}) [{}]",
-            from_node, to_node,
-            edge.from_x, edge.from_y,
-            edge.to_x, edge.to_y,
-            path_desc
+            from_node, to_node, edge.from_x, edge.from_y, edge.to_x, edge.to_y, path_desc
         );
     }
     println!();
@@ -95,7 +99,10 @@ fn main() {
     for (x, y) in test_coords {
         let hit = ir.node_at(x, y);
         match hit {
-            Some(node) => println!("  Click at ({}, {}): HIT '{}' (id={})", x, y, node.label, node.id),
+            Some(node) => println!(
+                "  Click at ({}, {}): HIT '{}' (id={})",
+                x, y, node.label, node.id
+            ),
             None => println!("  Click at ({}, {}): miss", x, y),
         }
     }

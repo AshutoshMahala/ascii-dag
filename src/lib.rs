@@ -123,7 +123,7 @@ pub mod layout;
 pub mod render;
 
 // Re-export IR types for convenience
-pub use ir::{LayoutIR, LayoutIRBuilder, LayoutNode, LayoutEdge, EdgePath};
+pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode};
 
 // Backward compatibility re-exports
 pub use graph::{DAG, RenderMode};

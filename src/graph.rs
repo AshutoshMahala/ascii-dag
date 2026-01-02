@@ -417,14 +417,14 @@ impl<'a> DAG<'a> {
         // - Each level takes ~width characters (canvas can be very wide)
         // - Vertical layouts have many levels with connection lines
         // - For layered graphs with skip-edges, canvas can be quite wide
-        // 
+        //
         // Vertical layout: nodes spread across canvas width + connection lines
         // Each node level line + ~5 connection lines per level
         // Canvas width roughly: nodes_per_level * 15 chars
         // Height roughly: levels * 6 lines
         let n = self.nodes.len();
-        let est_levels = ((n as f32).sqrt() as usize).max(1);
-        let est_width = (n / est_levels) * 15;
+        let est_levels = n.isqrt().max(1);
+        let est_width = (n / est_levels).max(1) * 15;
         let est_height = est_levels * 6;
         let base = est_width * est_height * 3; // UTF-8 chars average ~3 bytes
         base.max(n * 100) // Ensure minimum sensible estimate
@@ -454,8 +454,8 @@ impl<'a> DAG<'a> {
     /// }
     /// ```
     pub fn compute_layout(&self) -> crate::ir::LayoutIR<'a> {
-        use crate::ir::{LayoutIRBuilder, LayoutNode, LayoutEdge, EdgePath};
-        
+        use crate::ir::{EdgePath, LayoutEdge, LayoutIRBuilder, LayoutNode};
+
         if self.nodes.is_empty() {
             return LayoutIRBuilder::new().build();
         }
@@ -485,7 +485,7 @@ impl<'a> DAG<'a> {
         // Step 3: Assign x-coordinates
         let mut x_coords: Vec<Vec<usize>> = Vec::with_capacity(levels.len());
         let mut widths: Vec<Vec<usize>> = Vec::with_capacity(levels.len());
-        
+
         for level_nodes in &levels {
             let mut level_x = Vec::with_capacity(level_nodes.len());
             let mut level_w = Vec::with_capacity(level_nodes.len());
@@ -555,7 +555,9 @@ impl<'a> DAG<'a> {
 
         // Add edges with routing info
         for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
-            if let (Some(from_idx), Some(to_idx)) = (self.node_index(from_id), self.node_index(to_id)) {
+            if let (Some(from_idx), Some(to_idx)) =
+                (self.node_index(from_id), self.node_index(to_id))
+            {
                 let from_level = node_levels[from_idx];
                 let to_level = node_levels[to_idx];
 
@@ -575,7 +577,8 @@ impl<'a> DAG<'a> {
                         0
                     };
 
-                    let from_x = x_coords[from_level][fp] + from_level_offset + widths[from_level][fp] / 2;
+                    let from_x =
+                        x_coords[from_level][fp] + from_level_offset + widths[from_level][fp] / 2;
                     let to_x = x_coords[to_level][tp] + to_level_offset + widths[to_level][tp] / 2;
                     let from_y = from_level * lines_per_level;
                     let to_y = to_level * lines_per_level;

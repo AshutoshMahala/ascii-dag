@@ -2,7 +2,7 @@ use ascii_dag::DAG;
 
 fn main() {
     let mut dag = DAG::new();
-    
+
     dag.add_node(1, "Root");
     dag.add_node(2, "Task A");
     dag.add_node(3, "Task B");
@@ -24,7 +24,7 @@ fn main() {
     dag.add_edge(3, 7);
     dag.add_edge(4, 7);
     dag.add_edge(5, 7);
-    
+
     // Final Output
     dag.add_edge(7, 8); // F -> Output
     dag.add_edge(6, 8); // E -> Output (Long jump/side path)

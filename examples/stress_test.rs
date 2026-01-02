@@ -26,7 +26,10 @@ fn main() {
     println!("=== ASCII DAG Stress Test Suite ===\n");
 
     let tests = [
-        ("The Double Helix", test_double_helix as fn() -> DAG<'static>),
+        (
+            "The Double Helix",
+            test_double_helix as fn() -> DAG<'static>,
+        ),
         ("The Skyscraper", test_skyscraper),
         ("The Wide Fan", test_wide_fan),
         ("The Diamond Lattice", test_diamond_lattice),
@@ -43,7 +46,7 @@ fn main() {
         let start = std::time::Instant::now();
         let output = dag.render();
         let duration = start.elapsed();
-        
+
         println!("{}", output);
         println!(">>> Rendered in {:?} <<<\n", duration);
         println!("------------------------------------------------------------");
@@ -56,15 +59,15 @@ fn test_double_helix() -> DAG<'static> {
     for i in 0..10 {
         dag.add_node(i * 2, "A");
         dag.add_node(i * 2 + 1, "B");
-        
+
         if i > 0 {
-            dag.add_edge((i-1) * 2, i * 2);         // A -> A
-            dag.add_edge((i-1) * 2 + 1, i * 2 + 1); // B -> B
-            
+            dag.add_edge((i - 1) * 2, i * 2); // A -> A
+            dag.add_edge((i - 1) * 2 + 1, i * 2 + 1); // B -> B
+
             // Cross connections
             if i % 2 == 0 {
-                dag.add_edge((i-1) * 2, i * 2 + 1); // A -> B
-                dag.add_edge((i-1) * 2 + 1, i * 2); // B -> A
+                dag.add_edge((i - 1) * 2, i * 2 + 1); // A -> B
+                dag.add_edge((i - 1) * 2 + 1, i * 2); // B -> A
             }
         }
     }
@@ -77,7 +80,7 @@ fn test_skyscraper() -> DAG<'static> {
     for i in 0..50 {
         dag.add_node(i, Box::leak(format!("Floor {}", i).into_boxed_str()));
         if i > 0 {
-            dag.add_edge(i-1, i);
+            dag.add_edge(i - 1, i);
         }
     }
     dag
@@ -106,12 +109,12 @@ fn test_diamond_lattice() -> DAG<'static> {
         for x in 0..width {
             let id = y * width + x;
             dag.add_node(id, "♦");
-            
+
             if y > 0 {
                 // Connect to parents
                 let p_id = (y - 1) * width + x;
                 dag.add_edge(p_id, id);
-                
+
                 // Cross connections
                 if x > 0 {
                     dag.add_edge((y - 1) * width + (x - 1), id);
@@ -127,14 +130,14 @@ fn test_diamond_lattice() -> DAG<'static> {
 
 fn test_disconnected_islands() -> DAG<'static> {
     let mut dag = DAG::new();
-    
+
     // Create 5 separate small graphs
     for island in 0..5 {
         let base = island * 10;
         dag.add_node(base, "Island");
         dag.add_node(base + 1, "Palm");
         dag.add_node(base + 2, "Coconuts");
-        
+
         dag.add_edge(base, base + 1);
         dag.add_edge(base + 1, base + 2);
     }
@@ -145,7 +148,7 @@ fn test_random_hairball() -> DAG<'static> {
     let mut dag = DAG::new();
     let mut rng = SimpleRng::new(42);
     let nodes = 30;
-    
+
     for i in 0..nodes {
         dag.add_node(i, Box::leak(format!("N{}", i).into_boxed_str()));
     }
@@ -167,22 +170,22 @@ fn test_skip_level_nightmare() -> DAG<'static> {
     let mut dag = DAG::new();
     // Root
     dag.add_node(0, "Root");
-    
+
     // Levels 1, 2, 3, 4, 5
     for i in 1..6 {
         dag.add_node(i, Box::leak(format!("L{}", i).into_boxed_str()));
-        dag.add_edge(i-1, i); // Normal connection
+        dag.add_edge(i - 1, i); // Normal connection
     }
-    
+
     // Skip edges: 0->2, 0->3, 0->4, 0->5
     for i in 2..6 {
         dag.add_edge(0, i);
     }
-    
+
     // Nested skips: 1->3, 2->5
     dag.add_edge(1, 3);
     dag.add_edge(2, 5);
-    
+
     dag
 }
 
@@ -191,9 +194,16 @@ fn test_verbose_logger() -> DAG<'static> {
     dag.add_node(1, "A");
     dag.add_node(2, "B");
     // Long text to test centering
-    dag.add_node(3, Box::leak("Error: NullPointerException at line 55 (Critical Failure in Module X)".to_string().into_boxed_str())); 
+    dag.add_node(
+        3,
+        Box::leak(
+            "Error: NullPointerException at line 55 (Critical Failure in Module X)"
+                .to_string()
+                .into_boxed_str(),
+        ),
+    );
     dag.add_node(4, "C");
-    
+
     dag.add_edge(1, 2);
     dag.add_edge(1, 3);
     dag.add_edge(3, 4);

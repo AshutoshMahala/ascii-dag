@@ -27,13 +27,10 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // This is a compilation proof that the library works in a no_std environment.
-    let dag = DAG::from_edges(
-        &[(1, "Core"), (2, "HAL"), (3, "Driver")],
-        &[(1, 2), (2, 3)]
-    );
-    
+    let dag = DAG::from_edges(&[(1, "Core"), (2, "HAL"), (3, "Driver")], &[(1, 2), (2, 3)]);
+
     // We can't print, but we can verify rendering compiles
     let _output = dag.render();
-    
+
     loop {}
 }

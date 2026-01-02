@@ -33,7 +33,10 @@ struct BitSet {
 
 impl BitSet {
     fn new() -> Self {
-        Self { bits: Vec::new(), len: 0 }
+        Self {
+            bits: Vec::new(),
+            len: 0,
+        }
     }
 
     /// Prepare the bitmap for a given size (clear and resize)
@@ -69,8 +72,10 @@ impl BitSet {
 struct RenderBuffers {
     /// Packed bitmap for source positions
     is_source: BitSet,
-    /// Packed bitmap for target positions  
+    /// Packed bitmap for real target positions (for arrows)
     is_target: BitSet,
+    /// Packed bitmap for all target positions (for routing, includes dummy nodes)
+    all_targets: BitSet,
     /// Additional packed bitmap (pass-through, straight, etc.)
     bitmap_aux: BitSet,
     /// Character line buffer
@@ -82,6 +87,7 @@ impl RenderBuffers {
         Self {
             is_source: BitSet::new(),
             is_target: BitSet::new(),
+            all_targets: BitSet::new(),
             bitmap_aux: BitSet::new(),
             line_chars: Vec::new(),
         }
@@ -98,8 +104,9 @@ impl RenderBuffers {
     fn prepare_bitmaps(&mut self, size: usize) {
         self.is_source.prepare(size);
         self.is_target.prepare(size);
+        self.all_targets.prepare(size);
     }
-    
+
     /// Prepare aux bitmap
     fn prepare_aux(&mut self, size: usize) {
         self.bitmap_aux.prepare(size);
@@ -115,24 +122,24 @@ struct VirtualNode(usize);
 impl VirtualNode {
     /// High bit indicates dummy node
     const DUMMY_FLAG: usize = 1 << (usize::BITS - 1);
-    
+
     #[inline]
     fn real(idx: usize) -> Self {
         debug_assert!(idx & Self::DUMMY_FLAG == 0, "index too large");
         Self(idx)
     }
-    
+
     #[inline]
     fn dummy(edge_idx: usize) -> Self {
         debug_assert!(edge_idx & Self::DUMMY_FLAG == 0, "edge index too large");
         Self(edge_idx | Self::DUMMY_FLAG)
     }
-    
+
     #[inline]
     fn is_real(&self) -> bool {
         self.0 & Self::DUMMY_FLAG == 0
     }
-    
+
     #[inline]
     fn is_dummy(&self) -> bool {
         self.0 & Self::DUMMY_FLAG != 0
@@ -140,13 +147,9 @@ impl VirtualNode {
 
     #[inline]
     fn real_index(&self) -> Option<usize> {
-        if self.is_real() {
-            Some(self.0)
-        } else {
-            None
-        }
+        if self.is_real() { Some(self.0) } else { None }
     }
-    
+
     #[inline]
     fn index(&self) -> usize {
         self.0 & !Self::DUMMY_FLAG
@@ -507,14 +510,15 @@ impl<'a> DAG<'a> {
                         .iter()
                         .position(|vn| vn.is_real() && vn.index() == from_idx)
                     {
-                        let source_center_x = x_coords[from_level][source_pos]
-                            + widths[from_level][source_pos] / 2;
+                        let source_center_x =
+                            x_coords[from_level][source_pos] + widths[from_level][source_pos] / 2;
 
                         // Queue each dummy's x adjustment
                         for level_idx in (from_level + 1)..to_level {
-                            if let Some(dummy_pos) = levels[level_idx].iter().position(
-                                |vn| vn.is_dummy() && vn.index() == edge_idx,
-                            ) {
+                            if let Some(dummy_pos) = levels[level_idx]
+                                .iter()
+                                .position(|vn| vn.is_dummy() && vn.index() == edge_idx)
+                            {
                                 dummy_adjustments.push((level_idx, dummy_pos, source_center_x));
                             }
                         }
@@ -575,14 +579,16 @@ impl<'a> DAG<'a> {
                         // For each intermediate level, move this edge's dummy to after src_pos
                         for level_idx in (from_level + 1)..to_level {
                             // Find and remove the dummy for this edge
-                            if let Some(dummy_pos) = levels[level_idx].iter().position(
-                                |vn| vn.is_dummy() && vn.index() == edge_idx,
-                            ) {
+                            if let Some(dummy_pos) = levels[level_idx]
+                                .iter()
+                                .position(|vn| vn.is_dummy() && vn.index() == edge_idx)
+                            {
                                 let dummy = levels[level_idx].remove(dummy_pos);
 
                                 // Insert it right after the source position (but clamped to valid range)
                                 // Count how many real nodes are in this level
-                                let real_count = levels[level_idx].iter().filter(|vn| vn.is_real()).count();
+                                let real_count =
+                                    levels[level_idx].iter().filter(|vn| vn.is_real()).count();
 
                                 // Insert position: try to align with source, but after real nodes
                                 // if source position is beyond what we have
@@ -652,21 +658,24 @@ impl<'a> DAG<'a> {
 
                             // Edges between consecutive dummies
                             for level in (from_level + 1)..(to_level - 1) {
-                                if let Some(curr_pos) = levels[level].iter().position(
-                                    |vn| vn.is_dummy() && vn.index() == edge_idx,
-                                ) && let Some(next_pos) = levels[level + 1].iter().position(
-                                    |vn| vn.is_dummy() && vn.index() == edge_idx,
-                                ) {
+                                if let Some(curr_pos) = levels[level]
+                                    .iter()
+                                    .position(|vn| vn.is_dummy() && vn.index() == edge_idx)
+                                    && let Some(next_pos) = levels[level + 1]
+                                        .iter()
+                                        .position(|vn| vn.is_dummy() && vn.index() == edge_idx)
+                                {
                                     edges_by_level[level].push((curr_pos, next_pos));
                                 }
                             }
 
                             // Edge from last dummy to target
-                            if let Some(last_dummy_pos) = levels[to_level - 1].iter().position(
-                                |vn| vn.is_dummy() && vn.index() == edge_idx,
-                            ) && let Some(to_pos) = levels[to_level]
+                            if let Some(last_dummy_pos) = levels[to_level - 1]
                                 .iter()
-                                .position(|vn| vn.is_real() && vn.index() == to_idx)
+                                .position(|vn| vn.is_dummy() && vn.index() == edge_idx)
+                                && let Some(to_pos) = levels[to_level]
+                                    .iter()
+                                    .position(|vn| vn.is_real() && vn.index() == to_idx)
                             {
                                 edges_by_level[to_level - 1].push((last_dummy_pos, to_pos));
                             }
@@ -699,7 +708,170 @@ impl<'a> DAG<'a> {
             .collect();
 
         let max_canvas_width = *level_widths.iter().max().unwrap_or(&0);
-        
+
+        // Precompute level offsets
+        let level_offsets: Vec<usize> = level_widths
+            .iter()
+            .map(|&w| {
+                if max_canvas_width > w {
+                    (max_canvas_width - w) / 2
+                } else {
+                    0
+                }
+            })
+            .collect();
+
+        // Precompute absolute screen positions for all nodes
+        // For dummy nodes in a chain, we need consistent positions across levels
+        let mut absolute_positions: Vec<Vec<usize>> = layout
+            .levels
+            .iter()
+            .enumerate()
+            .map(|(level_idx, level_nodes)| {
+                level_nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(pos, _)| layout.x_coords[level_idx][pos] + level_offsets[level_idx])
+                    .collect()
+            })
+            .collect();
+
+        // Fix dummy chain positions: propagate positions down through dummy chains
+        // First, establish the absolute position for the first dummy in each chain
+        // Then propagate that position to all subsequent dummies in the chain
+        // Track used positions at each level to avoid collisions (use 3-char spacing for readability)
+        let mut used_positions: Vec<Vec<usize>> = vec![Vec::new(); layout.levels.len()];
+        const DUMMY_SPACING: usize = 3; // Minimum spacing between dummy columns
+
+        // Process level by level from top to bottom
+        for current_level in 0..layout.edges_by_level.len() {
+            let level_edges = &layout.edges_by_level[current_level];
+            for &(from_pos, to_pos) in level_edges {
+                let to_level = current_level + 1;
+                if to_level >= layout.levels.len() {
+                    continue;
+                }
+
+                let from_is_dummy = !layout.levels[current_level][from_pos].is_real();
+                let to_is_dummy = !layout.levels[to_level][to_pos].is_real();
+
+                if to_is_dummy {
+                    if from_is_dummy {
+                        // Propagate: dummy-to-dummy, use the same absolute position
+                        let propagated_pos = absolute_positions[current_level][from_pos];
+                        absolute_positions[to_level][to_pos] = propagated_pos;
+                        // Also mark this position as used at the target level
+                        if !used_positions[to_level].contains(&propagated_pos) {
+                            used_positions[to_level].push(propagated_pos);
+                        }
+                    } else {
+                        // First dummy in chain: find source center
+                        let from_center = absolute_positions[current_level][from_pos]
+                            + layout.get_width(self, current_level, from_pos) / 2;
+
+                        // Find gaps between real nodes where we can place the dummy
+                        // A gap is valid if the source center falls within it
+                        let mut real_node_spans: Vec<(usize, usize)> = layout.levels[to_level]
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, vn)| vn.is_real())
+                            .map(|(pos, _)| {
+                                let start = absolute_positions[to_level][pos];
+                                let end = start + layout.get_width(self, to_level, pos);
+                                (start, end)
+                            })
+                            .collect();
+                        real_node_spans.sort_by_key(|(s, _)| *s);
+
+                        // Check if source center is inside any real node
+                        let inside_real_node = real_node_spans
+                            .iter()
+                            .any(|(start, end)| from_center >= *start && from_center <= *end + 2);
+
+                        let candidate_x = if inside_real_node {
+                            // Find the nearest gap edge
+                            // Look for gaps and find the closest one to from_center
+                            let mut best_gap_pos = from_center;
+                            let mut best_distance = usize::MAX;
+
+                            // Check gap before first node
+                            if let Some(&(first_start, _)) = real_node_spans.first() {
+                                if first_start > 3 {
+                                    let gap_pos = first_start - 2;
+                                    let dist = if from_center > gap_pos {
+                                        from_center - gap_pos
+                                    } else {
+                                        gap_pos - from_center
+                                    };
+                                    if dist < best_distance {
+                                        best_distance = dist;
+                                        best_gap_pos = gap_pos;
+                                    }
+                                }
+                            }
+
+                            // Check gaps between nodes
+                            for i in 0..real_node_spans.len().saturating_sub(1) {
+                                let (_, prev_end) = real_node_spans[i];
+                                let (next_start, _) = real_node_spans[i + 1];
+                                if next_start > prev_end + 4 {
+                                    // There's a gap - find center of gap
+                                    let gap_center = (prev_end + next_start) / 2;
+                                    let dist = if from_center > gap_center {
+                                        from_center - gap_center
+                                    } else {
+                                        gap_center - from_center
+                                    };
+                                    if dist < best_distance {
+                                        best_distance = dist;
+                                        best_gap_pos = gap_center;
+                                    }
+                                }
+                            }
+
+                            // Check gap after last node
+                            if let Some(&(_, last_end)) = real_node_spans.last() {
+                                let gap_pos = last_end + 3;
+                                let dist = if from_center > gap_pos {
+                                    from_center - gap_pos
+                                } else {
+                                    gap_pos - from_center
+                                };
+                                if dist < best_distance {
+                                    best_gap_pos = gap_pos;
+                                }
+                            }
+
+                            best_gap_pos
+                        } else {
+                            // Source center is in a gap - use it directly
+                            from_center
+                        };
+
+                        // Ensure this position isn't too close to any already used position
+                        let mut final_x = candidate_x;
+                        loop {
+                            let too_close = used_positions[to_level].iter().any(|&used| {
+                                let diff = if final_x > used {
+                                    final_x - used
+                                } else {
+                                    used - final_x
+                                };
+                                diff < DUMMY_SPACING
+                            });
+                            if !too_close {
+                                break;
+                            }
+                            final_x += DUMMY_SPACING;
+                        }
+
+                        absolute_positions[to_level][to_pos] = final_x;
+                        used_positions[to_level].push(final_x);
+                    }
+                }
+            }
+        }
+
         // Create reusable buffers for connection drawing
         let mut buffers = RenderBuffers::new();
 
@@ -708,18 +880,15 @@ impl<'a> DAG<'a> {
                 continue;
             }
 
-            // Calculate centering offset for this level
-            let level_width = level_widths[current_level];
-            let level_offset = if max_canvas_width > level_width {
-                (max_canvas_width - level_width) / 2
-            } else {
-                0
-            };
+            // Create sorted render order based on absolute positions (left-to-right)
+            let mut render_order: Vec<usize> = (0..level_nodes.len()).collect();
+            render_order.sort_by_key(|&pos| absolute_positions[current_level][pos]);
 
-            // Render nodes at their assigned x-coordinates
+            // Render nodes at their precomputed absolute positions (in sorted order)
             let mut current_col = 0;
-            for (pos, vnode) in level_nodes.iter().enumerate() {
-                let node_x = layout.x_coords[current_level][pos] + level_offset;
+            for pos in render_order {
+                let vnode = &level_nodes[pos];
+                let node_x = absolute_positions[current_level][pos];
 
                 // Add spacing to reach this node's position (batch operation)
                 if node_x > current_col {
@@ -741,33 +910,24 @@ impl<'a> DAG<'a> {
 
             // Draw connections if not last level
             if current_level < layout.levels.len() - 1 {
-                let next_level_width = level_widths[current_level + 1];
-                let next_level_offset = if max_canvas_width > next_level_width {
-                    (max_canvas_width - next_level_width) / 2
-                } else {
-                    0
-                };
-
-                self.draw_virtual_connections(
+                self.draw_virtual_connections_absolute(
                     output,
                     layout,
                     current_level,
-                    level_offset,
-                    next_level_offset,
+                    &absolute_positions,
                     &mut buffers,
                 );
             }
         }
     }
 
-    /// Draw connections between adjacent levels in the virtual layout.
-    fn draw_virtual_connections(
+    /// Draw connections between adjacent levels using absolute positions.
+    fn draw_virtual_connections_absolute(
         &self,
         output: &mut String,
         layout: &VirtualLayout,
         current_level: usize,
-        current_offset: usize,
-        next_offset: usize,
+        absolute_positions: &[Vec<usize>],
         buffers: &mut RenderBuffers,
     ) {
         let next_level = current_level + 1;
@@ -779,19 +939,19 @@ impl<'a> DAG<'a> {
             return;
         }
 
-        // Calculate center positions for connections
-        let mut connections: Vec<(usize, usize, bool, bool)> = Vec::with_capacity(level_edges.len());
+        // Calculate center positions for connections using absolute positions
+        let mut connections: Vec<(usize, usize, bool, bool)> =
+            Vec::with_capacity(level_edges.len());
 
         for &(from_pos, to_pos) in level_edges {
-            let from_x = layout.x_coords[current_level][from_pos]
-                + layout.get_width(self, current_level, from_pos) / 2
-                + current_offset;
-            let to_x = layout.x_coords[next_level][to_pos]
-                + layout.get_width(self, next_level, to_pos) / 2
-                + next_offset;
-
             let from_is_dummy = !layout.levels[current_level][from_pos].is_real();
             let to_is_dummy = !layout.levels[next_level][to_pos].is_real();
+
+            let from_x = absolute_positions[current_level][from_pos]
+                + layout.get_width(self, current_level, from_pos) / 2;
+
+            let to_x = absolute_positions[next_level][to_pos]
+                + layout.get_width(self, next_level, to_pos) / 2;
 
             connections.push((from_x, to_x, from_is_dummy, to_is_dummy));
         }
@@ -828,9 +988,21 @@ impl<'a> DAG<'a> {
             // Mixed case: draw with proper crossing handling
             self.draw_mixed_connections(output, &connections, max_pos, buffers);
         } else if has_convergence {
-            self.draw_convergence_connections(output, &target_groups, max_pos, buffers);
+            self.draw_convergence_connections(
+                output,
+                &connections,
+                &target_groups,
+                max_pos,
+                buffers,
+            );
         } else if has_divergence {
-            self.draw_divergence_connections(output, &source_groups, max_pos, buffers);
+            self.draw_divergence_connections(
+                output,
+                &connections,
+                &source_groups,
+                max_pos,
+                buffers,
+            );
         } else {
             // Simple 1-to-1 connections
             self.draw_simple_connections(output, &connections, max_pos, buffers);
@@ -849,10 +1021,13 @@ impl<'a> DAG<'a> {
     ) {
         // Use reusable boolean arrays for O(1) lookups
         buffers.prepare_bitmaps(max_pos + 1);
-        
-        for &(from_x, to_x, _, _) in connections {
+
+        for &(from_x, to_x, _, to_is_dummy) in connections {
             buffers.is_source.set(from_x);
-            buffers.is_target.set(to_x);
+            buffers.all_targets.set(to_x); // All targets (for routing)
+            if !to_is_dummy {
+                buffers.is_target.set(to_x); // Only real targets (for arrows)
+            }
         }
 
         // Classify connections
@@ -875,18 +1050,22 @@ impl<'a> DAG<'a> {
 
         // Line 1: Vertical drops from all sources
         for i in 0..=max_pos {
-            output.push(if buffers.is_source.get(i) { V_LINE } else { ' ' });
+            output.push(if buffers.is_source.get(i) {
+                V_LINE
+            } else {
+                ' '
+            });
         }
         writeln!(output).ok();
 
         if has_crossings {
             // Complex case: multiple sources converging to multiple targets with crossings
             // Lines come DOWN from sources, turn horizontal, then continue down to targets
-            // 
+            //
             // Source positions: lines come FROM ABOVE → use ┴ (TEE_UP)
             // Target positions: lines go DOWN TO → use ┬ (TEE_DOWN)
             // Both source AND target: use ┼ (CROSS)
-            
+
             // Find the overall span of the horizontal routing line
             let all_positions: Vec<usize> = going_right
                 .iter()
@@ -894,10 +1073,10 @@ impl<'a> DAG<'a> {
                 .chain(going_left.iter().flat_map(|(f, t)| [*f, *t]))
                 .chain(straight_down.iter().copied())
                 .collect();
-            
+
             let min_x = *all_positions.iter().min().unwrap_or(&0);
             let max_x = *all_positions.iter().max().unwrap_or(&0);
-            
+
             // Reuse line buffer
             buffers.prepare_chars(max_pos + 1);
 
@@ -905,50 +1084,53 @@ impl<'a> DAG<'a> {
             for i in min_x..=max_x {
                 buffers.line_chars[i] = H_LINE;
             }
-            
+
             // Mark source positions (where lines come down from above) with ┴
             for i in min_x..=max_x {
                 if buffers.is_source.get(i) {
                     buffers.line_chars[i] = TEE_UP; // ┴ - line comes from above
                 }
             }
-            
+
             // Mark target positions (where lines go down to) with ┬
             // If already ┴ (source), upgrade to ┼ (cross)
+            // Use all_targets for routing (includes dummy nodes for pass-through)
             for i in min_x..=max_x {
-                if buffers.is_target.get(i) {
+                if buffers.all_targets.get(i) {
                     buffers.line_chars[i] = match buffers.line_chars[i] {
-                        TEE_UP => CROSS,  // Both source and target → cross
+                        TEE_UP => CROSS,    // Both source and target → cross
                         H_LINE => TEE_DOWN, // Only target → ┬
                         _ => buffers.line_chars[i],
                     };
                 }
             }
-            
+
             // Fix the endpoints based on whether they're source or target
             // Left endpoint
             if min_x < buffers.line_chars.len() {
-                buffers.line_chars[min_x] = if buffers.is_source.get(min_x) && buffers.is_target.get(min_x) {
-                    CROSS // Both
-                } else if buffers.is_source.get(min_x) {
-                    CORNER_DR // └ - source only (line from above)
-                } else if buffers.is_target.get(min_x) {
-                    CORNER_UR // ┌ - target only (line goes down)
-                } else {
-                    buffers.line_chars[min_x]
-                };
+                buffers.line_chars[min_x] =
+                    if buffers.is_source.get(min_x) && buffers.all_targets.get(min_x) {
+                        CROSS // Both
+                    } else if buffers.is_source.get(min_x) {
+                        CORNER_DR // └ - source only (line from above)
+                    } else if buffers.all_targets.get(min_x) {
+                        CORNER_UR // ┌ - target only (line goes down)
+                    } else {
+                        buffers.line_chars[min_x]
+                    };
             }
             // Right endpoint
             if max_x < buffers.line_chars.len() {
-                buffers.line_chars[max_x] = if buffers.is_source.get(max_x) && buffers.is_target.get(max_x) {
-                    CROSS // Both
-                } else if buffers.is_source.get(max_x) {
-                    CORNER_DL // ┘ - source only (line from above)
-                } else if buffers.is_target.get(max_x) {
-                    CORNER_UL // ┐ - target only (line goes down)
-                } else {
-                    buffers.line_chars[max_x]
-                };
+                buffers.line_chars[max_x] =
+                    if buffers.is_source.get(max_x) && buffers.all_targets.get(max_x) {
+                        CROSS // Both
+                    } else if buffers.is_source.get(max_x) {
+                        CORNER_DL // ┘ - source only (line from above)
+                    } else if buffers.all_targets.get(max_x) {
+                        CORNER_UL // ┐ - target only (line goes down)
+                    } else {
+                        buffers.line_chars[max_x]
+                    };
             }
 
             for ch in &buffers.line_chars {
@@ -956,13 +1138,13 @@ impl<'a> DAG<'a> {
             }
             writeln!(output).ok();
 
-            // Line 2b: Vertical continuation - reuse bitmap_aux for straight_down
+            // Line 2b: Vertical continuation - for all targets that continue down
             buffers.prepare_aux(max_pos + 1);
             for &x in &straight_down {
                 buffers.bitmap_aux.set(x);
             }
             for i in 0..=max_pos {
-                output.push(if buffers.is_target.get(i) || buffers.bitmap_aux.get(i) {
+                output.push(if buffers.all_targets.get(i) || buffers.bitmap_aux.get(i) {
                     V_LINE
                 } else {
                     ' '
@@ -976,11 +1158,11 @@ impl<'a> DAG<'a> {
             for &(from_x, to_x) in &going_right {
                 for i in from_x..=to_x {
                     if i == from_x {
-                        buffers.line_chars[i] = CORNER_DR;
+                        buffers.line_chars[i] = CORNER_DR; // └ - coming from above, going right
                     } else if i == to_x {
                         buffers.line_chars[i] = match buffers.line_chars[i] {
                             CORNER_DR => TEE_UP,
-                            _ => CORNER_DL,
+                            _ => CORNER_UL, // ┐ - coming from left, going down (not ┘)
                         };
                     } else if buffers.line_chars[i] == ' ' {
                         buffers.line_chars[i] = H_LINE;
@@ -993,13 +1175,14 @@ impl<'a> DAG<'a> {
                     if i == from_x {
                         buffers.line_chars[i] = match buffers.line_chars[i] {
                             CORNER_DR => TEE_UP,
-                            _ => CORNER_DL,
+                            CORNER_UL => TEE_UP,
+                            _ => CORNER_DL, // ┘ - coming from above, going left
                         };
                     } else if i == to_x {
                         buffers.line_chars[i] = match buffers.line_chars[i] {
                             CORNER_DL => TEE_UP,
                             H_LINE => TEE_UP,
-                            _ => CORNER_DR,
+                            _ => CORNER_UR, // ┌ - coming from right, going down (not └)
                         };
                     } else if buffers.line_chars[i] == ' ' {
                         buffers.line_chars[i] = H_LINE;
@@ -1021,22 +1204,27 @@ impl<'a> DAG<'a> {
             writeln!(output).ok();
         }
 
-        // Final line: Arrows at targets
+        // Final line: Arrows at real targets, vertical continuation for dummy targets
         for i in 0..=max_pos {
-            output.push(if buffers.is_target.get(i) {
-                ARROW_DOWN
+            if buffers.is_target.get(i) {
+                output.push(ARROW_DOWN);
+            } else if buffers.all_targets.get(i) {
+                // Dummy target - show vertical continuation (pass-through)
+                output.push(V_LINE);
             } else {
-                ' '
-            });
+                output.push(' ');
+            }
         }
         writeln!(output).ok();
     }
 
     /// Draw pure convergence pattern.
+    /// Extends horizontal bracket to include all sources (even pass-through) for cleaner visuals.
     /// Optimized with O(1) position lookups using reusable buffers.
     fn draw_convergence_connections(
         &self,
         output: &mut String,
+        connections: &[(usize, usize, bool, bool)],
         target_groups: &[(usize, Vec<(usize, bool)>)],
         max_pos: usize,
         buffers: &mut RenderBuffers,
@@ -1044,128 +1232,179 @@ impl<'a> DAG<'a> {
         // Prepare reusable bitmaps
         buffers.prepare_bitmaps(max_pos + 1);
         buffers.prepare_aux(max_pos + 1);
-        
-        // Build source bitmap
-        for (_, sources) in target_groups {
-            for (x, _) in sources {
-                buffers.is_source.set(*x);
+
+        // Build source bitmap and target bitmaps from connections
+        for &(from_x, to_x, _, to_is_dummy) in connections {
+            buffers.is_source.set(from_x);
+            buffers.all_targets.set(to_x); // All targets (for routing)
+            if !to_is_dummy {
+                buffers.is_target.set(to_x); // Only real targets (for arrows)
             }
         }
-        
+
         // Identify 1-to-1 connections (targets with only 1 source) - these are "pass-through"
         for (_, sources) in target_groups.iter().filter(|(_, s)| s.len() == 1) {
             buffers.bitmap_aux.set(sources[0].0); // is_pass_through_src
         }
-        
-        // Build target bitmap
-        for (target, _) in target_groups {
-            buffers.is_target.set(*target);
-        }
+
+        // Collect all source positions and convergence source positions
+        let all_source_xs: Vec<usize> = connections.iter().map(|(x, _, _, _)| *x).collect();
+        let convergence_source_xs: Vec<usize> = target_groups
+            .iter()
+            .filter(|(_, s)| s.len() > 1)
+            .flat_map(|(_, sources)| sources.iter().map(|(x, _)| *x))
+            .collect();
 
         // Line 1: Vertical drops
         for i in 0..=max_pos {
-            output.push(if buffers.is_source.get(i) { V_LINE } else { ' ' });
+            output.push(if buffers.is_source.get(i) {
+                V_LINE
+            } else {
+                ' '
+            });
         }
         writeln!(output).ok();
 
-        // Line 2: Horizontal convergence + vertical pass-through
+        // Line 2: Horizontal convergence - extend bracket to cover ALL sources
+        // Find the span that covers everything
+        let global_min = *all_source_xs.iter().min().unwrap_or(&0);
+        let global_max = *all_source_xs.iter().max().unwrap_or(&0);
+
         for i in 0..=max_pos {
             let mut ch = ' ';
-            
-            for (_, sources) in target_groups.iter() {
-                if sources.len() <= 1 {
-                    continue;
-                }
-                let source_xs: Vec<usize> = sources.iter().map(|(x, _)| *x).collect();
-                let min_src = *source_xs.iter().min().unwrap();
-                let max_src = *source_xs.iter().max().unwrap();
 
-                if i == min_src {
-                    ch = CORNER_DR;
-                } else if i == max_src {
-                    ch = CORNER_DL;
-                } else if source_xs.contains(&i) {
-                    ch = TEE_UP;
-                } else if i > min_src && i < max_src && ch == ' ' {
+            if i >= global_min && i <= global_max {
+                // We're inside the global source span
+                let is_convergence_src = convergence_source_xs.contains(&i);
+                let is_pass_through = buffers.bitmap_aux.get(i);
+
+                if i == global_min {
+                    // Left endpoint
+                    if is_convergence_src || is_pass_through {
+                        ch = CORNER_DR; // └
+                    } else {
+                        ch = H_LINE;
+                    }
+                } else if i == global_max {
+                    // Right endpoint
+                    if is_convergence_src || is_pass_through {
+                        ch = CORNER_DL; // ┘
+                    } else {
+                        ch = H_LINE;
+                    }
+                } else if is_convergence_src {
+                    ch = TEE_UP; // ┴
+                } else if is_pass_through {
+                    ch = TEE_UP; // ┴ - pass-through joins the line
+                } else {
                     ch = H_LINE;
                 }
             }
-            
-            // If this position is a pass-through and not already part of convergence line
-            if buffers.bitmap_aux.get(i) && ch == ' ' {
-                ch = V_LINE;
-            }
-            
+
             output.push(ch);
         }
         writeln!(output).ok();
 
-        // Line 3: Arrows
+        // Line 3: Arrows for real targets, vertical continuation for dummy targets
         for i in 0..=max_pos {
-            output.push(if buffers.is_target.get(i) { ARROW_DOWN } else { ' ' });
+            if buffers.is_target.get(i) {
+                output.push(ARROW_DOWN);
+            } else if buffers.all_targets.get(i) {
+                // Dummy target - show vertical continuation (pass-through)
+                output.push(V_LINE);
+            } else {
+                output.push(' ');
+            }
         }
         writeln!(output).ok();
     }
 
     /// Draw pure divergence pattern.
     /// Uses top corners (┌, ┐) because lines go DOWN from the horizontal routing line.
+    /// The horizontal bracket spans from source to all targets (not just between targets).
     /// Optimized with O(1) position lookups using reusable buffers.
     fn draw_divergence_connections(
         &self,
         output: &mut String,
+        connections: &[(usize, usize, bool, bool)],
         source_groups: &[(usize, Vec<(usize, bool)>)],
         max_pos: usize,
         buffers: &mut RenderBuffers,
     ) {
         // Prepare reusable bitmaps
         buffers.prepare_bitmaps(max_pos + 1);
-        
-        // Build source bitmap
-        for (s, _) in source_groups {
-            buffers.is_source.set(*s);
-        }
-        
-        // Build target bitmap
-        for (_, targets) in source_groups {
-            for (x, _) in targets {
-                buffers.is_target.set(*x);
+
+        // Build source bitmap and target bitmaps from connections
+        for &(from_x, to_x, _, to_is_dummy) in connections {
+            buffers.is_source.set(from_x);
+            buffers.all_targets.set(to_x); // All targets (for routing)
+            if !to_is_dummy {
+                buffers.is_target.set(to_x); // Only real targets (for arrows)
             }
         }
 
         // Line 1: Vertical from sources
         for i in 0..=max_pos {
-            output.push(if buffers.is_source.get(i) { V_LINE } else { ' ' });
+            output.push(if buffers.is_source.get(i) {
+                V_LINE
+            } else {
+                ' '
+            });
         }
         writeln!(output).ok();
 
-        // Line 2: Horizontal divergence - each source fans out with TOP corners
+        // Line 2: Horizontal divergence - bracket spans from source through all targets
+        // The span includes the source position so the vertical line connects properly
         for i in 0..=max_pos {
             let mut ch = ' ';
-            for (_, targets) in source_groups.iter() {
+            for &(source_x, ref targets) in source_groups.iter() {
                 if targets.len() <= 1 {
                     continue;
                 }
                 let target_xs: Vec<usize> = targets.iter().map(|(x, _)| *x).collect();
-                let min_tgt = *target_xs.iter().min().unwrap();
-                let max_tgt = *target_xs.iter().max().unwrap();
+                // Span includes source AND all targets
+                let min_span = *target_xs.iter().min().unwrap().min(&source_x);
+                let max_span = *target_xs.iter().max().unwrap().max(&source_x);
 
-                if i == min_tgt {
-                    ch = CORNER_UR; // ┌
-                } else if i == max_tgt {
-                    ch = CORNER_UL; // ┐
-                } else if target_xs.contains(&i) {
-                    ch = TEE_DOWN; // ┬
-                } else if i > min_tgt && i < max_tgt && ch == ' ' {
-                    ch = H_LINE;
+                if i == min_span {
+                    if buffers.is_source.get(i) {
+                        // Source at left edge - line comes from above and goes right
+                        ch = if target_xs.contains(&i) { TEE_DOWN } else { CORNER_DR }; // └ or ┬
+                    } else {
+                        ch = CORNER_UR; // ┌ - target at left, line goes down
+                    }
+                } else if i == max_span {
+                    if buffers.is_source.get(i) {
+                        // Source at right edge - line comes from above and goes left
+                        ch = if target_xs.contains(&i) { TEE_DOWN } else { CORNER_DL }; // ┘ or ┬
+                    } else {
+                        ch = CORNER_UL; // ┐ - target at right, line goes down
+                    }
+                } else if i > min_span && i < max_span {
+                    if buffers.is_source.get(i) {
+                        // Source in middle - line from above joins horizontal
+                        ch = if target_xs.contains(&i) { CROSS } else { TEE_UP }; // ┼ or ┴
+                    } else if target_xs.contains(&i) {
+                        ch = TEE_DOWN; // ┬ - target in middle
+                    } else if ch == ' ' {
+                        ch = H_LINE;
+                    }
                 }
             }
             output.push(ch);
         }
         writeln!(output).ok();
 
-        // Line 3: Arrows at targets
+        // Line 3: Arrows for real targets, vertical continuation for dummy targets
         for i in 0..=max_pos {
-            output.push(if buffers.is_target.get(i) { ARROW_DOWN } else { ' ' });
+            if buffers.is_target.get(i) {
+                output.push(ARROW_DOWN);
+            } else if buffers.all_targets.get(i) {
+                // Dummy target - show vertical continuation (pass-through)
+                output.push(V_LINE);
+            } else {
+                output.push(' ');
+            }
         }
         writeln!(output).ok();
     }
@@ -1179,22 +1418,53 @@ impl<'a> DAG<'a> {
         max_pos: usize,
         buffers: &mut RenderBuffers,
     ) {
-        // Prepare reusable bitmap (only need source for simple connections)
-        buffers.is_source.prepare(max_pos + 1);
-        
-        for (f, _, _, _) in connections {
-            buffers.is_source.set(*f);
+        // Check if any connection has significantly different from_x and to_x (needs routing)
+        // Small offsets (1-2 chars) can be handled with straight lines for cleaner output
+        const SNAP_THRESHOLD: usize = 2;
+        let needs_routing = connections.iter().any(|(f, t, _, _)| {
+            let diff = if *f > *t { f - t } else { t - f };
+            diff > SNAP_THRESHOLD
+        });
+
+        if needs_routing {
+            // Fall back to mixed connections handler for proper routing
+            self.draw_mixed_connections(output, connections, max_pos, buffers);
+            return;
+        }
+
+        // Prepare reusable bitmaps
+        buffers.prepare_bitmaps(max_pos + 1);
+
+        // Track sources and targets that go to real nodes (not dummy pass-through)
+        // For small offsets, use the target position for vertical alignment
+        for &(from_x, to_x, _, to_is_dummy) in connections {
+            buffers.is_source.set(from_x);
+            buffers.all_targets.set(to_x); // All targets for routing
+            if !to_is_dummy {
+                buffers.is_target.set(to_x); // Only mark targets to real nodes
+            }
         }
 
         // Line 1: Vertical
         for i in 0..=max_pos {
-            output.push(if buffers.is_source.get(i) { V_LINE } else { ' ' });
+            output.push(if buffers.is_source.get(i) {
+                V_LINE
+            } else {
+                ' '
+            });
         }
         writeln!(output).ok();
 
-        // Line 2: Arrows (straight down for 1-to-1)
+        // Line 2: Arrows for real targets, vertical lines for pass-through (dummy targets)
         for i in 0..=max_pos {
-            output.push(if buffers.is_source.get(i) { ARROW_DOWN } else { ' ' });
+            if buffers.is_target.get(i) {
+                output.push(ARROW_DOWN);
+            } else if buffers.all_targets.get(i) {
+                // Dummy target - show vertical continuation (pass-through)
+                output.push(V_LINE);
+            } else {
+                output.push(' ');
+            }
         }
         writeln!(output).ok();
     }
