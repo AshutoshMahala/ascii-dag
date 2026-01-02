@@ -34,10 +34,12 @@ enum VirtualNode {
 }
 
 impl VirtualNode {
+    #[inline]
     fn is_real(&self) -> bool {
         matches!(self, VirtualNode::Real(_))
     }
 
+    #[inline]
     fn real_index(&self) -> Option<usize> {
         match self {
             VirtualNode::Real(idx) => Some(*idx),
@@ -167,6 +169,7 @@ impl<'a> DAG<'a> {
     }
 
     /// Check if this is a simple chain (A → B → C, no branching).
+    /// Optimized to avoid allocations by using count methods.
     fn is_simple_chain(&self) -> bool {
         if self.nodes.is_empty() {
             return false;
@@ -178,12 +181,9 @@ impl<'a> DAG<'a> {
             return false;
         }
 
-        // Check if every node has at most 1 parent and 1 child
-        for &(node_id, _) in &self.nodes {
-            let parents = self.get_parents(node_id);
-            let children = self.get_children(node_id);
-
-            if parents.len() > 1 || children.len() > 1 {
+        // Check if every node has at most 1 parent and 1 child (zero-allocation)
+        for idx in 0..self.nodes.len() {
+            if self.parents_count(idx) > 1 || self.children_count(idx) > 1 {
                 return false;
             }
         }
@@ -718,6 +718,7 @@ impl<'a> DAG<'a> {
     }
 
     /// Draw mixed convergence and divergence (the previously broken case).
+    /// Optimized with O(1) position lookups using boolean arrays.
     #[allow(clippy::needless_range_loop)]
     fn draw_mixed_connections(
         &self,
@@ -725,8 +726,14 @@ impl<'a> DAG<'a> {
         connections: &[(usize, usize, bool, bool)],
         max_pos: usize,
     ) {
-        let sources: Vec<usize> = connections.iter().map(|(f, _, _, _)| *f).collect();
-        let targets: Vec<usize> = connections.iter().map(|(_, t, _, _)| *t).collect();
+        // Use boolean arrays for O(1) lookups instead of Vec::contains O(n)
+        let mut is_source = vec![false; max_pos + 1];
+        let mut is_target = vec![false; max_pos + 1];
+        
+        for &(from_x, to_x, _, _) in connections {
+            is_source[from_x] = true;
+            is_target[to_x] = true;
+        }
 
         // Classify connections
         let mut straight_down: Vec<usize> = Vec::new(); // from_x == to_x
@@ -748,7 +755,7 @@ impl<'a> DAG<'a> {
 
         // Line 1: Vertical drops from all sources
         for i in 0..=max_pos {
-            output.push(if sources.contains(&i) { V_LINE } else { ' ' });
+            output.push(if is_source[i] { V_LINE } else { ' ' });
         }
         writeln!(output).ok();
 
@@ -779,20 +786,20 @@ impl<'a> DAG<'a> {
             }
             
             // Mark source positions (where lines come down from above) with ┴
-            for &x in &sources {
-                if x >= min_x && x <= max_x {
-                    line2a[x] = TEE_UP; // ┴ - line comes from above
+            for i in min_x..=max_x {
+                if is_source[i] {
+                    line2a[i] = TEE_UP; // ┴ - line comes from above
                 }
             }
             
             // Mark target positions (where lines go down to) with ┬
             // If already ┴ (source), upgrade to ┼ (cross)
-            for &x in &targets {
-                if x >= min_x && x <= max_x {
-                    line2a[x] = match line2a[x] {
+            for i in min_x..=max_x {
+                if is_target[i] {
+                    line2a[i] = match line2a[i] {
                         TEE_UP => CROSS,  // Both source and target → cross
                         H_LINE => TEE_DOWN, // Only target → ┬
-                        _ => line2a[x],
+                        _ => line2a[i],
                     };
                 }
             }
@@ -800,11 +807,11 @@ impl<'a> DAG<'a> {
             // Fix the endpoints based on whether they're source or target
             // Left endpoint
             if min_x < line2a.len() {
-                line2a[min_x] = if sources.contains(&min_x) && targets.contains(&min_x) {
+                line2a[min_x] = if is_source[min_x] && is_target[min_x] {
                     CROSS // Both
-                } else if sources.contains(&min_x) {
+                } else if is_source[min_x] {
                     CORNER_DR // └ - source only (line from above)
-                } else if targets.contains(&min_x) {
+                } else if is_target[min_x] {
                     CORNER_UR // ┌ - target only (line goes down)
                 } else {
                     line2a[min_x]
@@ -812,11 +819,11 @@ impl<'a> DAG<'a> {
             }
             // Right endpoint
             if max_x < line2a.len() {
-                line2a[max_x] = if sources.contains(&max_x) && targets.contains(&max_x) {
+                line2a[max_x] = if is_source[max_x] && is_target[max_x] {
                     CROSS // Both
-                } else if sources.contains(&max_x) {
+                } else if is_source[max_x] {
                     CORNER_DL // ┘ - source only (line from above)
-                } else if targets.contains(&max_x) {
+                } else if is_target[max_x] {
                     CORNER_UL // ┐ - target only (line goes down)
                 } else {
                     line2a[max_x]
@@ -828,9 +835,13 @@ impl<'a> DAG<'a> {
             }
             writeln!(output).ok();
 
-            // Line 2b: Vertical continuation
+            // Line 2b: Vertical continuation - use bitmap for straight_down too
+            let mut is_straight = vec![false; max_pos + 1];
+            for &x in &straight_down {
+                is_straight[x] = true;
+            }
             for i in 0..=max_pos {
-                output.push(if targets.contains(&i) || straight_down.contains(&i) {
+                output.push(if is_target[i] || is_straight[i] {
                     V_LINE
                 } else {
                     ' '
@@ -891,7 +902,7 @@ impl<'a> DAG<'a> {
 
         // Final line: Arrows at targets
         for i in 0..=max_pos {
-            output.push(if targets.contains(&i) {
+            output.push(if is_target[i] {
                 ARROW_DOWN
             } else {
                 ' '
@@ -901,40 +912,42 @@ impl<'a> DAG<'a> {
     }
 
     /// Draw pure convergence pattern.
+    /// Optimized with O(1) position lookups.
     fn draw_convergence_connections(
         &self,
         output: &mut String,
         target_groups: &[(usize, Vec<(usize, bool)>)],
         max_pos: usize,
     ) {
-        let all_sources: Vec<usize> = target_groups
-            .iter()
-            .flat_map(|(_, sources)| sources.iter().map(|(x, _)| *x))
-            .collect();
+        // Build source bitmap for O(1) lookup
+        let mut is_source = vec![false; max_pos + 1];
+        for (_, sources) in target_groups {
+            for (x, _) in sources {
+                is_source[*x] = true;
+            }
+        }
         
         // Identify 1-to-1 connections (targets with only 1 source) - these are "pass-through"
-        let pass_through: Vec<(usize, usize)> = target_groups
-            .iter()
-            .filter(|(_, sources)| sources.len() == 1)
-            .map(|(target, sources)| (sources[0].0, *target))
-            .collect();
+        let mut is_pass_through_src = vec![false; max_pos + 1];
+        for (_, sources) in target_groups.iter().filter(|(_, s)| s.len() == 1) {
+            is_pass_through_src[sources[0].0] = true;
+        }
+        
+        // Build target bitmap
+        let mut is_target = vec![false; max_pos + 1];
+        for (target, _) in target_groups {
+            is_target[*target] = true;
+        }
 
         // Line 1: Vertical drops
         for i in 0..=max_pos {
-            output.push(if all_sources.contains(&i) {
-                V_LINE
-            } else {
-                ' '
-            });
+            output.push(if is_source[i] { V_LINE } else { ' ' });
         }
         writeln!(output).ok();
 
         // Line 2: Horizontal convergence + vertical pass-through
         for i in 0..=max_pos {
             let mut ch = ' ';
-            
-            // Check if this is a pass-through source position (straight down)
-            let is_pass_through_src = pass_through.iter().any(|(src, _)| *src == i);
             
             for (_, sources) in target_groups.iter() {
                 if sources.len() <= 1 {
@@ -956,7 +969,7 @@ impl<'a> DAG<'a> {
             }
             
             // If this position is a pass-through and not already part of convergence line
-            if is_pass_through_src && ch == ' ' {
+            if is_pass_through_src[i] && ch == ' ' {
                 ch = V_LINE;
             }
             
@@ -966,32 +979,37 @@ impl<'a> DAG<'a> {
 
         // Line 3: Arrows
         for i in 0..=max_pos {
-            if target_groups.iter().any(|(t, _)| *t == i) {
-                output.push(ARROW_DOWN);
-            } else {
-                output.push(' ');
-            }
+            output.push(if is_target[i] { ARROW_DOWN } else { ' ' });
         }
         writeln!(output).ok();
     }
 
     /// Draw pure divergence pattern.
     /// Uses top corners (┌, ┐) because lines go DOWN from the horizontal routing line.
+    /// Optimized with O(1) position lookups.
     fn draw_divergence_connections(
         &self,
         output: &mut String,
         source_groups: &[(usize, Vec<(usize, bool)>)],
         max_pos: usize,
     ) {
-        let all_sources: Vec<usize> = source_groups.iter().map(|(s, _)| *s).collect();
+        // Build source bitmap
+        let mut is_source = vec![false; max_pos + 1];
+        for (s, _) in source_groups {
+            is_source[*s] = true;
+        }
+        
+        // Build target bitmap
+        let mut is_target = vec![false; max_pos + 1];
+        for (_, targets) in source_groups {
+            for (x, _) in targets {
+                is_target[*x] = true;
+            }
+        }
 
         // Line 1: Vertical from sources
         for i in 0..=max_pos {
-            output.push(if all_sources.contains(&i) {
-                V_LINE
-            } else {
-                ' '
-            });
+            output.push(if is_source[i] { V_LINE } else { ' ' });
         }
         writeln!(output).ok();
 
@@ -1021,42 +1039,35 @@ impl<'a> DAG<'a> {
         writeln!(output).ok();
 
         // Line 3: Arrows at targets
-        let all_targets: Vec<usize> = source_groups
-            .iter()
-            .flat_map(|(_, t)| t.iter().map(|(x, _)| *x))
-            .collect();
         for i in 0..=max_pos {
-            output.push(if all_targets.contains(&i) {
-                ARROW_DOWN
-            } else {
-                ' '
-            });
+            output.push(if is_target[i] { ARROW_DOWN } else { ' ' });
         }
         writeln!(output).ok();
     }
 
     /// Draw simple 1-to-1 connections.
+    /// Optimized with O(1) position lookups.
     fn draw_simple_connections(
         &self,
         output: &mut String,
         connections: &[(usize, usize, bool, bool)],
         max_pos: usize,
     ) {
-        let sources: Vec<usize> = connections.iter().map(|(f, _, _, _)| *f).collect();
+        // Build source bitmap
+        let mut is_source = vec![false; max_pos + 1];
+        for (f, _, _, _) in connections {
+            is_source[*f] = true;
+        }
 
         // Line 1: Vertical
         for i in 0..=max_pos {
-            output.push(if sources.contains(&i) { V_LINE } else { ' ' });
+            output.push(if is_source[i] { V_LINE } else { ' ' });
         }
         writeln!(output).ok();
 
         // Line 2: Arrows (straight down for 1-to-1)
         for i in 0..=max_pos {
-            output.push(if sources.contains(&i) {
-                ARROW_DOWN
-            } else {
-                ' '
-            });
+            output.push(if is_source[i] { ARROW_DOWN } else { ' ' });
         }
         writeln!(output).ok();
     }

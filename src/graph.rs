@@ -328,6 +328,8 @@ impl<'a> DAG<'a> {
 
     /// Get children of a node (returns IDs, not indices).
     /// Uses cached adjacency lists for O(1) lookup instead of O(E) iteration.
+    /// NOTE: This allocates a new Vec. For hot paths, use `children_count` + `get_children_indices`.
+    #[inline]
     pub(crate) fn get_children(&self, node_id: usize) -> Vec<usize> {
         if let Some(&idx) = self.id_to_index.get(&node_id) {
             // Convert child indices back to IDs
@@ -342,6 +344,8 @@ impl<'a> DAG<'a> {
 
     /// Get parents of a node (returns IDs, not indices).
     /// Uses cached adjacency lists for O(1) lookup instead of O(E) iteration.
+    /// NOTE: This allocates a new Vec. For hot paths, use `parents_count` + `get_parents_indices`.
+    #[inline]
     pub(crate) fn get_parents(&self, node_id: usize) -> Vec<usize> {
         if let Some(&idx) = self.id_to_index.get(&node_id) {
             // Convert parent indices back to IDs
@@ -354,22 +358,26 @@ impl<'a> DAG<'a> {
         }
     }
 
-    /// Get children indices directly (no ID conversion) - faster for internal use.
-    ///
-    /// Reserved for future optimization. Currently unused but available for
-    /// performance-critical paths that work with node indices directly.
+    /// Count children of a node by index (zero-allocation).
     #[inline]
-    #[allow(dead_code)]
+    pub(crate) fn children_count(&self, node_idx: usize) -> usize {
+        self.children.get(node_idx).map_or(0, |c| c.len())
+    }
+
+    /// Count parents of a node by index (zero-allocation).
+    #[inline]
+    pub(crate) fn parents_count(&self, node_idx: usize) -> usize {
+        self.parents.get(node_idx).map_or(0, |p| p.len())
+    }
+
+    /// Get children indices directly (no ID conversion) - faster for internal use.
+    #[inline]
     pub(crate) fn get_children_indices(&self, node_idx: usize) -> &[usize] {
         &self.children[node_idx]
     }
 
     /// Get parent indices directly (no ID conversion) - faster for internal use.
-    ///
-    /// Reserved for future optimization. Currently unused but available for
-    /// performance-critical paths that work with node indices directly.
     #[inline]
-    #[allow(dead_code)]
     pub(crate) fn get_parents_indices(&self, node_idx: usize) -> &[usize] {
         &self.parents[node_idx]
     }

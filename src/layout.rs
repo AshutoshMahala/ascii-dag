@@ -107,20 +107,20 @@ impl<'a> DAG<'a> {
     }
 
     /// Order nodes by median position of their parents.
+    /// Optimized: uses index-based lookups to avoid allocations.
     fn order_by_median_parents(&self, level_nodes: &mut Vec<usize>, parent_level: &[usize]) {
-        let mut node_medians: Vec<(usize, f32)> = Vec::new();
+        let mut node_medians: Vec<(usize, f32)> = Vec::with_capacity(level_nodes.len());
 
         for (pos, &idx) in level_nodes.iter().enumerate() {
-            let node_id = self.nodes[idx].0;
-            let parents = self.get_parents(node_id);
+            let parent_indices = self.get_parents_indices(idx);
 
-            if parents.is_empty() {
+            if parent_indices.is_empty() {
                 node_medians.push((idx, pos as f32));
             } else {
                 // Find positions of parents in the parent level
-                let mut parent_positions: Vec<usize> = parents
+                let mut parent_positions: Vec<usize> = parent_indices
                     .iter()
-                    .filter_map(|&p_id| parent_level.iter().position(|&i| self.nodes[i].0 == p_id))
+                    .filter_map(|&p_idx| parent_level.iter().position(|&i| i == p_idx))
                     .collect();
                 parent_positions.sort_unstable();
 
@@ -143,20 +143,20 @@ impl<'a> DAG<'a> {
     }
 
     /// Order nodes by median position of their children.
+    /// Optimized: uses index-based lookups to avoid allocations.
     fn order_by_median_children(&self, level_nodes: &mut Vec<usize>, child_level: &[usize]) {
-        let mut node_medians: Vec<(usize, f32)> = Vec::new();
+        let mut node_medians: Vec<(usize, f32)> = Vec::with_capacity(level_nodes.len());
 
         for (pos, &idx) in level_nodes.iter().enumerate() {
-            let node_id = self.nodes[idx].0;
-            let children = self.get_children(node_id);
+            let child_indices = self.get_children_indices(idx);
 
-            if children.is_empty() {
+            if child_indices.is_empty() {
                 node_medians.push((idx, pos as f32));
             } else {
                 // Find positions of children in the child level
-                let mut child_positions: Vec<usize> = children
+                let mut child_positions: Vec<usize> = child_indices
                     .iter()
-                    .filter_map(|&c_id| child_level.iter().position(|&i| self.nodes[i].0 == c_id))
+                    .filter_map(|&c_idx| child_level.iter().position(|&i| i == c_idx))
                     .collect();
                 child_positions.sort_unstable();
 
@@ -222,13 +222,10 @@ impl<'a> DAG<'a> {
     }
 
     /// Check if a subgraph is a simple chain (no branching).
+    /// Optimized to avoid allocations.
     pub(crate) fn is_subgraph_simple_chain(&self, subgraph_indices: &[usize]) -> bool {
         for &idx in subgraph_indices {
-            let node_id = self.nodes[idx].0;
-            let parents = self.get_parents(node_id);
-            let children = self.get_children(node_id);
-
-            if parents.len() > 1 || children.len() > 1 {
+            if self.parents_count(idx) > 1 || self.children_count(idx) > 1 {
                 return false;
             }
         }
