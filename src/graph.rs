@@ -23,7 +23,7 @@
 //! - For untrusted input, consider limiting maximum nodes/edges to prevent resource exhaustion
 //! - Maximum node ID: `usize::MAX` (up to 20 decimal digits)
 
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 
 #[cfg(feature = "std")]
 use std::collections::{HashMap, HashSet};
@@ -407,5 +407,191 @@ impl<'a> DAG<'a> {
     pub fn estimate_size(&self) -> usize {
         // Rough estimate: nodes * avg_label_size + edges * connection_chars + box
         self.nodes.len() * 25 + self.edges.len() * 15 + 200
+    }
+
+    /// Compute the layout intermediate representation for this DAG.
+    ///
+    /// This returns a renderer-agnostic representation of the laid-out graph
+    /// that can be consumed by various renderers (ASCII, ANSI colors, SVG, etc.).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ascii_dag::DAG;
+    ///
+    /// let dag = DAG::from_edges(
+    ///     &[(1, "A"), (2, "B"), (3, "C")],
+    ///     &[(1, 2), (1, 3), (2, 3)]
+    /// );
+    ///
+    /// let ir = dag.compute_layout();
+    ///
+    /// // Inspect layout
+    /// println!("Width: {}, Height: {}", ir.width(), ir.height());
+    /// for node in ir.nodes() {
+    ///     println!("{} at ({}, {})", node.label, node.x, node.y);
+    /// }
+    /// ```
+    pub fn compute_layout(&self) -> crate::ir::LayoutIR<'a> {
+        use crate::ir::{LayoutIRBuilder, LayoutNode, LayoutEdge, EdgePath};
+        
+        if self.nodes.is_empty() {
+            return LayoutIRBuilder::new().build();
+        }
+
+        // Check for cycles - can't layout cyclic graphs
+        if self.has_cycle() {
+            return LayoutIRBuilder::new().build();
+        }
+
+        // Step 1: Calculate levels
+        let level_data = self.calculate_levels();
+        let max_level = level_data.iter().map(|(_, l)| *l).max().unwrap_or(0);
+
+        // Create level mapping
+        let mut node_levels: Vec<usize> = vec![0; self.nodes.len()];
+        for (idx, level) in &level_data {
+            node_levels[*idx] = *level;
+        }
+
+        // Step 2: Group nodes by level and apply crossing reduction
+        let mut levels: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
+        for (idx, level) in &level_data {
+            levels[*level].push(*idx);
+        }
+        self.reduce_crossings(&mut levels, max_level);
+
+        // Step 3: Assign x-coordinates
+        let mut x_coords: Vec<Vec<usize>> = Vec::with_capacity(levels.len());
+        let mut widths: Vec<Vec<usize>> = Vec::with_capacity(levels.len());
+        
+        for level_nodes in &levels {
+            let mut level_x = Vec::with_capacity(level_nodes.len());
+            let mut level_w = Vec::with_capacity(level_nodes.len());
+            let mut x = 0;
+
+            for &idx in level_nodes {
+                let width = self.get_node_width(idx);
+                level_x.push(x);
+                level_w.push(width);
+                x += width + 3; // Standard spacing
+            }
+
+            x_coords.push(level_x);
+            widths.push(level_w);
+        }
+
+        // Calculate total width and centering offsets
+        let level_widths: Vec<usize> = x_coords
+            .iter()
+            .zip(widths.iter())
+            .map(|(xs, ws)| {
+                xs.iter()
+                    .zip(ws.iter())
+                    .map(|(x, w)| x + w)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        let max_width = *level_widths.iter().max().unwrap_or(&0);
+
+        // Step 4: Build LayoutIR
+        let mut builder = LayoutIRBuilder::new().with_levels(max_level + 1);
+
+        // Lines per level: node line + connector lines (arrows, horizontal bars, etc.)
+        // Rough estimate: 3 lines per level (node, connector start, connector end)
+        let lines_per_level = 3;
+        let total_height = (max_level + 1) * lines_per_level;
+
+        // Add nodes with centered positions
+        for (level_idx, level_nodes) in levels.iter().enumerate() {
+            let level_width = level_widths[level_idx];
+            let level_offset = if max_width > level_width {
+                (max_width - level_width) / 2
+            } else {
+                0
+            };
+
+            for (pos, &idx) in level_nodes.iter().enumerate() {
+                let (id, label) = self.nodes[idx];
+                let x = x_coords[level_idx][pos] + level_offset;
+                let width = widths[level_idx][pos];
+                let y = level_idx * lines_per_level;
+
+                builder.add_node(LayoutNode {
+                    id,
+                    label,
+                    x,
+                    y,
+                    width,
+                    center_x: x + width / 2,
+                    level: level_idx,
+                    level_position: pos,
+                });
+            }
+        }
+
+        // Add edges with routing info
+        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+            if let (Some(from_idx), Some(to_idx)) = (self.node_index(from_id), self.node_index(to_id)) {
+                let from_level = node_levels[from_idx];
+                let to_level = node_levels[to_idx];
+
+                // Find positions in their levels
+                let from_pos = levels[from_level].iter().position(|&i| i == from_idx);
+                let to_pos = levels[to_level].iter().position(|&i| i == to_idx);
+
+                if let (Some(fp), Some(tp)) = (from_pos, to_pos) {
+                    let from_level_offset = if max_width > level_widths[from_level] {
+                        (max_width - level_widths[from_level]) / 2
+                    } else {
+                        0
+                    };
+                    let to_level_offset = if max_width > level_widths[to_level] {
+                        (max_width - level_widths[to_level]) / 2
+                    } else {
+                        0
+                    };
+
+                    let from_x = x_coords[from_level][fp] + from_level_offset + widths[from_level][fp] / 2;
+                    let to_x = x_coords[to_level][tp] + to_level_offset + widths[to_level][tp] / 2;
+                    let from_y = from_level * lines_per_level;
+                    let to_y = to_level * lines_per_level;
+
+                    let path = if to_level == from_level + 1 {
+                        // Adjacent levels - direct or corner connection
+                        if from_x == to_x {
+                            EdgePath::Direct
+                        } else {
+                            EdgePath::Corner {
+                                horizontal_y: from_y + 1,
+                            }
+                        }
+                    } else {
+                        // Skip-level edge - side channel routing
+                        EdgePath::SideChannel {
+                            channel_x: from_x.max(to_x) + 3,
+                            start_y: from_y + 1,
+                            end_y: to_y - 1,
+                        }
+                    };
+
+                    builder.add_edge(LayoutEdge {
+                        from_id,
+                        to_id,
+                        from_x,
+                        from_y,
+                        to_x,
+                        to_y,
+                        path,
+                        edge_index: edge_idx,
+                    });
+                }
+            }
+        }
+
+        builder.set_dimensions(max_width, total_height);
+        builder.build()
     }
 }

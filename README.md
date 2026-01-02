@@ -27,7 +27,7 @@ Draw DAGs in your terminal. **Fast.** Zero dependencies.
 ## Why?
 - **Zero Dependencies**: Drop it into any `no_std`, WASM, or embedded project.
 - **Visual Error Chains**: Show users *why* their build failed (Cycle detected? Dependency missing?).
-- **Fast**: Renders 1000 nodes in ~220ms.
+- **Fast**: Renders 1000 nodes in ~300ms with full layout computation.
 
 ## Features at a Glance
 - 📦 **Tiny**: ~77KB (WASM release).
@@ -287,7 +287,7 @@ println!("Is tree: {}", metrics.is_tree());
 [Short]   [Long1]
    │         │
    ↓         ↓
-           [Long2]
+   │       [Long2]
    │         │
    └─────────┘
         ↓
@@ -476,10 +476,10 @@ Available features:
 
 | Nodes | Build Time | **Render Time** | Peak RAM | Output |
 | :--- | :--- | :--- | :--- | :--- |
-| **50** | 63µs | **0.6ms** | ~80 KB | 16 KB |
-| **100** | 74µs | **1.7ms** | ~260 KB | 48 KB |
-| **500** | 0.4ms | **37ms** | ~3 MB | 680 KB |
-| **1000** | 0.7ms | **220ms** | ~11 MB | 2.5 MB |
+| **50** | 53µs | **0.8ms** | ~109 KB | 29 KB |
+| **100** | 70µs | **2.5ms** | ~382 KB | 94 KB |
+| **500** | 0.4ms | **65ms** | ~6.4 MB | 1.6 MB |
+| **1000** | 0.7ms | **391ms** | ~25 MB | 6.4 MB |
 
 *Measured via `cargo run --example benchmark --release`*
 

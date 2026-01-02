@@ -21,6 +21,7 @@ pub(crate) const TEE_DOWN: char = '┬'; // T pointing down
 pub(crate) const TEE_UP: char = '┴'; // T pointing up
 pub(crate) const CORNER_UR: char = '┌'; // Up-Right corner
 pub(crate) const CORNER_UL: char = '┐'; // Up-Left corner
+pub(crate) const CROSS: char = '┼'; // Cross junction
 
 /// A virtual node in the layout - either a real node or a dummy for edge routing.
 /// Memory: ~24 bytes per node (1 byte enum tag + padding + 16 bytes data)
@@ -305,7 +306,8 @@ impl<'a> DAG<'a> {
 
         self.reduce_crossings(&mut real_levels, max_level);
 
-        // Rebuild levels with proper ordering (real nodes in optimized order, dummies at end)
+        // Rebuild levels with proper ordering (real nodes in optimized order)
+        // Position dummies intelligently based on their source node's position
         for (level_idx, real_order) in real_levels.iter().enumerate() {
             let dummies: Vec<_> = levels[level_idx]
                 .iter()
@@ -317,8 +319,13 @@ impl<'a> DAG<'a> {
             for &idx in real_order {
                 levels[level_idx].push(VirtualNode::Real(idx));
             }
+            // Dummies will be repositioned after we have x-coordinates
             levels[level_idx].extend(dummies);
         }
+
+        // Step 4b: Reposition dummies to align with their skip-edge source nodes
+        // This creates visually cleaner vertical paths for skip edges
+        self.reposition_dummies(&mut levels, &node_levels);
 
         // Step 5: Assign x-coordinates
         let (x_coords, widths) = self.assign_virtual_x_coordinates(&levels, &node_levels);
@@ -335,16 +342,17 @@ impl<'a> DAG<'a> {
     }
 
     /// Assign x-coordinates to virtual nodes (real + dummy).
-    /// Dummies are positioned at the end of each level, giving them their own column
-    /// for skip edge visualization.
+    /// Real nodes get sequential x-coordinates.
+    /// Dummy nodes get x-coordinates aligned with their source node for visual continuity.
     fn assign_virtual_x_coordinates(
         &self,
         levels: &[Vec<VirtualNode>],
-        _node_levels: &[usize],
+        node_levels: &[usize],
     ) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
         let mut x_coords: Vec<Vec<usize>> = Vec::with_capacity(levels.len());
         let mut widths: Vec<Vec<usize>> = Vec::with_capacity(levels.len());
 
+        // First pass: assign x-coordinates to all nodes sequentially
         for level_nodes in levels {
             let mut level_x = Vec::with_capacity(level_nodes.len());
             let mut level_w = Vec::with_capacity(level_nodes.len());
@@ -353,23 +361,132 @@ impl<'a> DAG<'a> {
             for vnode in level_nodes {
                 let width = match vnode {
                     VirtualNode::Real(idx) => self.get_node_width(*idx),
-                    VirtualNode::Dummy(_) => 1, // Dummy nodes are 1 char wide (just a vertical line)
+                    VirtualNode::Dummy(_) => 1,
                 };
 
                 level_x.push(x);
                 level_w.push(width);
-                x += width + 3; // Standard spacing
+                x += width + 3; // Standard spacing for all nodes
             }
 
             x_coords.push(level_x);
             widths.push(level_w);
         }
 
-        // Note: We intentionally DON'T center dummies over their source.
-        // By keeping dummies at their natural position (end of each level),
-        // they get their own column which makes skip edges visible.
+        // Second pass: adjust dummy x-coordinates to align with their source node's center
+        // Collect all dummy adjustments first
+        let mut dummy_adjustments: Vec<(usize, usize, usize)> = Vec::new(); // (level_idx, dummy_pos, target_x)
+
+        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+            if let Some(from_idx) = self.node_index(from_id)
+                && let Some(to_idx) = self.node_index(to_id)
+            {
+                let from_level = node_levels[from_idx];
+                let to_level = node_levels[to_idx];
+
+                if to_level > from_level + 1 {
+                    // This is a skip edge - find source node's center x
+                    if let Some(source_pos) = levels[from_level]
+                        .iter()
+                        .position(|vn| matches!(vn, VirtualNode::Real(i) if *i == from_idx))
+                    {
+                        let source_center_x = x_coords[from_level][source_pos]
+                            + widths[from_level][source_pos] / 2;
+
+                        // Queue each dummy's x adjustment
+                        for level_idx in (from_level + 1)..to_level {
+                            if let Some(dummy_pos) = levels[level_idx].iter().position(
+                                |vn| matches!(vn, VirtualNode::Dummy(ei) if *ei == edge_idx),
+                            ) {
+                                dummy_adjustments.push((level_idx, dummy_pos, source_center_x));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Apply adjustments - for each level, set dummy x-coord and push any nodes that would overlap
+        for (level_idx, dummy_pos, target_x) in dummy_adjustments {
+            // Find the end position of the node just before the dummy (if any)
+            let prev_end = if dummy_pos > 0 {
+                x_coords[level_idx][dummy_pos - 1] + widths[level_idx][dummy_pos - 1] + 3
+            } else {
+                0
+            };
+
+            // Dummy goes at target_x, but at least after the previous node
+            let dummy_x = target_x.max(prev_end);
+            x_coords[level_idx][dummy_pos] = dummy_x;
+
+            // Push any subsequent nodes to avoid overlap
+            let mut min_next_x = dummy_x + 1 + 3; // dummy width (1) + spacing (3)
+            for pos in (dummy_pos + 1)..levels[level_idx].len() {
+                if x_coords[level_idx][pos] < min_next_x {
+                    x_coords[level_idx][pos] = min_next_x;
+                }
+                // Update minimum x for next node
+                min_next_x = x_coords[level_idx][pos] + widths[level_idx][pos] + 3;
+            }
+        }
 
         (x_coords, widths)
+    }
+
+    /// Reposition dummy nodes in the level arrays.
+    /// Note: The actual x-coordinate alignment happens in assign_virtual_x_coordinates.
+    #[allow(clippy::needless_range_loop)]
+    fn reposition_dummies(&self, levels: &mut [Vec<VirtualNode>], node_levels: &[usize]) {
+        // For each skip edge, find where its source node is positioned and place
+        // its dummies right after that position in each intermediate level
+        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+            if let Some(from_idx) = self.node_index(from_id)
+                && let Some(to_idx) = self.node_index(to_id)
+            {
+                let from_level = node_levels[from_idx];
+                let to_level = node_levels[to_idx];
+
+                if to_level > from_level + 1 {
+                    // This is a skip edge - reposition its dummies
+
+                    // Find where the source node is in its level
+                    let source_pos = levels[from_level]
+                        .iter()
+                        .position(|vn| matches!(vn, VirtualNode::Real(i) if *i == from_idx));
+
+                    if let Some(src_pos) = source_pos {
+                        // For each intermediate level, move this edge's dummy to after src_pos
+                        for level_idx in (from_level + 1)..to_level {
+                            // Find and remove the dummy for this edge
+                            if let Some(dummy_pos) = levels[level_idx].iter().position(
+                                |vn| matches!(vn, VirtualNode::Dummy(ei) if *ei == edge_idx),
+                            ) {
+                                let dummy = levels[level_idx].remove(dummy_pos);
+
+                                // Insert it right after the source position (but clamped to valid range)
+                                // Count how many real nodes are in this level
+                                let real_count = levels[level_idx].iter().filter(|vn| vn.is_real()).count();
+
+                                // Insert position: try to align with source, but after real nodes
+                                // if source position is beyond what we have
+                                let insert_pos = if src_pos < real_count {
+                                    // Insert right after the equivalent position
+                                    src_pos + 1
+                                } else {
+                                    // Source position is beyond this level's real nodes,
+                                    // insert at end of real nodes
+                                    real_count
+                                };
+
+                                // Insert, clamping to valid range
+                                let insert_pos = insert_pos.min(levels[level_idx].len());
+                                levels[level_idx].insert(insert_pos, dummy);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Build edges between adjacent levels in the virtual layout.
@@ -492,8 +609,8 @@ impl<'a> DAG<'a> {
                         current_col += layout.widths[current_level][pos];
                     }
                     VirtualNode::Dummy(_) => {
-                        // Dummy nodes are invisible in the node row
-                        output.push(' ');
+                        // Dummy nodes show as vertical line to indicate skip-level edge passing through
+                        output.push(V_LINE);
                         current_col += 1;
                     }
                 }
@@ -636,52 +753,74 @@ impl<'a> DAG<'a> {
         writeln!(output).ok();
 
         if has_crossings {
-            // Complex case: draw divergence first (sources branching out)
-            // Line 2a: Divergence from sources
+            // Complex case: multiple sources converging to multiple targets with crossings
+            // Lines come DOWN from sources, turn horizontal, then continue down to targets
+            // 
+            // Source positions: lines come FROM ABOVE → use ┴ (TEE_UP)
+            // Target positions: lines go DOWN TO → use ┬ (TEE_DOWN)
+            // Both source AND target: use ┼ (CROSS)
+            
+            // Find the overall span of the horizontal routing line
+            let all_positions: Vec<usize> = going_right
+                .iter()
+                .flat_map(|(f, t)| [*f, *t])
+                .chain(going_left.iter().flat_map(|(f, t)| [*f, *t]))
+                .chain(straight_down.iter().copied())
+                .collect();
+            
+            let min_x = *all_positions.iter().min().unwrap_or(&0);
+            let max_x = *all_positions.iter().max().unwrap_or(&0);
+            
             let mut line2a: Vec<char> = vec![' '; max_pos + 1];
 
-            // Draw all going_right and going_left as divergence
-            for &(from_x, to_x) in &going_right {
-                for i in from_x..=to_x {
-                    if i == from_x {
-                        line2a[i] = if line2a[i] == CORNER_UL {
-                            TEE_DOWN
-                        } else {
-                            CORNER_UR
-                        };
-                    } else if i == to_x {
-                        line2a[i] = CORNER_UL;
-                    } else if line2a[i] == ' ' {
-                        line2a[i] = H_LINE;
-                    }
+            // First, draw the horizontal line across the entire span
+            for i in min_x..=max_x {
+                line2a[i] = H_LINE;
+            }
+            
+            // Mark source positions (where lines come down from above) with ┴
+            for &x in &sources {
+                if x >= min_x && x <= max_x {
+                    line2a[x] = TEE_UP; // ┴ - line comes from above
                 }
             }
-            for &(from_x, to_x) in &going_left {
-                for i in to_x..=from_x {
-                    if i == from_x {
-                        line2a[i] = if line2a[i] == CORNER_UR {
-                            TEE_DOWN
-                        } else {
-                            CORNER_UL
-                        };
-                    } else if i == to_x {
-                        line2a[i] = if line2a[i] == CORNER_UL {
-                            TEE_DOWN
-                        } else {
-                            CORNER_UR
-                        };
-                    } else if line2a[i] == ' ' {
-                        line2a[i] = H_LINE;
-                    }
+            
+            // Mark target positions (where lines go down to) with ┬
+            // If already ┴ (source), upgrade to ┼ (cross)
+            for &x in &targets {
+                if x >= min_x && x <= max_x {
+                    line2a[x] = match line2a[x] {
+                        TEE_UP => CROSS,  // Both source and target → cross
+                        H_LINE => TEE_DOWN, // Only target → ┬
+                        _ => line2a[x],
+                    };
                 }
             }
-            // Add straight down
-            for &x in &straight_down {
-                if line2a[x] == ' ' {
-                    line2a[x] = V_LINE;
-                } else if line2a[x] == H_LINE {
-                    line2a[x] = TEE_DOWN;
-                }
+            
+            // Fix the endpoints based on whether they're source or target
+            // Left endpoint
+            if min_x < line2a.len() {
+                line2a[min_x] = if sources.contains(&min_x) && targets.contains(&min_x) {
+                    CROSS // Both
+                } else if sources.contains(&min_x) {
+                    CORNER_DR // └ - source only (line from above)
+                } else if targets.contains(&min_x) {
+                    CORNER_UR // ┌ - target only (line goes down)
+                } else {
+                    line2a[min_x]
+                };
+            }
+            // Right endpoint
+            if max_x < line2a.len() {
+                line2a[max_x] = if sources.contains(&max_x) && targets.contains(&max_x) {
+                    CROSS // Both
+                } else if sources.contains(&max_x) {
+                    CORNER_DL // ┘ - source only (line from above)
+                } else if targets.contains(&max_x) {
+                    CORNER_UL // ┐ - target only (line goes down)
+                } else {
+                    line2a[max_x]
+                };
             }
 
             for ch in &line2a {
@@ -772,6 +911,13 @@ impl<'a> DAG<'a> {
             .iter()
             .flat_map(|(_, sources)| sources.iter().map(|(x, _)| *x))
             .collect();
+        
+        // Identify 1-to-1 connections (targets with only 1 source) - these are "pass-through"
+        let pass_through: Vec<(usize, usize)> = target_groups
+            .iter()
+            .filter(|(_, sources)| sources.len() == 1)
+            .map(|(target, sources)| (sources[0].0, *target))
+            .collect();
 
         // Line 1: Vertical drops
         for i in 0..=max_pos {
@@ -783,9 +929,13 @@ impl<'a> DAG<'a> {
         }
         writeln!(output).ok();
 
-        // Line 2: Horizontal convergence
+        // Line 2: Horizontal convergence + vertical pass-through
         for i in 0..=max_pos {
             let mut ch = ' ';
+            
+            // Check if this is a pass-through source position (straight down)
+            let is_pass_through_src = pass_through.iter().any(|(src, _)| *src == i);
+            
             for (_, sources) in target_groups.iter() {
                 if sources.len() <= 1 {
                     continue;
@@ -804,6 +954,12 @@ impl<'a> DAG<'a> {
                     ch = H_LINE;
                 }
             }
+            
+            // If this position is a pass-through and not already part of convergence line
+            if is_pass_through_src && ch == ' ' {
+                ch = V_LINE;
+            }
+            
             output.push(ch);
         }
         writeln!(output).ok();
@@ -820,6 +976,7 @@ impl<'a> DAG<'a> {
     }
 
     /// Draw pure divergence pattern.
+    /// Uses top corners (┌, ┐) because lines go DOWN from the horizontal routing line.
     fn draw_divergence_connections(
         &self,
         output: &mut String,
@@ -838,7 +995,7 @@ impl<'a> DAG<'a> {
         }
         writeln!(output).ok();
 
-        // Line 2: Horizontal divergence
+        // Line 2: Horizontal divergence - each source fans out with TOP corners
         for i in 0..=max_pos {
             let mut ch = ' ';
             for (_, targets) in source_groups.iter() {
@@ -850,11 +1007,11 @@ impl<'a> DAG<'a> {
                 let max_tgt = *target_xs.iter().max().unwrap();
 
                 if i == min_tgt {
-                    ch = CORNER_UR;
+                    ch = CORNER_UR; // ┌
                 } else if i == max_tgt {
-                    ch = CORNER_UL;
+                    ch = CORNER_UL; // ┐
                 } else if target_xs.contains(&i) {
-                    ch = TEE_DOWN;
+                    ch = TEE_DOWN; // ┬
                 } else if i > min_tgt && i < max_tgt && ch == ' ' {
                     ch = H_LINE;
                 }

@@ -118,8 +118,12 @@ extern crate alloc;
 // Core modules (always available)
 pub mod cycles;
 pub mod graph;
+pub mod ir;
 pub mod layout;
 pub mod render;
+
+// Re-export IR types for convenience
+pub use ir::{LayoutIR, LayoutIRBuilder, LayoutNode, LayoutEdge, EdgePath};
 
 // Backward compatibility re-exports
 pub use graph::{DAG, RenderMode};
