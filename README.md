@@ -398,7 +398,7 @@ This library implements a **pragmatic variation** of the Sugiyama Layered Graph 
 | **Crossing Reduction** | Barycenter Method | **Median Heuristic** | Efficiently untangles most common spaghetti patterns. |
 | **Routing** | Spline Routing | **Grid-Router & "Side-Channel"** | Long skip-edges are routed via "dummy nodes" to the side, preventing visual clutter in the main flow. |
 
-## Limitations & Design Choices (v0.4.x)
+## Limitations & Design Choices (v0.5.x)
 
 This is a production-ready, zero-dependency rendering engine.
 
@@ -452,7 +452,7 @@ Control bundle size by enabling only what you need:
 
 ```toml
 [dependencies]
-ascii-dag = { version = "0.4", default-features = false }
+ascii-dag = { version = "0.5", default-features = false }
 ```
 *Note: Using `default-features = false` requires an `extern crate alloc;` in your root.*
 
@@ -518,6 +518,96 @@ Licensed under either of:
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 at your option.
+
+## Advanced Usage
+
+### Custom Renderers (Layout Engine)
+Want to draw to an HTML Canvas, SVG, or ANSI terminal?
+Use `compute_layout()` to get the intermediate representation (IR) with calculated positions:
+
+```rust
+use ascii_dag::DAG;
+
+let dag = DAG::from_edges(
+    &[(1, "A"), (2, "B"), (3, "C")],
+    &[(1, 2), (1, 3), (2, 3)]
+);
+
+let ir = dag.compute_layout();
+
+// Layout dimensions
+println!("Canvas: {}x{} chars", ir.width(), ir.height());
+println!("Levels: {}", ir.level_count());
+
+// Iterate nodes with full position info
+for node in ir.nodes() {
+    println!(
+        "Node '{}' (id={}) at ({}, {}), width={}, center_x={}",
+        node.label, node.id, node.x, node.y, node.width, node.center_x
+    );
+}
+
+// Iterate edges with routing info
+for edge in ir.edges() {
+    println!(
+        "Edge {} → {}: from ({},{}) to ({},{})",
+        edge.from_id, edge.to_id,
+        edge.from_x, edge.from_y,
+        edge.to_x, edge.to_y
+    );
+    
+    // Check routing type
+    match &edge.path {
+        ascii_dag::ir::EdgePath::Direct => println!("  Route: direct"),
+        ascii_dag::ir::EdgePath::Corner { horizontal_y } => {
+            println!("  Route: L-shaped at y={}", horizontal_y);
+        }
+        ascii_dag::ir::EdgePath::SideChannel { channel_x, .. } => {
+            println!("  Route: side channel at x={}", channel_x);
+        }
+        ascii_dag::ir::EdgePath::MultiSegment { waypoints } => {
+            println!("  Route: {} waypoints", waypoints.len());
+        }
+    }
+}
+
+// Useful helpers
+if let Some(node) = ir.node_by_id(2) {       // O(1) lookup
+    println!("Found node B at level {}", node.level);
+}
+
+for node in ir.nodes_at_level(1) {           // Get nodes at depth 1
+    println!("Level 1: {}", node.label);
+}
+
+if let Some(node) = ir.node_at(5, 2) {       // Hit testing for mouse interaction
+    println!("Clicked on: {}", node.label);
+}
+```
+
+**IR Structures:**
+
+| Struct | Fields | Description |
+|--------|--------|-------------|
+| `LayoutIR` | `width()`, `height()`, `level_count()` | Overall layout dimensions |
+| `LayoutNode` | `id`, `label`, `x`, `y`, `width`, `center_x`, `level` | Node position & metadata |
+| `LayoutEdge` | `from_id`, `to_id`, `from_x`, `from_y`, `to_x`, `to_y`, `path` | Edge routing info |
+| `EdgePath` | `Direct`, `Corner`, `SideChannel`, `MultiSegment` | How the edge is routed |
+
+### Render Modes
+Control the layout direction.
+
+**⚠️ Warning:** `Horizontal` mode is strictly for linear chains. If used on a branching graph, it will only render the first child and **discard** other branches.
+
+```rust
+use ascii_dag::graph::RenderMode;
+
+// Force horizontal (Compact, but lossy for branches)
+dag.set_render_mode(RenderMode::Horizontal); 
+
+// Default (Vertical, handles all topology)
+dag.set_render_mode(RenderMode::Auto);
+```
 
 ## Contribution
 
