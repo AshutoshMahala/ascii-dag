@@ -33,7 +33,22 @@ Draw DAGs in your terminal. **Fast.** Zero dependencies.
 - 📦 **Tiny**: ~55KB (WASM release).
 - ⚡ **Fast**: Optimized iterative layout via custom side-channel routing.
 - 🔗 **Robust**: Handles diamonds, cycles (detected safely), and skip-level edges.
+- 🧩 **Headless**: Calculate layout only (IR) and render to SVG/Canvas/anything.
 - 🎨 **Beautiful**: Uses Unicode box-drawing characters for clean TUI output.
+
+## Alternatives Comparison
+
+Here's a quick comparison with other popular graph tools to help you choose the right tool for your needs:
+
+| Feature | ascii-dag | petgraph | Graphviz (dot) |
+|---|---:|:---:|:---:|
+| Primary Goal | Visualization (Terminal) | Algorithms (Shortest Path, etc.) | Visualization (Image / SVG / PDF) |
+| Dependencies | 0 (Zero) | Minimal | Heavy (binary / C libs) |
+| WASM Size | **~46 - 55 KB** | ~30 KB | 2 MB+ (via Viz.js) |
+| Layout Engine | Built-in (Sugiyama) | None (manual positioning) | Built-in (advanced, many options) |
+| Environment | Terminal / Web / Headless | Code / Logic | Desktop / Web
+
+Use ascii-dag when you want compact, zero-dependency terminal visualization with a built-in layout engine. If you need heavy graph algorithms use `petgraph`; for high-fidelity image output and advanced layout options, use Graphviz.
 
 ## Quick Start
 
@@ -462,8 +477,8 @@ Available features:
 - `warnings`: Enable debug warnings for auto-created nodes
 
 **Bundle Size Impact**:
-- Core renderer only (`--no-default-features --features std`): ~46KB WASM
-- With generic features (default): ~55KB WASM
+- **Headless** (Layout Only): **~46 KB** (Automatic dead-code elimination)
+- **Full Renderer** (Default): **~55 KB**
 
 ### Resource Limits
 
@@ -493,8 +508,8 @@ Verified iteratively safe on scaling topologies (no stack overflow):
 | Topology | Nodes | Render Time | Output Size | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | **Diamond Lattice** | **20,164** | ~1.5s | 0.61 MB | ✅ Success |
-| **Diamond Lattice** | **50,176** | ~9.4s | 1.52 MB | ✅ Success |
-| **Wide Fan** | **50,000** | ~28s | 2.81 MB | ✅ Success |
+| **Diamond Lattice** | **50,176** | ~14s | 1.52 MB | ✅ Success |
+| **Wide Fan** | **50,000** | ~31s | 2.81 MB | ✅ Success |
 
 *Tested on release build. "Fan" topology represents the worst-case scenario for crossing reduction (single massive layer).*
 
