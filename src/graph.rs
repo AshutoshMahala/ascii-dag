@@ -554,6 +554,9 @@ impl<'a> DAG<'a> {
         }
 
         // Add edges with routing info
+        // Track max channel_x for width calculation
+        let mut max_channel_x = max_width;
+        
         for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
             if let (Some(from_idx), Some(to_idx)) =
                 (self.node_index(from_id), self.node_index(to_id))
@@ -594,8 +597,22 @@ impl<'a> DAG<'a> {
                         }
                     } else {
                         // Skip-level edge - side channel routing
+                        // Channel must be to the RIGHT of all nodes at ALL intermediate levels
+                        let mut max_right = from_x.max(to_x);
+                        for level in from_level..=to_level {
+                            // Get rightmost node edge at this level (after centering)
+                            let level_offset = if max_width > level_widths[level] {
+                                (max_width - level_widths[level]) / 2
+                            } else {
+                                0
+                            };
+                            let right_edge = level_widths[level] + level_offset;
+                            max_right = max_right.max(right_edge);
+                        }
+                        let channel_x = max_right + 2; // 2 chars spacing from rightmost node
+                        max_channel_x = max_channel_x.max(channel_x + 1);
                         EdgePath::SideChannel {
-                            channel_x: from_x.max(to_x) + 3,
+                            channel_x,
                             start_y: from_y + 1,
                             end_y: to_y - 1,
                         }
@@ -615,7 +632,7 @@ impl<'a> DAG<'a> {
             }
         }
 
-        builder.set_dimensions(max_width, total_height);
+        builder.set_dimensions(max_channel_x, total_height);
         builder.build()
     }
 }

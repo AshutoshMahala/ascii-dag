@@ -98,36 +98,31 @@ fn generate_layered_graph<'a>(dag: &mut DAG<'a>, node_count: usize, rng: &mut Si
 }
 
 fn run_benchmark(count: usize) {
-    reset_metrics();
     println!("benchmarking {} nodes...", count);
 
     let mut rng = SimpleRng::new(12345);
 
-    // Phase 1: Construction
+    // Phase 1: Construction (runs on DEVICE)
+    reset_metrics();
     let start_build = Instant::now();
     let mut dag = DAG::new();
     generate_layered_graph(&mut dag, count, &mut rng);
     let build_time = start_build.elapsed();
+    let build_peak_mem = get_peak_memory();
 
-    // Phase 2: Rendering
-    // We measure render_to because standard render() allocates a string which puts noise in our memory metric
-    // We want to measure the *algorithm's* memory usage, not the output buffer size (which is unavoidable).
+    // Phase 2: Rendering (runs on HOST)
+    reset_metrics();
     let start_render = Instant::now();
     let mut output = String::with_capacity(count * 100); // Pre-allocate output to minimize buffer noise
-    let reset_mem_before_render = get_peak_memory(); // Snapshot memory before algorithm runs
 
     dag.render_to(&mut output);
 
     let render_time = start_render.elapsed();
-    let peak_mem = get_peak_memory();
-
-    // Note: This Peak Mem includes the Graph structure itself + Algorithms + Output Buffer growth
-    // It is an "Total Integration" cost.
+    let render_peak_mem = get_peak_memory();
 
     println!("  Nodes: {}", count);
-    println!("  Build: {:?}", build_time);
-    println!("  Render: {:?}", render_time);
-    println!("  Peak RAM: {:.2} KB", peak_mem as f64 / 1024.0);
+    println!("  Build:  {:?} | Peak RAM: {:.2} KB  <-- DEVICE", build_time, build_peak_mem as f64 / 1024.0);
+    println!("  Render: {:?} | Peak RAM: {:.2} KB  <-- HOST", render_time, render_peak_mem as f64 / 1024.0);
     println!("  Output size: {:.2} KB", output.len() as f64 / 1024.0);
     println!("--------------------------------");
 }

@@ -202,6 +202,14 @@ impl<'a> DAG<'a> {
         buf
     }
 
+    /// Render using the classic renderer (pre-0.6 behavior).
+    /// This renderer has more sophisticated edge routing but is slower.
+    pub fn render_classic(&self) -> String {
+        let mut buf = String::with_capacity(self.estimate_size());
+        self.render_classic_to(&mut buf);
+        buf
+    }
+
     /// Render the DAG into a provided buffer (zero-allocation).
     ///
     /// # Examples
@@ -219,6 +227,43 @@ impl<'a> DAG<'a> {
     /// assert!(!buffer.is_empty());
     /// ```
     pub fn render_to(&self, output: &mut String) {
+        if self.nodes.is_empty() {
+            output.push_str("Empty DAG");
+            return;
+        }
+
+        // Check for cycles - use classic renderer for this special case
+        if self.has_cycle() {
+            self.render_cycle(output);
+            return;
+        }
+
+        // Determine render mode
+        let is_chain = self.is_simple_chain();
+        let mode = match self.render_mode {
+            RenderMode::Auto => {
+                if is_chain {
+                    RenderMode::Horizontal
+                } else {
+                    RenderMode::Vertical
+                }
+            }
+            other => other,
+        };
+
+        // Use classic renderer for horizontal mode (scanline doesn't support it yet)
+        if mode == RenderMode::Horizontal {
+            self.render_horizontal(output);
+            return;
+        }
+
+        // Use fast scanline renderer for vertical mode
+        let ir = self.compute_layout();
+        ir.render_scanline_to(output);
+    }
+
+    /// Render using the classic renderer into a buffer.
+    pub fn render_classic_to(&self, output: &mut String) {
         if self.nodes.is_empty() {
             output.push_str("Empty DAG");
             return;

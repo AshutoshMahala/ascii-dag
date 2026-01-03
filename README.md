@@ -27,10 +27,10 @@ Draw DAGs in your terminal. **Fast.** Zero dependencies.
 ## Why?
 - **Zero Dependencies**: Drop it into any `no_std`, WASM, or embedded project.
 - **Visual Error Chains**: Show users *why* their build failed (Cycle detected? Dependency missing?).
-- **Fast**: Renders 1000 nodes in ~185ms with full layout computation.
+- **Fast**: Renders 1000 nodes in ~20ms with full layout computation.
 
 ## Features at a Glance
-- 📦 **Tiny**: ~51KB (WASM release).
+- 📦 **Tiny**: ~55KB (WASM release).
 - ⚡ **Fast**: Optimized iterative layout via custom side-channel routing.
 - 🔗 **Robust**: Handles diamonds, cycles (detected safely), and skip-level edges.
 - 🎨 **Beautiful**: Uses Unicode box-drawing characters for clean TUI output.
@@ -462,8 +462,8 @@ Available features:
 - `warnings`: Enable debug warnings for auto-created nodes
 
 **Bundle Size Impact**:
-- Core renderer only (`--no-default-features --features std`): ~41KB WASM
-- With generic features (default): ~77KB WASM
+- Core renderer only (`--no-default-features --features std`): ~46KB WASM
+- With generic features (default): ~55KB WASM
 
 ### Resource Limits
 
@@ -474,13 +474,14 @@ Available features:
 
 **Benchmark Results** (Consumer Desktop, Release Build):
 
-| Nodes | Build Time | **Render Time** | Peak RAM | Output |
-| :--- | :--- | :--- | :--- | :--- |
-| **50** | 62µs | **0.7ms** | ~101 KB | 30 KB |
-| **100** | 69µs | **2.5ms** | ~352 KB | 98 KB |
-| **500** | 0.34ms | **36ms** | ~5.9 MB | 1.9 MB |
-| **1000** | 0.69ms | **182ms** | ~23 MB | 7.5 MB |
+| Nodes | Build Time | Build RAM | Render Time | Render RAM | Output |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **50** | 58µs | 12 KB | 292µs | 54 KB | 8 KB |
+| **100** | 71µs | 23 KB | 508µs | 155 KB | 24 KB |
+| **500** | 333µs | 108 KB | 5.1ms | 2.0 MB | 440 KB |
+| **1000** | 674µs | 216 KB | 18.2ms | 7.4 MB | 1.9 MB |
 
+*Build = DAG construction (device-side friendly), Render = layout + ASCII output (host-side)*
 *Measured via `cargo run --example benchmark --release`*
 
 **Memory usage**:

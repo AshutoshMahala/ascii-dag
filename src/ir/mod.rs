@@ -39,11 +39,31 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::OnceCell;
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap as HashMap;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
+
+/// Spatial index for fast scanline rendering.
+/// Maps a Y coordinate to the nodes and edges that occupy that line.
+#[derive(Debug, Clone)]
+pub struct LineOccupancy {
+    /// Indices of nodes that appear on this line
+    pub node_indices: Vec<usize>,
+    /// Indices of edges that cross this line
+    pub edge_indices: Vec<usize>,
+}
+
+impl LineOccupancy {
+    fn new() -> Self {
+        Self {
+            node_indices: Vec::new(),
+            edge_indices: Vec::new(),
+        }
+    }
+}
 
 /// A node in the laid-out graph with computed position and dimensions.
 #[derive(Debug, Clone)]
@@ -133,6 +153,8 @@ pub struct LayoutIR<'a> {
     pub(crate) levels: Vec<Vec<usize>>,
     /// O(1) lookup from node ID to index in nodes vec
     pub(crate) id_to_index: HashMap<usize, usize>,
+    /// Spatial index for fast scanline rendering (built lazily on first access)
+    y_index: OnceCell<Vec<LineOccupancy>>,
 }
 
 impl<'a> LayoutIR<'a> {
@@ -189,6 +211,48 @@ impl<'a> LayoutIR<'a> {
     /// Get all edges ending at a node.
     pub fn edges_to(&self, node_id: usize) -> impl Iterator<Item = &LayoutEdge> {
         self.edges.iter().filter(move |e| e.to_id == node_id)
+    }
+
+    /// Get or build the spatial Y-index for fast scanline rendering.
+    /// This is computed lazily on first access and cached for subsequent calls.
+    ///
+    /// Returns a slice where index `y` contains all nodes and edges that occupy line `y`.
+    pub fn y_index(&self) -> &[LineOccupancy] {
+        self.y_index.get_or_init(|| self.build_y_index())
+    }
+
+    /// Build the Y-index spatial structure.
+    /// Maps each Y coordinate to the nodes and edges that appear on that line.
+    fn build_y_index(&self) -> Vec<LineOccupancy> {
+        let mut index = vec![LineOccupancy::new(); self.height];
+
+        // Index nodes: each node occupies exactly one line (its Y coordinate)
+        // TODO: Support multi-line nodes in the future
+        for (node_idx, node) in self.nodes.iter().enumerate() {
+            if node.y < self.height {
+                index[node.y].node_indices.push(node_idx);
+            }
+        }
+
+        // Index edges: each edge may span multiple lines
+        for (edge_idx, edge) in self.edges.iter().enumerate() {
+            let min_y = edge.from_y.min(edge.to_y);
+            let max_y = edge.from_y.max(edge.to_y);
+
+            for y in min_y..=max_y {
+                if y < self.height {
+                    index[y].edge_indices.push(edge_idx);
+                }
+            }
+        }
+
+        index
+    }
+
+    /// Get items that occupy a specific line (fast lookup with Y-index).
+    /// Returns node and edge indices for the given Y coordinate.
+    pub fn items_at_line(&self, y: usize) -> Option<&LineOccupancy> {
+        self.y_index().get(y)
     }
 
     /// Check if two edges cross each other.
@@ -349,6 +413,7 @@ impl<'a> LayoutIRBuilder<'a> {
             level_count: self.level_count,
             levels: self.levels,
             id_to_index,
+            y_index: OnceCell::new(),
         }
     }
 }

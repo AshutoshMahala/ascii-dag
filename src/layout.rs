@@ -108,6 +108,7 @@ impl<'a> DAG<'a> {
 
     /// Order nodes by median position of their parents.
     /// Optimized: uses index-based lookups to avoid allocations.
+    #[inline]
     fn order_by_median_parents(&self, level_nodes: &mut Vec<usize>, parent_level: &[usize]) {
         let mut node_medians: Vec<(usize, f32)> = Vec::with_capacity(level_nodes.len());
 
@@ -144,6 +145,7 @@ impl<'a> DAG<'a> {
 
     /// Order nodes by median position of their children.
     /// Optimized: uses index-based lookups to avoid allocations.
+    #[inline]
     fn order_by_median_children(&self, level_nodes: &mut Vec<usize>, child_level: &[usize]) {
         let mut node_medians: Vec<(usize, f32)> = Vec::with_capacity(level_nodes.len());
 
@@ -194,28 +196,35 @@ impl<'a> DAG<'a> {
     }
 
     /// Collect all nodes connected to the given node (helper for find_subgraphs).
+    #[inline]
     fn collect_connected(&self, start_idx: usize, visited: &mut [bool], subgraph: &mut Vec<usize>) {
-        if visited[start_idx] {
-            return;
-        }
+        let mut stack = Vec::new();
+        stack.push(start_idx);
 
-        visited[start_idx] = true;
-        subgraph.push(start_idx);
-
-        let node_id = self.nodes[start_idx].0;
-
-        // Follow edges in both directions
-        for &(from, to) in &self.edges {
-            if from == node_id {
-                // O(1) HashMap lookup instead of O(n) scan
-                if let Some(child_idx) = self.node_index(to) {
-                    self.collect_connected(child_idx, visited, subgraph);
-                }
+        while let Some(idx) = stack.pop() {
+            if visited[idx] {
+                continue;
             }
-            if to == node_id {
-                // O(1) HashMap lookup instead of O(n) scan
-                if let Some(parent_idx) = self.node_index(from) {
-                    self.collect_connected(parent_idx, visited, subgraph);
+            visited[idx] = true;
+            subgraph.push(idx);
+
+        let node_id = self.nodes[idx].0;
+
+            // Follow edges in both directions
+            for &(from, to) in &self.edges {
+                if from == node_id {
+                    if let Some(child_idx) = self.node_index(to) {
+                        if !visited[child_idx] {
+                            stack.push(child_idx);
+                        }
+                    }
+                }
+                if to == node_id {
+                    if let Some(parent_idx) = self.node_index(from) {
+                        if !visited[parent_idx] {
+                            stack.push(parent_idx);
+                        }
+                    }
                 }
             }
         }
