@@ -484,10 +484,19 @@ Available features:
 *Build = DAG construction (device-side friendly), Render = layout + ASCII output (host-side)*
 *Measured via `cargo run --example benchmark --release`*
 
-**Memory usage**:
-- Base overhead: ~100 bytes per node (cached data structures)
-- Adjacency lists: ~16 bytes per edge (index storage)
 - Rendering buffers: Pre-allocated based on graph size estimate
+
+### Scalability (Stress Tests)
+
+Verified iteratively safe on scaling topologies (no stack overflow):
+
+| Topology | Nodes | Render Time | Output Size | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **Diamond Lattice** | **20,164** | ~1.5s | 0.61 MB | ✅ Success |
+| **Diamond Lattice** | **50,176** | ~9.4s | 1.52 MB | ✅ Success |
+| **Wide Fan** | **50,000** | ~28s | 2.81 MB | ✅ Success |
+
+*Tested on release build. "Fan" topology represents the worst-case scenario for crossing reduction (single massive layer).*
 
 **Performance characteristics**:
 - Node/edge insertion: O(1) amortized

@@ -38,6 +38,8 @@ fn main() {
         ("The Skip-Level Nightmare", test_skip_level_nightmare),
         ("The Verbose Logger", test_verbose_logger),
         ("The Ouroboros", test_ouroboros),
+        ("Massive Diamond (50k)", test_massive_diamond_50k),
+        ("Massive Fan (50k)", test_massive_fan_50k),
     ];
 
     for (name, test_fn) in tests {
@@ -47,7 +49,13 @@ fn main() {
         let output = dag.render();
         let duration = start.elapsed();
 
-        println!("{}", output);
+        if name.contains("Massive") {
+            println!("(Output suppressed. Length: {} chars)", output.len());
+            let size_mb = output.len() as f64 / 1024.0 / 1024.0;
+            println!(">>> Approx Output RAM: {:.2} MB <<<", size_mb);
+        } else {
+            println!("{}", output);
+        }
         println!(">>> Rendered in {:?} <<<\n", duration);
         println!("------------------------------------------------------------");
     }
@@ -219,5 +227,40 @@ fn test_ouroboros() -> DAG<'static> {
     dag.add_edge(1, 2);
     dag.add_edge(2, 3);
     dag.add_edge(3, 1); // Cycle!
+    dag
+}
+
+fn test_massive_diamond_50k() -> DAG<'static> {
+    let mut dag = DAG::new();
+    let width = 224;
+    let height = 224; // ~50k nodes
+    
+    for y in 0..height {
+        for x in 0..width {
+            let id = y * width + x;
+            dag.add_node(id, ".");
+            if y < height - 1 {
+                let next_y_base = (y + 1) * width;
+                dag.add_edge(id, next_y_base + x);
+                if x < width - 1 {
+                    dag.add_edge(id, next_y_base + (x + 1));
+                }
+            }
+        }
+    }
+    dag
+}
+
+fn test_massive_fan_50k() -> DAG<'static> {
+    let mut dag = DAG::new();
+    let root = 0;
+    let sink = 50001;
+    dag.add_node(root, "S");
+    dag.add_node(sink, "E");
+    for i in 1..=50000 {
+        dag.add_node(i, ".");
+        dag.add_edge(root, i);
+        dag.add_edge(i, sink);
+    }
     dag
 }
