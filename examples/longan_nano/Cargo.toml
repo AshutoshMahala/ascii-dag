@@ -1,0 +1,17 @@
+[package]
+name = "longan-ascii-dag"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ascii-dag = { path = "../../", default-features = false }
+longan-nano = { git = "https://github.com/riscv-rust/longan-nano", features = ["lcd"] }
+riscv-rt = "0.11"
+riscv = { version = "0.10", features = ["critical-section-single-hart"] }
+embedded-alloc = "0.5"
+panic-halt = "0.2"
+embedded-graphics = "0.7"
+
+[[bin]]
+name = "longan_demo"
+path = "src/main.rs"

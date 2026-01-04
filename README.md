@@ -36,6 +36,23 @@ Draw DAGs in your terminal. **Fast.** Zero dependencies.
 - 🧩 **Headless**: Calculate layout only (IR) and render to SVG/Canvas/anything.
 - 🎨 **Beautiful**: Uses Unicode box-drawing characters for clean TUI output.
 
+
+## Use Cases
+
+**🛠️ For Tool Authors**
+- **Error Diagnostics**: Show exactly *why* a build failed (e.g., "Circular dependency in module X").
+- **Build Systems**: Visualize task execution graphs in the terminal.
+- **Package Managers**: Print dependency trees that handle standard `tree` commands poorly (diamonds).
+
+**⚡ For Systems Engineers**
+- **Circuit/Logic Design**: Visualize digital signal flows and logic gate connections.
+- **Data Pipelines**: Debug ETL jobs and airflow DAGs directly in logs.
+- **Distributed Systems**: Trace request paths across microservices.
+
+**🌐 For Embedded & Web**
+- **IoT Consoles**: Debug state machines on devices with no display.
+- **Headless Rendering**: Calculate layout on the client-side for Canvas/SVG visualization.
+
 ## Alternatives Comparison
 
 Here's a quick comparison with other popular graph tools to help you choose the right tool for your needs:
@@ -49,6 +66,8 @@ Here's a quick comparison with other popular graph tools to help you choose the 
 | Environment | Terminal / Web / Headless | Code / Logic | Desktop / Web
 
 Use ascii-dag when you want compact, zero-dependency terminal visualization with a built-in layout engine. If you need heavy graph algorithms use `petgraph`; for high-fidelity image output and advanced layout options, use Graphviz.
+
+
 
 ## Quick Start
 
@@ -413,7 +432,7 @@ This library implements a **pragmatic variation** of the Sugiyama Layered Graph 
 | **Crossing Reduction** | Barycenter Method | **Median Heuristic** | Efficiently untangles most common spaghetti patterns. |
 | **Routing** | Spline Routing | **Grid-Router & "Side-Channel"** | Long skip-edges are routed via "dummy nodes" to the side, preventing visual clutter in the main flow. |
 
-## Limitations & Design Choices (v0.5.x)
+## Limitations & Design Choices (v0.6.x)
 
 This is a production-ready, zero-dependency rendering engine.
 
@@ -425,9 +444,9 @@ This is a production-ready, zero-dependency rendering engine.
 ### Performance
 - **Optimized hot paths**: O(1) HashMap lookups, cached widths, zero allocations in rendering loop.
 - **Scale**:
-    - **Tiny**: ~77KB WASM binary.
-    - **Fast**: Renders 100+ nodes in microseconds.
-    - **Scalable**: Regularly tested with graphs 50 layers deep and 200+ chars wide.
+    - **Tiny**: ~46-55KB WASM binary.
+    - **Fast**: Renders 1000+ nodes in milliseconds.
+    - **Scalable**: Regularly tested with 50,000+ nodes and deep hierarchies.
 
 ### What This Crate Does Well
 ✅ **Error Chain Visualization**: The primary use-case.
@@ -467,7 +486,7 @@ Control bundle size by enabling only what you need:
 
 ```toml
 [dependencies]
-ascii-dag = { version = "0.5", default-features = false }
+ascii-dag = { version = "0.6", default-features = false }
 ```
 *Note: Using `default-features = false` requires an `extern crate alloc;` in your root.*
 
@@ -485,7 +504,7 @@ Available features:
 **Tested configurations**:
 - ✅ Up to 1,000 nodes with acceptable performance
 - ✅ Dense graphs (high edge count) handled efficiently via cached adjacency lists
-- ⚠️ Very large graphs (>10,000 nodes) may experience slower layout computation
+- ⚠️ Very large graphs (>10,000 nodes) will take seconds to layout but will complete successfully.
 
 **Benchmark Results** (Consumer Desktop, Release Build):
 
@@ -500,6 +519,16 @@ Available features:
 *Measured via `cargo run --example benchmark --release`*
 
 - Rendering buffers: Pre-allocated based on graph size estimate
+
+**Embedded Performance** (RP2040 / Cortex-M0+ @ 125MHz):
+
+| Graph | Nodes | Time (Render) | RAM Usage |
+| :--- | :--- | :--- | :--- |
+| **Small** (Build Pipeline) | 10 | ~3 ms | 3.4 KB |
+| **Medium** (Binary Tree) | 31 | ~5 ms | 11.5 KB |
+| **Linear Chain** | 50 | ~2.5 ms | 19.5 KB |
+
+*Measured on physical hardware (Raspberry Pi Pico) using `examples/rp2040_pico`.*
 
 ### Scalability (Stress Tests)
 
@@ -524,16 +553,6 @@ Verified iteratively safe on scaling topologies (no stack overflow):
 - For untrusted input, consider limiting graph size to prevent resource exhaustion
 - Maximum node ID is `usize::MAX` (formatted as up to 20 digits)
 
-## Use Cases
-
-- **Error Diagnostics**: Visualize error dependency chains with cycle prevention
-- **Build Systems**: Show compilation dependencies and detect circular imports
-- **Task Scheduling**: Display task ordering and validate DAG structure
-- **Data Pipelines**: Illustrate data flow and check for feedback loops
-- **Package Managers**: Detect circular dependencies in packages
-- **Generic Cycle Detection**: Apply to any tree/graph structure via closures
-- **IoT**: Lightweight error reporting
-- **WASM**: Client-side error visualization
 
 ## License
 

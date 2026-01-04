@@ -1,0 +1,30 @@
+[package]
+name = "ascii-dag-pico"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Hardware abstraction
+rp2040-hal = { version = "0.10", features = ["rt", "critical-section-impl"] }
+rp2040-boot2 = "0.3"
+fugit = "0.3"  # Time types used by rp2040-hal timer
+
+# USB support
+usb-device = "0.3"
+usbd-serial = "0.2"
+
+# Cortex-M runtime
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+panic-halt = "0.2"
+
+# Allocator for no_std
+embedded-alloc = "0.5"
+
+# Our crate! (use path for local dev, or version for published)
+ascii-dag = { path = "../..", default-features = false }
+
+[profile.release]
+opt-level = "s"      # Optimize for size
+lto = true
+debug = false
