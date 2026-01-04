@@ -1,0 +1,11 @@
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor"
+
+[build]
+target = "xtensa-esp32s3-none-elf"
+
+[unstable]
+build-std = ["core", "alloc"]
+
+[env]
+ESP_LOG_LEVEL = "INFO"

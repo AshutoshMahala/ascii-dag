@@ -1,0 +1,24 @@
+[package]
+name = "esp32s3-ascii-dag"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ascii-dag = { path = "../..", default-features = false }
+esp-hal = "1.0.0"
+esp-println = { version = "0.14", features = ["esp32s3"] }
+esp-backtrace = { version = "0.16", features = ["esp32s3", "println", "panic-handler"] }
+esp-bootloader-esp-idf = { version = "0.4", features = ["esp32s3"] }
+embedded-alloc = "0.6"
+critical-section = "1.2"
+
+[features]
+default = ["esp-hal/esp32s3"]
+
+[profile.dev]
+opt-level = "z"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

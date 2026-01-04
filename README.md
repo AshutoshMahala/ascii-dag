@@ -530,6 +530,19 @@ Available features:
 
 *Measured on physical hardware (Raspberry Pi Pico) using `examples/rp2040_pico`.*
 
+**Embedded Performance** (ESP32-S3 / Xtensa LX7 @ 240MHz):
+
+| Graph | Nodes | Edges | Build | Render | RAM |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **Diamond** | 4 | 4 | 0.5ms | 2.5ms | 1.5 KB |
+| **Build Pipeline** | 10 | 12 | 0.4ms | 4.2ms | 3.4 KB |
+| **Fan-Out/Fan-In** | 12 | 16 | 0.5ms | 3.8ms | 4.6 KB |
+| **Binary Tree** | 31 | 30 | 0.9ms | 7ms | 11.5 KB |
+| **Deep Chain** | 50 | 49 | 1.8ms | 3.5ms | 19.5 KB |
+| **Diamond Lattice** | 64 | 112 | 2.7ms | 18.8ms | 25.5 KB |
+
+*Measured on physical hardware (Seeed XIAO ESP32-S3) using `examples/esp32s3`.*
+
 ### Scalability (Stress Tests)
 
 Verified iteratively safe on scaling topologies (no stack overflow):
