@@ -86,8 +86,8 @@ impl<'a> DAG<'a> {
     /// Applies the Sugiyama crossing reduction algorithm by iteratively
     /// reordering nodes within levels to minimize edge crossings.
     pub(crate) fn reduce_crossings(&self, levels: &mut [Vec<usize>], max_level: usize) {
-        // Iterate a few times for better results (diminishing returns after 4-5 iterations)
-        for _ in 0..4 {
+        // Iterate a variable number of times based on configuration
+        for _ in 0..self.crossing_reduction_passes {
             // Top-down pass: order nodes by median of parents
             for level_idx in 1..=max_level {
                 // Split borrows to avoid clone

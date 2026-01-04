@@ -61,7 +61,7 @@ pub enum RenderMode {
 /// assert!(output.contains("Start"));
 /// assert!(output.contains("End"));
 /// ```
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct DAG<'a> {
     pub(crate) nodes: Vec<(usize, &'a str)>,
     pub(crate) edges: Vec<(usize, usize)>,
@@ -71,6 +71,23 @@ pub struct DAG<'a> {
     pub(crate) node_widths: Vec<usize>,      // Cached formatted widths
     pub(crate) children: Vec<Vec<usize>>,    // Adjacency list: children[idx] = child indices
     pub(crate) parents: Vec<Vec<usize>>,     // Adjacency list: parents[idx] = parent indices
+    pub(crate) crossing_reduction_passes: usize, // Number of passes for crossing reduction algorithm
+}
+
+impl<'a> Default for DAG<'a> {
+    fn default() -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            render_mode: RenderMode::default(),
+            auto_created: HashSet::new(),
+            id_to_index: HashMap::new(),
+            node_widths: Vec::new(),
+            children: Vec::new(),
+            parents: Vec::new(),
+            crossing_reduction_passes: 4, // Default to 4 passes as per original implementation
+        }
+    }
 }
 
 impl<'a> DAG<'a> {
@@ -110,6 +127,7 @@ impl<'a> DAG<'a> {
             node_widths: Vec::new(),
             children: Vec::new(),
             parents: Vec::new(),
+            crossing_reduction_passes: 4,
         };
 
         // Build id_to_index map and widths cache
@@ -145,7 +163,79 @@ impl<'a> DAG<'a> {
         self.render_mode = mode;
     }
 
+    /// Set the number of passes for the crossing reduction algorithm.
+    ///
+    /// - `0`: Skip crossing reduction entirely (fastest, useful for debugging or simple graphs)
+    /// - `1-4`: Good for most graphs (default is 4)
+    /// - `8-10`: Better layouts for complex tangled graphs, but slower
+    ///
+    /// Values > 20 will trigger a warning (diminishing returns).
+    /// Values > 1000 are clamped to 0 with a warning (likely accidental).
+    pub fn set_crossing_reduction_passes(&mut self, passes: usize) {
+        self.crossing_reduction_passes = Self::validate_passes(passes);
+    }
+
+    /// Validate crossing reduction passes, returning a safe value.
+    /// - Values > 1000 are treated as accidental (e.g., -1i32 as usize) and clamped to 0
+    /// - Values > 20 trigger a warning about diminishing returns
+    #[inline]
+    fn validate_passes(passes: usize) -> usize {
+        if passes > 1000 {
+            // Likely accidental: -1 as usize wraps to usize::MAX
+            #[cfg(feature = "std")]
+            eprintln!(
+                "[ascii-dag] Warning: crossing_reduction_passes={} is unreasonably large (possibly from negative value). Clamping to 0.",
+                passes
+            );
+            0
+        } else if passes > 20 {
+            #[cfg(feature = "std")]
+            eprintln!(
+                "[ascii-dag] Warning: crossing_reduction_passes={} is high. Values >20 have diminishing returns and may be slow.",
+                passes
+            );
+            passes
+        } else {
+            passes
+        }
+    }
+
+    /// Builder method: set render mode (chainable).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ascii_dag::graph::{DAG, RenderMode};
+    ///
+    /// let dag = DAG::new()
+    ///     .with_render_mode(RenderMode::Horizontal)
+    ///     .with_crossing_reduction_passes(6);
+    /// ```
+    pub fn with_render_mode(mut self, mode: RenderMode) -> Self {
+        self.render_mode = mode;
+        self
+    }
+
+    /// Builder method: set crossing reduction passes (chainable).
+    ///
+    /// See [`set_crossing_reduction_passes`](Self::set_crossing_reduction_passes) for valid ranges.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ascii_dag::DAG;
+    ///
+    /// let dag = DAG::new()
+    ///     .with_crossing_reduction_passes(8);  // More passes for complex graphs
+    /// ```
+    pub fn with_crossing_reduction_passes(mut self, passes: usize) -> Self {
+        self.crossing_reduction_passes = Self::validate_passes(passes);
+        self
+    }
+
     /// Create a DAG with a specific render mode.
+    ///
+    /// **Deprecated**: Prefer `DAG::new().with_render_mode(mode)` for consistency.
     ///
     /// # Examples
     ///
@@ -155,16 +245,7 @@ impl<'a> DAG<'a> {
     /// let dag = DAG::with_mode(RenderMode::Horizontal);
     /// ```
     pub fn with_mode(mode: RenderMode) -> Self {
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            render_mode: mode,
-            auto_created: HashSet::new(),
-            id_to_index: HashMap::new(),
-            node_widths: Vec::new(),
-            children: Vec::new(),
-            parents: Vec::new(),
-        }
+        Self::new().with_render_mode(mode)
     }
 
     /// Add a node to the DAG.
