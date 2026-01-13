@@ -116,6 +116,7 @@
 extern crate alloc;
 
 // Core modules (always available)
+pub mod arena;
 pub mod cycles;
 pub mod graph;
 pub mod ir;

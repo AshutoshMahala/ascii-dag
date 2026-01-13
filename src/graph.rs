@@ -284,6 +284,49 @@ impl<'a> DAG<'a> {
         }
     }
 
+    /// Add a node with an explicit width override.
+    ///
+    /// This is useful for pixel-based renderers where node width is determined
+    /// by rendered content (HTML elements, custom graphics) rather than label length.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Unique node identifier
+    /// * `label` - Node label text (used for display, not for width calculation)
+    /// * `width` - Explicit width in layout units (character cells for ASCII, 
+    ///             or arbitrary units that will be scaled by the renderer)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ascii_dag::graph::DAG;
+    ///
+    /// let mut dag = DAG::new();
+    /// // Node with explicit width of 20 units (ignores label length)
+    /// dag.add_node_with_width(1, "Short", 20);
+    /// ```
+    pub fn add_node_with_width(&mut self, id: usize, label: &'a str, width: usize) {
+        // Check if node already exists (could be auto-created) - O(1) with HashMap
+        if let Some(&idx) = self.id_to_index.get(&id) {
+            // Promote auto-created node to explicit node
+            self.nodes[idx] = (id, label);
+            // Remove from auto_created set - O(1)
+            self.auto_created.remove(&id);
+            // Use explicit width instead of computed
+            self.node_widths[idx] = width;
+        } else {
+            // Brand new node
+            let idx = self.nodes.len();
+            self.nodes.push((id, label));
+            self.id_to_index.insert(id, idx);
+            // Use explicit width instead of computed
+            self.node_widths.push(width);
+            // Extend adjacency lists
+            self.children.push(Vec::new());
+            self.parents.push(Vec::new());
+        }
+    }
+
     /// Add an edge from one node to another.
     ///
     /// If either node doesn't exist, it will be auto-created as a placeholder.
@@ -546,34 +589,59 @@ impl<'a> DAG<'a> {
             return LayoutIRBuilder::new().build();
         }
 
-        // Step 1: Calculate levels
+        // Step 1: Calculate levels for real nodes
         let level_data = self.calculate_levels();
         let max_level = level_data.iter().map(|(_, l)| *l).max().unwrap_or(0);
 
-        // Create level mapping
+        // Create level mapping for real nodes
         let mut node_levels: Vec<usize> = vec![0; self.nodes.len()];
         for (idx, level) in &level_data {
             node_levels[*idx] = *level;
         }
 
-        // Step 2: Group nodes by level and apply crossing reduction
-        let mut levels: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
+        // Step 2: Build virtual levels with dummy nodes for skip-level edges
+        // Using the external VNode type that implements VNodeTrait
+        let mut virtual_levels: Vec<Vec<VNode>> = vec![Vec::new(); max_level + 1];
+        
+        // Add real nodes to their levels
         for (idx, level) in &level_data {
-            levels[*level].push(*idx);
+            virtual_levels[*level].push(VNode::Real(*idx));
         }
-        self.reduce_crossings(&mut levels, max_level);
+        
+        // Identify skip-level edges and insert dummy nodes
+        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+            if let (Some(from_idx), Some(to_idx)) = (self.node_index(from_id), self.node_index(to_id)) {
+                let from_level = node_levels[from_idx];
+                let to_level = node_levels[to_idx];
+                
+                if to_level > from_level + 1 {
+                    // Skip-level edge - insert dummy nodes at intermediate levels
+                    for level in (from_level + 1)..to_level {
+                        virtual_levels[level].push(VNode::Dummy { edge_idx });
+                    }
+                }
+            }
+        }
 
-        // Step 3: Assign x-coordinates
-        let mut x_coords: Vec<Vec<usize>> = Vec::with_capacity(levels.len());
-        let mut widths: Vec<Vec<usize>> = Vec::with_capacity(levels.len());
+        // Step 3: Apply crossing reduction WITH dummy nodes included
+        // We need to run barycenter on the virtual levels
+        // Convert to a format suitable for median ordering
+        self.reduce_crossings_virtual(&mut virtual_levels, &node_levels, max_level);
 
-        for level_nodes in &levels {
-            let mut level_x = Vec::with_capacity(level_nodes.len());
-            let mut level_w = Vec::with_capacity(level_nodes.len());
+        // Step 4: Assign x-coordinates to virtual nodes
+        let mut x_coords: Vec<Vec<usize>> = Vec::with_capacity(virtual_levels.len());
+        let mut widths: Vec<Vec<usize>> = Vec::with_capacity(virtual_levels.len());
+
+        for level_vnodes in &virtual_levels {
+            let mut level_x = Vec::with_capacity(level_vnodes.len());
+            let mut level_w = Vec::with_capacity(level_vnodes.len());
             let mut x = 0;
 
-            for &idx in level_nodes {
-                let width = self.get_node_width(idx);
+            for vnode in level_vnodes {
+                let width = match vnode {
+                    VNode::Real(idx) => self.get_node_width(*idx),
+                    VNode::Dummy { .. } => 1, // Dummy nodes are minimal width
+                };
                 level_x.push(x);
                 level_w.push(width);
                 x += width + 3; // Standard spacing
@@ -598,16 +666,17 @@ impl<'a> DAG<'a> {
 
         let max_width = *level_widths.iter().max().unwrap_or(&0);
 
-        // Step 4: Build LayoutIR
+        // Step 5: Build LayoutIR
         let mut builder = LayoutIRBuilder::new().with_levels(max_level + 1);
 
-        // Lines per level: node line + connector lines (arrows, horizontal bars, etc.)
-        // Rough estimate: 3 lines per level (node, connector start, connector end)
         let lines_per_level = 3;
         let total_height = (max_level + 1) * lines_per_level;
 
-        // Add nodes with centered positions
-        for (level_idx, level_nodes) in levels.iter().enumerate() {
+        // Build lookup: for each real node, find its (level, position, x, width)
+        let mut real_node_coords: Vec<(usize, usize, usize, usize)> = vec![(0, 0, 0, 0); self.nodes.len()];
+        
+        // Add real nodes to IR and build coordinate lookup
+        for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
             let level_width = level_widths[level_idx];
             let level_offset = if max_width > level_width {
                 (max_width - level_width) / 2
@@ -615,105 +684,314 @@ impl<'a> DAG<'a> {
                 0
             };
 
-            for (pos, &idx) in level_nodes.iter().enumerate() {
-                let (id, label) = self.nodes[idx];
-                let x = x_coords[level_idx][pos] + level_offset;
-                let width = widths[level_idx][pos];
-                let y = level_idx * lines_per_level;
+            for (pos, vnode) in level_vnodes.iter().enumerate() {
+                if let VNode::Real(idx) = vnode {
+                    let (id, label) = self.nodes[*idx];
+                    let x = x_coords[level_idx][pos] + level_offset;
+                    let width = widths[level_idx][pos];
+                    let y = level_idx * lines_per_level;
 
-                builder.add_node(LayoutNode {
-                    id,
-                    label,
-                    x,
-                    y,
-                    width,
-                    center_x: x + width / 2,
-                    level: level_idx,
-                    level_position: pos,
-                });
-            }
-        }
+                    real_node_coords[*idx] = (level_idx, pos, x, width);
 
-        // Add edges with routing info
-        // Track max channel_x for width calculation
-        let mut max_channel_x = max_width;
-        
-        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
-            if let (Some(from_idx), Some(to_idx)) =
-                (self.node_index(from_id), self.node_index(to_id))
-            {
-                let from_level = node_levels[from_idx];
-                let to_level = node_levels[to_idx];
-
-                // Find positions in their levels
-                let from_pos = levels[from_level].iter().position(|&i| i == from_idx);
-                let to_pos = levels[to_level].iter().position(|&i| i == to_idx);
-
-                if let (Some(fp), Some(tp)) = (from_pos, to_pos) {
-                    let from_level_offset = if max_width > level_widths[from_level] {
-                        (max_width - level_widths[from_level]) / 2
-                    } else {
-                        0
-                    };
-                    let to_level_offset = if max_width > level_widths[to_level] {
-                        (max_width - level_widths[to_level]) / 2
-                    } else {
-                        0
-                    };
-
-                    let from_x =
-                        x_coords[from_level][fp] + from_level_offset + widths[from_level][fp] / 2;
-                    let to_x = x_coords[to_level][tp] + to_level_offset + widths[to_level][tp] / 2;
-                    let from_y = from_level * lines_per_level;
-                    let to_y = to_level * lines_per_level;
-
-                    let path = if to_level == from_level + 1 {
-                        // Adjacent levels - direct or corner connection
-                        if from_x == to_x {
-                            EdgePath::Direct
-                        } else {
-                            EdgePath::Corner {
-                                horizontal_y: from_y + 1,
-                            }
-                        }
-                    } else {
-                        // Skip-level edge - side channel routing
-                        // Channel must be to the RIGHT of all nodes at ALL intermediate levels
-                        let mut max_right = from_x.max(to_x);
-                        for level in from_level..=to_level {
-                            // Get rightmost node edge at this level (after centering)
-                            let level_offset = if max_width > level_widths[level] {
-                                (max_width - level_widths[level]) / 2
-                            } else {
-                                0
-                            };
-                            let right_edge = level_widths[level] + level_offset;
-                            max_right = max_right.max(right_edge);
-                        }
-                        let channel_x = max_right + 2; // 2 chars spacing from rightmost node
-                        max_channel_x = max_channel_x.max(channel_x + 1);
-                        EdgePath::SideChannel {
-                            channel_x,
-                            start_y: from_y + 1,
-                            end_y: to_y - 1,
-                        }
-                    };
-
-                    builder.add_edge(LayoutEdge {
-                        from_id,
-                        to_id,
-                        from_x,
-                        from_y,
-                        to_x,
-                        to_y,
-                        path,
-                        edge_index: edge_idx,
+                    builder.add_node(LayoutNode {
+                        id,
+                        label,
+                        x,
+                        y,
+                        width,
+                        center_x: x + width / 2,
+                        level: level_idx,
+                        level_position: pos,
                     });
                 }
             }
         }
 
-        builder.set_dimensions(max_channel_x, total_height);
+        // Build lookup for dummy node positions: edge_idx -> Vec<(level, x)>
+        // Dummy nodes should be positioned along the line between source and target,
+        // NOT based on their position in the level ordering.
+        let mut dummy_positions: Vec<Vec<(usize, usize)>> = vec![Vec::new(); self.edges.len()];
+        
+        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+            if let (Some(from_idx), Some(to_idx)) = (self.node_index(from_id), self.node_index(to_id)) {
+                let from_level = node_levels[from_idx];
+                let to_level = node_levels[to_idx];
+                
+                if to_level > from_level + 1 {
+                    // Skip-level edge - compute dummy positions by interpolation
+                    let (_, _, from_x_base, from_width) = real_node_coords[from_idx];
+                    let (_, _, to_x_base, to_width) = real_node_coords[to_idx];
+                    
+                    let from_center = from_x_base + from_width / 2;
+                    let to_center = to_x_base + to_width / 2;
+                    
+                    let total_span = to_level - from_level;
+                    
+                    for level in (from_level + 1)..to_level {
+                        // Interpolate x position between source and target centers
+                        let t = (level - from_level) as f32 / total_span as f32;
+                        let x = (from_center as f32 * (1.0 - t) + to_center as f32 * t).round() as usize;
+                        dummy_positions[edge_idx].push((level, x));
+                    }
+                }
+            }
+        }
+
+        // Step 6: Add edges with proper routing
+        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+            if let (Some(from_idx), Some(to_idx)) = (self.node_index(from_id), self.node_index(to_id)) {
+                let from_level = node_levels[from_idx];
+                let to_level = node_levels[to_idx];
+                
+                let (_, _, from_x_base, from_width) = real_node_coords[from_idx];
+                let (_, _, to_x_base, to_width) = real_node_coords[to_idx];
+                
+                let from_x = from_x_base + from_width / 2;
+                let to_x = to_x_base + to_width / 2;
+                let from_y = from_level * lines_per_level;
+                let to_y = to_level * lines_per_level;
+
+                let path = if to_level == from_level + 1 {
+                    // Adjacent levels - direct or corner connection
+                    if from_x == to_x {
+                        EdgePath::Direct
+                    } else {
+                        EdgePath::Corner {
+                            horizontal_y: from_y + 1,
+                        }
+                    }
+                } else {
+                    // Skip-level edge - use dummy node positions for MultiSegment path
+                    let dummies = &dummy_positions[edge_idx];
+                    if dummies.is_empty() {
+                        // Fallback to corner if no dummies (shouldn't happen)
+                        EdgePath::Corner { horizontal_y: from_y + 1 }
+                    } else {
+                        // Build waypoints through dummy nodes
+                        let mut waypoints = Vec::with_capacity(dummies.len());
+                        for &(level, x) in dummies {
+                            waypoints.push((x, level * lines_per_level));
+                        }
+                        EdgePath::MultiSegment { waypoints }
+                    }
+                };
+
+                builder.add_edge(LayoutEdge {
+                    from_id,
+                    to_id,
+                    from_x,
+                    from_y,
+                    to_x,
+                    to_y,
+                    path,
+                    edge_index: edge_idx,
+                });
+            }
+        }
+
+        builder.set_dimensions(max_width, total_height);
         builder.build()
     }
+    
+    /// Crossing reduction for virtual levels (includes dummy nodes).
+    /// Uses median heuristic with both real and dummy nodes participating.
+    fn reduce_crossings_virtual(
+        &self,
+        levels: &mut [Vec<VNode>],
+        _node_levels: &[usize],
+        max_level: usize,
+    ) {
+        // Pre-allocate reusable buffers to avoid allocations in the hot loop
+        // Estimate max level size for capacity hints
+        let max_level_size = levels.iter().map(|l| l.len()).max().unwrap_or(0);
+        
+        // Reusable lookup tables
+        let mut real_pos: HashMap<usize, usize> = HashMap::with_capacity(max_level_size);
+        let mut dummy_pos: HashMap<usize, usize> = HashMap::with_capacity(max_level_size);
+        
+        // Reusable buffers for median computation
+        let mut node_medians: Vec<(VNode, f32)> = Vec::with_capacity(max_level_size);
+        let mut connected_positions: Vec<usize> = Vec::with_capacity(8); // Most nodes have few connections
+        
+        // Run multiple passes of median heuristic
+        for _ in 0..self.crossing_reduction_passes {
+            // Top-down pass
+            for level_idx in 1..=max_level {
+                let (prev_levels, rest) = levels.split_at_mut(level_idx);
+                let parent_level = &prev_levels[level_idx - 1];
+                self.order_virtual_by_median_reuse(
+                    &mut rest[0], 
+                    parent_level, 
+                    true,
+                    &mut real_pos,
+                    &mut dummy_pos,
+                    &mut node_medians,
+                    &mut connected_positions,
+                );
+            }
+
+            // Bottom-up pass
+            for level_idx in (0..max_level).rev() {
+                let (left, right) = levels.split_at_mut(level_idx + 1);
+                let child_level = &right[0];
+                self.order_virtual_by_median_reuse(
+                    &mut left[level_idx], 
+                    child_level, 
+                    false,
+                    &mut real_pos,
+                    &mut dummy_pos,
+                    &mut node_medians,
+                    &mut connected_positions,
+                );
+            }
+        }
+    }
+
+    /// Order virtual nodes by median position - version that reuses pre-allocated buffers.
+    fn order_virtual_by_median_reuse(
+        &self,
+        level_nodes: &mut Vec<VNode>,
+        adj_level: &[VNode],
+        use_parents: bool,
+        real_pos: &mut HashMap<usize, usize>,
+        dummy_pos: &mut HashMap<usize, usize>,
+        node_medians: &mut Vec<(VNode, f32)>,
+        connected_positions: &mut Vec<usize>,
+    ) {
+        // Clear and rebuild lookup tables (reuses allocated capacity)
+        real_pos.clear();
+        dummy_pos.clear();
+        
+        for (pos, vnode) in adj_level.iter().enumerate() {
+            match vnode {
+                VNode::Real(idx) => { real_pos.insert(*idx, pos); }
+                VNode::Dummy { edge_idx } => { dummy_pos.insert(*edge_idx, pos); }
+            }
+        }
+        
+        // Clear and rebuild medians (reuses allocated capacity)
+        node_medians.clear();
+
+        for (pos, &vnode) in level_nodes.iter().enumerate() {
+            // Clear and reuse connected_positions
+            connected_positions.clear();
+            
+            match (vnode.real_index(), vnode.dummy_edge()) {
+                (Some(idx), _) => {
+                    // Real node - find connected real nodes in adjacent level
+                    let connected_indices = if use_parents {
+                        self.get_parents_indices(idx)
+                    } else {
+                        self.get_children_indices(idx)
+                    };
+                    
+                    // O(1) lookup per connected node
+                    for &conn_idx in connected_indices {
+                        if let Some(&p) = real_pos.get(&conn_idx) {
+                            connected_positions.push(p);
+                        }
+                    }
+                }
+                (_, Some(edge_idx)) => {
+                    // Dummy node - find the connected node or dummy for this edge
+                    let &(from_id, to_id) = &self.edges[edge_idx];
+                    let from_idx = self.node_index(from_id);
+                    let to_idx = self.node_index(to_id);
+                    
+                    // Check for same edge's dummy in adjacent level
+                    if let Some(&dpos) = dummy_pos.get(&edge_idx) {
+                        connected_positions.push(dpos);
+                    }
+                    
+                    // Check for real endpoint in adjacent level
+                    if use_parents {
+                        if let Some(fidx) = from_idx {
+                            if let Some(&rpos) = real_pos.get(&fidx) {
+                                connected_positions.push(rpos);
+                            }
+                        }
+                    } else {
+                        if let Some(tidx) = to_idx {
+                            if let Some(&rpos) = real_pos.get(&tidx) {
+                                connected_positions.push(rpos);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            };
+
+            let median = if connected_positions.is_empty() {
+                pos as f32
+            } else {
+                connected_positions.sort_unstable();
+                if connected_positions.len() % 2 == 1 {
+                    connected_positions[connected_positions.len() / 2] as f32
+                } else {
+                    let mid = connected_positions.len() / 2;
+                    (connected_positions[mid - 1] + connected_positions[mid]) as f32 / 2.0
+                }
+            };
+
+            node_medians.push((vnode, median));
+        }
+
+        node_medians.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        
+        // Rebuild level_nodes from sorted medians
+        level_nodes.clear();
+        for (v, _) in node_medians.iter() {
+            level_nodes.push(*v);
+        }
+    }
+
+    /// Order virtual nodes by median position of connected nodes in adjacent level.
+    /// Legacy version - kept for API compatibility but internally uses the optimized version.
+    #[allow(dead_code)]
+    fn order_virtual_by_median(
+        &self,
+        level_nodes: &mut Vec<VNode>,
+        adj_level: &[VNode],
+        use_parents: bool,
+    ) {
+        // Create temporary buffers (less efficient, but maintains API)
+        let mut real_pos = HashMap::new();
+        let mut dummy_pos = HashMap::new();
+        let mut node_medians = Vec::with_capacity(level_nodes.len());
+        let mut connected_positions = Vec::with_capacity(8);
+        
+        self.order_virtual_by_median_reuse(
+            level_nodes,
+            adj_level,
+            use_parents,
+            &mut real_pos,
+            &mut dummy_pos,
+            &mut node_medians,
+            &mut connected_positions,
+        );
+    }
 }
+
+/// Virtual node for layout computation - either a real node or a dummy for edge routing.
+#[derive(Clone, Copy)]
+enum VNode {
+    Real(usize),
+    Dummy { edge_idx: usize },
+}
+
+impl VNode {
+    fn real_index(&self) -> Option<usize> {
+        match self {
+            VNode::Real(idx) => Some(*idx),
+            VNode::Dummy { .. } => None,
+        }
+    }
+    
+    fn dummy_edge(&self) -> Option<usize> {
+        match self {
+            VNode::Real(_) => None,
+            VNode::Dummy { edge_idx } => Some(*edge_idx),
+        }
+    }
+}
+

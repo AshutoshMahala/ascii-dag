@@ -33,7 +33,7 @@ impl<'a> LayoutIR<'a> {
         output
     }
 
-    /// Render scanline to a buffer.
+    /// Render scanline to a String buffer.
     pub fn render_scanline_to(&self, output: &mut String) {
         // Ensure Y-index is built
         let y_index = self.y_index();
@@ -69,6 +69,133 @@ impl<'a> LayoutIR<'a> {
             }
             output.push('\n');
         }
+    }
+
+    /// Render using a pre-allocated line buffer (arena-friendly).
+    /// 
+    /// The caller provides a reusable `line_buffer` slice that must be at least
+    /// `self.width()` chars. This eliminates the heap allocation for the line buffer.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use ascii_dag::DAG;
+    /// 
+    /// let dag = DAG::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
+    /// let ir = dag.compute_layout();
+    /// 
+    /// // Pre-allocate the line buffer (can be on stack or in arena)
+    /// let mut line_buffer = vec![' '; ir.width()];
+    /// let mut output = String::with_capacity(ir.width() * ir.height());
+    /// 
+    /// ir.render_scanline_with_buffer(&mut line_buffer, &mut output);
+    /// ```
+    pub fn render_scanline_with_buffer(&self, line_buffer: &mut [char], output: &mut String) {
+        let y_index = self.y_index();
+        let width = self.width().min(line_buffer.len());
+
+        for y in 0..self.height() {
+            // Clear line buffer
+            for c in line_buffer[..width].iter_mut() {
+                *c = ' ';
+            }
+
+            if let Some(occupancy) = y_index.get(y) {
+                // Paint edges FIRST so nodes take precedence
+                for &edge_idx in &occupancy.edge_indices {
+                    let edge = &self.edges()[edge_idx];
+                    self.paint_edge_at_y(&mut line_buffer[..width], edge, y);
+                }
+
+                // Paint nodes on this line (overwrites any edge characters)
+                for &node_idx in &occupancy.node_indices {
+                    let node = &self.nodes()[node_idx];
+                    self.paint_node(&mut line_buffer[..width], node);
+                }
+            }
+
+            // Write line to output (trim trailing spaces)
+            let trimmed_len = line_buffer[..width].iter().rposition(|&c| c != ' ')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            
+            for &c in &line_buffer[..trimmed_len] {
+                output.push(c);
+            }
+            output.push('\n');
+        }
+    }
+
+    /// Render directly to a byte buffer (zero String allocations).
+    /// 
+    /// This is the most allocation-efficient render method. The output buffer
+    /// should be sized to `width * height * 4` bytes to accommodate UTF-8 box
+    /// drawing characters.
+    /// 
+    /// Returns the number of bytes written.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// use ascii_dag::DAG;
+    /// 
+    /// let dag = DAG::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
+    /// let ir = dag.compute_layout();
+    /// 
+    /// // Allocate buffers (can be on stack or from arena)
+    /// let mut line_buffer = vec![' '; ir.width()];
+    /// let mut output_buffer = vec![0u8; ir.width() * ir.height() * 4];
+    /// 
+    /// let bytes_written = ir.render_scanline_to_bytes(&mut line_buffer, &mut output_buffer);
+    /// let output = core::str::from_utf8(&output_buffer[..bytes_written]).unwrap();
+    /// ```
+    pub fn render_scanline_to_bytes(&self, line_buffer: &mut [char], output: &mut [u8]) -> usize {
+        let y_index = self.y_index();
+        let width = self.width().min(line_buffer.len());
+        let mut offset = 0;
+
+        for y in 0..self.height() {
+            // Clear line buffer
+            for c in line_buffer[..width].iter_mut() {
+                *c = ' ';
+            }
+
+            if let Some(occupancy) = y_index.get(y) {
+                // Paint edges FIRST so nodes take precedence
+                for &edge_idx in &occupancy.edge_indices {
+                    let edge = &self.edges()[edge_idx];
+                    self.paint_edge_at_y(&mut line_buffer[..width], edge, y);
+                }
+
+                // Paint nodes on this line (overwrites any edge characters)
+                for &node_idx in &occupancy.node_indices {
+                    let node = &self.nodes()[node_idx];
+                    self.paint_node(&mut line_buffer[..width], node);
+                }
+            }
+
+            // Write line to output (trim trailing spaces)
+            let trimmed_len = line_buffer[..width].iter().rposition(|&c| c != ' ')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            
+            // Encode UTF-8 directly to output buffer
+            for &c in &line_buffer[..trimmed_len] {
+                let remaining = output.len() - offset;
+                if remaining < 4 {
+                    break; // Not enough space
+                }
+                offset += c.encode_utf8(&mut output[offset..]).len();
+            }
+            
+            // Add newline
+            if offset < output.len() {
+                output[offset] = b'\n';
+                offset += 1;
+            }
+        }
+        
+        offset
     }
 
     /// Paint a node onto the line buffer.
@@ -216,27 +343,76 @@ impl<'a> LayoutIR<'a> {
                 }
             }
             EdgePath::MultiSegment { waypoints } => {
-                // Draw through waypoints
-                for window in waypoints.windows(2) {
+                // Build full path: source → waypoints → target
+                let mut full_path: Vec<(usize, usize)> = Vec::with_capacity(waypoints.len() + 2);
+                full_path.push((edge.from_x, edge.from_y));
+                full_path.extend(waypoints.iter().copied());
+                full_path.push((edge.to_x, edge.to_y));
+
+                // Draw through all segments
+                for (seg_idx, window) in full_path.windows(2).enumerate() {
                     let (x1, y1) = window[0];
                     let (x2, y2) = window[1];
-                    
-                    if y1 == y2 && y == y1 {
-                        // Horizontal segment
-                        let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
-                        for x in min_x..=max_x {
-                            if x < buffer.len() && buffer[x] == ' ' {
-                                buffer[x] = H_LINE;
-                            }
-                        }
-                    } else if x1 == x2 && y >= y1.min(y2) && y <= y1.max(y2) {
-                        // Vertical segment
-                        if x1 < buffer.len() {
-                            if y == edge.to_y {
+                    let is_last_segment = seg_idx == full_path.len() - 2;
+                    let is_first_segment = seg_idx == 0;
+
+                    if x1 == x2 {
+                        // Pure vertical segment - draw on ALL lines from y1+1 to y2-1 inclusive
+                        // Also draw on y1 if not the first segment (waypoint continuation)
+                        let start_y = if is_first_segment { y1 + 1 } else { y1 };
+                        if y >= start_y && y < y2 && x1 < buffer.len() {
+                            if is_last_segment && y == y2 - 1 {
                                 buffer[x1] = ARROW_DOWN;
                             } else if buffer[x1] == ' ' {
                                 buffer[x1] = V_LINE;
                             }
+                        }
+                    } else if y1 == y2 {
+                        // Pure horizontal segment
+                        if y == y1 {
+                            let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
+                            for x in min_x..=max_x {
+                                if x < buffer.len() && buffer[x] == ' ' {
+                                    buffer[x] = H_LINE;
+                                }
+                            }
+                        }
+                    } else {
+                        // Diagonal segment: use corner routing
+                        // Route: from (x1, y1) → corner at (x1, y1+1) → horizontal to x2 → down to (x2, y2)
+                        let corner_y = y1 + 1;
+                        
+                        // Horizontal segment at corner_y
+                        if y == corner_y {
+                            let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
+                            for x in min_x..=max_x {
+                                if x < buffer.len() {
+                                    if x == x1 {
+                                        buffer[x] = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                                    } else if x == x2 {
+                                        buffer[x] = if x1 < x2 { CORNER_UL } else { CORNER_UR };
+                                    } else if buffer[x] == ' ' {
+                                        buffer[x] = H_LINE;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Vertical from corner to next waypoint/target
+                        // Draw on ALL lines from corner_y+1 to y2-1 inclusive
+                        // Also draw on y2-1 with arrow if this is the last segment
+                        if y > corner_y && y < y2 && x2 < buffer.len() {
+                            if is_last_segment && y == y2 - 1 {
+                                buffer[x2] = ARROW_DOWN;
+                            } else if buffer[x2] == ' ' {
+                                buffer[x2] = V_LINE;
+                            }
+                        }
+                        
+                        // If not the first segment, also draw vertical line AT the waypoint y-coordinate
+                        // This fills in the "gap" at the waypoint position
+                        if !is_first_segment && y == y1 && x1 < buffer.len() && buffer[x1] == ' ' {
+                            buffer[x1] = V_LINE;
                         }
                     }
                 }

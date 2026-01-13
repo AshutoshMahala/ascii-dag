@@ -130,7 +130,7 @@ fn run_benchmark(count: usize) {
 fn main() {
     println!("=== Performance Benchmark (Time & Heap) ===\n");
 
-    let sizes = [50, 100, 500, 1000];
+    let sizes = [50, 100, 500, 1000, 10000];
 
     for &size in &sizes {
         run_benchmark(size);
