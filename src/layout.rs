@@ -6,9 +6,12 @@
 //! ## Submodules
 //!
 //! - [`generic`] - Generic topological sorting for any data structure (requires `generic` feature)
+//! - [`arena`] - Arena-based layout computation for `no_std`/embedded
 
 #[cfg(feature = "generic")]
 pub mod generic;
+
+pub mod arena;
 
 use crate::graph::DAG;
 use alloc::{vec, vec::Vec};

@@ -117,11 +117,15 @@ extern crate alloc;
 
 // Core modules (always available)
 pub mod arena;
+pub mod csr;
 pub mod cycles;
 pub mod graph;
 pub mod ir;
 pub mod layout;
 pub mod render;
+
+// Re-export CSR types
+pub use csr::CsrGraph;
 
 // Re-export IR types for convenience
 pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode};

@@ -1,4 +1,4 @@
-//! Arena vs Heap Benchmark
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            //! Arena vs Heap Benchmark
 //!
 //! Compares performance and memory usage between:
 //! - Standard heap-based rendering
@@ -285,6 +285,107 @@ fn run_arena_test(name: &str, arena_size: usize) -> BenchResult {
     }
 }
 
+/// Benchmark using arena-based CSR graph conversion
+fn run_csr_benchmark<F>(name: &str, generator: F, rng: &mut SimpleRng) -> BenchResult
+where
+    F: Fn(&mut SimpleRng) -> DAG<'static>,
+{
+    // Phase 1: Build DAG (same as heap)
+    reset_metrics();
+    let build_start = Instant::now();
+    let dag = generator(rng);
+    let build_time = build_start.elapsed();
+    let build_allocs = get_alloc_count();
+    let build_peak = get_peak_memory();
+    
+    // Phase 2: Convert to CSR using arena
+    // Pre-allocate arena buffer BEFORE measurement
+    let arena_size = dag.estimate_csr_arena_size();
+    let mut arena_buffer = vec![0u8; arena_size];
+    
+    reset_metrics();
+    let convert_start = Instant::now();
+    
+    // We need to work around the borrow issue - get data from separate scopes
+    let csr_elements = {
+        let mut arena = Arena::new(&mut arena_buffer);
+        if let Some(csr) = dag.to_csr(&mut arena) {
+            csr.node_count() * 3 + csr.edge_count() * 2
+        } else {
+            0
+        }
+    };
+    
+    let convert_time = convert_start.elapsed();
+    let convert_peak = get_peak_memory();
+    let convert_allocs = get_alloc_count();
+    
+    // Arena used is approximately the estimate (we can't easily query it due to lifetimes)
+    let arena_used = arena_size;
+    
+    BenchResult {
+        name: name.to_string(),
+        mode: "csr".to_string(),
+        build_time,
+        render_time: convert_time,
+        peak_heap_bytes: build_peak.max(convert_peak),
+        alloc_count: build_allocs + convert_allocs,
+        output_size: csr_elements,
+        arena_used,
+    }
+}
+
+/// Benchmark full arena pipeline: DAG -> CSR -> Render (no heap allocs)
+fn run_full_arena_benchmark<F>(name: &str, generator: F, rng: &mut SimpleRng) -> BenchResult
+where
+    F: Fn(&mut SimpleRng) -> DAG<'static>,
+{
+    // Phase 1: Build DAG (heap-based, unavoidable for now)
+    reset_metrics();
+    let build_start = Instant::now();
+    let dag = generator(rng);
+    let build_time = build_start.elapsed();
+    let build_allocs = get_alloc_count();
+    let build_peak = get_peak_memory();
+    
+    // Phase 2: Convert to CSR + Render using arena
+    // Pre-allocate both arena and render buffer BEFORE measurement
+    let arena_size = dag.estimate_csr_arena_size();
+    let mut arena_buffer = vec![0u8; arena_size];
+    
+    // Estimate render buffer size (generous estimate)
+    let render_buffer_size = arena_size; // Use same size as arena
+    let mut render_buffer = vec![0u8; render_buffer_size];
+    
+    reset_metrics();
+    let render_start = Instant::now();
+    
+    let (output_size, arena_used) = {
+        let mut arena = Arena::new(&mut arena_buffer);
+        if let Some(csr) = dag.to_csr(&mut arena) {
+            let bytes_written = csr.render_to_buffer(&mut render_buffer).unwrap_or(0);
+            (bytes_written, arena_size)
+        } else {
+            (0, 0)
+        }
+    };
+    
+    let render_time = render_start.elapsed();
+    let render_peak = get_peak_memory();
+    let render_allocs = get_alloc_count();
+    
+    BenchResult {
+        name: name.to_string(),
+        mode: "full".to_string(),
+        build_time,
+        render_time,
+        peak_heap_bytes: build_peak.max(render_peak),
+        alloc_count: build_allocs + render_allocs,
+        output_size,
+        arena_used,
+    }
+}
+
 // --- Test Cases ---
 
 fn run_test_suite() {
@@ -340,6 +441,44 @@ fn run_test_suite() {
         result.print();
     }
     
+    println!("\n## Arena-based CSR Conversion\n");
+    println!("Converting heap DAG to arena-backed CSR format:\n");
+    BenchResult::print_header();
+    
+    for (name, count, graph_type, extra) in &test_configs {
+        let result = run_csr_benchmark(*name, |rng| {
+            let mut dag = DAG::new();
+            match graph_type {
+                0 => generate_layered_graph(&mut dag, *count, rng),
+                1 => generate_wide_graph(&mut dag, *count, *extra, rng),
+                2 => generate_deep_chain(&mut dag, *count),
+                3 => generate_skip_heavy(&mut dag, *count, rng),
+                _ => {}
+            }
+            dag
+        }, &mut rng);
+        result.print();
+    }
+    
+    println!("\n## Full Arena Pipeline (CSR + Render)\n");
+    println!("Complete no-alloc path: DAG -> CSR -> Buffer render:\n");
+    BenchResult::print_header();
+    
+    for (name, count, graph_type, extra) in &test_configs {
+        let result = run_full_arena_benchmark(*name, |rng| {
+            let mut dag = DAG::new();
+            match graph_type {
+                0 => generate_layered_graph(&mut dag, *count, rng),
+                1 => generate_wide_graph(&mut dag, *count, *extra, rng),
+                2 => generate_deep_chain(&mut dag, *count),
+                3 => generate_skip_heavy(&mut dag, *count, rng),
+                _ => {}
+            }
+            dag
+        }, &mut rng);
+        result.print();
+    }
+    
     println!("\n## Arena Module Test (Allocation Speed)\n");
     println!("Testing arena allocation overhead:\n");
     
@@ -356,8 +495,11 @@ fn run_test_suite() {
     );
     
     println!("\n## Summary\n");
-    println!("Comparing heap vs pre-allocated buffer rendering.");
-    println!("Buffer mode eliminates per-render allocations for the line buffer.");
+    println!("Comparing heap vs pre-allocated buffer vs arena-based CSR:");
+    println!("  - Heap: Standard Vec/String allocations per operation");
+    println!("  - Buffer: Pre-allocated line buffer, reduces render allocations");
+    println!("  - CSR: Arena-backed graph format, zero heap allocs during conversion");
+    println!("  - Full: Complete no-alloc pipeline (CSR + render to buffer)");
     println!();
 }
 

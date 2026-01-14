@@ -18,11 +18,14 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["std", "generic"]
-std = []
+std = ["alloc"]
+alloc = []            # Use heap allocation (Vec, String, HashMap)
 warnings = ["std"]
 # Optional modules for bundle size reduction
-generic = []  # Enable generic cycle detection, topological sort, impact analysis, metrics
-serde = []    # Future: serialization support
+generic = []          # Enable generic cycle detection, topological sort, impact analysis, metrics
+serde = []            # Future: serialization support
+# Experimental: arena-based allocation for no_std/embedded
+arena = []            # Arena allocator mode - fast but uses more memory upfront
 
 [dev-dependencies]
 

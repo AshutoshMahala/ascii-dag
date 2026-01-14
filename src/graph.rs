@@ -729,8 +729,14 @@ impl<'a> DAG<'a> {
                     
                     for level in (from_level + 1)..to_level {
                         // Interpolate x position between source and target centers
-                        let t = (level - from_level) as f32 / total_span as f32;
-                        let x = (from_center as f32 * (1.0 - t) + to_center as f32 * t).round() as usize;
+                        // Use integer rounding: (value + 0.5) as usize, but in integer math
+                        let t_num = level - from_level;
+                        let t_denom = total_span;
+                        // Compute: from_center * (1 - t) + to_center * t
+                        // = from_center + (to_center - from_center) * t
+                        // Use integer arithmetic with rounding
+                        let delta = to_center as isize - from_center as isize;
+                        let x = (from_center as isize + (delta * t_num as isize + t_denom as isize / 2) / t_denom as isize) as usize;
                         dummy_positions[edge_idx].push((level, x));
                     }
                 }
@@ -805,9 +811,9 @@ impl<'a> DAG<'a> {
         // Estimate max level size for capacity hints
         let max_level_size = levels.iter().map(|l| l.len()).max().unwrap_or(0);
         
-        // Reusable lookup tables
-        let mut real_pos: HashMap<usize, usize> = HashMap::with_capacity(max_level_size);
-        let mut dummy_pos: HashMap<usize, usize> = HashMap::with_capacity(max_level_size);
+        // Reusable lookup tables (use new() for BTreeMap compatibility in no_std)
+        let mut real_pos: HashMap<usize, usize> = HashMap::new();
+        let mut dummy_pos: HashMap<usize, usize> = HashMap::new();
         
         // Reusable buffers for median computation
         let mut node_medians: Vec<(VNode, f32)> = Vec::with_capacity(max_level_size);
