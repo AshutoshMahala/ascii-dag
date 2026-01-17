@@ -26,6 +26,13 @@ generic = []          # Enable generic cycle detection, topological sort, impact
 serde = []            # Future: serialization support
 # Experimental: arena-based allocation for no_std/embedded
 arena = []            # Arena allocator mode - fast but uses more memory upfront
+# Arena index size selection (mutually exclusive - pick ONE)
+# Smaller indices = less memory, but limits max graph size
+arena-idx-u8 = ["arena"]   # Max 255 nodes/edges - tiny MCUs (2-8KB RAM)
+arena-idx-u16 = ["arena"]  # Max 65535 nodes/edges - small MCUs (16-256KB RAM)  
+arena-idx-u32 = ["arena"]  # Max 4B nodes/edges - desktop/servers (default if none selected)
+# Internal marker for embedded examples that require custom targets
+embedded_no_std = []       # Used to exclude embedded examples from --all-targets builds
 
 [dev-dependencies]
 
@@ -61,12 +68,19 @@ name = "dependency_analysis"
 path = "examples/dependency_analysis.rs"
 required-features = ["generic"]
 
+[[example]]
+name = "embedded_proof"
+path = "examples/embedded_proof.rs"
+required-features = ["embedded_no_std"]  # Excluded from --all-targets (requires custom target)
+
 [profile.release]
 opt-level = "z"     # Optimize for size
 lto = true          # Enable Link Time Optimization
 codegen-units = 1   # Better optimization
 strip = true        # Strip symbols
-panic = "abort"     # Remove unwinding code for smaller binaries
+# Note: panic = "abort" removed - let downstream users control panic behavior
+# Embedded users should add panic = "abort" in their own Cargo.toml
 
 [profile.dev]
-panic = "abort"     # Required for no_std examples on some targets
+# Note: panic = "abort" removed - set in downstream project for embedded targets
+

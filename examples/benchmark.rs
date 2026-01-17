@@ -1,46 +1,8 @@
+use ascii_dag::arena::Arena;
+use ascii_dag::csr::CsrGraphBuilder;
 use ascii_dag::graph::DAG;
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::io::{self, Write};
 use std::time::Instant;
-
-// --- Memory Tracking Allocator ---
-struct TrackingAllocator;
-
-static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-static PEAK_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl GlobalAlloc for TrackingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = System.alloc(layout);
-        if !ptr.is_null() {
-            let current = ALLOCATED.fetch_add(layout.size(), Ordering::SeqCst) + layout.size();
-            let peak = PEAK_ALLOCATED.load(Ordering::SeqCst);
-            if current > peak {
-                PEAK_ALLOCATED.store(current, Ordering::SeqCst);
-            }
-        }
-        ptr
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout);
-        ALLOCATED.fetch_sub(layout.size(), Ordering::SeqCst);
-    }
-}
-
-#[global_allocator]
-static GLOBAL: TrackingAllocator = TrackingAllocator;
-
-fn reset_metrics() {
-    ALLOCATED.store(0, Ordering::SeqCst);
-    PEAK_ALLOCATED.store(0, Ordering::SeqCst);
-}
-
-fn get_peak_memory() -> usize {
-    PEAK_ALLOCATED.load(Ordering::SeqCst)
-}
-
-// --- Benchmark Logic ---
 
 struct SimpleRng {
     state: u64,
@@ -62,79 +24,165 @@ impl SimpleRng {
         min + (random % range) as usize
     }
 
-    // Returns true with probability p_true/100
     fn chance(&mut self, p_true: usize) -> bool {
         self.gen_range(0, 100) < p_true
     }
 }
 
-fn generate_layered_graph<'a>(dag: &mut DAG<'a>, node_count: usize, rng: &mut SimpleRng) {
-    // Generate nodes
+fn generate_graph_data(node_count: usize) -> (Vec<(usize, String)>, Vec<(usize, usize)>) {
+    let mut rng = SimpleRng::new(12345);
     let mut nodes = Vec::with_capacity(node_count);
+    let mut edges = Vec::with_capacity(node_count * 2);
+
     for i in 0..node_count {
-        let label = Box::leak(format!("N{}", i).into_boxed_str());
-        dag.add_node(i, label);
-        nodes.push(i);
+        nodes.push((i, format!("N{}", i)));
     }
 
-    // Connect them in layers to simulate a realistic DAG
-    // (Random graphs often cycle, so we force i -> j where i < j)
-    let edges_per_node = 2;
-
     for i in 0..node_count.saturating_sub(1) {
-        // Always connect to a nearby forward node to ensure connectivity
         let jump = rng.gen_range(1, 5.min(node_count - i));
-        dag.add_edge(i, i + jump);
+        edges.push((i, i + jump));
 
-        // Add random extra edges
-        for _ in 0..edges_per_node {
+        for _ in 0..2 {
             if rng.chance(40) {
-                // 40% chance of extra edge
                 let target_jump = rng.gen_range(1, 20.min(node_count - i));
-                dag.add_edge(i, i + target_jump);
+                edges.push((i, i + target_jump));
             }
         }
     }
+    (nodes, edges)
 }
 
-fn run_benchmark(count: usize) {
-    println!("benchmarking {} nodes...", count);
+fn run_comparison(count: usize) {
+    println!("Generating data for {} nodes...", count);
+    io::stdout().flush().unwrap();
+    let (nodes, edges) = generate_graph_data(count);
 
-    let mut rng = SimpleRng::new(12345);
+    // --- HEAP BENCHMARK ---
+    print!("Running HEAP...");
+    io::stdout().flush().unwrap();
+    let heap_total_us;
+    {
+        let start = Instant::now();
 
-    // Phase 1: Construction (runs on DEVICE)
-    reset_metrics();
-    let start_build = Instant::now();
-    let mut dag = DAG::new();
-    generate_layered_graph(&mut dag, count, &mut rng);
-    let build_time = start_build.elapsed();
-    let build_peak_mem = get_peak_memory();
+        // 1. Build
+        let build_start = Instant::now();
+        let node_refs: Vec<(usize, &str)> = nodes.iter().map(|(id, s)| (*id, s.as_str())).collect();
+        let dag = DAG::from_edges(&node_refs, &edges);
+        let build_time = build_start.elapsed();
 
-    // Phase 2: Rendering (runs on HOST)
-    reset_metrics();
-    let start_render = Instant::now();
-    let mut output = String::with_capacity(count * 100); // Pre-allocate output to minimize buffer noise
+        // 2. Render
+        let render_start = Instant::now();
+        let mut output = String::with_capacity(count * 100);
+        dag.render_to(&mut output);
+        let render_time = render_start.elapsed();
 
-    dag.render_to(&mut output);
+        heap_total_us = start.elapsed().as_micros();
 
-    let render_time = start_render.elapsed();
-    let render_peak_mem = get_peak_memory();
+        println!(" Done.");
+        print!(
+            "| {:<4} | {:<5} | {:>8} | {:>8} | {:>8} |",
+            count,
+            "HEAP",
+            format!("{:.1}ms", build_time.as_micros() as f64 / 1000.0),
+            format!("{:.1}ms", render_time.as_micros() as f64 / 1000.0),
+            format!("{:.1}ms", heap_total_us as f64 / 1000.0)
+        );
+    }
 
-    println!("  Nodes: {}", count);
-    println!("  Build:  {:?} | Peak RAM: {:.2} KB  <-- DEVICE", build_time, build_peak_mem as f64 / 1024.0);
-    println!("  Render: {:?} | Peak RAM: {:.2} KB  <-- HOST", render_time, render_peak_mem as f64 / 1024.0);
-    println!("  Output size: {:.2} KB", output.len() as f64 / 1024.0);
-    println!("--------------------------------");
+    println!();
+
+    // --- ARENA BENCHMARK ---
+    {
+        print!("Running ARENA...");
+        io::stdout().flush().unwrap();
+
+        // Allocate Memory Buffers
+        let mut graph_mem = vec![0u8; 1 * 1024 * 1024];
+        let mut temp_mem = vec![0u8; 5 * 1024 * 1024];
+        let mut output_mem = vec![0u8; 5 * 1024 * 1024];
+        println!("  Allocated.");
+        io::stdout().flush().unwrap();
+
+        let start = Instant::now();
+
+        // 1. Build
+        println!("  Building Arena...");
+        io::stdout().flush().unwrap();
+        let build_start = Instant::now();
+        let mut graph_arena = Arena::new(&mut graph_mem);
+
+        let label_bytes = nodes.iter().map(|(_, l)| l.len()).sum::<usize>() + 256;
+
+        let mut builder =
+            CsrGraphBuilder::new(&mut graph_arena, nodes.len(), edges.len(), label_bytes)
+                .expect("Failed to create CsrGraphBuilder");
+
+        for (id, label) in &nodes {
+            builder.add_node(*id, label);
+        }
+        for (u, v) in &edges {
+            builder.add_edge(*u, *v);
+        }
+
+        let graph = builder.build().expect("Failed to build graph");
+        let build_time = build_start.elapsed();
+        println!("  Build Done.");
+        io::stdout().flush().unwrap();
+
+        // 2. Compute Layout
+        println!("  Computing Layout...");
+        io::stdout().flush().unwrap();
+        let compute_start = Instant::now();
+        let mut temp_arena = Arena::new(&mut temp_mem);
+        let mut final_arena = Arena::new(&mut output_mem);
+
+        let layout = graph
+            .compute_layout_arena(&mut temp_arena, &mut final_arena)
+            .expect("Layout computation failed (None returned)");
+        let compute_time = compute_start.elapsed();
+        println!("  Layout Done.");
+        io::stdout().flush().unwrap();
+
+        // 3. Render
+        println!("  Rendering Arena...");
+        io::stdout().flush().unwrap();
+        let render_start = Instant::now();
+        let mut render_buf = vec![0u8; count * 500];
+        let mut line_buf = vec![' '; 1024];
+        layout
+            .render_to_buffer(&mut render_buf, &mut line_buf)
+            .unwrap();
+        let render_time = render_start.elapsed();
+
+        let arena_total_us = start.elapsed().as_micros();
+        let speedup = heap_total_us as f64 / arena_total_us as f64;
+
+        println!(" Done.");
+        print!(
+            "| {:<4} | {:<5} | {:>8} | {:>8} | {:>8} | x{:.2}",
+            "",
+            "ARENA",
+            format!("{:.1}ms", build_time.as_micros() as f64 / 1000.0),
+            format!("{:.1}ms", compute_time.as_micros() as f64 / 1000.0),
+            format!("{:.1}ms", arena_total_us as f64 / 1000.0),
+            speedup
+        );
+    }
+    println!("\n-------------------------------------------------------------");
 }
 
 fn main() {
-    println!("=== Performance Benchmark (Time & Heap) ===\n");
+    println!("\n=== Desktop Benchmark: Heap vs Arena ===\n");
+    println!(
+        "| {:<4} | {:<5} | {:>8} | {:>8} | {:>8} | Speedup",
+        "Node", "Mode", "Build", "Compute", "Total"
+    );
+    println!("|------|-------|----------|----------|----------|--------");
+    io::stdout().flush().unwrap();
 
-    let sizes = [50, 100, 500, 1000];
+    let sizes = [50];
 
     for &size in &sizes {
-        run_benchmark(size);
+        run_comparison(size);
     }
-
-    println!("Done.");
 }

@@ -1,4 +1,4 @@
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            //! Arena vs Heap Benchmark
+//! Arena vs Heap Benchmark
 //!
 //! Compares performance and memory usage between:
 //! - Standard heap-based rendering
@@ -221,7 +221,7 @@ impl BenchResult {
 
 // --- Benchmark Runner ---
 
-fn run_heap_benchmark<F>(name: &str, generator: F, rng: &mut SimpleRng) -> BenchResult 
+fn run_heap_benchmark<F>(name: &str, generator: F, rng: &mut SimpleRng) -> BenchResult
 where
     F: Fn(&mut SimpleRng) -> DAG<'static>,
 {
@@ -232,7 +232,7 @@ where
     let build_time = build_start.elapsed();
     let build_allocs = get_alloc_count();
     let build_peak = get_peak_memory();
-    
+
     // Phase 2: Render
     reset_metrics();
     let render_start = Instant::now();
@@ -258,21 +258,21 @@ fn run_arena_test(name: &str, arena_size: usize) -> BenchResult {
     // Test the arena module (not yet integrated with render)
     let mut buffer = vec![0u8; arena_size];
     let mut arena = Arena::new(&mut buffer);
-    
+
     // Simulate allocations similar to what render would need
     let start = Instant::now();
-    
+
     // Allocate test data
     let _nums: &mut [usize] = arena.alloc_slice_default(1000).unwrap();
     let _coords: &mut [usize] = arena.alloc_slice_default(1000).unwrap();
     let _flags: &mut [bool] = arena.alloc_slice_default(1000).unwrap();
-    
+
     let elapsed = start.elapsed();
     let used = arena.used();
     let allocs = arena.alloc_count();
-    
+
     arena.reset();
-    
+
     BenchResult {
         name: name.to_string(),
         mode: "arena".to_string(),
@@ -297,15 +297,15 @@ where
     let build_time = build_start.elapsed();
     let build_allocs = get_alloc_count();
     let build_peak = get_peak_memory();
-    
+
     // Phase 2: Convert to CSR using arena
     // Pre-allocate arena buffer BEFORE measurement
     let arena_size = dag.estimate_csr_arena_size();
     let mut arena_buffer = vec![0u8; arena_size];
-    
+
     reset_metrics();
     let convert_start = Instant::now();
-    
+
     // We need to work around the borrow issue - get data from separate scopes
     let csr_elements = {
         let mut arena = Arena::new(&mut arena_buffer);
@@ -315,14 +315,14 @@ where
             0
         }
     };
-    
+
     let convert_time = convert_start.elapsed();
     let convert_peak = get_peak_memory();
     let convert_allocs = get_alloc_count();
-    
+
     // Arena used is approximately the estimate (we can't easily query it due to lifetimes)
     let arena_used = arena_size;
-    
+
     BenchResult {
         name: name.to_string(),
         mode: "csr".to_string(),
@@ -347,19 +347,19 @@ where
     let build_time = build_start.elapsed();
     let build_allocs = get_alloc_count();
     let build_peak = get_peak_memory();
-    
+
     // Phase 2: Convert to CSR + Render using arena
     // Pre-allocate both arena and render buffer BEFORE measurement
     let arena_size = dag.estimate_csr_arena_size();
     let mut arena_buffer = vec![0u8; arena_size];
-    
+
     // Estimate render buffer size (generous estimate)
     let render_buffer_size = arena_size; // Use same size as arena
     let mut render_buffer = vec![0u8; render_buffer_size];
-    
+
     reset_metrics();
     let render_start = Instant::now();
-    
+
     let (output_size, arena_used) = {
         let mut arena = Arena::new(&mut arena_buffer);
         if let Some(csr) = dag.to_csr(&mut arena) {
@@ -369,11 +369,11 @@ where
             (0, 0)
         }
     };
-    
+
     let render_time = render_start.elapsed();
     let render_peak = get_peak_memory();
     let render_allocs = get_alloc_count();
-    
+
     BenchResult {
         name: name.to_string(),
         mode: "full".to_string(),
@@ -390,9 +390,9 @@ where
 
 fn run_test_suite() {
     println!("=== Arena vs Heap Benchmark ===\n");
-    
+
     let mut rng = SimpleRng::new(12345);
-    
+
     // Define test cases - we'll clone the generator for multiple runs
     let test_configs: Vec<(&str, usize, usize, usize)> = vec![
         // (name, node_count, 0=layered/1=wide/2=deep/3=skip, extra_param)
@@ -407,81 +407,97 @@ fn run_test_suite() {
 
     println!("## Heap-based Rendering (Current)\n");
     BenchResult::print_header();
-    
+
     for (name, count, graph_type, extra) in &test_configs {
-        let result = run_heap_benchmark(*name, |rng| {
-            let mut dag = DAG::new();
-            match graph_type {
-                0 => generate_layered_graph(&mut dag, *count, rng),
-                1 => generate_wide_graph(&mut dag, *count, *extra, rng),
-                2 => generate_deep_chain(&mut dag, *count),
-                3 => generate_skip_heavy(&mut dag, *count, rng),
-                _ => {}
-            }
-            dag
-        }, &mut rng);
+        let result = run_heap_benchmark(
+            *name,
+            |rng| {
+                let mut dag = DAG::new();
+                match graph_type {
+                    0 => generate_layered_graph(&mut dag, *count, rng),
+                    1 => generate_wide_graph(&mut dag, *count, *extra, rng),
+                    2 => generate_deep_chain(&mut dag, *count),
+                    3 => generate_skip_heavy(&mut dag, *count, rng),
+                    _ => {}
+                }
+                dag
+            },
+            &mut rng,
+        );
         result.print();
     }
-    
+
     println!("\n## Pre-allocated Buffer Rendering\n");
     BenchResult::print_header();
-    
+
     for (name, count, graph_type, extra) in &test_configs {
-        let result = run_buffer_benchmark(*name, |rng| {
-            let mut dag = DAG::new();
-            match graph_type {
-                0 => generate_layered_graph(&mut dag, *count, rng),
-                1 => generate_wide_graph(&mut dag, *count, *extra, rng),
-                2 => generate_deep_chain(&mut dag, *count),
-                3 => generate_skip_heavy(&mut dag, *count, rng),
-                _ => {}
-            }
-            dag
-        }, &mut rng);
+        let result = run_buffer_benchmark(
+            *name,
+            |rng| {
+                let mut dag = DAG::new();
+                match graph_type {
+                    0 => generate_layered_graph(&mut dag, *count, rng),
+                    1 => generate_wide_graph(&mut dag, *count, *extra, rng),
+                    2 => generate_deep_chain(&mut dag, *count),
+                    3 => generate_skip_heavy(&mut dag, *count, rng),
+                    _ => {}
+                }
+                dag
+            },
+            &mut rng,
+        );
         result.print();
     }
-    
+
     println!("\n## Arena-based CSR Conversion\n");
     println!("Converting heap DAG to arena-backed CSR format:\n");
     BenchResult::print_header();
-    
+
     for (name, count, graph_type, extra) in &test_configs {
-        let result = run_csr_benchmark(*name, |rng| {
-            let mut dag = DAG::new();
-            match graph_type {
-                0 => generate_layered_graph(&mut dag, *count, rng),
-                1 => generate_wide_graph(&mut dag, *count, *extra, rng),
-                2 => generate_deep_chain(&mut dag, *count),
-                3 => generate_skip_heavy(&mut dag, *count, rng),
-                _ => {}
-            }
-            dag
-        }, &mut rng);
+        let result = run_csr_benchmark(
+            *name,
+            |rng| {
+                let mut dag = DAG::new();
+                match graph_type {
+                    0 => generate_layered_graph(&mut dag, *count, rng),
+                    1 => generate_wide_graph(&mut dag, *count, *extra, rng),
+                    2 => generate_deep_chain(&mut dag, *count),
+                    3 => generate_skip_heavy(&mut dag, *count, rng),
+                    _ => {}
+                }
+                dag
+            },
+            &mut rng,
+        );
         result.print();
     }
-    
+
     println!("\n## Full Arena Pipeline (CSR + Render)\n");
     println!("Complete no-alloc path: DAG -> CSR -> Buffer render:\n");
     BenchResult::print_header();
-    
+
     for (name, count, graph_type, extra) in &test_configs {
-        let result = run_full_arena_benchmark(*name, |rng| {
-            let mut dag = DAG::new();
-            match graph_type {
-                0 => generate_layered_graph(&mut dag, *count, rng),
-                1 => generate_wide_graph(&mut dag, *count, *extra, rng),
-                2 => generate_deep_chain(&mut dag, *count),
-                3 => generate_skip_heavy(&mut dag, *count, rng),
-                _ => {}
-            }
-            dag
-        }, &mut rng);
+        let result = run_full_arena_benchmark(
+            *name,
+            |rng| {
+                let mut dag = DAG::new();
+                match graph_type {
+                    0 => generate_layered_graph(&mut dag, *count, rng),
+                    1 => generate_wide_graph(&mut dag, *count, *extra, rng),
+                    2 => generate_deep_chain(&mut dag, *count),
+                    3 => generate_skip_heavy(&mut dag, *count, rng),
+                    _ => {}
+                }
+                dag
+            },
+            &mut rng,
+        );
         result.print();
     }
-    
+
     println!("\n## Arena Module Test (Allocation Speed)\n");
     println!("Testing arena allocation overhead:\n");
-    
+
     let arena_result = run_arena_test("arena_alloc", 64 * 1024);
     println!(
         "  Arena alloc time: {:.3}µs for {} allocations",
@@ -493,7 +509,7 @@ fn run_test_suite() {
         arena_result.arena_used,
         arena_result.arena_used as f64 / (64.0 * 1024.0) * 100.0
     );
-    
+
     println!("\n## Summary\n");
     println!("Comparing heap vs pre-allocated buffer vs arena-based CSR:");
     println!("  - Heap: Standard Vec/String allocations per operation");
@@ -504,7 +520,7 @@ fn run_test_suite() {
 }
 
 /// Benchmark using pre-allocated buffers (arena-friendly rendering)
-fn run_buffer_benchmark<F>(name: &str, generator: F, rng: &mut SimpleRng) -> BenchResult 
+fn run_buffer_benchmark<F>(name: &str, generator: F, rng: &mut SimpleRng) -> BenchResult
 where
     F: Fn(&mut SimpleRng) -> DAG<'static>,
 {
@@ -515,21 +531,21 @@ where
     let build_time = build_start.elapsed();
     let build_allocs = get_alloc_count();
     let build_peak = get_peak_memory();
-    
+
     // Get the IR first (includes layout computation)
     let ir = dag.compute_layout();
-    
+
     // Pre-allocate buffers BEFORE measurement
     let mut line_buffer: Vec<char> = vec![' '; ir.width()];
     let mut output = String::with_capacity(ir.width() * ir.height() * 2);
-    
+
     // Reset metrics to measure ONLY the render phase
     reset_metrics();
     let render_start = Instant::now();
 
     // Use the buffer-based render method
     ir.render_scanline_with_buffer(&mut line_buffer, &mut output);
-    
+
     let render_time = render_start.elapsed();
     let render_peak = get_peak_memory();
     let render_allocs = get_alloc_count();
@@ -549,4 +565,3 @@ where
 fn main() {
     run_test_suite();
 }
-

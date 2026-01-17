@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo run --example arena_compare --release
 
-use ascii_dag::graph::{DAG, RenderMode};
 use ascii_dag::arena::Arena;
+use ascii_dag::graph::{DAG, RenderMode};
 
 fn main() {
     println!("=== Arena vs Heap Rendering Comparison ===\n");
@@ -18,13 +18,15 @@ fn main() {
             DAG::from_edges(
                 &[(1, "Root"), (2, "Left"), (3, "Right"), (4, "Merge")],
                 &[(1, 2), (1, 3), (2, 4), (3, 4)],
-            ).with_render_mode(RenderMode::Vertical)
+            )
+            .with_render_mode(RenderMode::Vertical)
         }),
         ("Multi-Convergence", {
             DAG::from_edges(
                 &[(1, "E1"), (2, "E2"), (3, "E3"), (4, "Final")],
                 &[(1, 4), (2, 4), (3, 4)],
-            ).with_render_mode(RenderMode::Vertical)
+            )
+            .with_render_mode(RenderMode::Vertical)
         }),
         ("Cross-Level Simple", {
             let mut dag = DAG::new().with_render_mode(RenderMode::Vertical);
@@ -86,26 +88,29 @@ fn main() {
 
     for (name, dag) in tests {
         println!("=== {} ===", name);
-        
+
         // Heap rendering
         let heap_output = dag.render();
-        
+
         // Arena rendering
         let arena_output = render_with_arena(&dag);
-        
+
         println!("--- HEAP ---");
         println!("{}", heap_output);
-        
+
         println!("--- ARENA ---");
         println!("{}", arena_output);
-        
+
         // Compare
         if heap_output.trim() == arena_output.trim() {
             println!("✅ MATCH!\n");
         } else {
             println!("❌ MISMATCH!\n");
-            println!("Heap lines: {}, Arena lines: {}", 
-                     heap_output.lines().count(), arena_output.lines().count());
+            println!(
+                "Heap lines: {}, Arena lines: {}",
+                heap_output.lines().count(),
+                arena_output.lines().count()
+            );
         }
         println!("{}", "=".repeat(60));
         println!();
@@ -115,24 +120,24 @@ fn main() {
 fn render_with_arena(dag: &DAG) -> String {
     // Use estimate_size() to get a reasonable arena size estimate
     let estimated = dag.estimate_size();
-    
+
     // Temp arena: proportional to estimated output size
     let temp_size = estimated * 4 + 32768;
     // Output arena: similar
     let output_size = estimated * 4 + 32768;
-    
+
     let mut temp_buffer = vec![0u8; temp_size];
     let mut output_buffer = vec![0u8; output_size];
-    
+
     let mut temp_arena = Arena::new(&mut temp_buffer);
     let mut output_arena = Arena::new(&mut output_buffer);
-    
+
     if let Some(layout) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
         // Render buffer
         let render_size = layout.estimate_render_size();
         let mut render_buffer = vec![0u8; render_size + 1024];
         let mut line_buffer = vec![' '; layout.width() + 16];
-        
+
         if let Some(bytes) = layout.render_to_buffer(&mut render_buffer, &mut line_buffer) {
             String::from_utf8_lossy(&render_buffer[..bytes]).into_owned()
         } else {

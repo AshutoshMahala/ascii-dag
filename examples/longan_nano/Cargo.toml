@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ascii-dag = { path = "../../", default-features = false }
+# Using arena-idx-u8 for minimal memory footprint on microcontroller (only 20KB RAM!)
+ascii-dag = { path = "../../", default-features = false, features = ["arena-idx-u8"] }
 longan-nano = { git = "https://github.com/riscv-rust/longan-nano", features = ["lcd"] }
 riscv-rt = "0.11"
 riscv = { version = "0.10", features = ["critical-section-single-hart"] }

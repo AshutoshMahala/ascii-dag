@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/ascii-dag/badge.svg)](https://docs.rs/ascii-dag)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
-Draw DAGs in your terminal. **Fast.** Zero dependencies.
+DAG layout engine. Zero dependencies. `no_std` ready.
 
 ```text
                        [Root]
@@ -29,29 +29,28 @@ Draw DAGs in your terminal. **Fast.** Zero dependencies.
 - **Visual Error Chains**: Show users *why* their build failed (Cycle detected? Dependency missing?).
 - **Fast**: Renders 1000 nodes in ~20ms with full layout computation.
 
-## Features at a Glance
-- 📦 **Tiny**: ~55KB (WASM release).
-- ⚡ **Fast**: Optimized iterative layout via custom side-channel routing.
-- 🔗 **Robust**: Handles diamonds, cycles (detected safely), and skip-level edges.
-- 🧩 **Headless**: Calculate layout only (IR) and render to SVG/Canvas/anything.
-- 🎨 **Beautiful**: Uses Unicode box-drawing characters for clean TUI output.
+## Features
+- **Tiny**: ~55KB WASM
+- **Fast**: Sugiyama layout with median crossing reduction
+- **Headless**: Layout IR for custom renderers (Canvas, SVG, TUI)
+- **Robust**: Handles diamonds, cycles, skip-level edges
+- **Embedded**: `no_std`, no-alloc (Arena mode)
 
 
 ## Use Cases
 
-**🛠️ For Tool Authors**
-- **Error Diagnostics**: Show exactly *why* a build failed (e.g., "Circular dependency in module X").
-- **Build Systems**: Visualize task execution graphs in the terminal.
-- **Package Managers**: Print dependency trees that handle standard `tree` commands poorly (diamonds).
+**Tool Authors**
+- Error diagnostics ("Circular dependency in module X")
+- Build systems (task execution graphs)
+- Package managers (dependency trees with diamonds)
 
-**⚡ For Systems Engineers**
-- **Circuit/Logic Design**: Visualize digital signal flows and logic gate connections.
-- **Data Pipelines**: Debug ETL jobs and airflow DAGs directly in logs.
-- **Distributed Systems**: Trace request paths across microservices.
+**Systems Engineers**
+- Data pipelines (ETL, Airflow DAGs)
+- Distributed systems (request tracing)
 
-**🌐 For Embedded & Web**
-- **IoT Consoles**: Debug state machines on devices with no display.
-- **Headless Rendering**: Calculate layout on the client-side for Canvas/SVG visualization.
+**Embedded & Web**
+- IoT consoles (state machines on devices with no display)
+- Headless rendering (Canvas/SVG from Layout IR)
 
 ## Alternatives Comparison
 
@@ -449,9 +448,9 @@ This is a production-ready, zero-dependency rendering engine.
     - **Scalable**: Regularly tested with 50,000+ nodes and deep hierarchies.
 
 ### What This Crate Does Well
-✅ **Error Chain Visualization**: The primary use-case.
-✅ **CLI Build Tools**: Visualizing task dependencies in terminal output.
-✅ **Embedded/WASM**: Works where heavy layout engines can't run.
+**Error Chain Visualization**: The primary use-case.
+**CLI Build Tools**: Visualizing task dependencies in terminal output.
+**Embedded/WASM**: Works where heavy layout engines can't run.
 
 ### What To Use Instead
 - **Graphviz/Dot**: If you need SVG export or non-hierarchical layouts.
@@ -467,6 +466,7 @@ cargo run --example generic_cycles      # Generic cycle detection
 cargo run --example error_registry      # Error chain with cycle detection
 cargo run --example topological_sort    # Dependency ordering
 cargo run --example dependency_analysis # Full dependency analysis suite
+cargo run --example layout_ir_demo      # Build → Compute IR → Process → Render workflow
 ```
 
 ## Performance & Configuration
@@ -482,22 +482,34 @@ The library is optimized for both performance and bundle size:
 
 ### Feature Flags
 
-Control bundle size by enabling only what you need:
+Control bundle size and memory usage:
 
 ```toml
 [dependencies]
 ascii-dag = { version = "0.6", default-features = false }
 ```
-*Note: Using `default-features = false` requires an `extern crate alloc;` in your root.*
 
-Available features:
-- `std` (default): Standard library support
-- `generic` (default): Generic cycle detection, topological sort, impact analysis, and metrics
-- `warnings`: Enable debug warnings for auto-created nodes
+**Available features:**
 
-**Bundle Size Impact**:
-- **Headless** (Layout Only): **~46 KB** (Automatic dead-code elimination)
-- **Full Renderer** (Default): **~55 KB**
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `std`   | ✓ | Standard library support |
+| `alloc` | (via std) | Heap allocation (`Vec`, `String`) |
+| `generic` | ✓ | Cycle detection, topological sort, impact analysis, metrics |
+| `warnings` | | Debug warnings for auto-created nodes |
+
+**Arena mode (no-alloc, embedded):**
+
+| Feature | Description |
+|---------|-------------|
+| `arena` | Enable arena allocator (no heap, fixed memory) |
+| `arena-idx-u8` | Max 255 nodes/edges (tiny MCUs, 2-8KB RAM) |
+| `arena-idx-u16` | Max 65,535 nodes/edges (small MCUs, 16-256KB RAM) |
+| `arena-idx-u32` | Max 4B nodes/edges (default for desktop) |
+
+**Bundle Size:**
+- **Headless** (IR only): ~46 KB WASM
+- **Full Renderer**: ~55 KB WASM
 
 ### Resource Limits
 
@@ -510,23 +522,30 @@ Available features:
 
 | Nodes | Build Time | Build RAM | Render Time | Render RAM | Output |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **50** | 58µs | 12 KB | 292µs | 54 KB | 8 KB |
-| **100** | 71µs | 23 KB | 508µs | 155 KB | 24 KB |
-| **500** | 333µs | 108 KB | 5.1ms | 2.0 MB | 440 KB |
-| **1000** | 674µs | 216 KB | 18.2ms | 7.4 MB | 1.9 MB |
+| **50** | 58µs | 12 KB | 0.9ms | 63 KB | 8 KB |
+| **100** | 72µs | 23 KB | 2.8ms | 175 KB | 26 KB |
+| **500** | 327µs | 108 KB | 54.4ms | 2.3 MB | 440 KB |
+| **1000** | 672µs | 216 KB | 273.6ms | 8.5 MB | 1.7 MB |
 
 *Build = DAG construction (device-side friendly), Render = layout + ASCII output (host-side)*
 *Measured via `cargo run --example benchmark --release`*
 
-- Rendering buffers: Pre-allocated based on graph size estimate
+- Rendering buffers: Dynamic (Vec) resizing overhead included in simple benchmark
+- For faster layout only, use `compute_layout()` directly (see Embedded section).
 
 **Embedded Performance** (RP2040 / Cortex-M0+ @ 125MHz):
 
-| Graph | Nodes | Time (Render) | RAM Usage |
-| :--- | :--- | :--- | :--- |
-| **Small** (Build Pipeline) | 10 | ~3 ms | 3.4 KB |
-| **Medium** (Binary Tree) | 31 | ~5 ms | 11.5 KB |
-| **Linear Chain** | 50 | ~2.5 ms | 19.5 KB |
+| Graph | Nodes | Mode | Build | Compute | Render | **Total** | RAM | Speedup |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Chain 10** | 10 | **Heap** | 0.4 ms | 1.8 ms | 0.6 ms | **2.8 ms** | 4.2 KB | |
+| | | **Arena** | 0.3 ms | 0.5 ms | 0.4 ms | **1.2 ms** | **0.7 KB** | **2.3x** |
+| **Chain 50** | 50 | **Heap** | 1.4 ms | 7.4 ms | 2.2 ms | **11.0 ms** | 20.4 KB | |
+| | | **Arena** | 0.6 ms | 0.9 ms | 3.6 ms | **5.1 ms** | **3.7 KB** | **2.2x** |
+| **Chain 100** | 100 | **Heap** | 2.9 ms | 15.3 ms | 4.3 ms | **22.6 ms** | 40.7 KB | |
+| | | **Arena** | 1.3 ms | 1.6 ms | 12.1 ms | **15.0 ms** | **7.5 KB** | **1.5x** |
+
+**Key Embedded Win**: Arena layout computation is **~10x faster** than Heap (indices vs pointers) and uses **5.5x less RAM**.
+**Note**: Arena rendering is slightly slower due to fixed-buffer safety checks, but the massive layout speedup yields a faster overall result.
 
 *Measured on physical hardware (Raspberry Pi Pico) using `examples/rp2040_pico`.*
 
@@ -642,7 +661,7 @@ if let Some(node) = ir.node_at(5, 2) {       // Hit testing for mouse interactio
 }
 ```
 
-**IR Structures:**
+**IR Structures (Heap mode):**
 
 | Struct | Fields | Description |
 |--------|--------|-------------|
@@ -650,6 +669,32 @@ if let Some(node) = ir.node_at(5, 2) {       // Hit testing for mouse interactio
 | `LayoutNode` | `id`, `label`, `x`, `y`, `width`, `center_x`, `level` | Node position & metadata |
 | `LayoutEdge` | `from_id`, `to_id`, `from_x`, `from_y`, `to_x`, `to_y`, `path` | Edge routing info |
 | `EdgePath` | `Direct`, `Corner`, `SideChannel`, `MultiSegment` | How the edge is routed |
+
+**IR Structures (Arena mode - no-alloc):**
+
+For embedded/no_std environments, use `compute_layout_arena()` which returns `LayoutIRArena`:
+
+```rust
+use ascii_dag::arena::Arena;
+
+let mut temp_buffer = [0u8; 16384];
+let mut output_buffer = [0u8; 16384];
+let mut temp_arena = Arena::new(&mut temp_buffer);
+let mut output_arena = Arena::new(&mut output_buffer);
+
+if let Some(ir) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
+    // ir is LayoutIRArena - same API as LayoutIR but no heap allocation
+    let mut render_buffer = [0u8; 4096];
+    let mut line_buffer = [' '; 256];
+    ir.render_to_buffer(&mut render_buffer, &mut line_buffer);
+}
+```
+
+| Arena Struct | Description |
+|--------------|-------------|
+| `LayoutIRArena` | Arena-allocated layout (slices instead of Vec) |
+| `LayoutNodeArena` | Node with fixed-size label reference |
+| `LayoutEdgeArena` | Edge with arena-allocated waypoints |
 
 ### Render Modes
 Control the layout direction.

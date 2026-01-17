@@ -20,9 +20,9 @@ fn main() {
     dag2.add_node(10, "Root");
     dag2.add_node(11, "Branch_1");
     dag2.add_node(12, "Branch_2");
-    
+
     dag2.add_edge(10, 11);
     dag2.add_edge(10, 12); // The ignored child?
-    
+
     println!("{}", dag2.render());
 }

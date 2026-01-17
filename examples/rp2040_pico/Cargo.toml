@@ -22,7 +22,8 @@ panic-halt = "0.2"
 embedded-alloc = "0.5"
 
 # Our crate! (use path for local dev, or version for published)
-ascii-dag = { path = "../..", default-features = false }
+# Using arena-idx-u8 for minimal memory footprint on microcontroller
+ascii-dag = { path = "../..", default-features = false, features = ["arena-idx-u8"] }
 
 [profile.release]
 opt-level = "s"      # Optimize for size

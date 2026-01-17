@@ -43,7 +43,7 @@ impl BitSet {
     #[inline]
     fn prepare(&mut self, size: usize) {
         self.len = size;
-        let words_needed = (size + 63) / 64;
+        let words_needed = size.div_ceil(64);
         self.bits.clear();
         self.bits.resize(words_needed, 0);
     }
@@ -843,11 +843,7 @@ impl<'a> DAG<'a> {
                             if let Some(&(first_start, _)) = real_node_spans.first() {
                                 if first_start > 3 {
                                     let gap_pos = first_start - 2;
-                                    let dist = if from_center > gap_pos {
-                                        from_center - gap_pos
-                                    } else {
-                                        gap_pos - from_center
-                                    };
+                                    let dist = from_center.abs_diff(gap_pos);
                                     if dist < best_distance {
                                         best_distance = dist;
                                         best_gap_pos = gap_pos;
@@ -862,11 +858,7 @@ impl<'a> DAG<'a> {
                                 if next_start > prev_end + 4 {
                                     // There's a gap - find center of gap
                                     let gap_center = (prev_end + next_start) / 2;
-                                    let dist = if from_center > gap_center {
-                                        from_center - gap_center
-                                    } else {
-                                        gap_center - from_center
-                                    };
+                                    let dist = from_center.abs_diff(gap_center);
                                     if dist < best_distance {
                                         best_distance = dist;
                                         best_gap_pos = gap_center;
@@ -877,11 +869,7 @@ impl<'a> DAG<'a> {
                             // Check gap after last node
                             if let Some(&(_, last_end)) = real_node_spans.last() {
                                 let gap_pos = last_end + 3;
-                                let dist = if from_center > gap_pos {
-                                    from_center - gap_pos
-                                } else {
-                                    gap_pos - from_center
-                                };
+                                let dist = from_center.abs_diff(gap_pos);
                                 if dist < best_distance {
                                     best_gap_pos = gap_pos;
                                 }
@@ -897,11 +885,7 @@ impl<'a> DAG<'a> {
                         let mut final_x = candidate_x;
                         loop {
                             let too_close = used_positions[to_level].iter().any(|&used| {
-                                let diff = if final_x > used {
-                                    final_x - used
-                                } else {
-                                    used - final_x
-                                };
+                                let diff = final_x.abs_diff(used);
                                 diff < DUMMY_SPACING
                             });
                             if !too_close {
@@ -937,7 +921,7 @@ impl<'a> DAG<'a> {
 
                 // Add spacing to reach this node's position (batch operation)
                 if node_x > current_col {
-                    output.extend(core::iter::repeat(' ').take(node_x - current_col));
+                    output.extend(std::iter::repeat_n(' ', node_x - current_col));
                     current_col = node_x;
                 }
 
@@ -1414,21 +1398,33 @@ impl<'a> DAG<'a> {
                 if i == min_span {
                     if buffers.is_source.get(i) {
                         // Source at left edge - line comes from above and goes right
-                        ch = if target_xs.contains(&i) { TEE_DOWN } else { CORNER_DR }; // └ or ┬
+                        ch = if target_xs.contains(&i) {
+                            TEE_DOWN
+                        } else {
+                            CORNER_DR
+                        }; // └ or ┬
                     } else {
                         ch = CORNER_UR; // ┌ - target at left, line goes down
                     }
                 } else if i == max_span {
                     if buffers.is_source.get(i) {
                         // Source at right edge - line comes from above and goes left
-                        ch = if target_xs.contains(&i) { TEE_DOWN } else { CORNER_DL }; // ┘ or ┬
+                        ch = if target_xs.contains(&i) {
+                            TEE_DOWN
+                        } else {
+                            CORNER_DL
+                        }; // ┘ or ┬
                     } else {
                         ch = CORNER_UL; // ┐ - target at right, line goes down
                     }
                 } else if i > min_span && i < max_span {
                     if buffers.is_source.get(i) {
                         // Source in middle - line from above joins horizontal
-                        ch = if target_xs.contains(&i) { CROSS } else { TEE_UP }; // ┼ or ┴
+                        ch = if target_xs.contains(&i) {
+                            CROSS
+                        } else {
+                            TEE_UP
+                        }; // ┼ or ┴
                     } else if target_xs.contains(&i) {
                         ch = TEE_DOWN; // ┬ - target in middle
                     } else if ch == ' ' {

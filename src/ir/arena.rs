@@ -185,9 +185,10 @@ impl<'a> LayoutIRArena<'a> {
     #[inline]
     pub fn edge_waypoints(&self, edge: &LayoutEdgeArena) -> &[(usize, usize)] {
         match edge.path {
-            EdgePathArena::MultiSegment { waypoints_start, waypoints_len } => {
-                &self.waypoints[waypoints_start..waypoints_start + waypoints_len]
-            }
+            EdgePathArena::MultiSegment {
+                waypoints_start,
+                waypoints_len,
+            } => &self.waypoints[waypoints_start..waypoints_start + waypoints_len],
             _ => &[],
         }
     }
@@ -204,47 +205,47 @@ impl<'a> LayoutIRArena<'a> {
     }
 
     /// Render the layout to ASCII art in a pre-allocated buffer.
-    /// 
+    ///
     /// Returns the number of bytes written, or None if buffer too small.
-    /// 
+    ///
     /// Arena-compatible scanline renderer that writes directly to the buffer.
     pub fn render_to_buffer(&self, buffer: &mut [u8], line_buffer: &mut [char]) -> Option<usize> {
         if self.is_empty() {
             return Some(0);
         }
-        
+
         // Ensure line buffer is wide enough
         if line_buffer.len() < self.width {
             return None;
         }
-        
+
         let mut pos = 0;
-        
+
         for y in 0..self.height {
             // Clear line buffer
             for c in line_buffer[..self.width].iter_mut() {
                 *c = ' ';
             }
-            
+
             // Paint edges first (so nodes overwrite)
             for edge in self.edges {
                 self.paint_edge_at_y(line_buffer, edge, y);
             }
-            
+
             // Paint nodes (overwrites edge chars)
             for (node_idx, node) in self.nodes.iter().enumerate() {
                 if node.y == y {
                     self.paint_node(line_buffer, node_idx, node);
                 }
             }
-            
+
             // Find trimmed length (skip trailing spaces)
             let trimmed_len = line_buffer[..self.width]
                 .iter()
                 .rposition(|&c| c != ' ')
                 .map(|i| i + 1)
                 .unwrap_or(0);
-            
+
             // Write line to output buffer
             for &c in &line_buffer[..trimmed_len] {
                 let mut buf = [0u8; 4];
@@ -255,7 +256,7 @@ impl<'a> LayoutIRArena<'a> {
                 buffer[pos..pos + encoded.len()].copy_from_slice(encoded.as_bytes());
                 pos += encoded.len();
             }
-            
+
             // Add newline
             if pos >= buffer.len() {
                 return None;
@@ -263,20 +264,20 @@ impl<'a> LayoutIRArena<'a> {
             buffer[pos] = b'\n';
             pos += 1;
         }
-        
+
         Some(pos)
     }
-    
+
     /// Paint a node on the line buffer.
     fn paint_node(&self, line_buffer: &mut [char], node_idx: usize, node: &LayoutNodeArena) {
         let label = self.node_label(node_idx);
         let x = node.x;
-        
+
         // Opening bracket
         if x < line_buffer.len() {
             line_buffer[x] = '[';
         }
-        
+
         // Label characters
         for (i, c) in label.chars().enumerate() {
             let px = x + 1 + i;
@@ -284,14 +285,14 @@ impl<'a> LayoutIRArena<'a> {
                 line_buffer[px] = c;
             }
         }
-        
+
         // Closing bracket
         let close_x = x + node.width - 1;
         if close_x < line_buffer.len() {
             line_buffer[close_x] = ']';
         }
     }
-    
+
     /// Paint an edge at a specific Y coordinate.
     fn paint_edge_at_y(&self, line_buffer: &mut [char], edge: &LayoutEdgeArena, y: usize) {
         // Box drawing characters
@@ -302,18 +303,18 @@ impl<'a> LayoutIRArena<'a> {
         const CORNER_DL: char = '┘';
         const CORNER_UR: char = '┌';
         const CORNER_UL: char = '┐';
-        
+
         let from_y = edge.from_y;
         let to_y = edge.to_y;
         let from_x = edge.from_x;
         let to_x = edge.to_x;
-        
+
         // Edge draws between from_y+1 (below source) and to_y-1 (above target)
         // Arrow appears at to_y-1
         if y <= from_y || y >= to_y {
             return;
         }
-        
+
         match edge.path {
             EdgePathArena::Direct => {
                 // Straight vertical line from from_x
@@ -330,7 +331,7 @@ impl<'a> LayoutIRArena<'a> {
                 let x1 = from_x;
                 let x2 = to_x;
                 let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
-                
+
                 if y == horizontal_y {
                     // Horizontal segment
                     for x in min_x..=max_x {
@@ -361,15 +362,18 @@ impl<'a> LayoutIRArena<'a> {
                     }
                 }
             }
-            EdgePathArena::MultiSegment { waypoints_start, waypoints_len } => {
+            EdgePathArena::MultiSegment {
+                waypoints_start,
+                waypoints_len,
+            } => {
                 // Multi-segment path: follow waypoints
                 // Match heap scanline logic: build full path, walk windows of 2
                 let waypoints = &self.waypoints[waypoints_start..waypoints_start + waypoints_len];
-                
+
                 // We need to iterate through segments: from -> wp[0] -> wp[1] -> ... -> to
                 // Since we can't allocate, we handle each segment inline
                 let segment_count = waypoints_len + 1; // from->wp0, wp0->wp1, ..., wpN->to
-                
+
                 for seg_idx in 0..segment_count {
                     let (x1, y1) = if seg_idx == 0 {
                         (from_x, from_y)
@@ -381,10 +385,10 @@ impl<'a> LayoutIRArena<'a> {
                     } else {
                         waypoints[seg_idx]
                     };
-                    
+
                     let is_first_segment = seg_idx == 0;
                     let is_last_segment = seg_idx == segment_count - 1;
-                    
+
                     if x1 == x2 {
                         // Pure vertical segment
                         let start_y = if is_first_segment { y1 + 1 } else { y1 };
@@ -408,23 +412,25 @@ impl<'a> LayoutIRArena<'a> {
                     } else {
                         // Diagonal segment: use corner routing at y1 + 1
                         let corner_y = y1 + 1;
-                        
+
                         // Horizontal segment at corner_y
                         if y == corner_y {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
                             for x in min_x..=max_x {
                                 if x < line_buffer.len() {
                                     if x == x1 {
-                                        line_buffer[x] = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                                        line_buffer[x] =
+                                            if x1 < x2 { CORNER_DR } else { CORNER_DL };
                                     } else if x == x2 {
-                                        line_buffer[x] = if x1 < x2 { CORNER_UL } else { CORNER_UR };
+                                        line_buffer[x] =
+                                            if x1 < x2 { CORNER_UL } else { CORNER_UR };
                                     } else if line_buffer[x] == ' ' {
                                         line_buffer[x] = H_LINE;
                                     }
                                 }
                             }
                         }
-                        
+
                         // Vertical from corner to next waypoint/target
                         if y > corner_y && y < y2 && x2 < line_buffer.len() {
                             if is_last_segment && y == y2 - 1 {
@@ -433,9 +439,13 @@ impl<'a> LayoutIRArena<'a> {
                                 line_buffer[x2] = V_LINE;
                             }
                         }
-                        
+
                         // If not first segment, draw vertical at waypoint y-coordinate
-                        if !is_first_segment && y == y1 && x1 < line_buffer.len() && line_buffer[x1] == ' ' {
+                        if !is_first_segment
+                            && y == y1
+                            && x1 < line_buffer.len()
+                            && line_buffer[x1] == ' '
+                        {
                             line_buffer[x1] = V_LINE;
                         }
                     }
@@ -443,7 +453,7 @@ impl<'a> LayoutIRArena<'a> {
             }
         }
     }
-    
+
     /// Estimate buffer size needed for rendering.
     pub fn estimate_render_size(&self) -> usize {
         // Each character can be up to 4 bytes (UTF-8), plus newline per row
@@ -459,22 +469,29 @@ pub fn estimate_layout_arena_size(
     max_waypoints: usize,
 ) -> usize {
     use core::mem::size_of;
-    
+
     let nodes_size = node_count * size_of::<LayoutNodeArena>();
     let edges_size = edge_count * size_of::<LayoutEdgeArena>();
     let waypoints_size = max_waypoints * size_of::<(usize, usize)>();
     let level_offsets_size = (node_count + 2) * size_of::<usize>(); // Generous estimate
     let level_data_size = node_count * size_of::<usize>();
-    
+
     // Add alignment padding and extra buffer
     let padding = 8 * 8;
-    
-    nodes_size + edges_size + waypoints_size + level_offsets_size + 
-    level_data_size + label_bytes + padding + 512
+
+    nodes_size
+        + edges_size
+        + waypoints_size
+        + level_offsets_size
+        + level_data_size
+        + label_bytes
+        + padding
+        + 512
 }
 
 /// Builder for constructing LayoutIRArena from arena memory.
 pub struct LayoutIRArenaBuilder<'a> {
+    #[allow(dead_code)] // Stored for potential future arena operations
     arena: &'a mut Arena<'a>,
     // Temporary data (will be copied to arena)
     nodes: &'a mut [LayoutNodeArena],
