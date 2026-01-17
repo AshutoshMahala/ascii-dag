@@ -27,7 +27,7 @@ DAG layout engine. Zero dependencies. `no_std` ready.
 ## Why?
 - **Zero Dependencies**: Drop it into any `no_std`, WASM, or embedded project.
 - **Visual Error Chains**: Show users *why* their build failed (Cycle detected? Dependency missing?).
-- **Fast**: Renders 1000 nodes in ~20ms with full layout computation.
+- **Fast**: ~5ms for 1000 nodes with Arena layout.
 
 ## Features
 - **Tiny**: ~55KB WASM
@@ -518,20 +518,25 @@ ascii-dag = { version = "0.6", default-features = false }
 - ✅ Dense graphs (high edge count) handled efficiently via cached adjacency lists
 - ⚠️ Very large graphs (>10,000 nodes) will take seconds to layout but will complete successfully.
 
-**Benchmark Results** (Consumer Desktop, Release Build):
+**Benchmark Results** (Apple M2 Ultra, ARM64, Release Build):
 
-| Nodes | Build Time | Build RAM | Render Time | Render RAM | Output |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **50** | 58µs | 12 KB | 0.9ms | 63 KB | 8 KB |
-| **100** | 72µs | 23 KB | 2.8ms | 175 KB | 26 KB |
-| **500** | 327µs | 108 KB | 54.4ms | 2.3 MB | 440 KB |
-| **1000** | 672µs | 216 KB | 273.6ms | 8.5 MB | 1.7 MB |
+| Topology | Nodes | Mode | Build | Compute | Render | **Total** | Speedup |
+| :--- | ---: | :--- | ---: | ---: | ---: | ---: | ---: |
+| **Chain** | 100 | Heap | 81µs | 265µs | 71µs | **419µs** | |
+| | | Arena | 6µs | 54µs | 127µs | **187µs** | **2.2x** |
+| **Chain** | 500 | Heap | 270µs | 1,252µs | 296µs | **1,818µs** | |
+| | | Arena | 23µs | 81µs | 1,082µs | **1,187µs** | **1.5x** |
+| **Diamond** | 100 | Heap | 78µs | 464µs | 195µs | **738µs** | |
+| | | Arena | 14µs | 30µs | 165µs | **210µs** | **3.5x** |
+| **Diamond** | 500 | Heap | 279µs | 2,656µs | 928µs | **3,865µs** | |
+| | | Arena | 24µs | 109µs | 1,141µs | **1,275µs** | **3.0x** |
+| **WideFan** | 100 | Heap | 54µs | 199µs | 221µs | **474µs** | |
+| | | Arena | 5µs | 29µs | 255µs | **290µs** | **1.6x** |
+| **WideFan** | 500 | Heap | 244µs | 1,509µs | 5,156µs | **6,910µs** | |
+| | | Arena | 21µs | 70µs | 3µs | **94µs** | **73.5x** |
 
-*Build = DAG construction (device-side friendly), Render = layout + ASCII output (host-side)*
+*Chain = linear (best case), Diamond = skip-level edges (stress), WideFan = fan-out/fan-in (crossing worst case)*
 *Measured via `cargo run --example benchmark --release`*
-
-- Rendering buffers: Dynamic (Vec) resizing overhead included in simple benchmark
-- For faster layout only, use `compute_layout()` directly (see Embedded section).
 
 **Embedded Performance** (RP2040 / Cortex-M0+ @ 125MHz):
 
@@ -566,13 +571,16 @@ ascii-dag = { version = "0.6", default-features = false }
 
 Verified iteratively safe on scaling topologies (no stack overflow):
 
-| Topology | Nodes | Render Time | Output Size | Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **Diamond Lattice** | **20,164** | ~1.5s | 0.61 MB | ✅ Success |
-| **Diamond Lattice** | **50,176** | ~14s | 1.52 MB | ✅ Success |
-| **Wide Fan** | **50,000** | ~31s | 2.81 MB | ✅ Success |
+| Topology | Nodes | Mode | Time | Output Size | Speedup |
+| :--- | ---: | :--- | ---: | ---: | ---: |
+| **Diamond** | 20,164 | Heap | 1.77s | 0.61 MB | |
+| | | Arena | 0.50s | | **3.5x** |
+| **Diamond** | 50,176 | Heap | 10.8s | 1.52 MB | |
+| | | Arena | 3.07s | | **3.5x** |
+| **Wide Fan** | 50,000 | Heap | 26.6s | 2.81 MB | |
+| | | Arena | 3.08s | | **8.6x** |
 
-*Tested on release build. "Fan" topology represents the worst-case scenario for crossing reduction (single massive layer).*
+*Tested on Apple M2 Ultra (ARM64), release build. Wide Fan is worst-case for crossing reduction.*
 
 **Performance characteristics**:
 - Node/edge insertion: O(1) amortized
@@ -580,7 +588,7 @@ Verified iteratively safe on scaling topologies (no stack overflow):
 - Rendering: O(V + E) layout (thanks to "Side-Channel" routing optimization)
 
 **Security considerations**:
-- No unsafe code
+- Minimal unsafe in arena allocator (Miri-tested)
 - Deterministic execution
 - For untrusted input, consider limiting graph size to prevent resource exhaustion
 - Maximum node ID is `usize::MAX` (formatted as up to 20 digits)

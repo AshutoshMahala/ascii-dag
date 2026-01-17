@@ -52,6 +52,7 @@ fn main() {
         ("The Skip-Level Nightmare", test_skip_level_nightmare),
         ("The Verbose Logger", test_verbose_logger),
         ("The Ouroboros", test_ouroboros),
+        ("Massive Diamond (20k)", test_massive_diamond_20k),
         ("Massive Diamond (50k)", test_massive_diamond_50k),
         ("Massive Fan (50k)", test_massive_fan_50k),
         // ("Massive Diamond (100k)", test_massive_diamond_100k), // Disabled: takes very long
@@ -347,6 +348,27 @@ fn test_ouroboros() -> DAG<'static> {
     dag.add_edge(1, 2);
     dag.add_edge(2, 3);
     dag.add_edge(3, 1); // Cycle!
+    dag
+}
+
+fn test_massive_diamond_20k() -> DAG<'static> {
+    let mut dag = DAG::new();
+    let width = 142;
+    let height = 142; // ~20k nodes
+
+    for y in 0..height {
+        for x in 0..width {
+            let id = y * width + x;
+            dag.add_node(id, ".");
+            if y < height - 1 {
+                let next_y_base = (y + 1) * width;
+                dag.add_edge(id, next_y_base + x);
+                if x < width - 1 {
+                    dag.add_edge(id, next_y_base + (x + 1));
+                }
+            }
+        }
+    }
     dag
 }
 

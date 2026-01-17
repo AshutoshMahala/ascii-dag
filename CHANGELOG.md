@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.1] - 2026-01-17
+
+### Benchmarks
+- **Topology-based benchmarks**: Chain, Diamond, WideFan tests showing Arena vs Heap speedups
+- **20K node stress test**: Added `test_massive_diamond_20k()` for mid-scale testing
+- **Microsecond precision**: Desktop benchmarks now report in µs for clarity
+- **ARM platform note**: Documented M2 Ultra (ARM64) as benchmark platform
+
+### Documentation
+- **README accuracy**: Updated performance claim to reflect actual Arena benchmarks (~5ms for 1000 nodes)
+- **Scalability table**: Added Heap vs Arena comparison (3.5x-8.6x speedup at scale)
+- **Security section**: Corrected "no unsafe" claim → "minimal unsafe in arena allocator (Miri-tested)"
+
 ## [0.7.0] - 2026-01-17
 
 ### No-Alloc / Arena Mode

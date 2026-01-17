@@ -50,7 +50,11 @@ fn main() {
     let ir = dag.compute_layout();
 
     println!("Layout IR generated:");
-    println!("  • Canvas size: {} × {} characters", ir.width(), ir.height());
+    println!(
+        "  • Canvas size: {} × {} characters",
+        ir.width(),
+        ir.height()
+    );
     println!("  • Levels: {}", ir.level_count());
     println!("  • Nodes: {}", ir.nodes().len());
     println!("  • Edges: {}", ir.edges().len());
@@ -97,7 +101,11 @@ fn main() {
 
     // Example: Generate custom output (pseudo-SVG)
     println!("Example: Generate pseudo-SVG from IR:");
-    println!("  <svg width=\"{}\" height=\"{}\">", ir.width() * 10, ir.height() * 20);
+    println!(
+        "  <svg width=\"{}\" height=\"{}\">",
+        ir.width() * 10,
+        ir.height() * 20
+    );
     for node in ir.nodes() {
         println!(
             "    <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"20\" label=\"{}\"/>",

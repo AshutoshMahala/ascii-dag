@@ -4,63 +4,82 @@ use ascii_dag::graph::DAG;
 use std::io::{self, Write};
 use std::time::Instant;
 
-struct SimpleRng {
-    state: u64,
+/// Graph topology for benchmarking
+#[derive(Clone, Copy)]
+enum Topology {
+    Chain,   // Simple chain: 0 → 1 → 2 → ... → N
+    Diamond, // Diamond lattice: worst case for skip-level edges
+    WideFan, // Fan-out then fan-in: worst case for crossing reduction
 }
 
-impl SimpleRng {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        self.state
-    }
-
-    fn gen_range(&mut self, min: usize, max: usize) -> usize {
-        let range = (max - min) as u64;
-        let random = self.next_u64();
-        min + (random % range) as usize
-    }
-
-    fn chance(&mut self, p_true: usize) -> bool {
-        self.gen_range(0, 100) < p_true
+impl Topology {
+    fn name(&self) -> &'static str {
+        match self {
+            Topology::Chain => "Chain",
+            Topology::Diamond => "Diamond",
+            Topology::WideFan => "WideFan",
+        }
     }
 }
 
-fn generate_graph_data(node_count: usize) -> (Vec<(usize, String)>, Vec<(usize, usize)>) {
-    let mut rng = SimpleRng::new(12345);
-    let mut nodes = Vec::with_capacity(node_count);
-    let mut edges = Vec::with_capacity(node_count * 2);
+fn generate_chain(n: usize) -> (Vec<(usize, String)>, Vec<(usize, usize)>) {
+    let nodes: Vec<_> = (0..n).map(|i| (i, format!("N{}", i))).collect();
+    let edges: Vec<_> = (0..n - 1).map(|i| (i, i + 1)).collect();
+    (nodes, edges)
+}
 
-    for i in 0..node_count {
-        nodes.push((i, format!("N{}", i)));
-    }
+fn generate_diamond(n: usize) -> (Vec<(usize, String)>, Vec<(usize, usize)>) {
+    // Diamond lattice: each node connects to 2 nodes in next level
+    // Creates many skip-level edges and crossing opportunities
+    let nodes: Vec<_> = (0..n).map(|i| (i, format!("N{}", i))).collect();
+    let mut edges = Vec::with_capacity(n * 2);
 
-    for i in 0..node_count.saturating_sub(1) {
-        let jump = rng.gen_range(1, 5.min(node_count - i));
-        edges.push((i, i + jump));
-
-        for _ in 0..2 {
-            if rng.chance(40) {
-                let target_jump = rng.gen_range(1, 20.min(node_count - i));
-                edges.push((i, i + target_jump));
-            }
+    for i in 0..n.saturating_sub(1) {
+        edges.push((i, i + 1));
+        if i + 2 < n {
+            edges.push((i, i + 2)); // Skip-level edge
         }
     }
     (nodes, edges)
 }
 
-fn run_comparison(count: usize) {
-    println!("Generating data for {} nodes...", count);
-    io::stdout().flush().unwrap();
-    let (nodes, edges) = generate_graph_data(count);
+fn generate_wide_fan(n: usize) -> (Vec<(usize, String)>, Vec<(usize, usize)>) {
+    // Fan-out from root, then fan-in to sink
+    // Worst case for crossing reduction (all nodes at same level)
+    let nodes: Vec<_> = (0..n).map(|i| (i, format!("N{}", i))).collect();
+    let mut edges = Vec::with_capacity(n * 2);
+
+    let root = 0;
+    let sink = n - 1;
+    let middle_count = n.saturating_sub(2);
+
+    // Root fans out to all middle nodes
+    for i in 1..=middle_count {
+        edges.push((root, i));
+    }
+    // All middle nodes fan in to sink
+    for i in 1..=middle_count {
+        edges.push((i, sink));
+    }
+    (nodes, edges)
+}
+
+fn generate_graph(topology: Topology, n: usize) -> (Vec<(usize, String)>, Vec<(usize, usize)>) {
+    match topology {
+        Topology::Chain => generate_chain(n),
+        Topology::Diamond => generate_diamond(n),
+        Topology::WideFan => generate_wide_fan(n),
+    }
+}
+
+fn run_comparison(topology: Topology, count: usize) {
+    let (nodes, edges) = generate_graph(topology, count);
 
     // --- HEAP BENCHMARK ---
-    print!("Running HEAP...");
-    io::stdout().flush().unwrap();
     let heap_total_us;
+    let heap_build_us;
+    let heap_compute_us;
+    let heap_render_us;
     {
         let start = Instant::now();
 
@@ -68,46 +87,36 @@ fn run_comparison(count: usize) {
         let build_start = Instant::now();
         let node_refs: Vec<(usize, &str)> = nodes.iter().map(|(id, s)| (*id, s.as_str())).collect();
         let dag = DAG::from_edges(&node_refs, &edges);
-        let build_time = build_start.elapsed();
+        heap_build_us = build_start.elapsed().as_micros();
 
-        // 2. Render
+        // 2. Compute Layout
+        let compute_start = Instant::now();
+        let ir = dag.compute_layout();
+        heap_compute_us = compute_start.elapsed().as_micros();
+
+        // 3. Render
         let render_start = Instant::now();
         let mut output = String::with_capacity(count * 100);
-        dag.render_to(&mut output);
-        let render_time = render_start.elapsed();
+        ir.render_scanline_to(&mut output);
+        heap_render_us = render_start.elapsed().as_micros();
 
         heap_total_us = start.elapsed().as_micros();
-
-        println!(" Done.");
-        print!(
-            "| {:<4} | {:<5} | {:>8} | {:>8} | {:>8} |",
-            count,
-            "HEAP",
-            format!("{:.1}ms", build_time.as_micros() as f64 / 1000.0),
-            format!("{:.1}ms", render_time.as_micros() as f64 / 1000.0),
-            format!("{:.1}ms", heap_total_us as f64 / 1000.0)
-        );
     }
 
-    println!();
-
     // --- ARENA BENCHMARK ---
+    let arena_total_us;
+    let arena_build_us;
+    let arena_compute_us;
+    let arena_render_us;
     {
-        print!("Running ARENA...");
-        io::stdout().flush().unwrap();
-
         // Allocate Memory Buffers
-        let mut graph_mem = vec![0u8; 1 * 1024 * 1024];
-        let mut temp_mem = vec![0u8; 5 * 1024 * 1024];
-        let mut output_mem = vec![0u8; 5 * 1024 * 1024];
-        println!("  Allocated.");
-        io::stdout().flush().unwrap();
+        let mut graph_mem = vec![0u8; 2 * 1024 * 1024];
+        let mut temp_mem = vec![0u8; 8 * 1024 * 1024];
+        let mut output_mem = vec![0u8; 8 * 1024 * 1024];
 
         let start = Instant::now();
 
         // 1. Build
-        println!("  Building Arena...");
-        io::stdout().flush().unwrap();
         let build_start = Instant::now();
         let mut graph_arena = Arena::new(&mut graph_mem);
 
@@ -125,13 +134,9 @@ fn run_comparison(count: usize) {
         }
 
         let graph = builder.build().expect("Failed to build graph");
-        let build_time = build_start.elapsed();
-        println!("  Build Done.");
-        io::stdout().flush().unwrap();
+        arena_build_us = build_start.elapsed().as_micros();
 
         // 2. Compute Layout
-        println!("  Computing Layout...");
-        io::stdout().flush().unwrap();
         let compute_start = Instant::now();
         let mut temp_arena = Arena::new(&mut temp_mem);
         let mut final_arena = Arena::new(&mut output_mem);
@@ -139,50 +144,70 @@ fn run_comparison(count: usize) {
         let layout = graph
             .compute_layout_arena(&mut temp_arena, &mut final_arena)
             .expect("Layout computation failed (None returned)");
-        let compute_time = compute_start.elapsed();
-        println!("  Layout Done.");
-        io::stdout().flush().unwrap();
+        arena_compute_us = compute_start.elapsed().as_micros();
 
         // 3. Render
-        println!("  Rendering Arena...");
-        io::stdout().flush().unwrap();
         let render_start = Instant::now();
-        let mut render_buf = vec![0u8; count * 500];
-        let mut line_buf = vec![' '; 1024];
-        layout
-            .render_to_buffer(&mut render_buf, &mut line_buf)
-            .unwrap();
-        let render_time = render_start.elapsed();
+        let mut render_buf = vec![0u8; count * 500 + 10000];
+        let mut line_buf = vec![' '; 2048];
+        let _ = layout.render_to_buffer(&mut render_buf, &mut line_buf);
+        arena_render_us = render_start.elapsed().as_micros();
 
-        let arena_total_us = start.elapsed().as_micros();
-        let speedup = heap_total_us as f64 / arena_total_us as f64;
-
-        println!(" Done.");
-        print!(
-            "| {:<4} | {:<5} | {:>8} | {:>8} | {:>8} | x{:.2}",
-            "",
-            "ARENA",
-            format!("{:.1}ms", build_time.as_micros() as f64 / 1000.0),
-            format!("{:.1}ms", compute_time.as_micros() as f64 / 1000.0),
-            format!("{:.1}ms", arena_total_us as f64 / 1000.0),
-            speedup
-        );
+        arena_total_us = start.elapsed().as_micros();
     }
-    println!("\n-------------------------------------------------------------");
+
+    let speedup = heap_total_us as f64 / arena_total_us as f64;
+
+    // Print Heap row
+    println!(
+        "| {:>8} | {:>5} | {:>5} | {:>8}µs | {:>8}µs | {:>8}µs | {:>10}µs |",
+        topology.name(),
+        count,
+        "Heap",
+        heap_build_us,
+        heap_compute_us,
+        heap_render_us,
+        heap_total_us
+    );
+
+    // Print Arena row
+    println!(
+        "| {:>8} | {:>5} | {:>5} | {:>8}µs | {:>8}µs | {:>8}µs | {:>10}µs | **{:.1}x**",
+        "", "", "Arena", arena_build_us, arena_compute_us, arena_render_us, arena_total_us, speedup
+    );
 }
 
 fn main() {
-    println!("\n=== Desktop Benchmark: Heap vs Arena ===\n");
+    println!("\n=== Desktop Benchmark: Heap vs Arena ===");
+    println!("Platform: Apple M2 Ultra (ARM64), Release Build\n");
     println!(
-        "| {:<4} | {:<5} | {:>8} | {:>8} | {:>8} | Speedup",
-        "Node", "Mode", "Build", "Compute", "Total"
+        "| {:>8} | {:>5} | {:>5} | {:>10} | {:>10} | {:>10} | {:>12} | Speedup",
+        "Topology", "Nodes", "Mode", "Build", "Compute", "Render", "Total"
     );
-    println!("|------|-------|----------|----------|----------|--------");
+    println!(
+        "|----------|-------|-------|------------|------------|------------|--------------|--------"
+    );
     io::stdout().flush().unwrap();
 
-    let sizes = [50];
+    let tests = [
+        (Topology::Chain, 100),
+        (Topology::Chain, 500),
+        (Topology::Diamond, 100),
+        (Topology::Diamond, 500),
+        (Topology::WideFan, 100),
+        (Topology::WideFan, 500),
+    ];
 
-    for &size in &sizes {
-        run_comparison(size);
+    for (topology, size) in tests {
+        run_comparison(topology, size);
+        println!();
     }
+
+    println!("Legend:");
+    println!("  Chain   = Simple linear chain (best case)");
+    println!("  Diamond = Diamond lattice with skip-level edges (stress test)");
+    println!("  WideFan = Fan-out/fan-in (worst case for crossing reduction)");
+    println!("\n  Build = DAG/CSR construction");
+    println!("  Compute = Sugiyama layout algorithm");
+    println!("  Render = ASCII output generation");
 }
