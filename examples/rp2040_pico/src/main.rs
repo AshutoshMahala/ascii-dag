@@ -46,25 +46,33 @@ use usbd_serial::SerialPort;
 use embedded_alloc::Heap;
 
 // ascii-dag
+// ascii-dag
 use ascii_dag::DAG;
+use ascii_dag::arena::Arena;
+use ascii_dag::csr::CsrGraphBuilder;
 
 /// Boot2 bootloader (W25Q080 flash)
 #[link_section = ".boot2"]
 #[used]
 pub static BOOT2: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 
-/// Heap allocator - 64KB for larger DAGs
+/// Heap allocator - 80KB for Heap tests
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
-const HEAP_SIZE: usize = 64 * 1024; // 64 KB
+const HEAP_SIZE: usize = 80 * 1024; // 80 KB
 
-/// Timing result for a benchmark
+/// Arena buffer - 80KB for Arena tests (statically allocated)
+/// We use 'static mut' which is unsafe but standard for embedded single-core No-OS tests
+static mut ARENA_BUF: [u8; 80 * 1024] = [0u8; 80 * 1024];
+
+/// Timing result for a benchmark (3-phase timing)
+#[derive(Clone, Copy)]
 struct BenchResult {
-    build_us: u64,
-    render_us: u64,
-    heap_bytes: usize,
-    output_bytes: usize,
+    build_us: u64,   // Graph construction
+    compute_us: u64, // Layout computation
+    render_us: u64,  // Rendering to string
+    memory_bytes: usize,
 }
 
 #[entry]
@@ -134,337 +142,75 @@ fn main() -> ! {
     
     // Send header
     write_serial(&mut serial, &mut usb_dev, "\r\n");
-    write_serial(&mut serial, &mut usb_dev, "╔══════════════════════════════════════════════════╗\r\n");
-    write_serial(&mut serial, &mut usb_dev, "║     ascii-dag Performance Benchmark on RP2040    ║\r\n");
-    write_serial(&mut serial, &mut usb_dev, "║          Cortex-M0+ @ 125 MHz, 264KB RAM         ║\r\n");
-    write_serial(&mut serial, &mut usb_dev, "╚══════════════════════════════════════════════════╝\r\n\r\n");
+    write_serial(&mut serial, &mut usb_dev, "╔═══════════════════════════════════════════════════════════════════╗\r\n");
+    write_serial(&mut serial, &mut usb_dev, "║         ascii-dag Performance Benchmark on RP2040 Pico           ║\r\n");
+    write_serial(&mut serial, &mut usb_dev, "║            Comparing: Heap (std) vs Arena (no_std)               ║\r\n");
+    write_serial(&mut serial, &mut usb_dev, "╚═══════════════════════════════════════════════════════════════════╝\r\n\r\n");
 
     let mut buf = String::new();
-    
-    // ========================================
-    // BENCHMARK 1: Small DAG (4 nodes)
-    // ========================================
-    write_serial(&mut serial, &mut usb_dev, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n");
-    write_serial(&mut serial, &mut usb_dev, "BENCHMARK 1: Diamond Pattern (4 nodes, 4 edges)\r\n");
-    write_serial(&mut serial, &mut usb_dev, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n");
-    
-    let heap_before = HEAP.used();
-    let start = timer.get_counter();
-    
-    let dag = DAG::from_edges(
-        &[(1, "Root"), (2, "Left"), (3, "Right"), (4, "Merge")],
-        &[(1, 2), (1, 3), (2, 4), (3, 4)],
-    );
-    
-    let build_time = timer.get_counter() - start;
-    let render_start = timer.get_counter();
-    
-    let output = dag.render();
-    
-    let render_time = timer.get_counter() - render_start;
-    let heap_after = HEAP.used();
-    
-    write_serial_lines(&mut serial, &mut usb_dev, &output);
-    write_serial(&mut serial, &mut usb_dev, "\r\n");
-    
-    buf.clear();
-    write!(buf, "Build:  {:>6} µs\r\n", build_time.ticks()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Render: {:>6} µs\r\n", render_time.ticks()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Heap:   {:>6} bytes (delta: {} bytes)\r\n", heap_after, heap_after - heap_before).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Output: {:>6} bytes\r\n\r\n", output.len()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    
-    drop(output);
-    drop(dag);
 
-    // ========================================
-    // BENCHMARK 2: Medium DAG (10 nodes)
-    // ========================================
-    write_serial(&mut serial, &mut usb_dev, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n");
-    write_serial(&mut serial, &mut usb_dev, "BENCHMARK 2: Build Pipeline (10 nodes, 12 edges)\r\n");
-    write_serial(&mut serial, &mut usb_dev, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n");
-    
-    let heap_before = HEAP.used();
-    let start = timer.get_counter();
-    
-    let dag = DAG::from_edges(
-        &[
-            (1, "Source"),
-            (2, "Parse"),
-            (3, "Validate"),
-            (4, "Transform"),
-            (5, "Optimize"),
-            (6, "CodeGen"),
-            (7, "Link"),
-            (8, "Test"),
-            (9, "Package"),
-            (10, "Deploy"),
-        ],
-        &[
-            (1, 2), (2, 3), (3, 4), (4, 5), (5, 6),
-            (6, 7), (7, 8), (8, 9), (9, 10),
-            (1, 4), // skip-level: Source -> Transform
-            (3, 6), // skip-level: Validate -> CodeGen
-            (5, 8), // skip-level: Optimize -> Test
-        ],
-    );
-    
-    let build_time = timer.get_counter() - start;
-    let render_start = timer.get_counter();
-    
-    let output = dag.render();
-    
-    let render_time = timer.get_counter() - render_start;
-    let heap_after = HEAP.used();
-    
-    write_serial_lines(&mut serial, &mut usb_dev, &output);
-    write_serial(&mut serial, &mut usb_dev, "\r\n");
-    
-    buf.clear();
-    write!(buf, "Build:  {:>6} µs\r\n", build_time.ticks()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Render: {:>6} µs\r\n", render_time.ticks()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Heap:   {:>6} bytes (delta: {} bytes)\r\n", heap_after, heap_after - heap_before).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Output: {:>6} bytes\r\n\r\n", output.len()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    
-    drop(output);
-    drop(dag);
+    // === TEST 1: 10 Node Chain ===
+    let mut nodes_10: Vec<(usize, String)> = Vec::new();
+    let mut edges_10: Vec<(usize, usize)> = Vec::new();
+    for i in 0..10 {
+        nodes_10.push((i + 1, alloc::format!("N{:02}", i)));
+        if i > 0 { edges_10.push((i, i + 1)); }
+    }
+    let node_refs_10: Vec<(usize, &str)> = nodes_10.iter().map(|(id, s)| (*id, s.as_str())).collect();
+    run_comparison("Chain 10", &node_refs_10, &edges_10, &timer, &mut serial, &mut usb_dev, &mut buf);
 
-    // ========================================
-    // BENCHMARK 3: Wide DAG (fan-out/fan-in)
-    // ========================================
-    write_serial(&mut serial, &mut usb_dev, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n");
-    write_serial(&mut serial, &mut usb_dev, "BENCHMARK 3: Wide Fan-Out/Fan-In (12 nodes, 16 edges)\r\n");
-    write_serial(&mut serial, &mut usb_dev, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n");
-    
-    let heap_before = HEAP.used();
-    let start = timer.get_counter();
-    
-    let dag = DAG::from_edges(
-        &[
-            (1, "Start"),
-            (2, "Worker1"), (3, "Worker2"), (4, "Worker3"), (5, "Worker4"), (6, "Worker5"),
-            (7, "Stage2-A"), (8, "Stage2-B"), (9, "Stage2-C"),
-            (10, "Merge1"), (11, "Merge2"),
-            (12, "Final"),
-        ],
-        &[
-            // Fan out from Start
-            (1, 2), (1, 3), (1, 4), (1, 5), (1, 6),
-            // First merge stage
-            (2, 7), (3, 7), (4, 8), (5, 9), (6, 9),
-            // Second merge
-            (7, 10), (8, 10), (8, 11), (9, 11),
-            // Final convergence
-            (10, 12), (11, 12),
-        ],
-    );
-    
-    let build_time = timer.get_counter() - start;
-    let render_start = timer.get_counter();
-    
-    let output = dag.render();
-    
-    let render_time = timer.get_counter() - render_start;
-    let heap_after = HEAP.used();
-    
-    write_serial_lines(&mut serial, &mut usb_dev, &output);
-    write_serial(&mut serial, &mut usb_dev, "\r\n");
-    
-    buf.clear();
-    write!(buf, "Build:  {:>6} µs\r\n", build_time.ticks()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Render: {:>6} µs\r\n", render_time.ticks()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Heap:   {:>6} bytes (delta: {} bytes)\r\n", heap_after, heap_after - heap_before).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Output: {:>6} bytes\r\n\r\n", output.len()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    
-    drop(output);
-    drop(dag);
+    // === TEST 2: 50 Node Chain ===
+    let mut nodes_50: Vec<(usize, String)> = Vec::new();
+    let mut edges_50: Vec<(usize, usize)> = Vec::new();
+    for i in 0..50 {
+        nodes_50.push((i + 1, alloc::format!("N{:02}", i)));
+        if i > 0 { edges_50.push((i, i + 1)); }
+    }
+    let node_refs_50: Vec<(usize, &str)> = nodes_50.iter().map(|(id, s)| (*id, s.as_str())).collect();
+    run_comparison("Chain 50", &node_refs_50, &edges_50, &timer, &mut serial, &mut usb_dev, &mut buf);
 
-    // ========================================
-    // BENCHMARK 4: Large Generated DAG
-    // ========================================
-    write_serial(&mut serial, &mut usb_dev, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n");
-    write_serial(&mut serial, &mut usb_dev, "BENCHMARK 4: Generated Binary Tree (31 nodes, 30 edges)\r\n");
-    write_serial(&mut serial, &mut usb_dev, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n");
-    
-    // Generate a binary tree: 5 levels = 31 nodes
-    let mut nodes: Vec<(usize, &str)> = Vec::new();
-    let mut edges: Vec<(usize, usize)> = Vec::new();
-    
-    // Level labels (reused)
-    static LABELS: [&str; 31] = [
-        "N00", "N01", "N02", "N03", "N04", "N05", "N06", "N07",
-        "N08", "N09", "N10", "N11", "N12", "N13", "N14", "N15",
-        "N16", "N17", "N18", "N19", "N20", "N21", "N22", "N23",
-        "N24", "N25", "N26", "N27", "N28", "N29", "N30",
-    ];
-    
-    for i in 0..31usize {
-        nodes.push((i + 1, LABELS[i]));
+    // === TEST 3: 100 Node Chain ===
+    let mut nodes_100: Vec<(usize, String)> = Vec::new();
+    let mut edges_100: Vec<(usize, usize)> = Vec::new();
+    for i in 0..100 {
+        nodes_100.push((i + 1, alloc::format!("N{:02}", i)));
+        if i > 0 { edges_100.push((i, i + 1)); }
     }
-    
-    // Binary tree edges: node i has children 2i and 2i+1
-    for i in 1..=15usize {
-        edges.push((i, i * 2));
-        edges.push((i, i * 2 + 1));
-    }
-    
-    let heap_before = HEAP.used();
-    let start = timer.get_counter();
-    
-    let dag = DAG::from_edges(&nodes, &edges);
-    
-    let build_time = timer.get_counter() - start;
-    let render_start = timer.get_counter();
-    
-    let output = dag.render();
-    
-    let render_time = timer.get_counter() - render_start;
-    let heap_after = HEAP.used();
-    
-    // Only show first 20 lines to avoid flooding serial
-    write_serial(&mut serial, &mut usb_dev, "(showing first 20 lines)\r\n");
-    for (i, line) in output.lines().enumerate() {
-        if i >= 20 {
-            write_serial(&mut serial, &mut usb_dev, "...(truncated)\r\n");
-            break;
-        }
-        write_serial(&mut serial, &mut usb_dev, line);
-        write_serial(&mut serial, &mut usb_dev, "\r\n");
-    }
-    write_serial(&mut serial, &mut usb_dev, "\r\n");
-    
-    buf.clear();
-    write!(buf, "Build:  {:>6} µs\r\n", build_time.ticks()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Render: {:>6} µs\r\n", render_time.ticks()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Heap:   {:>6} bytes (delta: {} bytes)\r\n", heap_after, heap_after - heap_before).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Output: {:>6} bytes ({} lines)\r\n\r\n", output.len(), output.lines().count()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    
-    drop(output);
-    drop(dag);
-    drop(nodes);
-    drop(edges);
-
-    // ========================================
-    // BENCHMARK 5: Stress Test - 50 nodes
-    // ========================================
-    write_serial(&mut serial, &mut usb_dev, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n");
-    write_serial(&mut serial, &mut usb_dev, "BENCHMARK 5: Stress Test - Linear Chain (50 nodes)\r\n");
-    write_serial(&mut serial, &mut usb_dev, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\r\n");
-    
-    static STRESS_LABELS: [&str; 50] = [
-        "S00", "S01", "S02", "S03", "S04", "S05", "S06", "S07", "S08", "S09",
-        "S10", "S11", "S12", "S13", "S14", "S15", "S16", "S17", "S18", "S19",
-        "S20", "S21", "S22", "S23", "S24", "S25", "S26", "S27", "S28", "S29",
-        "S30", "S31", "S32", "S33", "S34", "S35", "S36", "S37", "S38", "S39",
-        "S40", "S41", "S42", "S43", "S44", "S45", "S46", "S47", "S48", "S49",
-    ];
-    
-    let mut nodes: Vec<(usize, &str)> = Vec::new();
-    let mut edges: Vec<(usize, usize)> = Vec::new();
-    
-    for i in 0..50usize {
-        nodes.push((i + 1, STRESS_LABELS[i]));
-        if i > 0 {
-            edges.push((i, i + 1));
-        }
-    }
-    
-    let heap_before = HEAP.used();
-    let start = timer.get_counter();
-    
-    let dag = DAG::from_edges(&nodes, &edges);
-    
-    let build_time = timer.get_counter() - start;
-    let render_start = timer.get_counter();
-    
-    let output = dag.render();
-    
-    let render_time = timer.get_counter() - render_start;
-    let heap_after = HEAP.used();
-    
-    // Only show first/last few lines
-    write_serial(&mut serial, &mut usb_dev, "(showing first 5 and last 5 lines)\r\n");
-    let lines: Vec<&str> = output.lines().collect();
-    for (i, line) in lines.iter().enumerate() {
-        if i < 5 || i >= lines.len() - 5 {
-            write_serial(&mut serial, &mut usb_dev, line);
-            write_serial(&mut serial, &mut usb_dev, "\r\n");
-        } else if i == 5 {
-            write_serial(&mut serial, &mut usb_dev, "   ...(middle lines omitted)...\r\n");
-        }
-    }
-    write_serial(&mut serial, &mut usb_dev, "\r\n");
-    
-    buf.clear();
-    write!(buf, "Build:  {:>6} µs\r\n", build_time.ticks()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Render: {:>6} µs\r\n", render_time.ticks()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Heap:   {:>6} bytes (delta: {} bytes)\r\n", heap_after, heap_after - heap_before).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    buf.clear();
-    write!(buf, "Output: {:>6} bytes ({} lines)\r\n\r\n", output.len(), lines.len()).ok();
-    write_serial(&mut serial, &mut usb_dev, &buf);
-    
-    drop(lines);
-    drop(output);
-    drop(dag);
-    drop(nodes);
-    drop(edges);
+    let node_refs_100: Vec<(usize, &str)> = nodes_100.iter().map(|(id, s)| (*id, s.as_str())).collect();
+    run_comparison("Chain 100", &node_refs_100, &edges_100, &timer, &mut serial, &mut usb_dev, &mut buf);
 
     // ========================================
     // FINAL SUMMARY
     // ========================================
-    write_serial(&mut serial, &mut usb_dev, "╔══════════════════════════════════════════════════╗\r\n");
-    write_serial(&mut serial, &mut usb_dev, "║                    SUMMARY                       ║\r\n");
-    write_serial(&mut serial, &mut usb_dev, "╠══════════════════════════════════════════════════╣\r\n");
+    write_serial(&mut serial, &mut usb_dev, "\r\n");
+    write_serial(&mut serial, &mut usb_dev, "╔═══════════════════════════════════════════════════════════════════╗\r\n");
+    write_serial(&mut serial, &mut usb_dev, "║                          SUMMARY                                 ║\r\n");
+    write_serial(&mut serial, &mut usb_dev, "╠═══════════════════════════════════════════════════════════════════╣\r\n");
     
     let final_heap = HEAP.used();
     let free_heap = HEAP.free();
     
     buf.clear();
-    write!(buf, "║  Total heap allocated: {:>6} bytes              ║\r\n", HEAP_SIZE).ok();
+    write!(buf, "║  Heap Pool:     {:>6} bytes                                      ║\r\n", HEAP_SIZE).ok();
     write_serial(&mut serial, &mut usb_dev, &buf);
     buf.clear();
-    write!(buf, "║  Heap currently used:  {:>6} bytes              ║\r\n", final_heap).ok();
+    write!(buf, "║  Heap Used:     {:>6} bytes                                      ║\r\n", final_heap).ok();
     write_serial(&mut serial, &mut usb_dev, &buf);
     buf.clear();
-    write!(buf, "║  Heap free:            {:>6} bytes              ║\r\n", free_heap).ok();
+    write!(buf, "║  Heap Free:     {:>6} bytes                                      ║\r\n", free_heap).ok();
     write_serial(&mut serial, &mut usb_dev, &buf);
-    write_serial(&mut serial, &mut usb_dev, "║                                                  ║\r\n");
-    write_serial(&mut serial, &mut usb_dev, "║  ascii-dag runs great on embedded! 🎉           ║\r\n");
-    write_serial(&mut serial, &mut usb_dev, "╚══════════════════════════════════════════════════╝\r\n\r\n");
+    write_serial(&mut serial, &mut usb_dev, "║                                                                   ║\r\n");
+    write_serial(&mut serial, &mut usb_dev, "║  Arena mode uses ZERO heap - pure stack/static allocation!       ║\r\n");
+    write_serial(&mut serial, &mut usb_dev, "╚═══════════════════════════════════════════════════════════════════╝\r\n\r\n");
     
     write_serial(&mut serial, &mut usb_dev, "Press any key to run benchmarks again...\r\n");
+    
+    // Extra flush - poll USB many times to ensure all data is transmitted
+    for _ in 0..100 {
+        usb_dev.poll(&mut [&mut serial]);
+        let _ = serial.flush();
+        cortex_m::asm::delay(10_000); // Small delay between polls
+    }
 
     // Keep USB alive and wait for keypress to restart
     let mut restart = false;
@@ -500,11 +246,14 @@ fn write_serial(
         if let Ok(n) = serial.write(&bytes[written..]) {
             written += n;
         }
+        // Small delay to let USB process
+        cortex_m::asm::delay(1000);
     }
-    // Flush
-    for _ in 0..10 {
+    // Flush more aggressively
+    for _ in 0..20 {
         usb_dev.poll(&mut [serial]);
         let _ = serial.flush();
+        cortex_m::asm::delay(1000);
     }
 }
 
@@ -517,5 +266,191 @@ fn write_serial_lines(
     for line in s.lines() {
         write_serial(serial, usb_dev, line);
         write_serial(serial, usb_dev, "\r\n");
+    }
+}
+
+/// Run comparison for a specific graph scenario
+fn run_comparison(
+    name: &str,
+    nodes: &[(usize, &str)],
+    edges: &[(usize, usize)],
+    timer: &Timer,
+    serial: &mut SerialPort<UsbBus>,
+    usb_dev: &mut UsbDevice<UsbBus>,
+    buf: &mut String,
+) {
+    write_serial(serial, usb_dev, "═══════════════════════════════════════════════════════════════════════\r\n");
+    buf.clear();
+    write!(buf, " {} ({} nodes, {} edges)\r\n", name, nodes.len(), edges.len()).ok();
+    write_serial(serial, usb_dev, buf);
+    write_serial(serial, usb_dev, "───────────────────────────────────────────────────────────────────────\r\n");
+
+    // --- Heap Run ---
+    let heap_stats = run_heap_benchmark(nodes, edges, timer);
+    
+    // --- Arena Run ---
+    let arena_stats = run_arena_benchmark(nodes, edges, timer, serial, usb_dev);
+    
+    // --- Report with 3-phase timing ---
+    write_serial(serial, usb_dev, "Mode   | Build (us) | Compute (us) | Render (us) | Total (us) | Memory\r\n");
+    write_serial(serial, usb_dev, "-------|------------|--------------|-------------|------------|--------\r\n");
+    
+    buf.clear();
+    let heap_total = heap_stats.build_us + heap_stats.compute_us + heap_stats.render_us;
+    write!(buf, "HEAP   | {:>10} | {:>12} | {:>11} | {:>10} | {:>6}\r\n", 
+           heap_stats.build_us, heap_stats.compute_us, heap_stats.render_us,
+           heap_total, heap_stats.memory_bytes).ok();
+    write_serial(serial, usb_dev, buf);
+
+    buf.clear();
+    if let Some(stats) = arena_stats {
+        let arena_total = stats.build_us + stats.compute_us + stats.render_us;
+        write!(buf, "ARENA  | {:>10} | {:>12} | {:>11} | {:>10} | {:>6}\r\n", 
+            stats.build_us, stats.compute_us, stats.render_us,
+            arena_total, stats.memory_bytes).ok();
+    } else {
+        write!(buf, "ARENA  |     FAILED |       FAILED |      FAILED |     FAILED |    OOM\r\n").ok();
+    }
+    write_serial(serial, usb_dev, buf);
+    
+    // Show speedup if arena succeeded
+    if let Some(stats) = arena_stats {
+        let heap_total = heap_stats.build_us + heap_stats.compute_us + heap_stats.render_us;
+        let arena_total = stats.build_us + stats.compute_us + stats.render_us;
+        if arena_total > 0 {
+            let speedup = (heap_total as f32) / (arena_total as f32);
+            buf.clear();
+            write!(buf, "                                          Speedup: {:.2}x\r\n", speedup).ok();
+            write_serial(serial, usb_dev, buf);
+        }
+    }
+    write_serial(serial, usb_dev, "\r\n");
+}
+
+fn run_heap_benchmark(nodes: &[(usize, &str)], edges: &[(usize, usize)], timer: &Timer) -> BenchResult {
+    let heap_before = HEAP.used();
+    
+    // Phase 1: Build
+    let build_start = timer.get_counter();
+    let dag = DAG::from_edges(nodes, edges);
+    let build_time = timer.get_counter() - build_start;
+    
+    // Phase 2: Compute layout
+    let compute_start = timer.get_counter();
+    let ir = dag.compute_layout();
+    let compute_time = timer.get_counter() - compute_start;
+    
+    // Phase 3: Render
+    let render_start = timer.get_counter();
+    let output = ir.render_scanline();
+    let render_time = timer.get_counter() - render_start;
+    
+    let heap_after = HEAP.used();
+    
+    drop(output);
+    drop(dag);
+    
+    BenchResult {
+        build_us: build_time.ticks(),
+        compute_us: compute_time.ticks(),
+        render_us: render_time.ticks(),
+        memory_bytes: heap_after.saturating_sub(heap_before),
+    }
+}
+
+fn run_arena_benchmark(
+    nodes: &[(usize, &str)], 
+    edges: &[(usize, usize)], 
+    timer: &Timer,
+    // Debug output
+    serial: &mut SerialPort<UsbBus>,
+    usb_dev: &mut UsbDevice<UsbBus>,
+) -> Option<BenchResult> {
+    unsafe {
+        // Memory layout: 80KB total
+        // Graph: 10KB (structural data)
+        // Temp: 35KB (layout calculation scratch)
+        // Output: 35KB (final layout result)
+        let (graph_mem, rest) = ARENA_BUF.split_at_mut(10 * 1024);
+        let (layout_temp_mem, output_mem) = rest.split_at_mut(35 * 1024);
+        
+        // Phase 1: Build graph
+        let build_start = timer.get_counter();
+        
+        let mut graph_arena = Arena::new(graph_mem);
+        let label_bytes = nodes.iter().map(|(_, l)| l.len()).sum::<usize>() + 256;
+        let mut builder = match CsrGraphBuilder::new(&mut graph_arena, nodes.len(), edges.len(), label_bytes) {
+            Some(b) => b,
+            None => {
+                write_serial(serial, usb_dev, "  [Arena FAIL: CsrGraphBuilder::new]\r\n");
+                return None;
+            }
+        };
+        
+        // Build ID -> index map
+        let mut id_to_idx: [(usize, usize); 128] = [(0, 0); 128];
+        let node_count = nodes.len().min(128);
+        
+        for (i, (id, label)) in nodes.iter().enumerate() {
+            if builder.add_node(*id, label).is_none() {
+                write_serial(serial, usb_dev, "  [Arena FAIL: add_node]\r\n");
+                return None;
+            }
+            if i < 128 {
+                id_to_idx[i] = (*id, i);
+            }
+        }
+        
+        let find_idx = |id: usize| -> Option<usize> {
+            for i in 0..node_count {
+                if id_to_idx[i].0 == id {
+                    return Some(id_to_idx[i].1);
+                }
+            }
+            None
+        };
+        
+        for (u, v) in edges { 
+            let from_idx = find_idx(*u)?;
+            let to_idx = find_idx(*v)?;
+            if builder.add_edge(from_idx, to_idx).is_none() {
+                write_serial(serial, usb_dev, "  [Arena FAIL: add_edge]\r\n");
+                return None;
+            }
+        }
+        
+        let graph = builder.build()?;
+        let build_time = timer.get_counter() - build_start;
+        
+        // Phase 2: Compute layout
+        let compute_start = timer.get_counter();
+        let mut layout_temp_arena = Arena::new(layout_temp_mem);
+        let mut final_output_arena = Arena::new(output_mem);
+        
+        let layout = match graph.compute_layout_arena(&mut layout_temp_arena, &mut final_output_arena) {
+            Some(l) => l,
+            None => {
+                write_serial(serial, usb_dev, "  [Arena FAIL: compute_layout]\r\n");
+                return None;
+            }
+        };
+        let compute_time = timer.get_counter() - compute_start;
+        
+        // Measure arena usage
+        let temp_used = layout_temp_arena.used();
+        
+        // Phase 3: Render
+        let render_start = timer.get_counter();
+        let mut render_buf = [0u8; 8192]; // Larger buffer for 100 nodes
+        let mut line_buf = [' '; 512];
+        let _rendered_len = layout.render_to_buffer(&mut render_buf, &mut line_buf).unwrap_or(0);
+        let render_time = timer.get_counter() - render_start;
+        
+        Some(BenchResult {
+            build_us: build_time.ticks(),
+            compute_us: compute_time.ticks(),
+            render_us: render_time.ticks(),
+            memory_bytes: temp_used,
+        })
     }
 }

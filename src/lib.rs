@@ -112,16 +112,30 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// Allow certain clippy warnings that are cosmetic or intentional:
+// - too_many_arguments: Some internal functions have many params for performance
+// - unnecessary_cast: Casts like `x as usize` are kept for clarity when index types vary
+// - needless_range_loop: Some loops index multiple arrays making iterators awkward
+// - collapsible_if: Some nested ifs are more readable uncollapsed
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::collapsible_else_if)]
 
 extern crate alloc;
 
 // Core modules (always available)
 pub mod arena;
+pub mod csr;
 pub mod cycles;
 pub mod graph;
 pub mod ir;
 pub mod layout;
 pub mod render;
+
+// Re-export CSR types
+pub use csr::CsrGraph;
 
 // Re-export IR types for convenience
 pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode};

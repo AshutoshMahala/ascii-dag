@@ -37,6 +37,8 @@
 //! }
 //! ```
 
+pub mod arena;
+
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::OnceCell;

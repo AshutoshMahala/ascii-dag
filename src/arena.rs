@@ -1,8 +1,16 @@
-//! Custom bump allocator for zero-allocation rendering.
+//! Bump/arena allocator for `no_std` and embedded environments.
 //!
 //! This module provides a simple arena allocator that can be used
-//! for temporary allocations during graph layout and rendering,
-//! eliminating heap allocations in performance-critical paths.
+//! for temporary allocations during graph layout and rendering.
+//!
+//! # Trade-offs
+//!
+//! | Aspect | Arena | Heap |
+//! |--------|-------|------|
+//! | Speed | ⚡ Very fast (pointer bump) | Slower (bookkeeping) |
+//! | Memory | Uses ~5-30x CSR estimate | Uses only what's needed |
+//! | `no_std` | ✅ Works | ❌ Needs allocator |
+//! | Predictability | Must estimate upfront | Allocates on demand |
 //!
 //! # Usage
 //!
@@ -46,11 +54,109 @@ impl<'a> Arena<'a> {
         }
     }
 
+    /// Allocate raw memory for `count` items of type T.
+    ///
+    /// Returns a pointer and does NOT borrow the arena mutably past the call.
+    /// This allows multiple allocations before converting to slices.
+    /// Memory is zeroed by default. Use `alloc_raw_uninit` for uninitialized memory.
+    ///
+    /// # Safety
+    ///
+    /// The returned pointer is valid for `count` items of type T.
+    /// The caller must ensure:
+    /// - The arena outlives any slices created from this pointer
+    /// - The memory is properly initialized before reading
+    /// - No other code accesses this memory region while slices are held
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use ascii_dag::arena::Arena;
+    ///
+    /// let mut buffer = [0u8; 1024];
+    /// let mut arena = Arena::new(&mut buffer);
+    ///
+    /// // Allocate multiple regions
+    /// let (ptr1, len1) = arena.alloc_raw::<usize>(10).unwrap();
+    /// let (ptr2, len2) = arena.alloc_raw::<usize>(20).unwrap();
+    ///
+    /// // Convert to slices (unsafe because we're asserting exclusive access)
+    /// unsafe {
+    ///     let slice1 = core::slice::from_raw_parts_mut(ptr1, len1);
+    ///     let slice2 = core::slice::from_raw_parts_mut(ptr2, len2);
+    ///     slice1[0] = 42;
+    ///     slice2[0] = 99;
+    /// }
+    /// ```
+    #[inline]
+    pub fn alloc_raw<T: Copy>(&mut self, count: usize) -> Option<(*mut T, usize)> {
+        self.alloc_raw_inner::<T>(count, true)
+    }
+
+    /// Allocate raw memory for `count` items of type T WITHOUT zeroing.
+    ///
+    /// This is faster than `alloc_raw` but the memory contains garbage.
+    /// Use when you will immediately overwrite all values.
+    ///
+    /// # Safety
+    ///
+    /// Same as `alloc_raw`, plus: caller MUST initialize all memory before reading.
+    #[inline]
+    pub fn alloc_raw_uninit<T: Copy>(&mut self, count: usize) -> Option<(*mut T, usize)> {
+        self.alloc_raw_inner::<T>(count, false)
+    }
+
+    #[inline]
+    fn alloc_raw_inner<T: Copy>(&mut self, count: usize, zero: bool) -> Option<(*mut T, usize)> {
+        if count == 0 {
+            return Some((core::ptr::null_mut(), 0));
+        }
+
+        let size = size_of::<T>() * count;
+        let align = align_of::<T>();
+
+        // Align the offset
+        let aligned_offset = (self.offset + align - 1) & !(align - 1);
+
+        if aligned_offset + size > self.buffer.len() {
+            return None; // Out of memory
+        }
+
+        // Only zero if requested
+        if zero {
+            self.buffer[aligned_offset..aligned_offset + size].fill(0);
+        }
+
+        let ptr = self.buffer[aligned_offset..].as_mut_ptr() as *mut T;
+        self.offset = aligned_offset + size;
+        self.alloc_count += 1;
+
+        Some((ptr, count))
+    }
+
     /// Allocate a slice of `count` items, initialized to zero.
     ///
     /// Returns `None` if there isn't enough space in the arena.
     #[inline]
     pub fn alloc_slice_zeroed<T: Copy>(&mut self, count: usize) -> Option<&mut [T]> {
+        self.alloc_slice_inner::<T>(count, true)
+    }
+
+    /// Allocate a slice of `count` items WITHOUT initialization.
+    ///
+    /// This is faster but memory contains garbage. Use when you will
+    /// immediately overwrite all values (e.g., in a loop).
+    ///
+    /// # Safety
+    ///
+    /// Caller MUST initialize all elements before reading them.
+    #[inline]
+    pub fn alloc_slice_uninit<T: Copy>(&mut self, count: usize) -> Option<&mut [T]> {
+        self.alloc_slice_inner::<T>(count, false)
+    }
+
+    #[inline]
+    fn alloc_slice_inner<T: Copy>(&mut self, count: usize, zero: bool) -> Option<&mut [T]> {
         if count == 0 {
             return Some(&mut []);
         }
@@ -65,14 +171,16 @@ impl<'a> Arena<'a> {
             return None; // Out of memory
         }
 
-        // Zero the memory
-        self.buffer[aligned_offset..aligned_offset + size].fill(0);
+        // Only zero if requested
+        if zero {
+            self.buffer[aligned_offset..aligned_offset + size].fill(0);
+        }
 
         let ptr = self.buffer[aligned_offset..].as_mut_ptr() as *mut T;
         self.offset = aligned_offset + size;
         self.alloc_count += 1;
 
-        // Safety: we've bounds-checked, aligned, and zeroed the memory
+        // Safety: we've bounds-checked and aligned the memory
         Some(unsafe { core::slice::from_raw_parts_mut(ptr, count) })
     }
 

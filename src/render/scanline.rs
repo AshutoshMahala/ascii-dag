@@ -60,10 +60,12 @@ impl<'a> LayoutIR<'a> {
             }
 
             // Write line to output (trim trailing spaces)
-            let trimmed_len = line_buffer.iter().rposition(|&c| c != ' ')
+            let trimmed_len = line_buffer
+                .iter()
+                .rposition(|&c| c != ' ')
                 .map(|i| i + 1)
                 .unwrap_or(0);
-            
+
             for &c in &line_buffer[..trimmed_len] {
                 output.push(c);
             }
@@ -72,22 +74,22 @@ impl<'a> LayoutIR<'a> {
     }
 
     /// Render using a pre-allocated line buffer (arena-friendly).
-    /// 
+    ///
     /// The caller provides a reusable `line_buffer` slice that must be at least
     /// `self.width()` chars. This eliminates the heap allocation for the line buffer.
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```
     /// use ascii_dag::DAG;
-    /// 
+    ///
     /// let dag = DAG::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
     /// let ir = dag.compute_layout();
-    /// 
+    ///
     /// // Pre-allocate the line buffer (can be on stack or in arena)
     /// let mut line_buffer = vec![' '; ir.width()];
     /// let mut output = String::with_capacity(ir.width() * ir.height());
-    /// 
+    ///
     /// ir.render_scanline_with_buffer(&mut line_buffer, &mut output);
     /// ```
     pub fn render_scanline_with_buffer(&self, line_buffer: &mut [char], output: &mut String) {
@@ -115,10 +117,12 @@ impl<'a> LayoutIR<'a> {
             }
 
             // Write line to output (trim trailing spaces)
-            let trimmed_len = line_buffer[..width].iter().rposition(|&c| c != ' ')
+            let trimmed_len = line_buffer[..width]
+                .iter()
+                .rposition(|&c| c != ' ')
                 .map(|i| i + 1)
                 .unwrap_or(0);
-            
+
             for &c in &line_buffer[..trimmed_len] {
                 output.push(c);
             }
@@ -127,25 +131,25 @@ impl<'a> LayoutIR<'a> {
     }
 
     /// Render directly to a byte buffer (zero String allocations).
-    /// 
+    ///
     /// This is the most allocation-efficient render method. The output buffer
     /// should be sized to `width * height * 4` bytes to accommodate UTF-8 box
     /// drawing characters.
-    /// 
+    ///
     /// Returns the number of bytes written.
-    /// 
+    ///
     /// # Example
-    /// 
+    ///
     /// ```
     /// use ascii_dag::DAG;
-    /// 
+    ///
     /// let dag = DAG::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
     /// let ir = dag.compute_layout();
-    /// 
+    ///
     /// // Allocate buffers (can be on stack or from arena)
     /// let mut line_buffer = vec![' '; ir.width()];
     /// let mut output_buffer = vec![0u8; ir.width() * ir.height() * 4];
-    /// 
+    ///
     /// let bytes_written = ir.render_scanline_to_bytes(&mut line_buffer, &mut output_buffer);
     /// let output = core::str::from_utf8(&output_buffer[..bytes_written]).unwrap();
     /// ```
@@ -175,10 +179,12 @@ impl<'a> LayoutIR<'a> {
             }
 
             // Write line to output (trim trailing spaces)
-            let trimmed_len = line_buffer[..width].iter().rposition(|&c| c != ' ')
+            let trimmed_len = line_buffer[..width]
+                .iter()
+                .rposition(|&c| c != ' ')
                 .map(|i| i + 1)
                 .unwrap_or(0);
-            
+
             // Encode UTF-8 directly to output buffer
             for &c in &line_buffer[..trimmed_len] {
                 let remaining = output.len() - offset;
@@ -187,14 +193,14 @@ impl<'a> LayoutIR<'a> {
                 }
                 offset += c.encode_utf8(&mut output[offset..]).len();
             }
-            
+
             // Add newline
             if offset < output.len() {
                 output[offset] = b'\n';
                 offset += 1;
             }
         }
-        
+
         offset
     }
 
@@ -213,14 +219,14 @@ impl<'a> LayoutIR<'a> {
         if x < buffer.len() {
             buffer[x] = '[';
         }
-        
+
         for (i, c) in label.chars().enumerate() {
             let pos = x + 1 + i;
             if pos < buffer.len() {
                 buffer[pos] = c;
             }
         }
-        
+
         let close_pos = x + 1 + label.chars().count();
         if close_pos < buffer.len() {
             buffer[close_pos] = ']';
@@ -281,19 +287,23 @@ impl<'a> LayoutIR<'a> {
                     }
                 }
             }
-            EdgePath::SideChannel { channel_x, start_y, end_y } => {
+            EdgePath::SideChannel {
+                channel_x,
+                start_y,
+                end_y,
+            } => {
                 // SideChannel routes: source → right to channel → down → left to target
                 // Layout:
                 //   [Source]
                 //      └────┐  ← start_y: horizontal from from_x to channel_x
-                //           │  ← vertical in channel  
+                //           │  ← vertical in channel
                 //      ┌────┘  ← end_y: horizontal from channel_x back to to_x
                 //      ↓       ← to_y-1: arrow pointing down to target
                 //   [Target]   ← to_y
-                
+
                 let from_x = edge.from_x;
                 let to_x = edge.to_x;
-                
+
                 if y == *start_y {
                     // Horizontal from source to channel (going right)
                     for x in from_x..=*channel_x {
@@ -381,7 +391,7 @@ impl<'a> LayoutIR<'a> {
                         // Diagonal segment: use corner routing
                         // Route: from (x1, y1) → corner at (x1, y1+1) → horizontal to x2 → down to (x2, y2)
                         let corner_y = y1 + 1;
-                        
+
                         // Horizontal segment at corner_y
                         if y == corner_y {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
@@ -397,7 +407,7 @@ impl<'a> LayoutIR<'a> {
                                 }
                             }
                         }
-                        
+
                         // Vertical from corner to next waypoint/target
                         // Draw on ALL lines from corner_y+1 to y2-1 inclusive
                         // Also draw on y2-1 with arrow if this is the last segment
@@ -408,7 +418,7 @@ impl<'a> LayoutIR<'a> {
                                 buffer[x2] = V_LINE;
                             }
                         }
-                        
+
                         // If not the first segment, also draw vertical line AT the waypoint y-coordinate
                         // This fills in the "gap" at the waypoint position
                         if !is_first_segment && y == y1 && x1 < buffer.len() && buffer[x1] == ' ' {

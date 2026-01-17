@@ -6,9 +6,16 @@
 //! ## Submodules
 //!
 //! - [`generic`] - Generic topological sorting for any data structure (requires `generic` feature)
+//! - [`arena`] - Arena-based layout computation for `no_std`/embedded
+//! - `idx` - Configurable index types for memory optimization (requires `arena` feature)
 
 #[cfg(feature = "generic")]
 pub mod generic;
+
+pub mod arena;
+
+#[cfg(feature = "arena")]
+pub mod idx;
 
 use crate::graph::DAG;
 use alloc::{vec, vec::Vec};
@@ -208,23 +215,21 @@ impl<'a> DAG<'a> {
             visited[idx] = true;
             subgraph.push(idx);
 
-        let node_id = self.nodes[idx].0;
+            let node_id = self.nodes[idx].0;
 
             // Follow edges in both directions
             for &(from, to) in &self.edges {
-                if from == node_id {
-                    if let Some(child_idx) = self.node_index(to) {
-                        if !visited[child_idx] {
-                            stack.push(child_idx);
-                        }
-                    }
+                if from == node_id
+                    && let Some(child_idx) = self.node_index(to)
+                    && !visited[child_idx]
+                {
+                    stack.push(child_idx);
                 }
-                if to == node_id {
-                    if let Some(parent_idx) = self.node_index(from) {
-                        if !visited[parent_idx] {
-                            stack.push(parent_idx);
-                        }
-                    }
+                if to == node_id
+                    && let Some(parent_idx) = self.node_index(from)
+                    && !visited[parent_idx]
+                {
+                    stack.push(parent_idx);
                 }
             }
         }

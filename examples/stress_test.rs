@@ -1,4 +1,6 @@
+use ascii_dag::arena::Arena;
 use ascii_dag::graph::DAG;
+use std::time::Instant;
 
 // Simple Linear Congruential Generator to avoid adding 'rand' dependency
 struct SimpleRng {
@@ -23,7 +25,19 @@ impl SimpleRng {
 }
 
 fn main() {
-    println!("=== ASCII DAG Stress Test Suite ===\n");
+    let args: Vec<String> = std::env::args().collect();
+    let use_arena = args.iter().any(|a| a == "--arena");
+    let low_mem = args.iter().any(|a| a == "--low-mem");
+
+    if use_arena {
+        println!("=== ASCII DAG Stress Test Suite (ARENA MODE) ===\n");
+    } else {
+        println!("=== ASCII DAG Stress Test Suite (HEAP MODE) ===\n");
+    }
+
+    if low_mem {
+        println!(">>> LOW MEMORY MODE ENABLED (Fixed 10MB Budget) <<<\n");
+    }
 
     let tests = [
         (
@@ -40,25 +54,131 @@ fn main() {
         ("The Ouroboros", test_ouroboros),
         ("Massive Diamond (50k)", test_massive_diamond_50k),
         ("Massive Fan (50k)", test_massive_fan_50k),
+        // ("Massive Diamond (100k)", test_massive_diamond_100k), // Disabled: takes very long
     ];
 
     for (name, test_fn) in tests {
         println!("\n>>> RUNNING: {} <<<\n", name);
         let dag = test_fn();
-        let start = std::time::Instant::now();
-        let output = dag.render();
-        let duration = start.elapsed();
 
-        if name.contains("Massive") {
-            println!("(Output suppressed. Length: {} chars)", output.len());
-            let size_mb = output.len() as f64 / 1024.0 / 1024.0;
-            println!(">>> Approx Output RAM: {:.2} MB <<<", size_mb);
+        if use_arena {
+            run_arena_test(name, &dag, low_mem);
         } else {
-            println!("{}", output);
+            run_heap_test(name, &dag);
         }
-        println!(">>> Rendered in {:?} <<<\n", duration);
+
         println!("------------------------------------------------------------");
     }
+
+    if !use_arena {
+        println!("\nTip: Run with --arena flag to test arena mode:");
+        println!("  cargo run --example stress_test --release -- --arena");
+    }
+}
+
+fn run_heap_test(name: &str, dag: &DAG) {
+    let start = Instant::now();
+    let output = dag.render();
+    let duration = start.elapsed();
+
+    if name.contains("Massive") {
+        println!("(Output suppressed. Length: {} chars)", output.len());
+        let size_mb = output.len() as f64 / 1024.0 / 1024.0;
+        println!(">>> Approx Output RAM: {:.2} MB <<<", size_mb);
+    } else {
+        println!("{}", output);
+    }
+    println!(">>> [HEAP] Rendered in {:?} <<<\n", duration);
+}
+
+fn run_arena_test(name: &str, dag: &DAG, low_mem: bool) {
+    // Check for cycles first
+    if dag.has_cycle() {
+        println!("(Graph has cycles - skipping layout)");
+        return;
+    }
+
+    // Use estimate_csr_arena_size as a reasonable base for layout computation
+    let csr_estimate = dag.estimate_csr_arena_size();
+
+    // Determine memory budget
+    let (temp_arena_size, output_arena_size) = if low_mem && name.contains("Massive") {
+        if name.contains("100k") {
+            // 100MB + 100MB = 200MB for 100k nodes
+            (100 * 1024 * 1024, 100 * 1024 * 1024)
+        } else {
+            // 25MB + 25MB = 50MB for 50k nodes
+            (25 * 1024 * 1024, 25 * 1024 * 1024)
+        }
+    } else {
+        // Normal mode: adaptive sizing
+        let min_arena_size = 128 * 1024; // 128 KB minimum
+        let size = (csr_estimate * 5).max(min_arena_size);
+        (size, size)
+    };
+
+    let mut temp_buffer = vec![0u8; temp_arena_size];
+    let mut output_buffer = vec![0u8; output_arena_size];
+
+    // Render buffer - estimate based on output size
+    let estimated_render = dag.estimate_size();
+    let render_size = estimated_render + 65536;
+    let mut render_buffer = vec![0u8; render_size];
+
+    // Line buffer for scanline rendering (max width from estimate)
+    // Width is roughly sqrt(estimated_size) for typical graphs
+    let line_buffer_size = (estimated_render as f64).sqrt() as usize + 1024;
+    let mut line_buffer = vec![' '; line_buffer_size.max(1024)];
+
+    let start = Instant::now();
+
+    // Compute layout using arena
+    let mut temp_arena = Arena::new(&mut temp_buffer);
+    let mut output_arena = Arena::new(&mut output_buffer);
+
+    let output_len =
+        if let Some(layout) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
+            if layout.is_empty() {
+                println!("(Layout returned empty)");
+                0
+            } else {
+                // Render to ASCII art
+                let bytes_written = layout
+                    .render_to_buffer(&mut render_buffer, &mut line_buffer)
+                    .unwrap_or(0);
+
+                if !name.contains("Massive") {
+                    // Print output for non-massive tests
+                    if let Ok(s) = std::str::from_utf8(&render_buffer[..bytes_written]) {
+                        println!("{}", s);
+                    }
+                }
+                bytes_written
+            }
+        } else {
+            println!("(Failed to compute layout - arena may be too small)");
+            println!(
+                "  Temp arena: {} KB, Output arena: {} KB",
+                temp_arena_size / 1024,
+                output_arena_size / 1024
+            );
+            0
+        };
+
+    let duration = start.elapsed();
+
+    if name.contains("Massive") {
+        println!("(Output suppressed. Length: {} bytes)", output_len);
+        // Show allocated sizes
+        let allocated_kb = (temp_arena_size + output_arena_size) as f64 / 1024.0;
+        println!(
+            ">>> Allocated: {:.1} KB (temp: {:.1} KB, output: {:.1} KB) <<<",
+            allocated_kb,
+            temp_arena_size as f64 / 1024.0,
+            output_arena_size as f64 / 1024.0
+        );
+    }
+    println!(">>> [ARENA] Layout+Rendered in {:?} <<<\n", duration);
 }
 
 fn test_double_helix() -> DAG<'static> {
@@ -234,7 +354,28 @@ fn test_massive_diamond_50k() -> DAG<'static> {
     let mut dag = DAG::new();
     let width = 224;
     let height = 224; // ~50k nodes
-    
+
+    for y in 0..height {
+        for x in 0..width {
+            let id = y * width + x;
+            dag.add_node(id, ".");
+            if y < height - 1 {
+                let next_y_base = (y + 1) * width;
+                dag.add_edge(id, next_y_base + x);
+                if x < width - 1 {
+                    dag.add_edge(id, next_y_base + (x + 1));
+                }
+            }
+        }
+    }
+    dag
+}
+
+fn test_massive_diamond_100k() -> DAG<'static> {
+    let mut dag = DAG::new();
+    let width = 316; // 316*316 ≈ 99,856 nodes
+    let height = 316;
+
     for y in 0..height {
         for x in 0..width {
             let id = y * width + x;
