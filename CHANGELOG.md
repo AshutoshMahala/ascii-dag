@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.0] - 2026-01-17
+
+### No-Alloc / Arena Mode
+- **Full no-alloc support**: `LayoutIRArena` for embedded/`no_std` environments
+- **Arena index types**: `arena-idx-u8`, `arena-idx-u16`, `arena-idx-u32` for memory optimization
+- **Dual IR types**: `LayoutIR` (heap) and `LayoutIRArena` (arena) with same API
+
+### Layout Engine Improvements
+- **Skip-level edge separation**: Bounded offset (edge_idx % 4) prevents convergent edges from merging
+- **Crossing reduction refinements**: Improved visual quality for complex graphs
+- **Custom width/height for WASM**: Layout IR now supports custom dimensions
+
+### Documentation
+- **Feature flags table**: Documented all arena feature flags
+- **Dual IR documentation**: Explained both `LayoutIR` and `LayoutIRArena` with code examples
+- **New example**: `layout_ir_demo` demonstrating Build → Compute IR → Process → Render workflow
+
+### Fixes
+- Fixed clippy warnings (repeat_n migration)
+- Fixed broken doc link to `idx` module
+
 ## [0.6.1] - 2026-01-04
 
 ### 🎯 Embedded Examples
