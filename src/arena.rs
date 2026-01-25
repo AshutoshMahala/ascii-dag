@@ -29,6 +29,8 @@
 //! arena.reset();
 //! ```
 
+use core::cell::Cell;
+use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
 
 /// A simple bump allocator backed by a user-provided buffer.
@@ -36,9 +38,11 @@ use core::mem::{align_of, size_of};
 /// All allocations are contiguous and cannot be individually freed.
 /// Call `reset()` to free all allocations at once (O(1) operation).
 pub struct Arena<'a> {
-    buffer: &'a mut [u8],
-    offset: usize,
-    alloc_count: usize,
+    start: *mut u8,
+    end: *mut u8,
+    ptr: Cell<*mut u8>,
+    alloc_count: Cell<usize>,
+    _marker: PhantomData<&'a mut [u8]>,
 }
 
 impl<'a> Arena<'a> {
@@ -47,10 +51,13 @@ impl<'a> Arena<'a> {
     /// The buffer can be stack-allocated, static, or heap-allocated.
     #[inline]
     pub fn new(buffer: &'a mut [u8]) -> Self {
+        let range = buffer.as_mut_ptr_range();
         Self {
-            buffer,
-            offset: 0,
-            alloc_count: 0,
+            start: range.start,
+            end: range.end,
+            ptr: Cell::new(range.start),
+            alloc_count: Cell::new(0),
+            _marker: PhantomData,
         }
     }
 
@@ -107,38 +114,47 @@ impl<'a> Arena<'a> {
     }
 
     #[inline]
-    fn alloc_raw_inner<T: Copy>(&mut self, count: usize, zero: bool) -> Option<(*mut T, usize)> {
+    fn alloc_raw_inner<T: Copy>(&self, count: usize, zero: bool) -> Option<(*mut T, usize)> {
         if count == 0 {
-            return Some((core::ptr::null_mut(), 0));
+            return Some((core::ptr::NonNull::<T>::dangling().as_ptr(), 0));
         }
 
         let size = size_of::<T>() * count;
         let align = align_of::<T>();
 
-        // Align the offset
-        let aligned_offset = (self.offset + align - 1) & !(align - 1);
+        // Current pointer
+        let current = self.ptr.get() as usize;
+        
+        // Align the pointer
+        let aligned_ptr = (current + align - 1) & !(align - 1);
+        let new_ptr = aligned_ptr + size;
 
-        if aligned_offset + size > self.buffer.len() {
+        // Check bounds
+        if new_ptr > self.end as usize {
             return None; // Out of memory
         }
 
+        let ptr = aligned_ptr as *mut u8;
+        
         // Only zero if requested
         if zero {
-            self.buffer[aligned_offset..aligned_offset + size].fill(0);
+            unsafe {
+                core::ptr::write_bytes(ptr, 0, size);
+            }
         }
 
-        let ptr = self.buffer[aligned_offset..].as_mut_ptr() as *mut T;
-        self.offset = aligned_offset + size;
-        self.alloc_count += 1;
+        // Update state
+        self.ptr.set(new_ptr as *mut u8);
+        self.alloc_count.set(self.alloc_count.get() + 1);
 
-        Some((ptr, count))
+        Some((ptr as *mut T, count))
     }
 
     /// Allocate a slice of `count` items, initialized to zero.
     ///
     /// Returns `None` if there isn't enough space in the arena.
     #[inline]
-    pub fn alloc_slice_zeroed<T: Copy>(&mut self, count: usize) -> Option<&mut [T]> {
+    pub fn alloc_slice_zeroed<T: Copy>(&self, count: usize) -> Option<&'a mut [T]> {
         self.alloc_slice_inner::<T>(count, true)
     }
 
@@ -151,36 +167,21 @@ impl<'a> Arena<'a> {
     ///
     /// Caller MUST initialize all elements before reading them.
     #[inline]
-    pub fn alloc_slice_uninit<T: Copy>(&mut self, count: usize) -> Option<&mut [T]> {
+    pub fn alloc_slice_uninit<T: Copy>(&self, count: usize) -> Option<&'a mut [T]> {
         self.alloc_slice_inner::<T>(count, false)
     }
 
     #[inline]
-    fn alloc_slice_inner<T: Copy>(&mut self, count: usize, zero: bool) -> Option<&mut [T]> {
+    fn alloc_slice_inner<T: Copy>(&self, count: usize, zero: bool) -> Option<&'a mut [T]> {
         if count == 0 {
-            return Some(&mut []);
+            return Some(unsafe { core::slice::from_raw_parts_mut(core::ptr::NonNull::dangling().as_ptr(), 0) });
         }
 
-        let size = size_of::<T>() * count;
-        let align = align_of::<T>();
-
-        // Align the offset
-        let aligned_offset = (self.offset + align - 1) & !(align - 1);
-
-        if aligned_offset + size > self.buffer.len() {
-            return None; // Out of memory
-        }
-
-        // Only zero if requested
-        if zero {
-            self.buffer[aligned_offset..aligned_offset + size].fill(0);
-        }
-
-        let ptr = self.buffer[aligned_offset..].as_mut_ptr() as *mut T;
-        self.offset = aligned_offset + size;
-        self.alloc_count += 1;
-
-        // Safety: we've bounds-checked and aligned the memory
+        let (ptr, _size) = self.alloc_raw_inner::<T>(count, zero)?;
+        
+        // Safety: we've allocated valid memory and bound it to lifetime 'a
+        // The bump pointer ensures disjointness from future allocations.
+        // We rely on the borrow checker to ensure the arena itself outlives 'a (which is true since we borrow 'a mut [u8])
         Some(unsafe { core::slice::from_raw_parts_mut(ptr, count) })
     }
 
@@ -188,28 +189,9 @@ impl<'a> Arena<'a> {
     ///
     /// Returns `None` if there isn't enough space in the arena.
     #[inline]
-    pub fn alloc_slice_default<T: Copy + Default>(&mut self, count: usize) -> Option<&mut [T]> {
-        if count == 0 {
-            return Some(&mut []);
-        }
-
-        let size = size_of::<T>() * count;
-        let align = align_of::<T>();
-
-        // Align the offset
-        let aligned_offset = (self.offset + align - 1) & !(align - 1);
-
-        if aligned_offset + size > self.buffer.len() {
-            return None; // Out of memory
-        }
-
-        let ptr = self.buffer[aligned_offset..].as_mut_ptr() as *mut T;
-        self.offset = aligned_offset + size;
-        self.alloc_count += 1;
-
-        // Safety: we've bounds-checked and aligned the memory
-        let slice = unsafe { core::slice::from_raw_parts_mut(ptr, count) };
-
+    pub fn alloc_slice_default<T: Copy + Default>(&self, count: usize) -> Option<&'a mut [T]> {
+        let slice = self.alloc_slice_inner::<T>(count, false)?;
+        
         // Initialize to default
         for item in slice.iter_mut() {
             *item = T::default();
@@ -220,7 +202,7 @@ impl<'a> Arena<'a> {
 
     /// Allocate space for a single value, returning a mutable reference.
     #[inline]
-    pub fn alloc<T: Copy + Default>(&mut self) -> Option<&mut T> {
+    pub fn alloc<T: Copy + Default>(&self) -> Option<&'a mut T> {
         self.alloc_slice_default::<T>(1).map(|s| &mut s[0])
     }
 
@@ -228,33 +210,33 @@ impl<'a> Arena<'a> {
     ///
     /// This is an O(1) operation - it just resets the bump pointer.
     #[inline]
-    pub fn reset(&mut self) {
-        self.offset = 0;
-        self.alloc_count = 0;
+    pub fn reset(&self) {
+        self.ptr.set(self.start);
+        self.alloc_count.set(0);
     }
 
     /// Returns the number of bytes currently used.
     #[inline]
     pub fn used(&self) -> usize {
-        self.offset
+        (self.ptr.get() as usize) - (self.start as usize)
     }
 
     /// Returns the total capacity of the arena.
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.buffer.len()
+        (self.end as usize) - (self.start as usize)
     }
 
     /// Returns the number of bytes remaining.
     #[inline]
     pub fn remaining(&self) -> usize {
-        self.buffer.len() - self.offset
+        (self.end as usize) - (self.ptr.get() as usize)
     }
 
     /// Returns the number of allocations made since the last reset.
     #[inline]
     pub fn alloc_count(&self) -> usize {
-        self.alloc_count
+        self.alloc_count.get()
     }
 }
 
@@ -270,11 +252,9 @@ pub struct ArenaVec<'a, T> {
 impl<'a, T: Copy + Default> ArenaVec<'a, T> {
     /// Create a new ArenaVec with the given capacity.
     #[inline]
-    pub fn new(arena: &mut Arena<'a>, capacity: usize) -> Option<Self> {
-        // We need to transmute the lifetime - the arena ensures the memory is valid
+    pub fn new(arena: &Arena<'a>, capacity: usize) -> Option<Self> {
+        // No unsafe transmute needed! alloc_slice_default now returns &'a mut [T] directly
         let data = arena.alloc_slice_default::<T>(capacity)?;
-        // Safety: we're extending the lifetime to match the arena's buffer lifetime
-        let data = unsafe { core::slice::from_raw_parts_mut(data.as_mut_ptr(), capacity) };
         Some(Self { data, len: 0 })
     }
 
