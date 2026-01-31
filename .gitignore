@@ -72,3 +72,7 @@ examples/*/debug.gdb
 # Package/release artifacts
 target/package/
 *.crate
+
+fuzz/
+.agent/
+scripts/
