@@ -483,7 +483,7 @@ This library implements a **pragmatic variation** of the Sugiyama Layered Graph 
 | **Crossing Reduction** | Barycenter Method | **Median Heuristic** | Efficiently untangles most common spaghetti patterns. |
 | **Routing** | Spline Routing | **Grid-Router & "Side-Channel"** | Long skip-edges are routed via "dummy nodes" to the side, preventing visual clutter in the main flow. |
 
-## Limitations & Design Choices (v0.6.x)
+## Limitations & Design Choices (v0.8.x)
 
 This is a production-ready, zero-dependency rendering engine.
 
@@ -538,7 +538,7 @@ Control bundle size and memory usage:
 
 ```toml
 [dependencies]
-ascii-dag = { version = "0.6", default-features = false }
+ascii-dag = { version = "0.8", default-features = false }
 ```
 
 **Available features:**
