@@ -18,11 +18,11 @@ fn main() {
     dag.add_node(4, "Merge branch 'feat/login' (j9k0l)");
     dag.add_node(5, "Release v1.0 (m1n2o)");
 
-    dag.add_edge(1, 2);
-    dag.add_edge(1, 3);
-    dag.add_edge(2, 4);
-    dag.add_edge(3, 4);
-    dag.add_edge(4, 5);
+    dag.add_edge(1, 2, None);
+    dag.add_edge(1, 3, None);
+    dag.add_edge(2, 4, None);
+    dag.add_edge(3, 4, None);
+    dag.add_edge(4, 5, None);
 
     println!("{}", dag.render());
 
@@ -38,20 +38,20 @@ fn main() {
     complex.add_node(16, "merge-all");
 
     // init -> dev
-    complex.add_edge(10, 11);
+    complex.add_edge(10, 11, None);
 
     // dev splits into A, B, and continues
-    complex.add_edge(11, 12); // dev -> feature-A
-    complex.add_edge(11, 13); // dev -> feature-B
-    complex.add_edge(11, 14); // dev -> dev-update
+    complex.add_edge(11, 12, None); // dev -> feature-A
+    complex.add_edge(11, 13, None); // dev -> feature-B
+    complex.add_edge(11, 14, None); // dev -> dev-update
 
     // A merges back to dev
-    complex.add_edge(12, 15);
-    complex.add_edge(14, 15);
+    complex.add_edge(12, 15, None);
+    complex.add_edge(14, 15, None);
 
     // B and A-Merge merge to final
-    complex.add_edge(13, 16);
-    complex.add_edge(15, 16);
+    complex.add_edge(13, 16, None);
+    complex.add_edge(15, 16, None);
 
     println!("{}", complex.render());
 }

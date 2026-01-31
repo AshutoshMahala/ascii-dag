@@ -33,9 +33,9 @@ fn main() {
             dag.add_node(1, "Root");
             dag.add_node(2, "Middle");
             dag.add_node(3, "End");
-            dag.add_edge(1, 2);
-            dag.add_edge(2, 3);
-            dag.add_edge(1, 3); // cross-level
+            dag.add_edge(1, 2, None);
+            dag.add_edge(2, 3, None);
+            dag.add_edge(1, 3, None); // cross-level
             dag
         }),
         ("Cross-Level Chain", {
@@ -44,10 +44,10 @@ fn main() {
             dag.add_node(2, "B");
             dag.add_node(3, "C");
             dag.add_node(4, "D");
-            dag.add_edge(1, 2);
-            dag.add_edge(2, 3);
-            dag.add_edge(3, 4);
-            dag.add_edge(1, 4); // cross-level
+            dag.add_edge(1, 2, None);
+            dag.add_edge(2, 3, None);
+            dag.add_edge(3, 4, None);
+            dag.add_edge(1, 4, None); // cross-level
             dag
         }),
         ("Readme Hero", {
@@ -60,17 +60,17 @@ fn main() {
             dag.add_node(6, "Task E");
             dag.add_node(7, "Task F");
             dag.add_node(8, "Output");
-            dag.add_edge(1, 2);
-            dag.add_edge(1, 3);
-            dag.add_edge(1, 4);
-            dag.add_edge(1, 5);
-            dag.add_edge(1, 6);
-            dag.add_edge(2, 7);
-            dag.add_edge(3, 7);
-            dag.add_edge(4, 7);
-            dag.add_edge(5, 7);
-            dag.add_edge(7, 8);
-            dag.add_edge(6, 8);
+            dag.add_edge(1, 2, None);
+            dag.add_edge(1, 3, None);
+            dag.add_edge(1, 4, None);
+            dag.add_edge(1, 5, None);
+            dag.add_edge(1, 6, None);
+            dag.add_edge(2, 7, None);
+            dag.add_edge(3, 7, None);
+            dag.add_edge(4, 7, None);
+            dag.add_edge(5, 7, None);
+            dag.add_edge(7, 8, None);
+            dag.add_edge(6, 8, None);
             dag
         }),
         ("Wide Fan", {
@@ -79,8 +79,8 @@ fn main() {
             dag.add_node(1, "Sink");
             for i in 2..12 {
                 dag.add_node(i, Box::leak(format!("W{}", i - 1).into_boxed_str()));
-                dag.add_edge(0, i);
-                dag.add_edge(i, 1);
+                dag.add_edge(0, i, None);
+                dag.add_edge(i, 1, None);
             }
             dag
         }),

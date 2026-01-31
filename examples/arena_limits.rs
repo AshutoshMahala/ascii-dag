@@ -70,6 +70,7 @@ fn find_minimum_memory(name: &str, dag: &DAG) {
     }
 }
 
+#[allow(dead_code)]
 fn binary_search_minimum(dag: &DAG, csr_estimate: usize) -> usize {
     let mut low = 1024usize;
     let mut high = csr_estimate * 6;
@@ -151,7 +152,7 @@ fn build_chain(n: usize) -> DAG<'static> {
     for i in 0..n {
         dag.add_node(i, Box::leak(format!("N{}", i).into_boxed_str()));
         if i > 0 {
-            dag.add_edge(i - 1, i);
+            dag.add_edge(i - 1, i, None);
         }
     }
     dag
@@ -183,7 +184,7 @@ fn build_diamond(layers: usize) -> DAG<'static> {
                 let from = prev_start + i;
                 let to = curr_start + (i + j).min(curr_count - 1);
                 if from < id && to < id && from != to {
-                    dag.add_edge(from, to);
+                    dag.add_edge(from, to, None);
                 }
             }
         }
@@ -203,8 +204,8 @@ fn build_fan(width: usize) -> DAG<'static> {
 
     for i in 0..width {
         dag.add_node(i + 2, Box::leak(format!("W{}", i).into_boxed_str()));
-        dag.add_edge(0, i + 2);
-        dag.add_edge(i + 2, 1);
+        dag.add_edge(0, i + 2, None);
+        dag.add_edge(i + 2, 1, None);
     }
 
     dag

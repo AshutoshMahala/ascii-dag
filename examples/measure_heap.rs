@@ -9,8 +9,8 @@ fn main() {
     dag.add_node(1, "Root");
     dag.add_node(2, "Child");
     dag.add_node(3, "Leaf");
-    dag.add_edge(1, 2);
-    dag.add_edge(2, 3);
+    dag.add_edge(1, 2, None);
+    dag.add_edge(2, 3, None);
 
     // Render
     let output = dag.render();

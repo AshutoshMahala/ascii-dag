@@ -124,7 +124,7 @@ impl<'a> Arena<'a> {
 
         // Current pointer
         let current = self.ptr.get() as usize;
-        
+
         // Align the pointer
         let aligned_ptr = (current + align - 1) & !(align - 1);
         let new_ptr = aligned_ptr + size;
@@ -135,7 +135,7 @@ impl<'a> Arena<'a> {
         }
 
         let ptr = aligned_ptr as *mut u8;
-        
+
         // Only zero if requested
         if zero {
             unsafe {
@@ -174,11 +174,13 @@ impl<'a> Arena<'a> {
     #[inline]
     fn alloc_slice_inner<T: Copy>(&self, count: usize, zero: bool) -> Option<&'a mut [T]> {
         if count == 0 {
-            return Some(unsafe { core::slice::from_raw_parts_mut(core::ptr::NonNull::dangling().as_ptr(), 0) });
+            return Some(unsafe {
+                core::slice::from_raw_parts_mut(core::ptr::NonNull::dangling().as_ptr(), 0)
+            });
         }
 
         let (ptr, _size) = self.alloc_raw_inner::<T>(count, zero)?;
-        
+
         // Safety: we've allocated valid memory and bound it to lifetime 'a
         // The bump pointer ensures disjointness from future allocations.
         // We rely on the borrow checker to ensure the arena itself outlives 'a (which is true since we borrow 'a mut [u8])
@@ -191,7 +193,7 @@ impl<'a> Arena<'a> {
     #[inline]
     pub fn alloc_slice_default<T: Copy + Default>(&self, count: usize) -> Option<&'a mut [T]> {
         let slice = self.alloc_slice_inner::<T>(count, false)?;
-        
+
         // Initialize to default
         for item in slice.iter_mut() {
             *item = T::default();
@@ -329,7 +331,7 @@ mod tests {
     #[test]
     fn test_arena_basic() {
         let mut buffer = [0u8; 1024];
-        let mut arena = Arena::new(&mut buffer);
+        let arena = Arena::new(&mut buffer);
 
         let nums: &mut [usize] = arena.alloc_slice_default(10).unwrap();
         assert_eq!(nums.len(), 10);
@@ -349,7 +351,7 @@ mod tests {
     #[test]
     fn test_arena_out_of_memory() {
         let mut buffer = [0u8; 64];
-        let mut arena = Arena::new(&mut buffer);
+        let arena = Arena::new(&mut buffer);
 
         // This should fail - not enough space for 100 usizes
         let result: Option<&mut [usize]> = arena.alloc_slice_default(100);
@@ -359,9 +361,9 @@ mod tests {
     #[test]
     fn test_arena_vec() {
         let mut buffer = [0u8; 1024];
-        let mut arena = Arena::new(&mut buffer);
+        let arena = Arena::new(&mut buffer);
 
-        let mut vec: ArenaVec<i32> = ArenaVec::new(&mut arena, 10).unwrap();
+        let mut vec: ArenaVec<i32> = ArenaVec::new(&arena, 10).unwrap();
         assert!(vec.push(1));
         assert!(vec.push(2));
         assert!(vec.push(3));

@@ -16,17 +16,17 @@ fn main() {
 
     // Level 2: Children clustered on opposite sides
     // LeftRoot connects to far-right children
-    dag.add_edge(1, 6);
-    dag.add_edge(1, 7);
+    dag.add_edge(1, 6, None);
+    dag.add_edge(1, 7, None);
 
     // RightRoot connects to far-left children
-    dag.add_edge(2, 8);
-    dag.add_edge(2, 9);
+    dag.add_edge(2, 8, None);
+    dag.add_edge(2, 9, None);
 
     // Middle nodes connect normally
-    dag.add_edge(3, 6);
-    dag.add_edge(4, 8);
-    dag.add_edge(5, 9);
+    dag.add_edge(3, 6, None);
+    dag.add_edge(4, 8, None);
+    dag.add_edge(5, 9, None);
 
     dag.add_node(6, "X");
     dag.add_node(7, "Y");

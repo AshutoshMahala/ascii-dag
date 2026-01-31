@@ -228,7 +228,7 @@ fn main() {
 
     test!("Builder: add_edge before nodes", {
         let mut dag = DAG::new();
-        dag.add_edge(1, 2); // Nodes don't exist yet
+        dag.add_edge(1, 2, None); // Nodes don't exist yet
         dag.add_node(1, "A");
         dag.add_node(2, "B");
         let _ = dag.render();
@@ -236,8 +236,8 @@ fn main() {
 
     test!("Builder: add_edge only (no explicit nodes)", {
         let mut dag = DAG::new();
-        dag.add_edge(1, 2);
-        dag.add_edge(2, 3);
+        dag.add_edge(1, 2, None);
+        dag.add_edge(2, 3, None);
         let _ = dag.render();
     });
 

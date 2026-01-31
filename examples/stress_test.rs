@@ -1,5 +1,6 @@
 use ascii_dag::arena::Arena;
 use ascii_dag::graph::DAG;
+use ascii_dag::render::colors::Palette;
 use std::time::Instant;
 
 // Simple Linear Congruential Generator to avoid adding 'rand' dependency
@@ -79,7 +80,17 @@ fn main() {
 
 fn run_heap_test(name: &str, dag: &DAG) {
     let start = Instant::now();
-    let output = dag.render();
+
+    // Use colored rendering for Helix and Hairball
+    let use_color =
+        name.contains("Helix") || name.contains("Hairball") || name.contains("Nightmare");
+
+    let output = if use_color {
+        let ir = dag.compute_layout();
+        ir.render_scanline_colored_with_legend(Palette::Ansi)
+    } else {
+        dag.render()
+    };
     let duration = start.elapsed();
 
     if name.contains("Massive") {
@@ -99,8 +110,8 @@ fn run_arena_test(name: &str, dag: &DAG, low_mem: bool) {
         return;
     }
 
-    // Use estimate_csr_arena_size as a reasonable base for layout computation
-    let csr_estimate = dag.estimate_csr_arena_size();
+    // Use the proper layout arena size estimator
+    let layout_estimate = dag.estimate_layout_arena_size();
 
     // Determine memory budget
     let (temp_arena_size, output_arena_size) = if low_mem && name.contains("Massive") {
@@ -112,9 +123,10 @@ fn run_arena_test(name: &str, dag: &DAG, low_mem: bool) {
             (25 * 1024 * 1024, 25 * 1024 * 1024)
         }
     } else {
-        // Normal mode: adaptive sizing
+        // Normal mode: use proper estimate with safety margin
         let min_arena_size = 128 * 1024; // 128 KB minimum
-        let size = (csr_estimate * 5).max(min_arena_size);
+        // Add 20% safety margin
+        let size = ((layout_estimate * 6) / 5).max(min_arena_size);
         (size, size)
     };
 
@@ -137,34 +149,59 @@ fn run_arena_test(name: &str, dag: &DAG, low_mem: bool) {
     let mut temp_arena = Arena::new(&mut temp_buffer);
     let mut output_arena = Arena::new(&mut output_buffer);
 
-    let output_len =
-        if let Some(layout) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
-            if layout.is_empty() {
-                println!("(Layout returned empty)");
-                0
-            } else {
-                // Render to ASCII art
-                let bytes_written = layout
-                    .render_to_buffer(&mut render_buffer, &mut line_buffer)
-                    .unwrap_or(0);
-
-                if !name.contains("Massive") {
-                    // Print output for non-massive tests
-                    if let Ok(s) = std::str::from_utf8(&render_buffer[..bytes_written]) {
-                        println!("{}", s);
-                    }
-                }
-                bytes_written
-            }
-        } else {
-            println!("(Failed to compute layout - arena may be too small)");
-            println!(
-                "  Temp arena: {} KB, Output arena: {} KB",
-                temp_arena_size / 1024,
-                output_arena_size / 1024
-            );
+    let output_len = if let Some(layout) =
+        dag.compute_layout_arena(&mut temp_arena, &mut output_arena)
+    {
+        if layout.is_empty() {
+            println!("(Layout returned empty)");
             0
-        };
+        } else {
+            // Use colored rendering for Helix and Hairball
+            let use_color =
+                name.contains("Helix") || name.contains("Hairball") || name.contains("Nightmare");
+
+            let bytes_written = if use_color {
+                // Allocate buffers for colored rendering
+                let edge_count = layout.edge_count();
+                let mut edge_colors = vec![0usize; edge_count];
+                let mut color_buffer = vec![0u8; line_buffer_size];
+                let mut skipped_buffer = vec![false; edge_count];
+                let palette = Palette::Ansi;
+                layout.compute_edge_colors(&mut edge_colors, palette.colors().len());
+
+                layout
+                    .render_to_buffer_colored_with_legend(
+                        &mut render_buffer,
+                        &mut line_buffer,
+                        &mut color_buffer,
+                        &edge_colors,
+                        palette.colors(),
+                        &mut skipped_buffer,
+                    )
+                    .unwrap_or(0)
+            } else {
+                layout
+                    .render_to_buffer(&mut render_buffer, &mut line_buffer)
+                    .unwrap_or(0)
+            };
+
+            if !name.contains("Massive") {
+                // Print output for non-massive tests
+                if let Ok(s) = std::str::from_utf8(&render_buffer[..bytes_written]) {
+                    println!("{}", s);
+                }
+            }
+            bytes_written
+        }
+    } else {
+        println!("(Failed to compute layout - arena may be too small)");
+        println!(
+            "  Temp arena: {} KB, Output arena: {} KB",
+            temp_arena_size / 1024,
+            output_arena_size / 1024
+        );
+        0
+    };
 
     let duration = start.elapsed();
 
@@ -190,13 +227,13 @@ fn test_double_helix() -> DAG<'static> {
         dag.add_node(i * 2 + 1, "B");
 
         if i > 0 {
-            dag.add_edge((i - 1) * 2, i * 2); // A -> A
-            dag.add_edge((i - 1) * 2 + 1, i * 2 + 1); // B -> B
+            dag.add_edge((i - 1) * 2, i * 2, None); // A -> A
+            dag.add_edge((i - 1) * 2 + 1, i * 2 + 1, None); // B -> B
 
             // Cross connections
             if i % 2 == 0 {
-                dag.add_edge((i - 1) * 2, i * 2 + 1); // A -> B
-                dag.add_edge((i - 1) * 2 + 1, i * 2); // B -> A
+                dag.add_edge((i - 1) * 2, i * 2 + 1, None); // A -> B
+                dag.add_edge((i - 1) * 2 + 1, i * 2, None); // B -> A
             }
         }
     }
@@ -209,7 +246,7 @@ fn test_skyscraper() -> DAG<'static> {
     for i in 0..50 {
         dag.add_node(i, Box::leak(format!("Floor {}", i).into_boxed_str()));
         if i > 0 {
-            dag.add_edge(i - 1, i);
+            dag.add_edge(i - 1, i, None);
         }
     }
     dag
@@ -223,8 +260,8 @@ fn test_wide_fan() -> DAG<'static> {
     // 50 parallel nodes
     for i in 1..51 {
         dag.add_node(i, Box::leak(format!("Worker {}", i).into_boxed_str()));
-        dag.add_edge(0, i);
-        dag.add_edge(i, 1000);
+        dag.add_edge(0, i, None);
+        dag.add_edge(i, 1000, None);
     }
     dag
 }
@@ -242,14 +279,14 @@ fn test_diamond_lattice() -> DAG<'static> {
             if y > 0 {
                 // Connect to parents
                 let p_id = (y - 1) * width + x;
-                dag.add_edge(p_id, id);
+                dag.add_edge(p_id, id, None);
 
                 // Cross connections
                 if x > 0 {
-                    dag.add_edge((y - 1) * width + (x - 1), id);
+                    dag.add_edge((y - 1) * width + (x - 1), id, None);
                 }
                 if x < width - 1 {
-                    dag.add_edge((y - 1) * width + (x + 1), id);
+                    dag.add_edge((y - 1) * width + (x + 1), id, None);
                 }
             }
         }
@@ -267,8 +304,8 @@ fn test_disconnected_islands() -> DAG<'static> {
         dag.add_node(base + 1, "Palm");
         dag.add_node(base + 2, "Coconuts");
 
-        dag.add_edge(base, base + 1);
-        dag.add_edge(base + 1, base + 2);
+        dag.add_edge(base, base + 1, None);
+        dag.add_edge(base + 1, base + 2, None);
     }
     dag
 }
@@ -288,7 +325,7 @@ fn test_random_hairball() -> DAG<'static> {
         for _ in 0..num_edges {
             let target = rng.gen_range(i + 1, nodes + 5); // +5 allows some out of bounds (ignored) or valid
             if target < nodes {
-                dag.add_edge(i, target);
+                dag.add_edge(i, target, None);
             }
         }
     }
@@ -303,17 +340,17 @@ fn test_skip_level_nightmare() -> DAG<'static> {
     // Levels 1, 2, 3, 4, 5
     for i in 1..6 {
         dag.add_node(i, Box::leak(format!("L{}", i).into_boxed_str()));
-        dag.add_edge(i - 1, i); // Normal connection
+        dag.add_edge(i - 1, i, None); // Normal connection
     }
 
     // Skip edges: 0->2, 0->3, 0->4, 0->5
     for i in 2..6 {
-        dag.add_edge(0, i);
+        dag.add_edge(0, i, None);
     }
 
     // Nested skips: 1->3, 2->5
-    dag.add_edge(1, 3);
-    dag.add_edge(2, 5);
+    dag.add_edge(1, 3, None);
+    dag.add_edge(2, 5, None);
 
     dag
 }
@@ -333,9 +370,9 @@ fn test_verbose_logger() -> DAG<'static> {
     );
     dag.add_node(4, "C");
 
-    dag.add_edge(1, 2);
-    dag.add_edge(1, 3);
-    dag.add_edge(3, 4);
+    dag.add_edge(1, 2, None);
+    dag.add_edge(1, 3, None);
+    dag.add_edge(3, 4, None);
     dag
 }
 
@@ -345,9 +382,9 @@ fn test_ouroboros() -> DAG<'static> {
     dag.add_node(2, "Body");
     dag.add_node(3, "Tail");
 
-    dag.add_edge(1, 2);
-    dag.add_edge(2, 3);
-    dag.add_edge(3, 1); // Cycle!
+    dag.add_edge(1, 2, None);
+    dag.add_edge(2, 3, None);
+    dag.add_edge(3, 1, None); // Cycle!
     dag
 }
 
@@ -362,9 +399,9 @@ fn test_massive_diamond_20k() -> DAG<'static> {
             dag.add_node(id, ".");
             if y < height - 1 {
                 let next_y_base = (y + 1) * width;
-                dag.add_edge(id, next_y_base + x);
+                dag.add_edge(id, next_y_base + x, None);
                 if x < width - 1 {
-                    dag.add_edge(id, next_y_base + (x + 1));
+                    dag.add_edge(id, next_y_base + (x + 1), None);
                 }
             }
         }
@@ -383,9 +420,9 @@ fn test_massive_diamond_50k() -> DAG<'static> {
             dag.add_node(id, ".");
             if y < height - 1 {
                 let next_y_base = (y + 1) * width;
-                dag.add_edge(id, next_y_base + x);
+                dag.add_edge(id, next_y_base + x, None);
                 if x < width - 1 {
-                    dag.add_edge(id, next_y_base + (x + 1));
+                    dag.add_edge(id, next_y_base + (x + 1), None);
                 }
             }
         }
@@ -393,6 +430,7 @@ fn test_massive_diamond_50k() -> DAG<'static> {
     dag
 }
 
+#[allow(dead_code)]
 fn test_massive_diamond_100k() -> DAG<'static> {
     let mut dag = DAG::new();
     let width = 316; // 316*316 ≈ 99,856 nodes
@@ -404,9 +442,9 @@ fn test_massive_diamond_100k() -> DAG<'static> {
             dag.add_node(id, ".");
             if y < height - 1 {
                 let next_y_base = (y + 1) * width;
-                dag.add_edge(id, next_y_base + x);
+                dag.add_edge(id, next_y_base + x, None);
                 if x < width - 1 {
-                    dag.add_edge(id, next_y_base + (x + 1));
+                    dag.add_edge(id, next_y_base + (x + 1), None);
                 }
             }
         }
@@ -422,8 +460,8 @@ fn test_massive_fan_50k() -> DAG<'static> {
     dag.add_node(sink, "E");
     for i in 1..=50000 {
         dag.add_node(i, ".");
-        dag.add_edge(root, i);
-        dag.add_edge(i, sink);
+        dag.add_edge(root, i, None);
+        dag.add_edge(i, sink, None);
     }
     dag
 }

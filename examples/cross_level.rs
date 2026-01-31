@@ -14,9 +14,9 @@ fn main() {
     dag.add_node(2, "Middle");
     dag.add_node(3, "End");
 
-    dag.add_edge(1, 2); // Root -> Middle
-    dag.add_edge(2, 3); // Middle -> End
-    dag.add_edge(1, 3); // Root -> End (cross-level!)
+    dag.add_edge(1, 2, None); // Root -> Middle
+    dag.add_edge(2, 3, None); // Middle -> End
+    dag.add_edge(1, 3, None); // Root -> End (cross-level!)
 
     println!("{}\n", dag.render());
 
@@ -28,10 +28,10 @@ fn main() {
     dag.add_node(3, "C");
     dag.add_node(4, "D");
 
-    dag.add_edge(1, 2); // Level 0 -> 1
-    dag.add_edge(2, 3); // Level 1 -> 2
-    dag.add_edge(3, 4); // Level 2 -> 3
-    dag.add_edge(1, 4); // Level 0 -> 3 (cross-level!)
+    dag.add_edge(1, 2, None); // Level 0 -> 1
+    dag.add_edge(2, 3, None); // Level 1 -> 2
+    dag.add_edge(3, 4, None); // Level 2 -> 3
+    dag.add_edge(1, 4, None); // Level 0 -> 3 (cross-level!)
 
     println!("{}\n", dag.render());
 
@@ -44,11 +44,11 @@ fn main() {
     dag.add_node(4, "Link");
     dag.add_node(5, "Done");
 
-    dag.add_edge(1, 2); // Normal flow
-    dag.add_edge(2, 3);
-    dag.add_edge(3, 4);
-    dag.add_edge(4, 5);
-    dag.add_edge(1, 5); // Direct shortcut from Start to Done!
+    dag.add_edge(1, 2, None); // Normal flow
+    dag.add_edge(2, 3, None);
+    dag.add_edge(3, 4, None);
+    dag.add_edge(4, 5, None);
+    dag.add_edge(1, 5, None); // Direct shortcut from Start to Done!
 
     println!("{}\n", dag.render());
 }

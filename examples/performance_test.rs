@@ -21,10 +21,10 @@ fn main() {
     // Add edges to create a complex DAG (each node connects to 2-3 children)
     let start = Instant::now();
     for i in 0..80 {
-        dag.add_edge(i, i + 10);
-        dag.add_edge(i, i + 15);
+        dag.add_edge(i, i + 10, None);
+        dag.add_edge(i, i + 15, None);
         if i % 2 == 0 {
-            dag.add_edge(i, i + 20);
+            dag.add_edge(i, i + 20, None);
         }
     }
     println!("✓ Added ~240 edges in {:?}", start.elapsed());
@@ -46,7 +46,7 @@ fn main() {
     let promoted_strs: Vec<&str> = promoted_labels.iter().map(|s| s.as_str()).collect();
 
     for i in 0..50 {
-        dag2.add_edge(i, i + 50); // Auto-creates node i+50
+        dag2.add_edge(i, i + 50, None); // Auto-creates node i+50
     }
     for i in 50..100 {
         dag2.add_node(i, promoted_strs[i - 50]); // Promotes placeholder

@@ -5,6 +5,8 @@
 //!
 //! Run with: cargo run --example arena_perf --release
 
+#![allow(clippy::needless_range_loop)]
+
 use ascii_dag::arena::Arena;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -24,7 +26,7 @@ fn benchmark_arena_simulation(node_count: usize, edge_count: usize, iterations: 
     let mut total_time = Duration::ZERO;
 
     for _ in 0..iterations {
-        let mut arena = Arena::new(&mut arena_buffer);
+        let arena = Arena::new(&mut arena_buffer);
         let start = Instant::now();
 
         // Allocate one big block and partition it using split_at_mut
@@ -152,7 +154,7 @@ fn benchmark_heap_simulation(node_count: usize, edge_count: usize, iterations: u
 fn benchmark_lookup_arena(node_count: usize, lookups: usize) -> Duration {
     let arena_size = node_count * 16 + 1024;
     let mut arena_buffer = vec![0u8; arena_size];
-    let mut arena = Arena::new(&mut arena_buffer);
+    let arena = Arena::new(&mut arena_buffer);
 
     // Arena: use flat array (O(1) index lookup)
     let id_to_index: &mut [usize] = arena.alloc_slice_default(node_count).unwrap();

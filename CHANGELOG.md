@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.8.0] - Unreleased
+
+### ⚠️ Breaking Changes
+- **`add_edge()` API change**: Now takes an optional label parameter
+  - Before: `dag.add_edge(1, 2)`
+  - After: `dag.add_edge(1, 2, None)` or `dag.add_edge(1, 2, Some("label"))`
+- **`LayoutEdge` struct**: Added `label` and `label_position` fields
+
+### Edge Labels
+- **Labeled edges**: `add_edge(from, to, Some("label"))` displays inline labels on edges
+- **`from_edges_labeled()`**: New batch constructor for graphs with labeled edges
+- **Label positioning**: Automatic label placement at edge midpoints
+- **Collision detection**: Labels that would overlap are skipped
+- **Legend fallback**: Skipped labels appear in a legend below the graph
+
+### Colored Rendering
+- **New color module**: `ascii_dag::render::colors` with `Palette` enum
+- **Three palettes**: `Palette::Ansi` (default), `Palette::AnsiDark`, `Palette::AnsiLight`
+- **Greedy graph coloring**: `compute_edge_colors()` assigns colors to minimize same-color adjacent edges
+- **Colored scanline render**: `render_scanline_colored(Palette::Ansi)` for ANSI terminal colors
+- **Colored legend**: `render_scanline_colored_with_legend()` includes legend for skipped labels
+- **Arena colored rendering**: Full color support in `LayoutIRArena` with `render_to_buffer_colored()`
+
+### Arena Stability & Robustness
+- **Fuzz-tested**: 17.4 million iterations (1 hour) with zero crashes
+- **Improved memory estimation**: `estimate_layout_arena_size()` now accurately predicts arena requirements
+- **Bounds checking hardening**: Comprehensive bounds checks in layout and rendering paths
+- **Fixed subtraction overflow**: `paint_node` handles zero-width nodes safely
+- **Fixed dummy node width**: Arena mode now uses width 3 (matching heap mode) for better edge separation
+- **Stress test improvements**: 20k/50k node tests work reliably (31MB/78MB memory)
+
+### New Examples
+- `edge_label_demo.rs`: Demonstrates edge labels and legend feature
+- `color_demo.rs`: Shows all color palettes
+- `arena_labels_test.rs`: Tests arena mode with labels and colors
+- `hero_colored.rs`: Complex graph with labels and performance test
+
+### Performance
+- **Updated benchmarks**: Fresh measurements on M2 Ultra showing 2.1x-37.3x Arena speedups
+
 ## [0.7.1] - 2026-01-17
 
 ### Benchmarks

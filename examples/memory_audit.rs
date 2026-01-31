@@ -23,7 +23,7 @@ fn measure_chain(n: usize) {
     for i in 0..n {
         dag.add_node(i, Box::leak(format!("N{}", i).into_boxed_str()));
         if i > 0 {
-            dag.add_edge(i - 1, i);
+            dag.add_edge(i - 1, i, None);
         }
     }
 

@@ -79,6 +79,18 @@ pub struct LayoutEdgeArena {
     pub path: EdgePathArena,
     /// Edge index (for consistent coloring)
     pub edge_index: usize,
+    /// Offset into labels array for edge label (0 = no label)
+    pub label_offset: usize,
+    /// Length of edge label in bytes (0 = no label)
+    pub label_len: usize,
+    /// X coordinate for label rendering (0 if no label)
+    pub label_x: usize,
+    /// Y coordinate for label rendering (0 if no label)
+    pub label_y: usize,
+    /// Minimum Y coordinate this edge occupies (for early-exit optimization)
+    pub min_y: usize,
+    /// Maximum Y coordinate this edge occupies (for early-exit optimization)
+    pub max_y: usize,
 }
 
 /// Arena-backed intermediate representation of a laid-out graph.
@@ -158,6 +170,23 @@ impl<'a> LayoutIRArena<'a> {
         core::str::from_utf8(bytes).unwrap_or("")
     }
 
+    /// Get edge label by index (returns empty string if no label).
+    #[inline]
+    pub fn edge_label(&self, index: usize) -> &str {
+        let edge = &self.edges[index];
+        if edge.label_len == 0 {
+            return "";
+        }
+        let bytes = &self.labels[edge.label_offset..edge.label_offset + edge.label_len];
+        core::str::from_utf8(bytes).unwrap_or("")
+    }
+
+    /// Check if an edge has a label.
+    #[inline]
+    pub fn edge_has_label(&self, index: usize) -> bool {
+        self.edges[index].label_len > 0
+    }
+
     /// Iterate over all nodes.
     #[inline]
     pub fn nodes(&self) -> &[LayoutNodeArena] {
@@ -198,6 +227,11 @@ impl<'a> LayoutIRArena<'a> {
         self.nodes.iter().find(|n| n.id == id)
     }
 
+    /// Find node index by ID (linear search - O(n)).
+    pub fn node_index_by_id(&self, id: usize) -> Option<usize> {
+        self.nodes.iter().position(|n| n.id == id)
+    }
+
     /// Check if the layout is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -227,12 +261,26 @@ impl<'a> LayoutIRArena<'a> {
                 *c = ' ';
             }
 
-            // Paint edges first (so nodes overwrite)
+            // 1. Paint edges first (so nodes overwrite)
             for edge in self.edges {
+                // Early exit: skip edges that don't occupy this line
+                if y < edge.min_y || y > edge.max_y {
+                    continue;
+                }
                 self.paint_edge_at_y(line_buffer, edge, y);
             }
 
-            // Paint nodes (overwrites edge chars)
+            // 2. Paint edge labels (only for edges with labels at this y)
+            for (edge_idx, edge) in self.edges.iter().enumerate() {
+                // Fast skip: only check edges that could have a label at this y
+                if edge.label_len == 0 || edge.label_y != y {
+                    continue;
+                }
+                let label = self.edge_label(edge_idx);
+                self.paint_edge_label(line_buffer, label, edge.label_x);
+            }
+
+            // 3. Paint nodes (overwrites edge chars)
             for (node_idx, node) in self.nodes.iter().enumerate() {
                 if node.y == y {
                     self.paint_node(line_buffer, node_idx, node);
@@ -268,6 +316,39 @@ impl<'a> LayoutIRArena<'a> {
         Some(pos)
     }
 
+    /// Paint an edge label without color.
+    fn paint_edge_label(&self, line_buffer: &mut [char], label: &str, x: usize) {
+        if x >= line_buffer.len() {
+            return;
+        }
+
+        // Collision detection: skip if would overwrite existing characters
+        if !self.can_place_label(line_buffer, label, x) {
+            return;
+        }
+
+        let mut pos = x;
+
+        // Opening quote
+        if pos < line_buffer.len() {
+            line_buffer[pos] = '"';
+            pos += 1;
+        }
+
+        // Label characters
+        for c in label.chars() {
+            if pos < line_buffer.len() {
+                line_buffer[pos] = c;
+                pos += 1;
+            }
+        }
+
+        // Closing quote
+        if pos < line_buffer.len() {
+            line_buffer[pos] = '"';
+        }
+    }
+
     /// Paint a node on the line buffer.
     fn paint_node(&self, line_buffer: &mut [char], node_idx: usize, node: &LayoutNodeArena) {
         let label = self.node_label(node_idx);
@@ -287,9 +368,11 @@ impl<'a> LayoutIRArena<'a> {
         }
 
         // Closing bracket
-        let close_x = x + node.width - 1;
-        if close_x < line_buffer.len() {
-            line_buffer[close_x] = ']';
+        if node.width > 0 {
+            let close_x = x + node.width - 1;
+            if close_x < line_buffer.len() {
+                line_buffer[close_x] = ']';
+            }
         }
     }
 
@@ -458,6 +541,756 @@ impl<'a> LayoutIRArena<'a> {
     pub fn estimate_render_size(&self) -> usize {
         // Each character can be up to 4 bytes (UTF-8), plus newline per row
         self.width * self.height * 4 + self.height
+    }
+
+    // =========================================================================
+    // Greedy Graph Coloring
+    // =========================================================================
+
+    /// Compute optimal color indices for all edges using greedy graph coloring.
+    ///
+    /// Adjacent edges (those sharing a source or target node) are assigned different
+    /// colors when possible. This reduces visual confusion in complex graphs.
+    ///
+    /// `color_buffer` must have length >= edge_count.
+    /// Returns the number of colors used, or None if buffer too small.
+    ///
+    /// This matches the heap implementation in LayoutIR::compute_edge_colors().
+    pub fn compute_edge_colors(
+        &self,
+        color_buffer: &mut [usize],
+        palette_size: usize,
+    ) -> Option<usize> {
+        let n = self.edges.len();
+
+        if n == 0 {
+            return Some(0);
+        }
+
+        if color_buffer.len() < n || palette_size == 0 {
+            return None;
+        }
+
+        // Initialize all to 0
+        for c in color_buffer[..n].iter_mut() {
+            *c = 0;
+        }
+
+        let mut max_color_used = 0usize;
+
+        // Greedy coloring: for each edge, find colors used by adjacent edges
+        // Two edges are "adjacent" if they share from_id or to_id
+        for i in 0..n {
+            let edge = &self.edges[i];
+
+            // Track colors used by adjacent edges (already colored)
+            // Support up to 32 colors in fixed-size bitset
+            let mut used_colors = 0u32;
+
+            for j in 0..i {
+                let other = &self.edges[j];
+
+                // Check if edges are adjacent (share a node)
+                let adjacent = edge.from_id == other.from_id
+                    || edge.from_id == other.to_id
+                    || edge.to_id == other.from_id
+                    || edge.to_id == other.to_id;
+
+                if adjacent {
+                    let other_color = color_buffer[j];
+                    if other_color < 32 {
+                        used_colors |= 1 << other_color;
+                    }
+                }
+            }
+
+            // Find the first available color
+            let mut color = 0;
+            for c in 0..palette_size.min(32) {
+                if (used_colors & (1 << c)) == 0 {
+                    color = c;
+                    break;
+                }
+            }
+
+            color_buffer[i] = color;
+            if color > max_color_used {
+                max_color_used = color;
+            }
+        }
+
+        Some(max_color_used + 1)
+    }
+
+    // =========================================================================
+    // Colored Rendering
+    // =========================================================================
+
+    /// Render the layout with ANSI colors to a pre-allocated buffer.
+    ///
+    /// Each edge is colored based on greedy graph coloring to differentiate
+    /// adjacent edges. Nodes use the default terminal color.
+    ///
+    /// # Arguments
+    /// - `buffer`: Output buffer for UTF-8 bytes
+    /// - `line_buffer`: Temporary line buffer (must be >= width)
+    /// - `color_buffer`: Temporary color buffer (must be >= width)
+    /// - `edge_colors`: Pre-computed edge colors from `compute_edge_colors()` (must be >= edge_count)
+    /// - `palette`: Color palette to use
+    ///
+    /// Returns the number of bytes written, or None if buffers too small.
+    pub fn render_to_buffer_colored(
+        &self,
+        buffer: &mut [u8],
+        line_buffer: &mut [char],
+        color_buffer: &mut [u8],
+        edge_colors: &[usize],
+        palette: &[u8],
+    ) -> Option<usize> {
+        if self.is_empty() {
+            return Some(0);
+        }
+
+        // Validate buffer sizes
+        if line_buffer.len() < self.width || color_buffer.len() < self.width {
+            return None;
+        }
+        if edge_colors.len() < self.edges.len() {
+            return None;
+        }
+
+        let mut pos = 0;
+
+        for y in 0..self.height {
+            // Clear buffers
+            for c in line_buffer[..self.width].iter_mut() {
+                *c = ' ';
+            }
+            for c in color_buffer[..self.width].iter_mut() {
+                *c = 0; // 0 = no color (default terminal)
+            }
+
+            // 1. Paint edges with colors
+            for (edge_idx, edge) in self.edges.iter().enumerate() {
+                // Early exit: skip edges that don't occupy this line
+                if y < edge.min_y || y > edge.max_y {
+                    continue;
+                }
+                let color_idx = edge_colors[edge_idx];
+                let color = palette[color_idx % palette.len()];
+                self.paint_edge_at_y_colored(line_buffer, color_buffer, edge, y, color);
+            }
+
+            // 2. Paint edge labels (same color as the edge line)
+            for (edge_idx, edge) in self.edges.iter().enumerate() {
+                // Fast skip: only check edges that could have a label at this y
+                if edge.label_len == 0 || edge.label_y != y {
+                    continue;
+                }
+                let color_idx = edge_colors[edge_idx];
+                let color = palette[color_idx % palette.len()];
+                let label = self.edge_label(edge_idx);
+                self.paint_edge_label_colored(
+                    line_buffer,
+                    color_buffer,
+                    label,
+                    edge.label_x,
+                    color,
+                );
+            }
+
+            // 3. Paint nodes (no color - clears color at node positions)
+            for (node_idx, node) in self.nodes.iter().enumerate() {
+                if node.y == y {
+                    self.paint_node_colored(line_buffer, color_buffer, node_idx, node);
+                }
+            }
+
+            // Write line with ANSI color escapes
+            pos = self.write_colored_line_to_buffer(buffer, pos, line_buffer, color_buffer)?;
+
+            // Add newline
+            if pos >= buffer.len() {
+                return None;
+            }
+            buffer[pos] = b'\n';
+            pos += 1;
+        }
+
+        Some(pos)
+    }
+
+    /// Render with ANSI colors and append a legend for skipped labels.
+    ///
+    /// When edge labels collide with other characters, they are skipped in the main
+    /// rendering but added to a legend at the bottom in the format:
+    /// `[from] → [to]: "label"` with the edge's color.
+    ///
+    /// The `skipped_labels` buffer stores tuples of (edge_index, was_skipped).
+    /// Returns the number of bytes written, or None if buffers too small.
+    ///
+    /// # Arguments
+    /// * `buffer` - Output byte buffer for UTF-8 + ANSI escapes
+    /// * `line_buffer` - Temporary char buffer (width chars)
+    /// * `color_buffer` - Temporary color buffer (width bytes)
+    /// * `edge_colors` - Pre-computed edge color indices
+    /// * `palette` - ANSI 256-color palette values
+    /// * `skipped_buffer` - Buffer to track which edges had skipped labels (must be edge_count size)
+    pub fn render_to_buffer_colored_with_legend(
+        &self,
+        buffer: &mut [u8],
+        line_buffer: &mut [char],
+        color_buffer: &mut [u8],
+        edge_colors: &[usize],
+        palette: &[u8],
+        skipped_buffer: &mut [bool],
+    ) -> Option<usize> {
+        if self.is_empty() {
+            return Some(0);
+        }
+
+        // Validate buffer sizes
+        if line_buffer.len() < self.width || color_buffer.len() < self.width {
+            return None;
+        }
+        if edge_colors.len() < self.edges.len() {
+            return None;
+        }
+        if skipped_buffer.len() < self.edges.len() {
+            return None;
+        }
+
+        // Initialize skipped buffer
+        for s in skipped_buffer.iter_mut() {
+            *s = false;
+        }
+
+        let mut pos = 0;
+
+        for y in 0..self.height {
+            // Clear buffers
+            for c in line_buffer[..self.width].iter_mut() {
+                *c = ' ';
+            }
+            for c in color_buffer[..self.width].iter_mut() {
+                *c = 0;
+            }
+
+            // 1. Paint edges with colors
+            for (edge_idx, edge) in self.edges.iter().enumerate() {
+                // Early exit: skip edges that don't occupy this line
+                if y < edge.min_y || y > edge.max_y {
+                    continue;
+                }
+                let color_idx = edge_colors[edge_idx];
+                let color = palette[color_idx % palette.len()];
+                self.paint_edge_at_y_colored(line_buffer, color_buffer, edge, y, color);
+            }
+
+            // 2. Paint edge labels, tracking skipped ones
+            for (edge_idx, edge) in self.edges.iter().enumerate() {
+                // Fast skip: only check edges that could have a label at this y
+                if edge.label_len == 0 || edge.label_y != y {
+                    continue;
+                }
+                let color_idx = edge_colors[edge_idx];
+                let color = palette[color_idx % palette.len()];
+                let label = self.edge_label(edge_idx);
+                if self.can_place_label(line_buffer, label, edge.label_x) {
+                    self.paint_edge_label_colored(
+                        line_buffer,
+                        color_buffer,
+                        label,
+                        edge.label_x,
+                        color,
+                    );
+                } else {
+                    // Mark as skipped for legend
+                    skipped_buffer[edge_idx] = true;
+                }
+            }
+
+            // 3. Paint nodes (no color)
+            for (node_idx, node) in self.nodes.iter().enumerate() {
+                if node.y == y {
+                    self.paint_node_colored(line_buffer, color_buffer, node_idx, node);
+                }
+            }
+
+            // Write line with ANSI color escapes
+            pos = self.write_colored_line_to_buffer(buffer, pos, line_buffer, color_buffer)?;
+
+            // Add newline
+            if pos >= buffer.len() {
+                return None;
+            }
+            buffer[pos] = b'\n';
+            pos += 1;
+        }
+
+        // Append legend for skipped labels
+        let has_skipped = skipped_buffer[..self.edges.len()].iter().any(|&s| s);
+        if has_skipped {
+            // Write "Edge labels:\n"
+            let header = b"\nEdge labels:\n";
+            if pos + header.len() > buffer.len() {
+                return None;
+            }
+            buffer[pos..pos + header.len()].copy_from_slice(header);
+            pos += header.len();
+
+            // Write each skipped label
+            for (edge_idx, edge) in self.edges.iter().enumerate() {
+                if !skipped_buffer[edge_idx] || edge.label_len == 0 {
+                    continue;
+                }
+
+                let label = self.edge_label(edge_idx);
+                let color_idx = edge_colors[edge_idx];
+                let color = palette[color_idx % palette.len()];
+
+                // Get from/to node labels
+                let from_label = self
+                    .node_index_by_id(edge.from_id)
+                    .map(|idx| self.node_label(idx))
+                    .unwrap_or("?");
+                let to_label = self
+                    .node_index_by_id(edge.to_id)
+                    .map(|idx| self.node_label(idx))
+                    .unwrap_or("?");
+
+                // Write: "  \x1b[38;5;{color}m{from} → {to}: "{label}"\x1b[0m\n"
+                // Prefix: "  "
+                if pos + 2 > buffer.len() {
+                    return None;
+                }
+                buffer[pos..pos + 2].copy_from_slice(b"  ");
+                pos += 2;
+
+                // ANSI color start
+                pos = self.write_ansi_color(buffer, pos, color)?;
+
+                // From label
+                let from_bytes = from_label.as_bytes();
+                if pos + from_bytes.len() > buffer.len() {
+                    return None;
+                }
+                buffer[pos..pos + from_bytes.len()].copy_from_slice(from_bytes);
+                pos += from_bytes.len();
+
+                // Arrow " → "
+                let arrow = " → ";
+                let arrow_bytes = arrow.as_bytes();
+                if pos + arrow_bytes.len() > buffer.len() {
+                    return None;
+                }
+                buffer[pos..pos + arrow_bytes.len()].copy_from_slice(arrow_bytes);
+                pos += arrow_bytes.len();
+
+                // To label
+                let to_bytes = to_label.as_bytes();
+                if pos + to_bytes.len() > buffer.len() {
+                    return None;
+                }
+                buffer[pos..pos + to_bytes.len()].copy_from_slice(to_bytes);
+                pos += to_bytes.len();
+
+                // ": \""
+                if pos + 3 > buffer.len() {
+                    return None;
+                }
+                buffer[pos..pos + 3].copy_from_slice(b": \"");
+                pos += 3;
+
+                // Edge label
+                let label_bytes = label.as_bytes();
+                if pos + label_bytes.len() > buffer.len() {
+                    return None;
+                }
+                buffer[pos..pos + label_bytes.len()].copy_from_slice(label_bytes);
+                pos += label_bytes.len();
+
+                // "\""
+                if pos + 1 > buffer.len() {
+                    return None;
+                }
+                buffer[pos] = b'"';
+                pos += 1;
+
+                // ANSI reset
+                pos = self.write_ansi_reset(buffer, pos)?;
+
+                // Newline
+                if pos >= buffer.len() {
+                    return None;
+                }
+                buffer[pos] = b'\n';
+                pos += 1;
+            }
+        }
+
+        Some(pos)
+    }
+
+    /// Check if a label can be placed without collision.
+    /// Returns true if all positions are empty (space) or the edge's vertical line (│).
+    fn can_place_label(&self, buffer: &[char], label: &str, x: usize) -> bool {
+        if x >= buffer.len() {
+            return false;
+        }
+
+        let label_len = label.chars().count() + 2; // +2 for quotes
+
+        // Check if all positions are available (space or the edge's own vertical line)
+        for i in 0..label_len {
+            let pos_x = x + i;
+            if pos_x >= buffer.len() {
+                return false; // Would go out of bounds
+            }
+            let c = buffer[pos_x];
+            if c != ' ' && c != '│' {
+                return false; // Collision with existing character
+            }
+        }
+        true
+    }
+
+    /// Paint an edge label with the same color as the edge.
+    fn paint_edge_label_colored(
+        &self,
+        line_buffer: &mut [char],
+        color_buffer: &mut [u8],
+        label: &str,
+        x: usize,
+        color: u8,
+    ) {
+        if x >= line_buffer.len() {
+            return;
+        }
+
+        // Collision detection: skip if would overwrite existing characters
+        if !self.can_place_label(line_buffer, label, x) {
+            return;
+        }
+
+        let mut pos = x;
+
+        // Opening quote
+        if pos < line_buffer.len() {
+            line_buffer[pos] = '"';
+            color_buffer[pos] = color;
+            pos += 1;
+        }
+
+        // Label characters
+        for c in label.chars() {
+            if pos < line_buffer.len() {
+                line_buffer[pos] = c;
+                color_buffer[pos] = color;
+                pos += 1;
+            }
+        }
+
+        // Closing quote
+        if pos < line_buffer.len() {
+            line_buffer[pos] = '"';
+            color_buffer[pos] = color;
+        }
+    }
+
+    /// Paint a node, clearing color (nodes use default terminal color).
+    fn paint_node_colored(
+        &self,
+        line_buffer: &mut [char],
+        color_buffer: &mut [u8],
+        node_idx: usize,
+        node: &LayoutNodeArena,
+    ) {
+        let label = self.node_label(node_idx);
+        let x = node.x;
+
+        // Opening bracket (no color)
+        if x < line_buffer.len() {
+            line_buffer[x] = '[';
+            color_buffer[x] = 0;
+        }
+
+        // Label characters (no color)
+        for (i, c) in label.chars().enumerate() {
+            let px = x + 1 + i;
+            if px < line_buffer.len() {
+                line_buffer[px] = c;
+                color_buffer[px] = 0;
+            }
+        }
+
+        // Closing bracket (no color)
+        if node.width > 0 {
+            let close_x = x + node.width - 1;
+            if close_x < line_buffer.len() {
+                line_buffer[close_x] = ']';
+                color_buffer[close_x] = 0;
+            }
+        }
+    }
+
+    /// Paint an edge at Y with color.
+    fn paint_edge_at_y_colored(
+        &self,
+        line_buffer: &mut [char],
+        color_buffer: &mut [u8],
+        edge: &LayoutEdgeArena,
+        y: usize,
+        color: u8,
+    ) {
+        // Box drawing characters
+        const V_LINE: char = '│';
+        const H_LINE: char = '─';
+        const ARROW_DOWN: char = '↓';
+        const CORNER_DR: char = '└';
+        const CORNER_DL: char = '┘';
+        const CORNER_UR: char = '┌';
+        const CORNER_UL: char = '┐';
+
+        let from_y = edge.from_y;
+        let to_y = edge.to_y;
+        let from_x = edge.from_x;
+        let to_x = edge.to_x;
+
+        if y <= from_y || y >= to_y {
+            return;
+        }
+
+        match edge.path {
+            EdgePathArena::Direct => {
+                if from_x < line_buffer.len() {
+                    if y == to_y - 1 {
+                        line_buffer[from_x] = ARROW_DOWN;
+                    } else {
+                        line_buffer[from_x] = V_LINE;
+                    }
+                    color_buffer[from_x] = color;
+                }
+            }
+            EdgePathArena::Corner { horizontal_y } => {
+                let x1 = from_x;
+                let x2 = to_x;
+                let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
+
+                if y == horizontal_y {
+                    // Horizontal segment
+                    for x in min_x..=max_x {
+                        if x < line_buffer.len() && line_buffer[x] == ' ' {
+                            line_buffer[x] = H_LINE;
+                            color_buffer[x] = color;
+                        }
+                    }
+                    // Corners
+                    if x1 < line_buffer.len() {
+                        line_buffer[x1] = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                        color_buffer[x1] = color;
+                    }
+                    if x2 < line_buffer.len() {
+                        line_buffer[x2] = if x1 < x2 { CORNER_UL } else { CORNER_UR };
+                        color_buffer[x2] = color;
+                    }
+                } else if y > from_y && y < horizontal_y {
+                    // Vertical from source to horizontal
+                    if x1 < line_buffer.len() {
+                        line_buffer[x1] = V_LINE;
+                        color_buffer[x1] = color;
+                    }
+                } else if y > horizontal_y && y < to_y {
+                    // Vertical from horizontal to target
+                    if x2 < line_buffer.len() {
+                        if y == to_y - 1 {
+                            line_buffer[x2] = ARROW_DOWN;
+                        } else {
+                            line_buffer[x2] = V_LINE;
+                        }
+                        color_buffer[x2] = color;
+                    }
+                }
+            }
+            EdgePathArena::MultiSegment {
+                waypoints_start,
+                waypoints_len,
+            } => {
+                let waypoints = &self.waypoints[waypoints_start..waypoints_start + waypoints_len];
+                let segment_count = waypoints_len + 1;
+
+                for seg_idx in 0..segment_count {
+                    let (x1, y1) = if seg_idx == 0 {
+                        (from_x, from_y)
+                    } else {
+                        waypoints[seg_idx - 1]
+                    };
+                    let (x2, y2) = if seg_idx == waypoints_len {
+                        (to_x, to_y)
+                    } else {
+                        waypoints[seg_idx]
+                    };
+
+                    let is_first_segment = seg_idx == 0;
+                    let is_last_segment = seg_idx == segment_count - 1;
+
+                    if x1 == x2 {
+                        // Pure vertical segment
+                        let start_y = if is_first_segment { y1 + 1 } else { y1 };
+                        if y >= start_y && y < y2 && x1 < line_buffer.len() {
+                            if is_last_segment && y == y2 - 1 {
+                                line_buffer[x1] = ARROW_DOWN;
+                            } else if line_buffer[x1] == ' ' {
+                                line_buffer[x1] = V_LINE;
+                            }
+                            color_buffer[x1] = color;
+                        }
+                    } else if y1 == y2 {
+                        // Pure horizontal segment
+                        if y == y1 {
+                            let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
+                            for x in min_x..=max_x {
+                                if x < line_buffer.len() && line_buffer[x] == ' ' {
+                                    line_buffer[x] = H_LINE;
+                                    color_buffer[x] = color;
+                                }
+                            }
+                        }
+                    } else {
+                        // Diagonal: corner routing
+                        let corner_y = y1 + 1;
+
+                        if y == corner_y {
+                            let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
+                            for x in min_x..=max_x {
+                                if x < line_buffer.len() {
+                                    if x == x1 {
+                                        line_buffer[x] =
+                                            if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                                    } else if x == x2 {
+                                        line_buffer[x] =
+                                            if x1 < x2 { CORNER_UL } else { CORNER_UR };
+                                    } else if line_buffer[x] == ' ' {
+                                        line_buffer[x] = H_LINE;
+                                    }
+                                    color_buffer[x] = color;
+                                }
+                            }
+                        }
+
+                        if y > corner_y && y < y2 && x2 < line_buffer.len() {
+                            if is_last_segment && y == y2 - 1 {
+                                line_buffer[x2] = ARROW_DOWN;
+                            } else if line_buffer[x2] == ' ' {
+                                line_buffer[x2] = V_LINE;
+                            }
+                            color_buffer[x2] = color;
+                        }
+
+                        if !is_first_segment
+                            && y == y1
+                            && x1 < line_buffer.len()
+                            && line_buffer[x1] == ' '
+                        {
+                            line_buffer[x1] = V_LINE;
+                            color_buffer[x1] = color;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Write a line with ANSI color escapes to the buffer.
+    /// Returns the new position, or None if buffer overflow.
+    fn write_colored_line_to_buffer(
+        &self,
+        buffer: &mut [u8],
+        mut pos: usize,
+        chars: &[char],
+        colors: &[u8],
+    ) -> Option<usize> {
+        // Find trimmed length
+        let trimmed_len = chars[..self.width]
+            .iter()
+            .rposition(|&c| c != ' ')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+
+        let mut last_color: u8 = 0;
+
+        for i in 0..trimmed_len {
+            let c = chars[i];
+            let color = colors[i];
+
+            // Handle color changes
+            if color != 0 && color != last_color {
+                // Write ANSI escape: \x1b[38;5;NNNm (up to 11 bytes)
+                pos = self.write_ansi_color(buffer, pos, color)?;
+                last_color = color;
+            } else if color == 0 && last_color != 0 {
+                // Reset to default: \x1b[0m (4 bytes)
+                pos = self.write_ansi_reset(buffer, pos)?;
+                last_color = 0;
+            }
+
+            // Write the character (up to 4 bytes UTF-8)
+            let mut char_buf = [0u8; 4];
+            let encoded = c.encode_utf8(&mut char_buf);
+            if pos + encoded.len() > buffer.len() {
+                return None;
+            }
+            buffer[pos..pos + encoded.len()].copy_from_slice(encoded.as_bytes());
+            pos += encoded.len();
+        }
+
+        // Reset color at end of line if needed
+        if last_color != 0 {
+            pos = self.write_ansi_reset(buffer, pos)?;
+        }
+
+        Some(pos)
+    }
+
+    /// Write ANSI color escape sequence: \x1b[38;5;{color}m
+    #[inline]
+    fn write_ansi_color(&self, buffer: &mut [u8], pos: usize, color: u8) -> Option<usize> {
+        // Format: \x1b[38;5;NNNm where NNN is 1-3 digits
+        // Max length: 11 bytes (\x1b[38;5;255m)
+        let prefix = b"\x1b[38;5;";
+        if pos + 11 > buffer.len() {
+            return None;
+        }
+        buffer[pos..pos + 7].copy_from_slice(prefix);
+        let mut p = pos + 7;
+
+        // Write color number as ASCII digits
+        if color >= 100 {
+            buffer[p] = b'0' + (color / 100);
+            p += 1;
+        }
+        if color >= 10 {
+            buffer[p] = b'0' + ((color / 10) % 10);
+            p += 1;
+        }
+        buffer[p] = b'0' + (color % 10);
+        p += 1;
+
+        buffer[p] = b'm';
+        p += 1;
+
+        Some(p)
+    }
+
+    /// Write ANSI reset escape sequence: \x1b[0m
+    #[inline]
+    fn write_ansi_reset(&self, buffer: &mut [u8], pos: usize) -> Option<usize> {
+        const RESET: &[u8] = b"\x1b[0m";
+        if pos + RESET.len() > buffer.len() {
+            return None;
+        }
+        buffer[pos..pos + RESET.len()].copy_from_slice(RESET);
+        Some(pos + RESET.len())
     }
 }
 
@@ -640,6 +1473,21 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         self.waypoint_count += points.len();
 
         Some((start, points.len()))
+    }
+
+    /// Add an edge label to the label storage, returns (offset, len).
+    pub fn add_edge_label(&mut self, label: &str) -> Option<(usize, usize)> {
+        let label_bytes = label.as_bytes();
+        if self.label_offset + label_bytes.len() > self.labels.len() {
+            return None;
+        }
+
+        let offset = self.label_offset;
+        self.labels[self.label_offset..self.label_offset + label_bytes.len()]
+            .copy_from_slice(label_bytes);
+        self.label_offset += label_bytes.len();
+
+        Some((offset, label_bytes.len()))
     }
 
     /// Record a node index at a level.

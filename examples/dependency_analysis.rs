@@ -201,9 +201,9 @@ fn example_metrics_dashboard() {
     dag.add_node(2, "main.c");
     dag.add_node(3, "main.o");
     dag.add_node(4, "app.exe");
-    dag.add_edge(2, 3);
-    dag.add_edge(1, 3);
-    dag.add_edge(3, 4);
+    dag.add_edge(2, 3, None);
+    dag.add_edge(1, 3, None);
+    dag.add_edge(3, 4, None);
 
     println!("{}", dag.render());
 

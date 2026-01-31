@@ -95,12 +95,12 @@ fn generate_layered_graph<'a>(dag: &mut DAG<'a>, node_count: usize, rng: &mut Si
     let edges_per_node = 2;
     for i in 0..node_count.saturating_sub(1) {
         let jump = rng.gen_range(1, 5.min(node_count - i));
-        dag.add_edge(i, i + jump);
+        dag.add_edge(i, i + jump, None);
 
         for _ in 0..edges_per_node {
             if rng.chance(40) {
                 let target_jump = rng.gen_range(1, 20.min(node_count - i));
-                dag.add_edge(i, i + target_jump);
+                dag.add_edge(i, i + target_jump, None);
             }
         }
     }
@@ -126,7 +126,7 @@ fn generate_wide_graph<'a>(dag: &mut DAG<'a>, width: usize, levels: usize, rng: 
             let conn_count = rng.gen_range(1, 4.min(width));
             for _ in 0..conn_count {
                 let to = next_level_start + rng.gen_range(0, width);
-                dag.add_edge(from, to);
+                dag.add_edge(from, to, None);
             }
         }
     }
@@ -137,7 +137,7 @@ fn generate_deep_chain<'a>(dag: &mut DAG<'a>, depth: usize) {
         let label = Box::leak(format!("D{}", i).into_boxed_str());
         dag.add_node(i, label);
         if i > 0 {
-            dag.add_edge(i - 1, i);
+            dag.add_edge(i - 1, i, None);
         }
     }
 }
@@ -152,14 +152,14 @@ fn generate_skip_heavy<'a>(dag: &mut DAG<'a>, nodes: usize, rng: &mut SimpleRng)
     for i in 0..nodes {
         // Regular forward edge
         if i + 1 < nodes {
-            dag.add_edge(i, i + 1);
+            dag.add_edge(i, i + 1, None);
         }
         // Skip edges (2-5 levels ahead)
         for _ in 0..3 {
             if rng.chance(60) {
                 let skip = rng.gen_range(2, 6.min(nodes - i));
                 if i + skip < nodes {
-                    dag.add_edge(i, i + skip);
+                    dag.add_edge(i, i + skip, None);
                 }
             }
         }
@@ -257,7 +257,7 @@ where
 fn run_arena_test(name: &str, arena_size: usize) -> BenchResult {
     // Test the arena module (not yet integrated with render)
     let mut buffer = vec![0u8; arena_size];
-    let mut arena = Arena::new(&mut buffer);
+    let arena = Arena::new(&mut buffer);
 
     // Simulate allocations similar to what render would need
     let start = Instant::now();
@@ -410,7 +410,7 @@ fn run_test_suite() {
 
     for (name, count, graph_type, extra) in &test_configs {
         let result = run_heap_benchmark(
-            *name,
+            name,
             |rng| {
                 let mut dag = DAG::new();
                 match graph_type {
@@ -432,7 +432,7 @@ fn run_test_suite() {
 
     for (name, count, graph_type, extra) in &test_configs {
         let result = run_buffer_benchmark(
-            *name,
+            name,
             |rng| {
                 let mut dag = DAG::new();
                 match graph_type {
@@ -455,7 +455,7 @@ fn run_test_suite() {
 
     for (name, count, graph_type, extra) in &test_configs {
         let result = run_csr_benchmark(
-            *name,
+            name,
             |rng| {
                 let mut dag = DAG::new();
                 match graph_type {
@@ -478,7 +478,7 @@ fn run_test_suite() {
 
     for (name, count, graph_type, extra) in &test_configs {
         let result = run_full_arena_benchmark(
-            *name,
+            name,
             |rng| {
                 let mut dag = DAG::new();
                 match graph_type {

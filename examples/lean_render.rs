@@ -70,7 +70,6 @@ fn main() {
 
         let render_buffer = temp_mem;
         // We also need a small line buffer for the renderer logic
-        let mut line_buffer = [0u8; 1024];
         let mut line_chars = [' '; 1024]; // Used by renderer
 
         println!("> Reusing Temp Buffer for Rendering...");

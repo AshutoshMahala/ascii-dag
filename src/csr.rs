@@ -577,7 +577,7 @@ impl<'a> crate::DAG<'a> {
         }
 
         // Count children per node for offsets
-        for &(from_id, _to_id) in &self.edges {
+        for &(from_id, _to_id, _) in &self.edges {
             if let Some(from_idx) = self.node_index(from_id) {
                 children_offsets[from_idx + 1] += 1;
             }
@@ -601,7 +601,7 @@ impl<'a> crate::DAG<'a> {
         // Zero parents_offsets to use as counters
         parents_offsets.fill(0);
 
-        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+        for (edge_idx, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
             if let (Some(from_idx), Some(to_idx)) =
                 (self.node_index(from_id), self.node_index(to_id))
             {
@@ -622,7 +622,7 @@ impl<'a> crate::DAG<'a> {
         parents_offsets.fill(0);
 
         // Build parents (reverse of children)
-        for &(_from_id, to_id) in &self.edges {
+        for &(_from_id, to_id, _) in &self.edges {
             if let Some(to_idx) = self.node_index(to_id) {
                 parents_offsets[to_idx + 1] += 1;
             }
@@ -642,7 +642,7 @@ impl<'a> crate::DAG<'a> {
         let parent_counts = unsafe { core::slice::from_raw_parts_mut(counters_ptr, node_count) };
         parent_counts.fill(0);
 
-        for &(from_id, to_id) in &self.edges {
+        for &(from_id, to_id, _) in &self.edges {
             if let (Some(from_idx), Some(to_idx)) =
                 (self.node_index(from_id), self.node_index(to_id))
             {

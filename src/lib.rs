@@ -53,7 +53,7 @@
 //! let mut dag = DAG::new();
 //! dag.add_node(1, "A");
 //! dag.add_node(2, "B");
-//! dag.add_edge(1, 2);
+//! dag.add_edge(1, 2, None);
 //! ```
 //!
 //! ### [`cycles`] - Cycle Detection
@@ -61,8 +61,8 @@
 //! use ascii_dag::graph::DAG;
 //!
 //! let mut dag = DAG::new();
-//! dag.add_edge(1, 2);
-//! dag.add_edge(2, 1);
+//! dag.add_edge(1, 2, None);
+//! dag.add_edge(2, 1, None);
 //! assert!(dag.has_cycle());
 //! ```
 //!
@@ -168,8 +168,8 @@ mod tests {
         let mut dag = DAG::new();
         dag.add_node(1, "A");
         dag.add_node(2, "B");
-        dag.add_edge(1, 2);
-        dag.add_edge(2, 1); // Cycle!
+        dag.add_edge(1, 2, None);
+        dag.add_edge(2, 1, None); // Cycle!
 
         assert!(dag.has_cycle());
     }
@@ -198,9 +198,9 @@ mod tests {
     fn test_auto_created_nodes() {
         let mut dag = DAG::new();
         dag.add_node(1, "A");
-        dag.add_edge(1, 2); // Auto-creates node 2
+        dag.add_edge(1, 2, None); // Auto-creates node 2
         dag.add_node(3, "C");
-        dag.add_edge(2, 3);
+        dag.add_edge(2, 3, None);
 
         let output = dag.render();
 
@@ -222,7 +222,7 @@ mod tests {
         let mut dag = DAG::new();
         dag.add_node(1, "A");
         dag.add_node(2, "B"); // Explicit!
-        dag.add_edge(1, 2);
+        dag.add_edge(1, 2, None);
 
         let output = dag.render();
 
@@ -240,7 +240,7 @@ mod tests {
     fn test_edge_to_missing_node_no_panic() {
         let mut dag = DAG::new();
         dag.add_node(1, "A");
-        dag.add_edge(1, 2); // Node 2 doesn't exist - should auto-create
+        dag.add_edge(1, 2, None); // Node 2 doesn't exist - should auto-create
 
         // Should NOT panic
         let output = dag.render();
@@ -258,9 +258,9 @@ mod tests {
         dag.add_node(2, "Middle");
         dag.add_node(3, "End");
 
-        dag.add_edge(1, 2);
-        dag.add_edge(1, 3);
-        dag.add_edge(2, 3);
+        dag.add_edge(1, 2, None);
+        dag.add_edge(1, 3, None);
+        dag.add_edge(2, 3, None);
 
         let output = dag.render();
 
@@ -279,10 +279,10 @@ mod tests {
         dag.add_node(3, "Left");
         dag.add_node(4, "Bottom");
 
-        dag.add_edge(1, 3);
-        dag.add_edge(1, 2);
-        dag.add_edge(3, 4);
-        dag.add_edge(2, 4);
+        dag.add_edge(1, 3, None);
+        dag.add_edge(1, 2, None);
+        dag.add_edge(3, 4, None);
+        dag.add_edge(2, 4, None);
 
         let output = dag.render();
 
@@ -306,8 +306,8 @@ mod tests {
         let mut dag = DAG::new();
         dag.add_node(1, "A");
         // Node 2 will be auto-created
-        dag.add_edge(1, 2);
-        dag.add_edge(2, 1); // Creates cycle
+        dag.add_edge(1, 2, None);
+        dag.add_edge(2, 1, None); // Creates cycle
 
         let output = dag.render();
 
@@ -326,7 +326,7 @@ mod tests {
         let mut dag = DAG::new();
 
         dag.add_node(1, "A");
-        dag.add_edge(1, 2); // Auto-creates node 2 as placeholder
+        dag.add_edge(1, 2, None); // Auto-creates node 2 as placeholder
 
         // Verify initially auto-created
         assert!(dag.is_auto_created(2));
@@ -373,9 +373,9 @@ mod tests {
         dag.add_node(4, "C");
 
         // Top connects to all children
-        dag.add_edge(1, 2);
-        dag.add_edge(1, 3);
-        dag.add_edge(1, 4);
+        dag.add_edge(1, 2, None);
+        dag.add_edge(1, 3, None);
+        dag.add_edge(1, 4, None);
 
         let output = dag.render();
 

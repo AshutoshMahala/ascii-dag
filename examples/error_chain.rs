@@ -13,9 +13,9 @@ fn main() {
     dag.add_node(3, "CompilationFailed");
     dag.add_node(4, "BuildFailed");
 
-    dag.add_edge(1, 2); // FileNotFound caused ParseError
-    dag.add_edge(2, 3); // ParseError caused CompilationFailed
-    dag.add_edge(3, 4); // CompilationFailed caused BuildFailed
+    dag.add_edge(1, 2, None); // FileNotFound caused ParseError
+    dag.add_edge(2, 3, None); // ParseError caused CompilationFailed
+    dag.add_edge(3, 4, None); // CompilationFailed caused BuildFailed
 
     println!("Error Dependency Chain:");
     println!("{}", dag.render());

@@ -96,8 +96,17 @@ impl<'a> DAG<'a> {
             return None; // Graph too large for selected index type
         }
 
-        // Calculate total label bytes
-        let total_label_bytes: usize = self.nodes.iter().map(|(_, l)| l.len()).sum();
+        // Calculate total label bytes (nodes + edge labels)
+        let node_label_bytes: usize = self.nodes.iter().map(|(_, l)| l.len()).sum();
+        let edge_label_bytes: usize = self
+            .edges
+            .iter()
+            .filter_map(|(_, _, label)| label.map(|l| l.len()))
+            .sum();
+        let total_label_bytes = node_label_bytes + edge_label_bytes;
+
+        // Check if any edges have labels (for lines_per_level adjustment)
+        let has_labeled_edges = self.edges.iter().any(|(_, _, label)| label.is_some());
 
         // Estimate max waypoints: for skip-level edges only
         // Most edges are adjacent-level (0 waypoints), use conservative estimate
@@ -148,17 +157,25 @@ impl<'a> DAG<'a> {
             max_width,
         );
 
-        // Step 7: Build dummy positions for skip edges
+        // Step 7: Build dummy positions for skip edges using actual virtual level positions
         self.build_dummy_positions_arena(
-            temps.node_levels,
-            temps.real_coords,
+            temps.vlevel_offsets,
+            temps.vnode_data,
+            temps.x_coords,
+            temps.widths,
             temps.dummy_offsets,
             temps.dummy_data,
+            max_level,
+            max_width,
         );
 
         // Step 8: Build the final LayoutIRArena from output arena
-        let lines_per_level = 3;
+        // Use 4 lines per level when edges have labels (extra row for label)
+        let lines_per_level = if has_labeled_edges { 4 } else { 3 };
         let total_height = (max_level + 1) * lines_per_level;
+
+        // Add width margin for labels if present
+        let label_margin = if has_labeled_edges { 8 } else { 0 };
 
         let mut builder = LayoutIRArenaBuilder::new(
             output_arena,
@@ -169,7 +186,8 @@ impl<'a> DAG<'a> {
             max_level + 1,
         )?;
 
-        builder.set_dimensions(max_width, total_height);
+        // Add buffer for edge routing (+4) plus label margin
+        builder.set_dimensions(max_width + 4 + label_margin, total_height);
         builder.set_level_count(max_level + 1);
 
         // Add nodes
@@ -184,7 +202,7 @@ impl<'a> DAG<'a> {
         builder.finalize_levels();
 
         // Add edges
-        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+        for (edge_idx, &(from_id, to_id, _label)) in self.edges.iter().enumerate() {
             if let (Some(from_idx), Some(to_idx)) =
                 (self.node_index(from_id), self.node_index(to_id))
             {
@@ -210,10 +228,12 @@ impl<'a> DAG<'a> {
                     let dummy_end = temps.dummy_offsets[edge_idx + 1] as usize;
                     let dummy_count = dummy_end - dummy_start;
 
-                    if dummy_count > 0 {
+                    if dummy_count > 0 && dummy_start < temps.dummy_data.len() {
                         // Build waypoints
                         let mut waypoint_buf = [(0usize, 0usize); 64]; // Stack buffer
-                        let waypoint_count = dummy_count.min(64);
+                        // Limit waypoint_count to available data
+                        let available = temps.dummy_data.len().saturating_sub(dummy_start);
+                        let waypoint_count = dummy_count.min(64).min(available);
 
                         for i in 0..waypoint_count {
                             let (level, x) = temps.dummy_data[dummy_start + i];
@@ -241,6 +261,32 @@ impl<'a> DAG<'a> {
                     EdgePathArena::Direct
                 };
 
+                // Store edge label if present
+                let (label_offset, label_len, label_x, label_y) =
+                    if let Some(label) = self.edges[edge_idx].2 {
+                        // Add label to arena's label storage
+                        if let Some((offset, len)) = builder.add_edge_label(label) {
+                            // Compute label position: label_y at from_y + 2
+                            let l_y = from_y + 2;
+                            // Center label on edge's vertical line at that row
+                            let edge_x_at_label =
+                                match &path {
+                                    EdgePathArena::Direct => from_x,
+                                    EdgePathArena::Corner { horizontal_y } => {
+                                        if l_y <= *horizontal_y { from_x } else { to_x }
+                                    }
+                                    EdgePathArena::MultiSegment { .. } => from_x,
+                                };
+                            let label_len_with_quotes = len + 2;
+                            let l_x = edge_x_at_label.saturating_sub(label_len_with_quotes / 2);
+                            (offset, len, l_x, l_y)
+                        } else {
+                            (0, 0, 0, 0)
+                        }
+                    } else {
+                        (0, 0, 0, 0)
+                    };
+
                 builder.add_edge(LayoutEdgeArena {
                     from_id,
                     to_id,
@@ -250,6 +296,13 @@ impl<'a> DAG<'a> {
                     to_y,
                     path,
                     edge_index: edge_idx,
+                    label_offset,
+                    label_len,
+                    label_x,
+                    label_y,
+                    // Edge draws between from_y+1 and to_y-1 (below source, above target)
+                    min_y: from_y + 1,
+                    max_y: to_y.saturating_sub(1),
                 });
             }
         }
@@ -274,10 +327,11 @@ impl<'a> DAG<'a> {
         // Max levels is min(node_count, MAX_LEVELS)
         let max_levels = node_count.min(MAX_LEVELS);
 
-        // Virtual nodes = real + dummy. Each skip-level edge can create up to max_levels dummies.
-        // Worst case: every edge could skip all levels, creating (max_levels - 1) dummies each
-        // Use max_levels as multiplier instead of 4 to handle deep skip-level edges
-        let max_vnodes = (node_count + edge_count * max_levels).min(MAX_NODES);
+        // Virtual nodes = real + dummy nodes from skip-level edges.
+        // Most edges span only 1 level (no dummies). Skip-level edges typically span 2-4 levels.
+        // Use a more reasonable estimate: each edge creates at most 4 dummy nodes on average,
+        // which handles most practical graphs while avoiding huge over-allocation.
+        let max_vnodes = (node_count + edge_count * 4).min(MAX_NODES);
 
         // Level size: at most node_count (if all nodes on one level)
         let max_level_size = node_count.min(MAX_NODES);
@@ -326,7 +380,7 @@ impl<'a> DAG<'a> {
         let mut changed = true;
         while changed {
             changed = false;
-            for &(from, to) in &self.edges {
+            for &(from, to, _) in &self.edges {
                 if let (Some(from_idx), Some(to_idx)) = (self.node_index(from), self.node_index(to))
                 {
                     let new_level = levels[from_idx] as usize + 1;
@@ -372,7 +426,7 @@ impl<'a> DAG<'a> {
         }
 
         // Count dummy nodes per level
-        for &(from_id, to_id) in &self.edges {
+        for &(from_id, to_id, _) in &self.edges {
             if let (Some(from_idx), Some(to_idx)) =
                 (self.node_index(from_id), self.node_index(to_id))
             {
@@ -418,7 +472,7 @@ impl<'a> DAG<'a> {
         }
 
         // Fill with dummy nodes
-        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+        for (edge_idx, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
             if let (Some(from_idx), Some(to_idx)) =
                 (self.node_index(from_id), self.node_index(to_id))
             {
@@ -473,13 +527,21 @@ impl<'a> DAG<'a> {
         max_level: usize,
     ) -> usize {
         let mut max_width: usize = 0;
+        let max_pos = x_coords.len();
+        let max_vnode_idx = vnode_data.len() / 2;
 
         for level in 0..=max_level {
             let start = vlevel_offsets[level] as usize;
-            let end = vlevel_offsets[level + 1] as usize;
+            let end = (vlevel_offsets[level + 1] as usize)
+                .min(max_pos)
+                .min(max_vnode_idx);
             let mut x: usize = 0;
 
             for pos in start..end {
+                // Bounds check
+                if pos * 2 + 1 >= vnode_data.len() {
+                    break;
+                }
                 let vnode_type = vnode_data[pos * 2];
                 let vnode_idx = vnode_data[pos * 2 + 1] as usize;
 
@@ -487,17 +549,19 @@ impl<'a> DAG<'a> {
                     // Real node
                     self.get_node_width(vnode_idx)
                 } else {
-                    // Dummy node
-                    1
+                    // Dummy node - use width 3 for visual separation (matches heap mode)
+                    3
                 };
 
-                x_coords[pos] = x as Coord;
-                widths[pos] = width as Coord;
+                if pos < x_coords.len() {
+                    x_coords[pos] = x as Coord;
+                    widths[pos] = width as Coord;
+                }
                 x += width + 3; // spacing between nodes
             }
 
             // Level width is the rightmost edge of the last node
-            if end > start {
+            if end > start && end - 1 < x_coords.len() {
                 let last_x = x_coords[end - 1] as usize;
                 let last_width = widths[end - 1] as usize;
                 let level_width = last_x + last_width;
@@ -519,17 +583,22 @@ impl<'a> DAG<'a> {
         max_level: usize,
         max_width: usize,
     ) {
+        let max_pos = x_coords.len();
+        let max_vnode_idx = vnode_data.len() / 2;
+
         // Calculate level widths for centering
         for level in 0..=max_level {
             let start = vlevel_offsets[level] as usize;
-            let end = vlevel_offsets[level + 1] as usize;
+            let end = (vlevel_offsets[level + 1] as usize)
+                .min(max_pos)
+                .min(max_vnode_idx);
 
             if end <= start {
                 continue;
             }
 
-            // Calculate this level's width
-            let level_width = if end > start {
+            // Calculate this level's width (with bounds check)
+            let level_width = if end > start && end - 1 < x_coords.len() {
                 x_coords[end - 1] as usize + widths[end - 1] as usize
             } else {
                 0
@@ -543,10 +612,14 @@ impl<'a> DAG<'a> {
 
             // Find real nodes at this level
             for pos in start..end {
+                // Bounds check
+                if pos * 2 + 1 >= vnode_data.len() || pos >= x_coords.len() {
+                    break;
+                }
                 let vnode_type = vnode_data[pos * 2];
                 let vnode_idx = vnode_data[pos * 2 + 1] as usize;
 
-                if vnode_type == 0 {
+                if vnode_type == 0 && vnode_idx < real_coords.len() {
                     // Real node
                     let x = x_coords[pos] as usize + offset;
                     let width = widths[pos] as usize;
@@ -557,53 +630,111 @@ impl<'a> DAG<'a> {
         }
     }
 
-    /// Build dummy positions for skip-level edges.
+    /// Build dummy positions for skip-level edges from virtual level positions.
+    /// This extracts the actual x-coordinates assigned during layout, ensuring edges
+    /// route around nodes based on the natural layout ordering (like heap mode does).
     fn build_dummy_positions_arena(
         &self,
-        node_levels: &[Idx],
-        real_coords: &[(usize, usize, usize, usize)],
+        vlevel_offsets: &[Idx],
+        vnode_data: &[Idx],
+        x_coords: &[Coord],
+        widths: &[Coord],
         dummy_offsets: &mut [Idx],
         dummy_data: &mut [(Idx, Coord)],
+        max_level: usize,
+        max_width: usize,
     ) {
+        let edge_count = self.edges.len();
+        let max_vnode_idx = vnode_data.len() / 2;
+
+        // Initialize offsets to 0
         dummy_offsets[0] = 0;
-        let mut dummy_count: usize = 0;
+        for i in 1..=edge_count {
+            if i < dummy_offsets.len() {
+                dummy_offsets[i] = 0;
+            }
+        }
 
-        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
-            if let (Some(from_idx), Some(to_idx)) =
-                (self.node_index(from_id), self.node_index(to_id))
-            {
-                let from_level = node_levels[from_idx] as usize;
-                let to_level = node_levels[to_idx] as usize;
+        // Collect dummy positions per edge into a temporary buffer
+        // First, count how many dummy nodes each edge has
+        let mut edge_dummy_counts = [0u16; 512]; // Support up to 512 edges
 
-                if to_level > from_level + 1 {
-                    let (_, _, from_x_base, from_width) = real_coords[from_idx];
-                    let (_, _, to_x_base, to_width) = real_coords[to_idx];
+        for level in 0..=max_level {
+            let start = vlevel_offsets[level] as usize;
+            let end = (vlevel_offsets[level + 1] as usize).min(max_vnode_idx);
 
-                    let from_center = from_x_base + from_width / 2;
-                    let to_center = to_x_base + to_width / 2;
-                    let total_span = to_level - from_level;
+            for pos in start..end {
+                // Bounds check
+                if pos * 2 + 1 >= vnode_data.len() {
+                    break;
+                }
+                let vnode_type = vnode_data[pos * 2];
+                if vnode_type == 1 {
+                    let edge_idx = vnode_data[pos * 2 + 1] as usize;
+                    if edge_idx < 512 {
+                        edge_dummy_counts[edge_idx] += 1;
+                    }
+                }
+            }
+        }
 
-                    for level in (from_level + 1)..to_level {
-                        // Interpolate x position using integer arithmetic
-                        let t_num = level - from_level;
-                        let t_denom = total_span;
-                        let delta = to_center as isize - from_center as isize;
-                        let base_x = (from_center as isize
-                            + (delta * t_num as isize + t_denom as isize / 2) / t_denom as isize)
-                            as usize;
-                        // Add bounded offset for visual separation between edges
-                        let edge_offset = edge_idx % 4;
-                        let x = base_x + edge_offset;
+        // Build prefix sums for offsets
+        let mut running_offset: Idx = 0;
+        for edge_idx in 0..edge_count {
+            dummy_offsets[edge_idx] = running_offset;
+            if edge_idx < 512 {
+                running_offset += edge_dummy_counts[edge_idx] as Idx;
+            }
+        }
+        dummy_offsets[edge_count] = running_offset;
 
-                        if dummy_count < dummy_data.len() {
-                            dummy_data[dummy_count] = (level as Idx, x as Coord);
-                            dummy_count += 1;
+        // Reset counts for use as write indices
+        for count in edge_dummy_counts.iter_mut() {
+            *count = 0;
+        }
+
+        // Second pass: write dummy data in level order (important for waypoints)
+        for level in 0..=max_level {
+            let start = vlevel_offsets[level] as usize;
+            let end = (vlevel_offsets[level + 1] as usize)
+                .min(max_vnode_idx)
+                .min(x_coords.len());
+
+            // Calculate centering offset for this level
+            let level_width = if end > start && end - 1 < x_coords.len() {
+                x_coords[end - 1] as usize + widths[end - 1] as usize
+            } else {
+                0
+            };
+            let offset = if max_width > level_width {
+                (max_width - level_width) / 2
+            } else {
+                0
+            };
+
+            for pos in start..end {
+                // Bounds check
+                if pos * 2 + 1 >= vnode_data.len() || pos >= x_coords.len() {
+                    break;
+                }
+                let vnode_type = vnode_data[pos * 2];
+                if vnode_type == 1 {
+                    let edge_idx = vnode_data[pos * 2 + 1] as usize;
+
+                    let base_x = x_coords[pos] as usize + offset;
+                    let edge_offset = edge_idx % 4;
+                    let x = base_x + edge_offset;
+
+                    if edge_idx < 512 && edge_idx < edge_count {
+                        let base_offset = dummy_offsets[edge_idx] as usize;
+                        let write_idx = base_offset + edge_dummy_counts[edge_idx] as usize;
+                        if write_idx < dummy_data.len() {
+                            dummy_data[write_idx] = (level as Idx, x as Coord);
+                            edge_dummy_counts[edge_idx] += 1;
                         }
                     }
                 }
             }
-
-            dummy_offsets[edge_idx + 1] = dummy_count as Idx;
         }
     }
 
@@ -613,15 +744,34 @@ impl<'a> DAG<'a> {
         let edge_count = self.edges.len();
         let label_bytes: usize = self.nodes.iter().map(|(_, l)| l.len()).sum();
 
-        // Temporary buffers
-        let temps_size = node_count * 64 + edge_count * 128 + 4096;
+        // Calculate the same values used in alloc_layout_temps
+        let max_levels = node_count.min(MAX_LEVELS);
+        let max_vnodes = (node_count + edge_count * 4).min(MAX_NODES);
+        let max_level_size = node_count.min(MAX_NODES);
+        let max_dummy_waypoints = (edge_count * 4).min(MAX_NODES);
 
-        // Output IR
+        // Calculate actual temporary buffer sizes (matching alloc_layout_temps)
+        // Using core::mem::size_of for each type
+        let temps_size = node_count * core::mem::size_of::<Idx>()                      // node_levels
+            + (max_levels + 1) * core::mem::size_of::<Idx>()              // vlevel_offsets
+            + max_levels * core::mem::size_of::<Idx>()                    // level_counts
+            + max_vnodes * 2 * core::mem::size_of::<Idx>()                // vnode_data
+            + max_vnodes * core::mem::size_of::<Coord>()                  // x_coords
+            + max_vnodes * core::mem::size_of::<Coord>()                  // widths
+            + node_count * core::mem::size_of::<(usize, usize, usize, usize)>() // real_coords
+            + (edge_count + 1) * core::mem::size_of::<Idx>()              // dummy_offsets
+            + max_dummy_waypoints * core::mem::size_of::<(Idx, Coord)>()  // dummy_data
+            + max_level_size * core::mem::size_of::<(Idx, u32)>()         // medians
+            + max_level_size * core::mem::size_of::<Idx>()                // positions
+            + 4096; // alignment padding buffer
+
+        // Output IR: waypoints estimate should match max_dummy_waypoints (edge_count * 4)
+        let max_ir_waypoints = max_dummy_waypoints;
         let ir_size = crate::ir::arena::estimate_layout_arena_size(
             node_count,
             edge_count,
             label_bytes,
-            edge_count * node_count,
+            max_ir_waypoints,
         );
 
         temps_size + ir_size
@@ -702,13 +852,17 @@ pub fn compute_layout_arena_csr<'b>(
         max_width,
     );
 
-    // Step 7: Build dummy positions
+    // Step 7: Build dummy positions using actual virtual level positions
     build_dummy_positions_csr(
         graph,
-        temps.node_levels,
-        temps.real_coords,
+        temps.vlevel_offsets,
+        temps.vnode_data,
+        temps.x_coords,
+        temps.widths,
         temps.dummy_offsets,
         temps.dummy_data,
+        max_level,
+        max_width,
     );
 
     // Step 8: Build LayoutIRArena
@@ -724,7 +878,8 @@ pub fn compute_layout_arena_csr<'b>(
         max_level as usize + 1,
     )?;
 
-    builder.set_dimensions(max_width as usize, total_height);
+    // Add buffer for edge routing (+4)
+    builder.set_dimensions(max_width as usize + 4, total_height);
     builder.set_level_count(max_level as usize + 1);
 
     // Add nodes
@@ -774,9 +929,11 @@ pub fn compute_layout_arena_csr<'b>(
             let dummy_end = temps.dummy_offsets[edge_idx + 1] as usize;
             let dummy_count = dummy_end - dummy_start;
 
-            if dummy_count > 0 {
+            if dummy_count > 0 && dummy_start < temps.dummy_data.len() {
                 let mut waypoint_buf = [(0usize, 0usize); 64];
-                let waypoint_count = dummy_count.min(64);
+                // Limit waypoint_count to available data
+                let available = temps.dummy_data.len().saturating_sub(dummy_start);
+                let waypoint_count = dummy_count.min(64).min(available);
 
                 for i in 0..waypoint_count {
                     let (level, x) = temps.dummy_data[dummy_start + i];
@@ -811,6 +968,13 @@ pub fn compute_layout_arena_csr<'b>(
             to_y,
             path,
             edge_index: edge_idx,
+            label_offset: 0,
+            label_len: 0,
+            label_x: 0,
+            label_y: 0,
+            // Edge draws between from_y+1 and to_y-1 (below source, above target)
+            min_y: from_y + 1,
+            max_y: to_y.saturating_sub(1),
         });
     }
 
@@ -981,13 +1145,21 @@ fn assign_x_coords_csr(
     max_level: Idx,
 ) -> Coord {
     let mut max_width: Coord = 0;
+    let max_pos = x_coords.len();
+    let max_vnode_idx = vnode_data.len() / 2;
 
     for level in 0..=(max_level as usize) {
         let start = vlevel_offsets[level] as usize;
-        let end = vlevel_offsets[level + 1] as usize;
+        let end = (vlevel_offsets[level + 1] as usize)
+            .min(max_pos)
+            .min(max_vnode_idx);
         let mut x: Coord = 0;
 
         for pos in start..end {
+            // Bounds check
+            if pos * 2 + 1 >= vnode_data.len() {
+                break;
+            }
             let vnode_type = vnode_data[pos * 2];
             let vnode_idx = vnode_data[pos * 2 + 1] as usize;
 
@@ -995,15 +1167,18 @@ fn assign_x_coords_csr(
                 // Real node: use graph.node_label(idx).len() + padding
                 (graph.node_label(vnode_idx).len() + 2) as Coord // +2 for brackets []
             } else {
-                1
+                // Dummy node - use width 3 for visual separation (matches heap mode)
+                3
             };
 
-            x_coords[pos] = x;
-            widths[pos] = width;
+            if pos < x_coords.len() {
+                x_coords[pos] = x;
+                widths[pos] = width;
+            }
             x += width + 3;
         }
 
-        if end > start {
+        if end > start && end - 1 < x_coords.len() {
             let last_x = x_coords[end - 1];
             let last_width = widths[end - 1];
             max_width = max_width.max(last_x + last_width);
@@ -1021,15 +1196,20 @@ fn build_real_coords_csr(
     max_level: Idx,
     max_width: Coord,
 ) {
+    let max_pos = x_coords.len();
+    let max_vnode_idx = vnode_data.len() / 2;
+
     // Logic identical to DAG version (no graph access needed, just array processing)
     for level in 0..=(max_level as usize) {
         let start = vlevel_offsets[level] as usize;
-        let end = vlevel_offsets[level + 1] as usize;
+        let end = (vlevel_offsets[level + 1] as usize)
+            .min(max_pos)
+            .min(max_vnode_idx);
         if end <= start {
             continue;
         }
 
-        let level_width: usize = if end > start {
+        let level_width: usize = if end > start && end - 1 < x_coords.len() {
             x_coords[end - 1] as usize + widths[end - 1] as usize
         } else {
             0
@@ -1041,10 +1221,14 @@ fn build_real_coords_csr(
         };
 
         for pos in start..end {
+            // Bounds check
+            if pos * 2 + 1 >= vnode_data.len() || pos >= x_coords.len() {
+                break;
+            }
             let vnode_type = vnode_data[pos * 2];
             let vnode_idx = vnode_data[pos * 2 + 1] as usize;
 
-            if vnode_type == 0 {
+            if vnode_type == 0 && vnode_idx < real_coords.len() {
                 let x = x_coords[pos] as usize + offset;
                 let width = widths[pos] as usize;
                 let level_pos = pos - start;
@@ -1054,42 +1238,99 @@ fn build_real_coords_csr(
     }
 }
 
+/// Build dummy positions for skip-level edges from virtual level positions (CSR version).
+/// This extracts the actual x-coordinates assigned during layout, ensuring edges
+/// route around nodes based on the natural layout ordering.
 fn build_dummy_positions_csr(
     graph: &CsrGraph<'_>,
-    node_levels: &[Idx],
-    real_coords: &[(usize, usize, usize, usize)],
+    vlevel_offsets: &[Idx],
+    vnode_data: &[Idx],
+    x_coords: &[Coord],
+    widths: &[Coord],
     dummy_offsets: &mut [Idx],
     dummy_data: &mut [(Idx, Coord)],
+    max_level: Idx,
+    max_width: Coord,
 ) {
+    let edge_count = graph.edge_count();
+
+    // Initialize offsets to 0
     dummy_offsets[0] = 0;
-    let mut dummy_count: Idx = 0;
+    for i in 1..=edge_count {
+        if i < dummy_offsets.len() {
+            dummy_offsets[i] = 0;
+        }
+    }
 
-    for (edge_idx, (from, to)) in graph.edges_iter().enumerate() {
-        let from_level = node_levels[from] as usize;
-        let to_level = node_levels[to] as usize;
+    // Collect dummy positions per edge using stack buffer
+    let mut edge_dummy_counts = [0u16; 512]; // Support up to 512 edges
 
-        if to_level > from_level + 1 {
-            let (_, _, from_x_base, from_width) = real_coords[from];
-            let (_, _, to_x_base, to_width) = real_coords[to];
+    // First pass: count dummy nodes per edge
+    for level in 0..=(max_level as usize) {
+        let start = vlevel_offsets[level] as usize;
+        let end = vlevel_offsets[level + 1] as usize;
 
-            let from_center = (from_x_base + from_width / 2) as isize;
-            let to_center = (to_x_base + to_width / 2) as isize;
-            let total_span = (to_level - from_level) as isize;
-
-            for level in (from_level + 1)..to_level {
-                let t_num = (level - from_level) as isize;
-                let delta = to_center - from_center;
-                let base_x = (from_center + (delta * t_num + total_span / 2) / total_span) as Coord;
-                // Add bounded offset for visual separation between edges
-                let edge_offset = (edge_idx % 4) as Coord;
-                let x = base_x + edge_offset;
-
-                if (dummy_count as usize) < dummy_data.len() {
-                    dummy_data[dummy_count as usize] = (level as Idx, x);
-                    dummy_count += 1;
+        for pos in start..end {
+            let vnode_type = vnode_data[pos * 2];
+            if vnode_type == 1 {
+                let edge_idx = vnode_data[pos * 2 + 1] as usize;
+                if edge_idx < 512 {
+                    edge_dummy_counts[edge_idx] += 1;
                 }
             }
         }
-        dummy_offsets[edge_idx + 1] = dummy_count;
+    }
+
+    // Build prefix sums for offsets
+    let mut running_offset: Idx = 0;
+    for edge_idx in 0..edge_count {
+        dummy_offsets[edge_idx] = running_offset;
+        if edge_idx < 512 {
+            running_offset += edge_dummy_counts[edge_idx] as Idx;
+        }
+    }
+    dummy_offsets[edge_count] = running_offset;
+
+    // Reset counts for use as write indices
+    for count in edge_dummy_counts.iter_mut() {
+        *count = 0;
+    }
+
+    // Second pass: write dummy data in level order (important for waypoints)
+    for level in 0..=(max_level as usize) {
+        let start = vlevel_offsets[level] as usize;
+        let end = vlevel_offsets[level + 1] as usize;
+
+        // Calculate centering offset for this level
+        let level_width = if end > start {
+            x_coords[end - 1] as usize + widths[end - 1] as usize
+        } else {
+            0
+        };
+        let offset = if (max_width as usize) > level_width {
+            ((max_width as usize) - level_width) / 2
+        } else {
+            0
+        };
+
+        for pos in start..end {
+            let vnode_type = vnode_data[pos * 2];
+            if vnode_type == 1 {
+                let edge_idx = vnode_data[pos * 2 + 1] as usize;
+
+                let base_x = x_coords[pos] as usize + offset;
+                let edge_offset = edge_idx % 4;
+                let x = base_x + edge_offset;
+
+                if edge_idx < 512 && edge_idx < edge_count {
+                    let base_offset = dummy_offsets[edge_idx] as usize;
+                    let write_idx = base_offset + edge_dummy_counts[edge_idx] as usize;
+                    if write_idx < dummy_data.len() {
+                        dummy_data[write_idx] = (level as Idx, x as Coord);
+                        edge_dummy_counts[edge_idx] += 1;
+                    }
+                }
+            }
+        }
     }
 }

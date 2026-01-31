@@ -51,10 +51,10 @@ fn main() -> ! {
     dag.add_node(2, "Left");
     dag.add_node(3, "Right");
     dag.add_node(4, "Merge");
-    dag.add_edge(1, 2);
-    dag.add_edge(1, 3);
-    dag.add_edge(2, 4);
-    dag.add_edge(3, 4);
+    dag.add_edge(1, 2, None);
+    dag.add_edge(1, 3, None);
+    dag.add_edge(2, 4, None);
+    dag.add_edge(3, 4, None);
     
     let build_time = start.elapsed();
     let render_start = Instant::now();

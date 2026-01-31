@@ -47,8 +47,8 @@ impl<'a> DAG<'a> {
     /// let mut dag = DAG::new();
     /// dag.add_node(1, "A");
     /// dag.add_node(2, "B");
-    /// dag.add_edge(1, 2);
-    /// dag.add_edge(2, 1);  // Creates a cycle!
+    /// dag.add_edge(1, 2, None);
+    /// dag.add_edge(2, 1, None);  // Creates a cycle!
     ///
     /// assert!(dag.has_cycle());
     /// ```
@@ -77,7 +77,7 @@ impl<'a> DAG<'a> {
         rec_stack[idx] = true;
 
         let node_id = self.nodes[idx].0;
-        for &(from, to) in &self.edges {
+        for &(from, to, _) in &self.edges {
             if from == node_id {
                 // O(1) HashMap lookup instead of O(n) scan
                 if let Some(child_idx) = self.node_index(to)
@@ -131,7 +131,7 @@ impl<'a> DAG<'a> {
         path.push(start_idx);
 
         let node_id = self.nodes[start_idx].0;
-        for &(from, to) in &self.edges {
+        for &(from, to, _) in &self.edges {
             if from == node_id {
                 // O(1) HashMap lookup instead of O(n) scan
                 if let Some(child_idx) = self.node_index(to)
@@ -156,8 +156,8 @@ mod tests {
         let mut dag = DAG::new();
         dag.add_node(1, "A");
         dag.add_node(2, "B");
-        dag.add_edge(1, 2);
-        dag.add_edge(2, 1); // Cycle!
+        dag.add_edge(1, 2, None);
+        dag.add_edge(2, 1, None); // Cycle!
 
         assert!(dag.has_cycle());
     }
@@ -174,8 +174,8 @@ mod tests {
         let mut dag = DAG::new();
         dag.add_node(1, "A");
         // Node 2 will be auto-created
-        dag.add_edge(1, 2);
-        dag.add_edge(2, 1); // Creates cycle
+        dag.add_edge(1, 2, None);
+        dag.add_edge(2, 1, None); // Creates cycle
 
         assert!(dag.has_cycle());
     }

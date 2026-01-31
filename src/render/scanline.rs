@@ -11,9 +11,11 @@
 //! - Optimized for speed over visual perfection
 
 use crate::ir::{EdgePath, LayoutIR};
+use crate::render::colors::{self, Palette};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::fmt::Write;
 
 // Box drawing characters
 const V_LINE: char = '│';
@@ -33,6 +35,257 @@ impl<'a> LayoutIR<'a> {
         output
     }
 
+    /// Render scanline with ANSI colors for edges.
+    ///
+    /// Each edge is colored based on its edge_index, cycling through the palette.
+    /// This makes it easier to trace individual edges in complex graphs.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use ascii_dag::DAG;
+    /// use ascii_dag::render::colors::Palette;
+    ///
+    /// let dag = DAG::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (1, 3)]);
+    /// let ir = dag.compute_layout();
+    ///
+    /// // Render with colored edges
+    /// let output = ir.render_scanline_colored(Palette::Ansi);
+    /// println!("{}", output);
+    /// ```
+    pub fn render_scanline_colored(&self, palette: Palette) -> String {
+        let mut output = String::with_capacity(self.width() * self.height() * 2);
+        self.render_scanline_colored_to(&mut output, palette);
+        output
+    }
+
+    /// Render scanline with ANSI colors to a String buffer.
+    /// Uses greedy graph coloring to avoid giving adjacent edges the same color.
+    pub fn render_scanline_colored_to(&self, output: &mut String, palette: Palette) {
+        let y_index = self.y_index();
+
+        // Compute optimized color assignments (adjacent edges get different colors)
+        let palette_colors = palette.colors();
+        let edge_color_indices = self.compute_edge_colors(palette_colors.len());
+
+        // Allocate line buffer and color buffer
+        let mut line_buffer: Vec<char> = vec![' '; self.width()];
+        let mut color_buffer: Vec<u8> = vec![0; self.width()]; // 0 = no color
+
+        for y in 0..self.height() {
+            // Clear buffers
+            line_buffer.fill(' ');
+            color_buffer.fill(0);
+
+            if let Some(occupancy) = y_index.get(y) {
+                // 1. Paint edge lines with colors
+                for &edge_idx in &occupancy.edge_indices {
+                    let edge = &self.edges()[edge_idx];
+                    let color_idx = edge_color_indices.get(edge_idx).copied().unwrap_or(0);
+                    let color = palette_colors[color_idx % palette_colors.len()];
+                    self.paint_edge_at_y_colored(
+                        &mut line_buffer,
+                        &mut color_buffer,
+                        edge,
+                        y,
+                        color,
+                    );
+                }
+
+                // 2. Paint edge labels (same color as the edge line)
+                for &edge_idx in &occupancy.edge_indices {
+                    let edge = &self.edges()[edge_idx];
+                    if let (Some(label), Some((label_x, label_y))) =
+                        (edge.label, edge.label_position)
+                    {
+                        if y == label_y {
+                            let color_idx = edge_color_indices.get(edge_idx).copied().unwrap_or(0);
+                            let color = palette_colors[color_idx % palette_colors.len()];
+                            self.paint_edge_label_colored(
+                                &mut line_buffer,
+                                &mut color_buffer,
+                                label,
+                                label_x,
+                                color,
+                            );
+                        }
+                    }
+                }
+
+                // 3. Paint nodes (no color - uses default terminal color)
+                for &node_idx in &occupancy.node_indices {
+                    let node = &self.nodes()[node_idx];
+                    self.paint_node_colored(&mut line_buffer, &mut color_buffer, node);
+                }
+            }
+
+            // Write line with ANSI color escapes
+            self.write_colored_line(output, &line_buffer, &color_buffer);
+            output.push('\n');
+        }
+    }
+
+    /// Render scanline with ANSI colors and append a legend for any skipped labels.
+    ///
+    /// Labels may be skipped due to collisions with other characters. When this happens,
+    /// a legend is appended at the bottom showing: `[from] → [to]: "label"` in the edge's color.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use ascii_dag::DAG;
+    /// use ascii_dag::render::colors::Palette;
+    ///
+    /// let mut dag = DAG::new();
+    /// dag.add_node(1, "A");
+    /// dag.add_node(2, "B");
+    /// dag.add_edge(1, 2, Some("depends"));
+    ///
+    /// let ir = dag.compute_layout();
+    /// let output = ir.render_scanline_colored_with_legend(Palette::Ansi);
+    /// println!("{}", output);
+    /// ```
+    pub fn render_scanline_colored_with_legend(&self, palette: Palette) -> String {
+        let mut output = String::with_capacity(self.width() * self.height() * 2);
+        let skipped = self.render_scanline_colored_track_skipped(&mut output, palette);
+
+        // Append legend if any labels were skipped
+        if !skipped.is_empty() {
+            output.push_str("\nEdge labels:\n");
+            for (from_label, to_label, label, color) in skipped {
+                let _ = writeln!(
+                    output,
+                    "  \x1b[38;5;{}m{} → {}: \"{}\"\x1b[0m",
+                    color, from_label, to_label, label
+                );
+            }
+        }
+
+        output
+    }
+
+    /// Render scanline with ANSI colors, tracking skipped labels.
+    /// Returns a list of (from_label, to_label, edge_label, color) for each skipped label.
+    fn render_scanline_colored_track_skipped(
+        &self,
+        output: &mut String,
+        palette: Palette,
+    ) -> Vec<(&'a str, &'a str, &'a str, u8)> {
+        let y_index = self.y_index();
+        let mut skipped_labels: Vec<(&'a str, &'a str, &'a str, u8)> = Vec::new();
+
+        // Compute optimized color assignments (adjacent edges get different colors)
+        let palette_colors = palette.colors();
+        let edge_color_indices = self.compute_edge_colors(palette_colors.len());
+
+        // Allocate line buffer and color buffer
+        let mut line_buffer: Vec<char> = vec![' '; self.width()];
+        let mut color_buffer: Vec<u8> = vec![0; self.width()]; // 0 = no color
+
+        for y in 0..self.height() {
+            // Clear buffers
+            line_buffer.fill(' ');
+            color_buffer.fill(0);
+
+            if let Some(occupancy) = y_index.get(y) {
+                // 1. Paint edge lines with colors
+                for &edge_idx in &occupancy.edge_indices {
+                    let edge = &self.edges()[edge_idx];
+                    let color_idx = edge_color_indices.get(edge_idx).copied().unwrap_or(0);
+                    let color = palette_colors[color_idx % palette_colors.len()];
+                    self.paint_edge_at_y_colored(
+                        &mut line_buffer,
+                        &mut color_buffer,
+                        edge,
+                        y,
+                        color,
+                    );
+                }
+
+                // 2. Paint edge labels (same color as the edge line), track skipped ones
+                for &edge_idx in &occupancy.edge_indices {
+                    let edge = &self.edges()[edge_idx];
+                    if let (Some(label), Some((label_x, label_y))) =
+                        (edge.label, edge.label_position)
+                    {
+                        if y == label_y {
+                            let color_idx = edge_color_indices.get(edge_idx).copied().unwrap_or(0);
+                            let color = palette_colors[color_idx % palette_colors.len()];
+                            if self.can_place_label(&line_buffer, label, label_x) {
+                                self.paint_edge_label_colored(
+                                    &mut line_buffer,
+                                    &mut color_buffer,
+                                    label,
+                                    label_x,
+                                    color,
+                                );
+                            } else {
+                                // Track this skipped label for the legend
+                                if let (Some(from_node), Some(to_node)) = (
+                                    self.id_to_index
+                                        .get(&edge.from_id)
+                                        .map(|&i| self.nodes()[i].label),
+                                    self.id_to_index
+                                        .get(&edge.to_id)
+                                        .map(|&i| self.nodes()[i].label),
+                                ) {
+                                    skipped_labels.push((from_node, to_node, label, color));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 3. Paint nodes (no color - uses default terminal color)
+                for &node_idx in &occupancy.node_indices {
+                    let node = &self.nodes()[node_idx];
+                    self.paint_node_colored(&mut line_buffer, &mut color_buffer, node);
+                }
+            }
+
+            // Write line with ANSI color escapes
+            self.write_colored_line(output, &line_buffer, &color_buffer);
+            output.push('\n');
+        }
+
+        skipped_labels
+    }
+
+    /// Write a line with ANSI color escapes, trimming trailing spaces.
+    fn write_colored_line(&self, output: &mut String, chars: &[char], colors: &[u8]) {
+        // Find trimmed length
+        let trimmed_len = chars
+            .iter()
+            .rposition(|&c| c != ' ')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+
+        let mut last_color: u8 = 0;
+
+        for i in 0..trimmed_len {
+            let c = chars[i];
+            let color = colors[i];
+
+            // Handle color changes
+            if color != 0 && color != last_color {
+                // Start new color
+                let _ = write!(output, "\x1b[38;5;{}m", color);
+                last_color = color;
+            } else if color == 0 && last_color != 0 {
+                // Reset to default
+                output.push_str(colors::RESET);
+                last_color = 0;
+            }
+
+            output.push(c);
+        }
+
+        // Reset color at end of line if needed
+        if last_color != 0 {
+            output.push_str(colors::RESET);
+        }
+    }
+
     /// Render scanline to a String buffer.
     pub fn render_scanline_to(&self, output: &mut String) {
         // Ensure Y-index is built
@@ -46,13 +299,25 @@ impl<'a> LayoutIR<'a> {
             line_buffer.fill(' ');
 
             if let Some(occupancy) = y_index.get(y) {
-                // Paint edges FIRST so nodes take precedence
+                // 1. Paint edge lines FIRST (connectors, arrows)
                 for &edge_idx in &occupancy.edge_indices {
                     let edge = &self.edges()[edge_idx];
                     self.paint_edge_at_y(&mut line_buffer, edge, y);
                 }
 
-                // Paint nodes on this line (overwrites any edge characters)
+                // 2. Paint edge labels (overwrites edge lines where needed)
+                for &edge_idx in &occupancy.edge_indices {
+                    let edge = &self.edges()[edge_idx];
+                    if let (Some(label), Some((label_x, label_y))) =
+                        (edge.label, edge.label_position)
+                    {
+                        if y == label_y {
+                            self.paint_edge_label(&mut line_buffer, label, label_x);
+                        }
+                    }
+                }
+
+                // 3. Paint nodes on this line (highest priority)
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
                     self.paint_node(&mut line_buffer, node);
@@ -235,7 +500,7 @@ impl<'a> LayoutIR<'a> {
 
     /// Paint the portion of an edge that crosses line Y.
     #[inline]
-    fn paint_edge_at_y(&self, buffer: &mut [char], edge: &crate::ir::LayoutEdge, y: usize) {
+    fn paint_edge_at_y(&self, buffer: &mut [char], edge: &crate::ir::LayoutEdge<'a>, y: usize) {
         match &edge.path {
             EdgePath::Direct => {
                 // Vertical line from from_y+1 to to_y-1 at from_x
@@ -423,6 +688,358 @@ impl<'a> LayoutIR<'a> {
                         // This fills in the "gap" at the waypoint position
                         if !is_first_segment && y == y1 && x1 < buffer.len() && buffer[x1] == ' ' {
                             buffer[x1] = V_LINE;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Paint edge label if this line contains it
+        if let (Some(label), Some((label_x, label_y))) = (edge.label, edge.label_position) {
+            if y == label_y {
+                self.paint_edge_label(buffer, label, label_x);
+            }
+        }
+    }
+
+    /// Paint an edge label centered on the edge's path.
+    /// Labels replace the vertical line character, going "through" the line.
+    /// Skips painting if there would be a collision with other content.
+    #[inline]
+    fn paint_edge_label(&self, buffer: &mut [char], label: &str, x: usize) {
+        if x >= buffer.len() {
+            return;
+        }
+
+        // Collision detection: check if all positions are either empty or vertical line
+        // (we're allowed to replace the edge's own vertical line)
+        let label_len = label.chars().count() + 2; // +2 for quotes
+        for i in 0..label_len {
+            let pos = x + i;
+            if pos >= buffer.len() {
+                return; // Out of bounds
+            }
+            let c = buffer[pos];
+            // Allow: space, or our own vertical line in the middle
+            if c != ' ' && c != '│' {
+                return; // Collision with something else
+            }
+        }
+
+        // Draw "label"
+        let mut pos = x;
+
+        if pos < buffer.len() {
+            buffer[pos] = '"';
+            pos += 1;
+        }
+
+        for c in label.chars() {
+            if pos < buffer.len() {
+                buffer[pos] = c;
+                pos += 1;
+            }
+        }
+
+        if pos < buffer.len() {
+            buffer[pos] = '"';
+        }
+    }
+
+    // =========================================================================
+    // Colored painting methods
+    // =========================================================================
+
+    /// Paint a node onto the buffer, clearing color (nodes use default color).
+    #[inline]
+    fn paint_node_colored(
+        &self,
+        buffer: &mut [char],
+        colors: &mut [u8],
+        node: &crate::ir::LayoutNode,
+    ) {
+        let label = node.label;
+        let x = node.x;
+
+        if x >= buffer.len() {
+            return;
+        }
+
+        // Draw [Label] with no color (0 = default)
+        if x < buffer.len() {
+            buffer[x] = '[';
+            colors[x] = 0;
+        }
+
+        for (i, c) in label.chars().enumerate() {
+            let pos = x + 1 + i;
+            if pos < buffer.len() {
+                buffer[pos] = c;
+                colors[pos] = 0;
+            }
+        }
+
+        let close_pos = x + 1 + label.chars().count();
+        if close_pos < buffer.len() {
+            buffer[close_pos] = ']';
+            colors[close_pos] = 0;
+        }
+    }
+
+    /// Check if a label can be placed without collision.
+    /// Returns true if all positions are empty (space) or the edge's vertical line (│).
+    /// The "through" approach allows labels to pass through their own edge line.
+    #[inline]
+    fn can_place_label(&self, buffer: &[char], label: &str, x: usize) -> bool {
+        if x >= buffer.len() {
+            return false;
+        }
+
+        let label_len = label.chars().count() + 2; // +2 for quotes
+
+        // Check if all positions are available (space or the edge's own vertical line)
+        for i in 0..label_len {
+            let pos = x + i;
+            if pos >= buffer.len() {
+                return false; // Would go out of bounds
+            }
+            let c = buffer[pos];
+            if c != ' ' && c != '│' {
+                return false; // Collision with existing character
+            }
+        }
+        true
+    }
+
+    /// Paint an edge label with the same color as the edge.
+    /// Only paints if there's no collision.
+    #[inline]
+    fn paint_edge_label_colored(
+        &self,
+        buffer: &mut [char],
+        color_buf: &mut [u8],
+        label: &str,
+        x: usize,
+        color: u8,
+    ) {
+        if x >= buffer.len() {
+            return;
+        }
+
+        // Collision detection: skip if would overwrite existing characters
+        if !self.can_place_label(buffer, label, x) {
+            return;
+        }
+
+        let mut pos = x;
+
+        if pos < buffer.len() {
+            buffer[pos] = '"';
+            color_buf[pos] = color;
+            pos += 1;
+        }
+
+        for c in label.chars() {
+            if pos < buffer.len() {
+                buffer[pos] = c;
+                color_buf[pos] = color;
+                pos += 1;
+            }
+        }
+
+        if pos < buffer.len() {
+            buffer[pos] = '"';
+            color_buf[pos] = color;
+        }
+    }
+
+    /// Paint an edge at Y with color.
+    #[inline]
+    fn paint_edge_at_y_colored(
+        &self,
+        buffer: &mut [char],
+        colors: &mut [u8],
+        edge: &crate::ir::LayoutEdge<'a>,
+        y: usize,
+        color: u8,
+    ) {
+        match &edge.path {
+            EdgePath::Direct => {
+                let x = edge.from_x;
+                if x < buffer.len() && y > edge.from_y && y < edge.to_y {
+                    if y == edge.to_y - 1 {
+                        buffer[x] = ARROW_DOWN;
+                    } else {
+                        buffer[x] = V_LINE;
+                    }
+                    colors[x] = color;
+                }
+            }
+            EdgePath::Corner { horizontal_y } => {
+                let x1 = edge.from_x;
+                let x2 = edge.to_x;
+                let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
+
+                if y == *horizontal_y {
+                    // Horizontal segment
+                    for x in min_x..=max_x {
+                        if x < buffer.len() && buffer[x] == ' ' {
+                            buffer[x] = H_LINE;
+                            colors[x] = color;
+                        }
+                    }
+                    // Corners
+                    if x1 < buffer.len() {
+                        buffer[x1] = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                        colors[x1] = color;
+                    }
+                    if x2 < buffer.len() {
+                        buffer[x2] = if x1 < x2 { CORNER_UL } else { CORNER_UR };
+                        colors[x2] = color;
+                    }
+                } else if y > edge.from_y && y < *horizontal_y {
+                    // Vertical from source to horizontal
+                    if x1 < buffer.len() {
+                        buffer[x1] = V_LINE;
+                        colors[x1] = color;
+                    }
+                } else if y > *horizontal_y && y < edge.to_y {
+                    // Vertical from horizontal to target
+                    if x2 < buffer.len() {
+                        if y == edge.to_y - 1 {
+                            buffer[x2] = ARROW_DOWN;
+                        } else {
+                            buffer[x2] = V_LINE;
+                        }
+                        colors[x2] = color;
+                    }
+                }
+            }
+            EdgePath::SideChannel {
+                channel_x,
+                start_y,
+                end_y,
+            } => {
+                let from_x = edge.from_x;
+                let to_x = edge.to_x;
+
+                if y == *start_y {
+                    // Horizontal from source to channel
+                    for x in from_x..=*channel_x {
+                        if x < buffer.len() {
+                            if x == from_x {
+                                buffer[x] = CORNER_DR;
+                            } else if x == *channel_x {
+                                buffer[x] = CORNER_UL;
+                            } else if buffer[x] == ' ' {
+                                buffer[x] = H_LINE;
+                            }
+                            colors[x] = color;
+                        }
+                    }
+                } else if y > *start_y && y < *end_y {
+                    // Vertical in channel
+                    if *channel_x < buffer.len() {
+                        buffer[*channel_x] = V_LINE;
+                        colors[*channel_x] = color;
+                    }
+                } else if y == *end_y {
+                    // Horizontal from channel to target
+                    for x in to_x..=*channel_x {
+                        if x < buffer.len() {
+                            if x == *channel_x {
+                                buffer[x] = CORNER_DL;
+                            } else if x == to_x {
+                                if *end_y + 1 >= edge.to_y {
+                                    buffer[x] = ARROW_DOWN;
+                                } else {
+                                    buffer[x] = CORNER_UR;
+                                }
+                            } else if buffer[x] == ' ' {
+                                buffer[x] = H_LINE;
+                            }
+                            colors[x] = color;
+                        }
+                    }
+                } else if y > *end_y && y < edge.to_y {
+                    // Vertical from end to target
+                    if to_x < buffer.len() {
+                        if y == edge.to_y - 1 {
+                            buffer[to_x] = ARROW_DOWN;
+                        } else {
+                            buffer[to_x] = V_LINE;
+                        }
+                        colors[to_x] = color;
+                    }
+                }
+            }
+            EdgePath::MultiSegment { waypoints } => {
+                // Build full path
+                let mut full_path: Vec<(usize, usize)> = Vec::with_capacity(waypoints.len() + 2);
+                full_path.push((edge.from_x, edge.from_y));
+                full_path.extend(waypoints.iter().copied());
+                full_path.push((edge.to_x, edge.to_y));
+
+                for (seg_idx, window) in full_path.windows(2).enumerate() {
+                    let (x1, y1) = window[0];
+                    let (x2, y2) = window[1];
+                    let is_last_segment = seg_idx == full_path.len() - 2;
+                    let is_first_segment = seg_idx == 0;
+
+                    if x1 == x2 {
+                        // Vertical segment
+                        let start_y = if is_first_segment { y1 + 1 } else { y1 };
+                        if y >= start_y && y < y2 && x1 < buffer.len() {
+                            if is_last_segment && y == y2 - 1 {
+                                buffer[x1] = ARROW_DOWN;
+                            } else if buffer[x1] == ' ' {
+                                buffer[x1] = V_LINE;
+                            }
+                            colors[x1] = color;
+                        }
+                    } else if y1 == y2 {
+                        // Horizontal segment
+                        if y == y1 {
+                            let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
+                            for x in min_x..=max_x {
+                                if x < buffer.len() && buffer[x] == ' ' {
+                                    buffer[x] = H_LINE;
+                                    colors[x] = color;
+                                }
+                            }
+                        }
+                    } else {
+                        // Diagonal: corner routing
+                        let corner_y = y1 + 1;
+
+                        if y == corner_y {
+                            let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
+                            for x in min_x..=max_x {
+                                if x < buffer.len() {
+                                    if x == x1 {
+                                        buffer[x] = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                                    } else if x == x2 {
+                                        buffer[x] = if x1 < x2 { CORNER_UL } else { CORNER_UR };
+                                    } else if buffer[x] == ' ' {
+                                        buffer[x] = H_LINE;
+                                    }
+                                    colors[x] = color;
+                                }
+                            }
+                        }
+
+                        if y > corner_y && y < y2 && x2 < buffer.len() {
+                            if is_last_segment && y == y2 - 1 {
+                                buffer[x2] = ARROW_DOWN;
+                            } else if buffer[x2] == ' ' {
+                                buffer[x2] = V_LINE;
+                            }
+                            colors[x2] = color;
+                        }
+
+                        if !is_first_segment && y == y1 && x1 < buffer.len() && buffer[x1] == ' ' {
+                            buffer[x1] = V_LINE;
+                            colors[x1] = color;
                         }
                     }
                 }

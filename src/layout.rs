@@ -31,7 +31,7 @@ impl<'a> DAG<'a> {
 
         while changed {
             changed = false;
-            for &(from, to) in &self.edges {
+            for &(from, to, _) in &self.edges {
                 // Guard against missing nodes - O(1) HashMap lookups
                 if let Some(from_idx) = self.node_index(from)
                     && let Some(to_idx) = self.node_index(to)
@@ -63,7 +63,7 @@ impl<'a> DAG<'a> {
 
         while changed {
             changed = false;
-            for &(from, to) in &self.edges {
+            for &(from, to, _) in &self.edges {
                 // Only process edges within this subgraph
                 if !subgraph_node_ids.contains(&from) || !subgraph_node_ids.contains(&to) {
                     continue;
@@ -218,7 +218,7 @@ impl<'a> DAG<'a> {
             let node_id = self.nodes[idx].0;
 
             // Follow edges in both directions
-            for &(from, to) in &self.edges {
+            for &(from, to, _) in &self.edges {
                 if from == node_id
                     && let Some(child_idx) = self.node_index(to)
                     && !visited[child_idx]

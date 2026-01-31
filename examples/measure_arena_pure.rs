@@ -28,11 +28,11 @@ fn main() {
     let graph = builder.build().unwrap();
 
     let mut render_buf = [0u8; 1024];
-    if let Some(bytes) = graph.render_to_buffer(&mut render_buf) {
-        if args.len() > 100 {
-            // Prevent optimization
-            let s = unsafe { core::str::from_utf8_unchecked(&render_buf[..bytes]) };
-            println!("{}", s);
-        }
+    if let Some(bytes) = graph.render_to_buffer(&mut render_buf)
+        && args.len() > 100
+    {
+        // Prevent optimization
+        let s = unsafe { core::str::from_utf8_unchecked(&render_buf[..bytes]) };
+        println!("{}", s);
     }
 }

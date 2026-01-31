@@ -9,8 +9,8 @@ fn main() {
     dag.add_node(4, "Y");
 
     // Create skewed children: L connects to rightmost, R connects to leftmost
-    dag.add_edge(1, 4); // L -> Y (right child)
-    dag.add_edge(2, 3); // R -> X (left child)
+    dag.add_edge(1, 4, None); // L -> Y (right child)
+    dag.add_edge(2, 3, None); // R -> X (left child)
 
     let output = dag.render();
     println!("{}", output);

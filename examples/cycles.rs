@@ -9,9 +9,9 @@ fn main() {
     dag.add_node(1, "A");
     dag.add_node(2, "B");
     dag.add_node(3, "C");
-    dag.add_edge(1, 2); // A → B
-    dag.add_edge(2, 3); // B → C
-    dag.add_edge(3, 1); // C → A (creates cycle!)
+    dag.add_edge(1, 2, None); // A → B
+    dag.add_edge(2, 3, None); // B → C
+    dag.add_edge(3, 1, None); // C → A (creates cycle!)
 
     println!("{}\n", dag.render());
 
@@ -19,7 +19,7 @@ fn main() {
     println!("2. Self-Reference (A → A):");
     let mut dag = DAG::new();
     dag.add_node(1, "SelfRef");
-    dag.add_edge(1, 1); // Points to itself
+    dag.add_edge(1, 1, None); // Points to itself
 
     println!("{}\n", dag.render());
 
@@ -30,10 +30,10 @@ fn main() {
     dag.add_node(2, "Error2");
     dag.add_node(3, "Error3");
     dag.add_node(4, "Error4");
-    dag.add_edge(1, 2); // E1 → E2
-    dag.add_edge(2, 3); // E2 → E3
-    dag.add_edge(3, 4); // E3 → E4
-    dag.add_edge(4, 2); // E4 → E2 (cycle!)
+    dag.add_edge(1, 2, None); // E1 → E2
+    dag.add_edge(2, 3, None); // E2 → E3
+    dag.add_edge(3, 4, None); // E3 → E4
+    dag.add_edge(4, 2, None); // E4 → E2 (cycle!)
 
     println!("{}\n", dag.render());
 

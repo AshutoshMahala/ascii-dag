@@ -22,9 +22,9 @@ fn main() {
     dag.add_node(2, "B");
     dag.add_node(3, "C");
 
-    dag.add_edge(1, 2); // A -> B (level 0 -> 1)
-    dag.add_edge(2, 3); // B -> C (level 1 -> 2)
-    dag.add_edge(1, 3); // A -> C (level 0 -> 2, CROSS-LEVEL!)
+    dag.add_edge(1, 2, None); // A -> B (level 0 -> 1)
+    dag.add_edge(2, 3, None); // B -> C (level 1 -> 2)
+    dag.add_edge(1, 3, None); // A -> C (level 0 -> 2, CROSS-LEVEL!)
 
     println!("Actual rendering:");
     println!("{}", dag.render());
@@ -43,9 +43,9 @@ fn main() {
     dag2.add_node(2, "Mid");
     dag2.add_node(3, "End");
 
-    dag2.add_edge(1, 2); // Root -> Mid
-    dag2.add_edge(2, 3); // Mid -> End
-    dag2.add_edge(1, 3); // Root -> End (CROSS-LEVEL)
+    dag2.add_edge(1, 2, None); // Root -> Mid
+    dag2.add_edge(2, 3, None); // Mid -> End
+    dag2.add_edge(1, 3, None); // Root -> End (CROSS-LEVEL)
 
     println!("Actual rendering:");
     println!("{}", dag2.render());

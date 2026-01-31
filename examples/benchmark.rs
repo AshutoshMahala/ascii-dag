@@ -22,13 +22,15 @@ impl Topology {
     }
 }
 
-fn generate_chain(n: usize) -> (Vec<(usize, String)>, Vec<(usize, usize)>) {
+type GraphData = (Vec<(usize, String)>, Vec<(usize, usize)>);
+
+fn generate_chain(n: usize) -> GraphData {
     let nodes: Vec<_> = (0..n).map(|i| (i, format!("N{}", i))).collect();
     let edges: Vec<_> = (0..n - 1).map(|i| (i, i + 1)).collect();
     (nodes, edges)
 }
 
-fn generate_diamond(n: usize) -> (Vec<(usize, String)>, Vec<(usize, usize)>) {
+fn generate_diamond(n: usize) -> GraphData {
     // Diamond lattice: each node connects to 2 nodes in next level
     // Creates many skip-level edges and crossing opportunities
     let nodes: Vec<_> = (0..n).map(|i| (i, format!("N{}", i))).collect();
@@ -43,7 +45,7 @@ fn generate_diamond(n: usize) -> (Vec<(usize, String)>, Vec<(usize, usize)>) {
     (nodes, edges)
 }
 
-fn generate_wide_fan(n: usize) -> (Vec<(usize, String)>, Vec<(usize, usize)>) {
+fn generate_wide_fan(n: usize) -> GraphData {
     // Fan-out from root, then fan-in to sink
     // Worst case for crossing reduction (all nodes at same level)
     let nodes: Vec<_> = (0..n).map(|i| (i, format!("N{}", i))).collect();
@@ -64,7 +66,7 @@ fn generate_wide_fan(n: usize) -> (Vec<(usize, String)>, Vec<(usize, usize)>) {
     (nodes, edges)
 }
 
-fn generate_graph(topology: Topology, n: usize) -> (Vec<(usize, String)>, Vec<(usize, usize)>) {
+fn generate_graph(topology: Topology, n: usize) -> GraphData {
     match topology {
         Topology::Chain => generate_chain(n),
         Topology::Diamond => generate_diamond(n),

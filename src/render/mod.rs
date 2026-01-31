@@ -4,4 +4,5 @@
 //! including horizontal, vertical, and cycle visualization modes.
 
 pub mod ascii;
+pub mod colors;
 pub mod scanline;

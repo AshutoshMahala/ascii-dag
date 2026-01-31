@@ -70,7 +70,7 @@ fn test_alignment_waste() {
     // Simulate arena allocations with different types
     let mut offset = 0usize;
     let mut wasted = 0usize;
-    let buffer_size = 64 * 1024;
+    let _buffer_size = 64 * 1024;
 
     // Typical allocation pattern: mix of u8, usize, tuples
     let allocations: &[(usize, usize)] = &[

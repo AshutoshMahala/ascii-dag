@@ -22,8 +22,8 @@ fn main() {
     dag.add_node(1, "Parse");
     dag.add_node(2, "Compile");
     dag.add_node(3, "Link");
-    dag.add_edge(1, 2);
-    dag.add_edge(2, 3);
+    dag.add_edge(1, 2, None);
+    dag.add_edge(2, 3, None);
     println!("{}\n", dag.render());
 
     // Example 4: Multi-convergence

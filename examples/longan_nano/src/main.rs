@@ -57,9 +57,9 @@ fn main() -> ! {
     dag.add_node(2, "Build");
     dag.add_node(3, "Test");
     dag.add_node(4, "Deploy");
-    dag.add_edge(1, 2);
-    dag.add_edge(2, 3);
-    dag.add_edge(3, 4);
+    dag.add_edge(1, 2, None);
+    dag.add_edge(2, 3, None);
+    dag.add_edge(3, 4, None);
 
     let output = dag.render();
     

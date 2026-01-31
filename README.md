@@ -7,19 +7,25 @@
 DAG layout engine. Zero dependencies. `no_std` ready.
 
 ```text
-                       [Root]
-                          │
-    ┌──────────┬──────────┬──────────┬──────────┐
-    ↓          ↓          ↓          ↓          ↓
-[Task A]   [Task B]   [Task C]   [Task D]   [Task E]
-    │          │          │          │          │
-    └──────────┴──────────┴──────────┘          │
-                        ↓                       ↓
-                    [Task F]                    │
-                        │                       │
-                        └───────────────────────┘
-                                    ↓
-                                 [Output]
+                             [Root]
+          ┌──────────┌──────────└──────────┐──────────┐
+       "init"     "spawn"    "fork"     "start"    "begin"
+          ↓          ↓          ↓          ↓          ↓
+      [Task A]   [Task B]   [Task C]   [Task D]   [Task E]
+          └──────────└───────┌──┘─────┌────┘──────────┘
+                           "run"      │            "skip"
+                             ↓        │
+                         [Task F]     │
+                             └──┌─────┘
+                             "done"
+                                ↓
+                            [Output]
+
+
+Edge labels:
+  Task B → Task F: "exec"
+  Task C → Task F: "call"
+  Task D → Task F: "join"
 ```
 
 **ascii-dag** is a high-performance **layout engine** for placing nodes and routing edges in a fixed-width grid.
@@ -35,6 +41,8 @@ DAG layout engine. Zero dependencies. `no_std` ready.
 - **Headless**: Layout IR for custom renderers (Canvas, SVG, TUI)
 - **Robust**: Handles diamonds, cycles, skip-level edges
 - **Embedded**: `no_std`, no-alloc (Arena mode)
+- **Colored Edges**: Up to 8 colors with automatic greedy coloring
+- **Edge Labels**: Inline labels displayed along edge paths
 
 
 ## Use Cases
@@ -136,9 +144,9 @@ dag.add_node(1, "Parse");
 dag.add_node(2, "Compile");
 dag.add_node(3, "Link");
 
-// Add edges (dependencies)
-dag.add_edge(1, 2);  // Parse -> Compile
-dag.add_edge(2, 3);  // Compile -> Link
+// Add edges (dependencies) - third parameter is optional label
+dag.add_edge(1, 2, None);  // Parse -> Compile
+dag.add_edge(2, 3, None);  // Compile -> Link
 
 println!("{}", dag.render());
 ```
@@ -185,6 +193,50 @@ let mut buffer = String::with_capacity(dag.estimate_size());
 dag.render_to(&mut buffer);  // No allocation!
 ```
 
+### Colored Edges
+
+Render edges with distinct colors to visualize different dependency types or highlight paths:
+
+```rust
+use ascii_dag::DAG;
+use ascii_dag::render::colors::Palette;
+
+let dag = DAG::from_edges(
+    &[(1, "Root"), (2, "A"), (3, "B"), (4, "C"), (5, "End")],
+    &[(1, 2), (1, 3), (1, 4), (2, 5), (3, 5), (4, 5)]
+);
+
+let ir = dag.compute_layout();
+
+// Render with colors (greedy coloring minimizes same-color crossings)
+let output = ir.render_scanline_colored(Palette::Ansi);
+println!("{}", output);
+```
+
+### Edge Labels
+
+Add labels to edges to describe relationships:
+
+```rust
+use ascii_dag::DAG;
+use ascii_dag::render::colors::Palette;
+
+let mut dag = DAG::new();
+dag.add_node(1, "Parser");
+dag.add_node(2, "Lexer");
+dag.add_node(3, "AST");
+
+dag.add_edge(1, 2, Some("uses"));     // Labeled edge
+dag.add_edge(1, 3, Some("produces")); // Labeled edge  
+dag.add_edge(2, 3, None);              // No label
+
+let ir = dag.compute_layout();
+
+// Render with colors and legend for any skipped labels
+let output = ir.render_scanline_colored_with_legend(Palette::Ansi);
+println!("{}", output);
+```
+
 ### Cycle Detection
 
 ```rust
@@ -195,9 +247,9 @@ dag.add_node(1, "A");
 dag.add_node(2, "B");
 dag.add_node(3, "C");
 
-dag.add_edge(1, 2);
-dag.add_edge(2, 3);
-dag.add_edge(3, 1);  // Cycle!
+dag.add_edge(1, 2, None);
+dag.add_edge(2, 3, None);
+dag.add_edge(3, 1, None);  // Cycle!
 
 if dag.has_cycle() {
     eprintln!("Error: Circular dependency detected!");
@@ -522,18 +574,18 @@ ascii-dag = { version = "0.6", default-features = false }
 
 | Topology | Nodes | Mode | Build | Compute | Render | **Total** | Speedup |
 | :--- | ---: | :--- | ---: | ---: | ---: | ---: | ---: |
-| **Chain** | 100 | Heap | 81µs | 265µs | 71µs | **419µs** | |
-| | | Arena | 6µs | 54µs | 127µs | **187µs** | **2.2x** |
-| **Chain** | 500 | Heap | 270µs | 1,252µs | 296µs | **1,818µs** | |
-| | | Arena | 23µs | 81µs | 1,082µs | **1,187µs** | **1.5x** |
-| **Diamond** | 100 | Heap | 78µs | 464µs | 195µs | **738µs** | |
-| | | Arena | 14µs | 30µs | 165µs | **210µs** | **3.5x** |
-| **Diamond** | 500 | Heap | 279µs | 2,656µs | 928µs | **3,865µs** | |
-| | | Arena | 24µs | 109µs | 1,141µs | **1,275µs** | **3.0x** |
-| **WideFan** | 100 | Heap | 54µs | 199µs | 221µs | **474µs** | |
-| | | Arena | 5µs | 29µs | 255µs | **290µs** | **1.6x** |
-| **WideFan** | 500 | Heap | 244µs | 1,509µs | 5,156µs | **6,910µs** | |
-| | | Arena | 21µs | 70µs | 3µs | **94µs** | **73.5x** |
+| **Chain** | 100 | Heap | 50µs | 206µs | 53µs | **311µs** | |
+| | | Arena | 6µs | 29µs | 113µs | **150µs** | **2.1x** |
+| **Chain** | 500 | Heap | 244µs | 1,223µs | 258µs | **1,726µs** | |
+| | | Arena | 14µs | 39µs | 711µs | **765µs** | **2.3x** |
+| **Diamond** | 100 | Heap | 40µs | 536µs | 235µs | **812µs** | |
+| | | Arena | 10µs | 40µs | 293µs | **345µs** | **2.4x** |
+| **Diamond** | 500 | Heap | 307µs | 2,121µs | 744µs | **3,172µs** | |
+| | | Arena | 17µs | 60µs | 1,325µs | **1,403µs** | **2.3x** |
+| **WideFan** | 100 | Heap | 32µs | 139µs | 138µs | **310µs** | |
+| | | Arena | 6µs | 20µs | 239µs | **266µs** | **1.2x** |
+| **WideFan** | 500 | Heap | 146µs | 942µs | 3,419µs | **4,508µs** | |
+| | | Arena | 33µs | 83µs | 3µs | **121µs** | **37.3x** |
 
 *Chain = linear (best case), Diamond = skip-level edges (stress), WideFan = fan-out/fan-in (crossing worst case)*
 *Measured via `cargo run --example benchmark --release`*

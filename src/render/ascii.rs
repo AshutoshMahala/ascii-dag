@@ -445,7 +445,7 @@ impl<'a> DAG<'a> {
 
         // Step 3: Identify skip-level edges and insert dummy nodes
         // We use the edge_idx in Dummy nodes so we can find them after reordering
-        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+        for (edge_idx, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
             if let Some(from_idx) = self.node_index(from_id)
                 && let Some(to_idx) = self.node_index(to_id)
             {
@@ -542,7 +542,7 @@ impl<'a> DAG<'a> {
         // Collect all dummy adjustments first
         let mut dummy_adjustments: Vec<(usize, usize, usize)> = Vec::new(); // (level_idx, dummy_pos, target_x)
 
-        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+        for (edge_idx, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
             if let Some(from_idx) = self.node_index(from_id)
                 && let Some(to_idx) = self.node_index(to_id)
             {
@@ -605,7 +605,7 @@ impl<'a> DAG<'a> {
     fn reposition_dummies(&self, levels: &mut [Vec<VirtualNode>], node_levels: &[usize]) {
         // For each skip edge, find where its source node is positioned and place
         // its dummies right after that position in each intermediate level
-        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+        for (edge_idx, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
             if let Some(from_idx) = self.node_index(from_id)
                 && let Some(to_idx) = self.node_index(to_id)
             {
@@ -668,7 +668,7 @@ impl<'a> DAG<'a> {
         let mut edges_by_level: Vec<Vec<(usize, usize)>> = vec![Vec::new(); levels.len()];
 
         // Process each DAG edge
-        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+        for (edge_idx, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
             if let Some(from_idx) = self.node_index(from_id)
                 && let Some(to_idx) = self.node_index(to_id)
             {

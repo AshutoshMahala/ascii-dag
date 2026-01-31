@@ -55,7 +55,7 @@ pub enum RenderMode {
 /// let mut dag = DAG::new();
 /// dag.add_node(1, "Start");
 /// dag.add_node(2, "End");
-/// dag.add_edge(1, 2);
+/// dag.add_edge(1, 2, None);
 ///
 /// let output = dag.render();
 /// assert!(output.contains("Start"));
@@ -64,7 +64,7 @@ pub enum RenderMode {
 #[derive(Clone)]
 pub struct DAG<'a> {
     pub(crate) nodes: Vec<(usize, &'a str)>,
-    pub(crate) edges: Vec<(usize, usize)>,
+    pub(crate) edges: Vec<(usize, usize, Option<&'a str>)>,
     pub(crate) render_mode: RenderMode,
     pub(crate) auto_created: HashSet<usize>, // Track auto-created nodes for visual distinction (O(1) lookups)
     pub(crate) id_to_index: HashMap<usize, usize>, // Cache id→index mapping (O(1) lookups)
@@ -106,6 +106,7 @@ impl<'a> DAG<'a> {
     /// Create a DAG from pre-defined nodes and edges (batch construction).
     ///
     /// This is more efficient than using the builder API for static graphs.
+    /// For edges with labels, use [`from_edges_labeled`](Self::from_edges_labeled).
     ///
     /// # Examples
     ///
@@ -143,7 +144,54 @@ impl<'a> DAG<'a> {
 
         // Add edges (may auto-create missing nodes)
         for &(from, to) in edges {
-            dag.add_edge(from, to);
+            dag.add_edge(from, to, None);
+        }
+
+        dag
+    }
+
+    /// Create a DAG from pre-defined nodes and labeled edges (batch construction).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ascii_dag::graph::DAG;
+    ///
+    /// let dag = DAG::from_edges_labeled(
+    ///     &[(1, "A"), (2, "B"), (3, "C")],
+    ///     &[(1, 2, Some("uses")), (2, 3, None)]
+    /// );
+    /// ```
+    pub fn from_edges_labeled(
+        nodes: &[(usize, &'a str)],
+        edges: &[(usize, usize, Option<&'a str>)],
+    ) -> Self {
+        let mut dag = Self {
+            nodes: nodes.to_vec(),
+            edges: Vec::new(),
+            render_mode: RenderMode::default(),
+            auto_created: HashSet::new(),
+            id_to_index: HashMap::new(),
+            node_widths: Vec::new(),
+            children: Vec::new(),
+            parents: Vec::new(),
+            crossing_reduction_passes: 4,
+        };
+
+        // Build id_to_index map and widths cache
+        for (idx, &(id, label)) in dag.nodes.iter().enumerate() {
+            dag.id_to_index.insert(id, idx);
+            let width = dag.compute_node_width(id, label);
+            dag.node_widths.push(width);
+        }
+
+        // Initialize adjacency lists
+        dag.children.resize(dag.nodes.len(), Vec::new());
+        dag.parents.resize(dag.nodes.len(), Vec::new());
+
+        // Add edges (may auto-create missing nodes)
+        for &(from, to, label) in edges {
+            dag.add_edge(from, to, label);
         }
 
         dag
@@ -327,7 +375,7 @@ impl<'a> DAG<'a> {
         }
     }
 
-    /// Add an edge from one node to another.
+    /// Add an edge from one node to another with an optional label.
     ///
     /// If either node doesn't exist, it will be auto-created as a placeholder.
     /// You can later call `add_node` to provide a label for auto-created nodes.
@@ -340,12 +388,14 @@ impl<'a> DAG<'a> {
     /// let mut dag = DAG::new();
     /// dag.add_node(1, "A");
     /// dag.add_node(2, "B");
-    /// dag.add_edge(1, 2);  // A -> B
+    /// dag.add_node(3, "C");
+    /// dag.add_edge(1, 2, None);  // A -> B (no label)
+    /// dag.add_edge(2, 3, Some("depends on"));  // B -> C with label
     /// ```
-    pub fn add_edge(&mut self, from: usize, to: usize) {
+    pub fn add_edge(&mut self, from: usize, to: usize, label: Option<&'a str>) {
         self.ensure_node_exists(from);
         self.ensure_node_exists(to);
-        self.edges.push((from, to));
+        self.edges.push((from, to, label));
 
         // Update adjacency lists (O(1) lookups)
         if let (Some(&from_idx), Some(&to_idx)) =
@@ -354,6 +404,12 @@ impl<'a> DAG<'a> {
             self.children[from_idx].push(to_idx);
             self.parents[to_idx].push(from_idx);
         }
+    }
+
+    /// Get the label for an edge, if any.
+    #[inline]
+    pub fn edge_label(&self, edge_idx: usize) -> Option<&'a str> {
+        self.edges.get(edge_idx).and_then(|e| e.2)
     }
 
     /// Ensure a node exists, auto-creating if missing.
@@ -609,7 +665,7 @@ impl<'a> DAG<'a> {
         }
 
         // Identify skip-level edges and insert dummy nodes
-        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+        for (edge_idx, &(from_id, to_id, _label)) in self.edges.iter().enumerate() {
             if let (Some(from_idx), Some(to_idx)) =
                 (self.node_index(from_id), self.node_index(to_id))
             {
@@ -667,12 +723,16 @@ impl<'a> DAG<'a> {
             .collect();
 
         // Add small buffer for bounded edge offsets (max 3 chars) plus 1 for routing
-        let max_width = level_widths.iter().max().unwrap_or(&0) + 4;
+        // Also add limited expansion for labels (4 chars each side) if any edges have labels
+        let has_labeled_edges = self.edges.iter().any(|(_, _, label)| label.is_some());
+        let label_margin = if has_labeled_edges { 8 } else { 0 }; // 4 chars each side
+        let max_width = level_widths.iter().max().unwrap_or(&0) + 4 + label_margin;
 
         // Step 5: Build LayoutIR
         let mut builder = LayoutIRBuilder::new().with_levels(max_level + 1);
 
-        let lines_per_level = 3;
+        // Check if any edges have labels - if so, use extra row for label space
+        let lines_per_level = if has_labeled_edges { 4 } else { 3 };
         let total_height = (max_level + 1) * lines_per_level;
 
         // Build lookup: for each real node, find its (level, position, x, width)
@@ -744,7 +804,7 @@ impl<'a> DAG<'a> {
         }
 
         // Step 6: Add edges with proper routing
-        for (edge_idx, &(from_id, to_id)) in self.edges.iter().enumerate() {
+        for (edge_idx, &(from_id, to_id, label)) in self.edges.iter().enumerate() {
             if let (Some(from_idx), Some(to_idx)) =
                 (self.node_index(from_id), self.node_index(to_id))
             {
@@ -786,6 +846,73 @@ impl<'a> DAG<'a> {
                     }
                 };
 
+                // Compute label position
+                // With lines_per_level=4, we have a dedicated label row at from_y + 2:
+                //   y=from_y:   [Source Node]
+                //   y=from_y+1: corner/horizontal routing
+                //   y=from_y+2: LABEL ROW (vertical line + label text)
+                //   y=from_y+3: arrow (to_y - 1)
+                //   y=to_y:     [Target Node]
+                let label_position = label.map(|lbl| {
+                    let label_len = lbl.chars().count() + 2; // +2 for quotes
+
+                    // Label Y is always at from_y + 2 (the dedicated label row)
+                    let label_y = from_y + 2;
+
+                    // Find the edge's X position at the label row
+                    let edge_x_at_label = match &path {
+                        EdgePath::Direct => from_x,
+                        EdgePath::Corner { horizontal_y } => {
+                            // If label row is before the corner, edge is at from_x
+                            // If label row is after the corner, edge is at to_x
+                            if label_y <= *horizontal_y {
+                                from_x
+                            } else {
+                                to_x
+                            }
+                        }
+                        EdgePath::SideChannel {
+                            channel_x, start_y, ..
+                        } => {
+                            // If before the horizontal segment, use from_x
+                            // Otherwise use channel_x
+                            if label_y < *start_y {
+                                from_x
+                            } else {
+                                *channel_x
+                            }
+                        }
+                        EdgePath::MultiSegment { waypoints } => {
+                            // Find which segment the label row falls into
+                            if waypoints.is_empty() {
+                                from_x
+                            } else {
+                                // Check if before first waypoint
+                                let first_wp = &waypoints[0];
+                                if label_y < first_wp.1 {
+                                    from_x
+                                } else {
+                                    // After first waypoint, use to_x
+                                    to_x
+                                }
+                            }
+                        }
+                    };
+
+                    // Center the label on the edge's X position
+                    // Label goes through the line: the edge character is replaced by label
+                    let half_len = label_len / 2;
+                    let label_x = edge_x_at_label.saturating_sub(half_len);
+
+                    // Ensure label fits within width
+                    let clamped_x = if label_x + label_len > max_width {
+                        max_width.saturating_sub(label_len)
+                    } else {
+                        label_x
+                    };
+                    (clamped_x, label_y)
+                });
+
                 builder.add_edge(LayoutEdge {
                     from_id,
                     to_id,
@@ -795,6 +922,8 @@ impl<'a> DAG<'a> {
                     to_y,
                     path,
                     edge_index: edge_idx,
+                    label,
+                    label_position,
                 });
             }
         }
@@ -908,7 +1037,7 @@ impl<'a> DAG<'a> {
                 }
                 (_, Some(edge_idx)) => {
                     // Dummy node - find the connected node or dummy for this edge
-                    let &(from_id, to_id) = &self.edges[edge_idx];
+                    let &(from_id, to_id, _) = &self.edges[edge_idx];
                     let from_idx = self.node_index(from_id);
                     let to_idx = self.node_index(to_id);
 

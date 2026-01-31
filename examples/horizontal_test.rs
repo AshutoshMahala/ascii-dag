@@ -10,8 +10,8 @@ fn main() {
     dag.add_node(1, "A");
     dag.add_node(2, "B");
     dag.add_node(3, "C");
-    dag.add_edge(1, 2);
-    dag.add_edge(2, 3);
+    dag.add_edge(1, 2, None);
+    dag.add_edge(2, 3, None);
     println!("{}", dag.render());
 
     println!("2. Branching (Potential Data Loss):");
@@ -21,8 +21,8 @@ fn main() {
     dag2.add_node(11, "Branch_1");
     dag2.add_node(12, "Branch_2");
 
-    dag2.add_edge(10, 11);
-    dag2.add_edge(10, 12); // The ignored child?
+    dag2.add_edge(10, 11, None);
+    dag2.add_edge(10, 12, None); // The ignored child?
 
     println!("{}", dag2.render());
 }

@@ -116,7 +116,7 @@ pub enum EdgePath {
 
 /// A routed edge in the layout with path information.
 #[derive(Debug, Clone)]
-pub struct LayoutEdge {
+pub struct LayoutEdge<'a> {
     /// Source node ID
     pub from_id: usize,
     /// Target node ID  
@@ -133,6 +133,11 @@ pub struct LayoutEdge {
     pub path: EdgePath,
     /// Edge index (for consistent coloring)
     pub edge_index: usize,
+    /// Optional edge label (e.g., "depends on", "uses")
+    pub label: Option<&'a str>,
+    /// Computed position for rendering the label: (x, y)
+    /// Calculated during layout as the midpoint of the edge path.
+    pub label_position: Option<(usize, usize)>,
 }
 
 /// Intermediate representation of a laid-out graph.
@@ -144,7 +149,7 @@ pub struct LayoutIR<'a> {
     /// All nodes with their computed positions
     pub(crate) nodes: Vec<LayoutNode<'a>>,
     /// All edges with routing information
-    pub(crate) edges: Vec<LayoutEdge>,
+    pub(crate) edges: Vec<LayoutEdge<'a>>,
     /// Total width in character cells
     pub(crate) width: usize,
     /// Total height in lines
@@ -186,7 +191,7 @@ impl<'a> LayoutIR<'a> {
 
     /// Get all routed edges.
     #[inline]
-    pub fn edges(&self) -> &[LayoutEdge] {
+    pub fn edges(&self) -> &[LayoutEdge<'a>] {
         &self.edges
     }
 
@@ -206,12 +211,12 @@ impl<'a> LayoutIR<'a> {
     }
 
     /// Get all edges originating from a node.
-    pub fn edges_from(&self, node_id: usize) -> impl Iterator<Item = &LayoutEdge> {
+    pub fn edges_from(&self, node_id: usize) -> impl Iterator<Item = &LayoutEdge<'a>> {
         self.edges.iter().filter(move |e| e.from_id == node_id)
     }
 
     /// Get all edges ending at a node.
-    pub fn edges_to(&self, node_id: usize) -> impl Iterator<Item = &LayoutEdge> {
+    pub fn edges_to(&self, node_id: usize) -> impl Iterator<Item = &LayoutEdge<'a>> {
         self.edges.iter().filter(move |e| e.to_id == node_id)
     }
 
@@ -259,7 +264,7 @@ impl<'a> LayoutIR<'a> {
 
     /// Check if two edges cross each other.
     /// Useful for advanced renderers that want to handle crossings specially.
-    pub fn edges_cross(&self, edge1: &LayoutEdge, edge2: &LayoutEdge) -> bool {
+    pub fn edges_cross(&self, edge1: &LayoutEdge<'a>, edge2: &LayoutEdge<'a>) -> bool {
         // Simple crossing detection: edges cross if their horizontal spans overlap
         // and they go in opposite directions
         let (min1, max1) = if edge1.from_x <= edge1.to_x {
@@ -290,10 +295,61 @@ impl<'a> LayoutIR<'a> {
 
     /// Get a suggested color index for an edge (for colored renderers).
     /// Uses a deterministic algorithm based on edge index to ensure consistent colors.
-    pub fn edge_color_index(&self, edge: &LayoutEdge) -> usize {
+    pub fn edge_color_index(&self, edge: &LayoutEdge<'a>) -> usize {
         // Use the edge's index modulo a palette size
         // This ensures the same edge always gets the same color
         edge.edge_index
+    }
+
+    /// Compute optimal color indices for all edges using greedy graph coloring.
+    ///
+    /// Adjacent edges (those sharing a source or target node) are assigned different
+    /// colors when possible. This reduces visual confusion in complex graphs.
+    ///
+    /// Returns a Vec where index i is the color index for edge i.
+    pub fn compute_edge_colors(&self, palette_size: usize) -> Vec<usize> {
+        let n = self.edges.len();
+        let mut colors = vec![0usize; n];
+
+        if n == 0 || palette_size == 0 {
+            return colors;
+        }
+
+        // Build adjacency: for each edge, find edges that share a node
+        // Two edges are "adjacent" if they share from_id or to_id
+        for (i, edge) in self.edges.iter().enumerate() {
+            // Collect colors used by adjacent edges (already colored)
+            let mut used_colors = [false; 32]; // Support up to 32 colors
+
+            for (j, other) in self.edges.iter().enumerate() {
+                if j >= i {
+                    break; // Only look at already-colored edges
+                }
+
+                // Check if edges are adjacent (share a node)
+                let adjacent = edge.from_id == other.from_id
+                    || edge.from_id == other.to_id
+                    || edge.to_id == other.from_id
+                    || edge.to_id == other.to_id;
+
+                if adjacent && colors[j] < 32 {
+                    used_colors[colors[j]] = true;
+                }
+            }
+
+            // Find the first available color
+            let mut color = 0;
+            for c in 0..palette_size.min(32) {
+                if !used_colors[c] {
+                    color = c;
+                    break;
+                }
+            }
+
+            colors[i] = color;
+        }
+
+        colors
     }
 
     /// Get bounding box for a node (x, y, width, height).
@@ -332,7 +388,7 @@ impl<'a> LayoutIR<'a> {
 
     /// Get all edges from a specific level (including skip-level edges).
     /// Returns full edge info for advanced rendering.
-    pub fn edges_from_level(&self, level: usize) -> Vec<&LayoutEdge> {
+    pub fn edges_from_level(&self, level: usize) -> Vec<&LayoutEdge<'a>> {
         self.edges
             .iter()
             .filter(|edge| {
@@ -354,7 +410,7 @@ impl<'a> LayoutIR<'a> {
 #[derive(Debug, Default)]
 pub struct LayoutIRBuilder<'a> {
     nodes: Vec<LayoutNode<'a>>,
-    edges: Vec<LayoutEdge>,
+    edges: Vec<LayoutEdge<'a>>,
     width: usize,
     height: usize,
     level_count: usize,
@@ -387,7 +443,7 @@ impl<'a> LayoutIRBuilder<'a> {
     }
 
     /// Add an edge to the layout.
-    pub fn add_edge(&mut self, edge: LayoutEdge) {
+    pub fn add_edge(&mut self, edge: LayoutEdge<'a>) {
         self.edges.push(edge);
     }
 
