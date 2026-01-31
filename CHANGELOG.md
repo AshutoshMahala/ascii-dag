@@ -1,8 +1,8 @@
 # Changelog
 
-## [0.8.0] - Unreleased
+## [0.8.0] - 2026-01-31
 
-### ⚠️ Breaking Changes
+### Breaking Changes
 - **`add_edge()` API change**: Now takes an optional label parameter
   - Before: `dag.add_edge(1, 2)`
   - After: `dag.add_edge(1, 2, None)` or `dag.add_edge(1, 2, Some("label"))`
