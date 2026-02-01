@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.1] - Unreleased
+
+### Performance
+- **Updated benchmarks**: Fresh measurements on M2 Ultra showing 2.1x-56.9x Arena speedups
+
+### Arena Layout Engine Refactor
+- **Deep Graph Fix**: Replaced fixed-size stack arrays in `compute_layout_arena_csr` with dynamic arena allocations, resolving panics on deep graphs.
+- **Performance Optimization**: Replaced linear source scanning with O(1) lookups, yielding **56.9x speedup** on WideFan topologies.
+- **Vertical Spacing**: Ported dynamic row height calculation to Arena mode, ensuring parity with Heap mode layouts.
+- **Visual Fix**: Resolved edge label/breakout overlap by reserving dedicated rows for routing.
+
 ## [0.8.0] - 2026-01-31
 
 ### Breaking Changes

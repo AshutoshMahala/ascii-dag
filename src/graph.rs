@@ -807,25 +807,25 @@ impl<'a> DAG<'a> {
                      // Vertical Optimization: If straight vertical, we DON'T need a slot!
                      // We add a tiny epsilon to min/max check? No, if min_x == max_x it's vertical.
                      // But we should check overlapping ranges.
-                     let is_vertical = min_x == max_x;
+                     // CRITICAL FIX: Skip-level edges are NEVER purely vertical because they route through
+                     // dummy nodes which have offsets (edge_idx % 4). They require slots.
+                     let is_vertical = min_x == max_x && to_level == from_level + 1;
 
                      // Target Bus Logic
                      if in_degrees[to_idx] > 1 {
                          let (last_level, last_slot) = target_slot_tracker[to_idx];
-                         if last_level == from_level {
-                             // Reuse slot
-                             edge_slots[i] = last_slot;
-                             // Note: We don't verify if the NEW incoming edge fits in the OLD slot interval
-                             // because "Target Bus" implies they MERGE. They share the track.
-                             // We should ideally extend the reserved interval of that slot?
-                             // But since they merge at the target, they share the same horizontal destination.
-                             // Overlap is expected/required near the target.
-                             // We only care if they overlap with OTHER edges not in this bus.
-                             
-                             // EXTEND Interval:
-                             // We really should mark the union of intervals.
-                             // But for now, let's assume the first allocation covered the "bus lane".
-                             // (Refinement: We should technically update level_occupied_slots[level][slot].push(new_range))
+                         if last_level == from_level && last_slot != usize::MAX {
+                              // Reuse slot only if it's a real slot!
+                              // If last_slot was MAX (Vertical), and WE are diagonal, we can't reuse "no slot".
+                              edge_slots[i] = last_slot;
+                              
+                              // CRITICAL FIX: We MUST extend the occupied interval for this slot!
+                              // Even though we merge with the previous edge to the same target,
+                              // we consume space (from start_x to end_x).
+                              // Other edges (to DIFFERENT targets) need to know this space is taken.
+                              if last_slot < level_occupied_slots[from_level].len() {
+                                  level_occupied_slots[from_level][last_slot].push((min_x, max_x));
+                              }
                          } else {
                              if is_vertical {
                                  // Don't allocate slot for vertical edge
