@@ -18,22 +18,47 @@
 /// Colors are ordered to maximize contrast between adjacent indices
 /// (alternating warm/cool, light/dark).
 pub const ANSI: &[u8] = &[
-    39,  // Blue (cool)
-    203, // Red/Tomato (warm)
-    37,  // Teal/Cyan (cool)
-    208, // Orange (warm)
-    134, // Purple (cool)
-    35,  // Green (cool)
-    220, // Yellow (warm)
-    81,  // Sky blue (cool)
-    196, // Bright red (warm)
-    123, // Light cyan (cool)
-    214, // Amber (warm)
-    99,  // Violet (cool)
-    71,  // Grass green (cool)
-    205, // Pink (warm)
-    33,  // Bright blue (cool)
-    170, // Plum (warm)
+    // Set 1: High Contrast Primaries (Vivid)
+    196, // Bright Red
+    39,  // Bright Blue
+    46,  // Neon Green
+    226, // Bright Yellow
+    201, // Magenta
+    51,  // Cyan
+
+    // Set 2: Deep/Rich Tones (Darker)
+    160, // Deep Red
+    21,  // Deep Blue
+    28,  // Forest Green
+    208, // Orange
+    93,  // Purple
+    30,  // Teal
+
+    // Set 3: Light/Pastel (High Luma)
+    203, // Salmon
+    75,  // Sky Blue
+    154, // Lime
+    215, // Gold
+    213, // Pink
+    159, // Pale Cyan
+
+    // Set 4: Earth & Electric (Mixed)
+    166, // Burnt Orange
+    57,  // Indigo Blue
+    82,  // Electric Green
+    190, // Chartreuse
+    129, // Violet
+    37,  // Dark Cyan
+
+    // Set 5: Extended Range
+    220, // Goldenrod
+    33,  // Dodger Blue
+    198, // Deep Pink
+    88,  // Dark Maroon
+    71,  // Moss Green
+    17,  // Navy Blue
+    202, // Red-Orange
+    45,  // Turquoise
 ];
 
 /// ANSI palette optimized for dark terminals (brighter colors)

@@ -731,9 +731,64 @@ impl<'a> DAG<'a> {
         // Step 5: Build LayoutIR
         let mut builder = LayoutIRBuilder::new().with_levels(max_level + 1);
 
-        // Check if any edges have labels - if so, use extra row for label space
-        let lines_per_level = if has_labeled_edges { 4 } else { 3 };
-        let total_height = (max_level + 1) * lines_per_level;
+        // Compute horizontal channel slots to prevent edges from different sources overlapping.
+        // Edges from the SAME source can share a horizontal row (fan-out is OK to overlap).
+        // Edges from DIFFERENT sources at the same level get separate horizontal rows.
+        // Edges from DIFFERENT sources at the same level get separate horizontal rows.
+        let mut level_gap_sources: HashMap<usize, HashSet<usize>> = HashMap::new();
+        for &(from_id, to_id, _) in &self.edges {
+            if let (Some(from_idx), Some(to_idx)) =
+                (self.node_index(from_id), self.node_index(to_id))
+            {
+                let from_level = node_levels[from_idx];
+                let to_level = node_levels[to_idx];
+                
+                // Edges leaving this level need horizontal slots given their source
+                // This includes both adjacent-level edges (Direct/Corner) and skip-level edges (MultiSegment)
+                if to_level > from_level {
+                    level_gap_sources.entry(from_level).or_default().insert(from_id);
+                }
+            }
+        }
+        
+        // Assign a slot index to each source at each level
+        let mut source_slots: HashMap<(usize, usize), usize> = HashMap::new();
+        for (level, sources) in &level_gap_sources {
+            for (slot, &source_id) in sources.iter().enumerate() {
+                source_slots.insert((*level, source_id), slot);
+            }
+        }
+        
+        // Calculate per-level heights dynamically to reduce whitespace
+        // Instead of a global `lines_per_level`, we compute `level_heights` and `level_y_offsets`
+        let base_lines = if has_labeled_edges { 4 } else { 3 };
+        let mut level_y_offsets = Vec::with_capacity(max_level + 1);
+        let mut current_offset = 0;
+
+        for level in 0..=max_level {
+            level_y_offsets.push(current_offset);
+
+            // 1. Slots for edges originating at this level (adjacent or skip)
+            let adjacent_slots = level_gap_sources.get(&level).map(|s| s.len()).unwrap_or(0);
+            
+            // 2. Slots for edges passing through (dummy nodes)
+            // Virtual levels might effectively wrap around or exist only where nodes are
+            // But structurally, virtual_levels corresponds to 0..=max_level
+            let skip_slots = if level < virtual_levels.len() {
+                 virtual_levels[level].iter().filter(|v| matches!(v, VNode::Dummy { .. })).count()
+            } else {
+                 0
+            };
+
+            // Determine max slots needed for this specific level
+            let slots_needed = adjacent_slots.max(skip_slots);
+            let extra_lines = slots_needed.saturating_sub(1);
+            
+            let height = base_lines + extra_lines;
+            current_offset += height;
+        }
+
+        let total_height = current_offset;
 
         // Build lookup: for each real node, find its (level, position, x, width)
         let mut real_node_coords: Vec<(usize, usize, usize, usize)> =
@@ -753,7 +808,7 @@ impl<'a> DAG<'a> {
                     let (id, label) = self.nodes[*idx];
                     let x = x_coords[level_idx][pos] + level_offset;
                     let width = widths[level_idx][pos];
-                    let y = level_idx * lines_per_level;
+                    let y = level_y_offsets[level_idx];
 
                     real_node_coords[*idx] = (level_idx, pos, x, width);
 
@@ -803,6 +858,17 @@ impl<'a> DAG<'a> {
             positions.sort_by_key(|(level, _)| *level);
         }
 
+        // Build level-to-edge slot mapping for MultiSegment Y separation.
+        // Each edge passing through a level gets a unique Y slot to prevent horizontal overlap.
+        let mut level_edge_slots: HashMap<usize, HashMap<usize, usize>> = HashMap::new();
+        for (edge_idx, positions) in dummy_positions.iter().enumerate() {
+            for &(level, _) in positions {
+                let level_map = level_edge_slots.entry(level).or_default();
+                let slot = level_map.len(); // Next available slot
+                level_map.insert(edge_idx, slot);
+            }
+        }
+
         // Step 6: Add edges with proper routing
         for (edge_idx, &(from_id, to_id, label)) in self.edges.iter().enumerate() {
             if let (Some(from_idx), Some(to_idx)) =
@@ -816,16 +882,23 @@ impl<'a> DAG<'a> {
 
                 let from_x = from_x_base + from_width / 2;
                 let to_x = to_x_base + to_width / 2;
-                let from_y = from_level * lines_per_level;
-                let to_y = to_level * lines_per_level;
+                // Calculate Y positions based on variable level heights
+                let from_y = level_y_offsets[from_level];
+                let to_y = level_y_offsets[to_level];
+
+                // Calculate separation: Row 1 is reserved for labels if they exist.
+                // Breakouts start at Row 2 (if labels) or Row 1 (if no labels).
+                let edge_start_row = if has_labeled_edges { 2 } else { 1 };
 
                 let path = if to_level == from_level + 1 {
                     // Adjacent levels - direct or corner connection
                     if from_x == to_x {
                         EdgePath::Direct
                     } else {
+                        // Get horizontal slot for this source at this level
+                        let slot = source_slots.get(&(from_level, from_id)).copied().unwrap_or(0);
                         EdgePath::Corner {
-                            horizontal_y: from_y + 1,
+                            horizontal_y: from_y + edge_start_row + slot,
                         }
                     }
                 } else {
@@ -833,16 +906,36 @@ impl<'a> DAG<'a> {
                     let dummies = &dummy_positions[edge_idx];
                     if dummies.is_empty() {
                         // Fallback to corner if no dummies (shouldn't happen)
+                        let slot = source_slots.get(&(from_level, from_id)).copied().unwrap_or(0);
                         EdgePath::Corner {
-                            horizontal_y: from_y + 1,
+                            horizontal_y: from_y + edge_start_row + slot,
                         }
                     } else {
-                        // Build waypoints through dummy nodes
+                        // Build waypoints through dummy nodes with Y slot separation
                         let mut waypoints = Vec::with_capacity(dummies.len());
                         for &(level, x) in dummies {
-                            waypoints.push((x, level * lines_per_level));
+                            // Get slot for this edge at this level
+                            let slot = level_edge_slots
+                                .get(&level)
+                                .and_then(|m| m.get(&edge_idx))
+                                .copied()
+                                .unwrap_or(0);
+                            let edge_start_row = if has_labeled_edges { 2 } else { 1 };
+                            waypoints.push((x, level_y_offsets[level] + edge_start_row + slot));
                         }
-                        EdgePath::MultiSegment { waypoints }
+                        
+                        // Use source slot for initial horizontal offset
+                        let source_slot = source_slots.get(&(from_level, from_id)).copied().unwrap_or(0);
+                        
+                        // Calculate offset from (y+1)
+                        // Target Y = y + edge_start + slot
+                        // Offset = Target Y - (y+1) = edge_start + slot - 1
+                        let start_y_offset = (edge_start_row + source_slot).saturating_sub(1);
+                        
+                        EdgePath::MultiSegment { 
+                            waypoints,
+                            start_y_offset,
+                        }
                     }
                 };
 
@@ -856,8 +949,8 @@ impl<'a> DAG<'a> {
                 let label_position = label.map(|lbl| {
                     let label_len = lbl.chars().count() + 2; // +2 for quotes
 
-                    // Label Y is always at from_y + 2 (the dedicated label row)
-                    let label_y = from_y + 2;
+                    // Label Y is always at from_y + 1 (immediately below the source node)
+                    let label_y = from_y + 1;
 
                     // Find the edge's X position at the label row
                     let edge_x_at_label = match &path {
@@ -882,19 +975,16 @@ impl<'a> DAG<'a> {
                                 *channel_x
                             }
                         }
-                        EdgePath::MultiSegment { waypoints } => {
+                        EdgePath::MultiSegment { waypoints, start_y_offset } => {
                             // Find which segment the label row falls into
-                            if waypoints.is_empty() {
+                            let horizontal_y = from_y + 1 + start_y_offset;
+                            
+                            if label_y <= horizontal_y {
+                                from_x
+                            } else if waypoints.is_empty() {
                                 from_x
                             } else {
-                                // Check if before first waypoint
-                                let first_wp = &waypoints[0];
-                                if label_y < first_wp.1 {
-                                    from_x
-                                } else {
-                                    // After first waypoint, use to_x
-                                    to_x
-                                }
+                                waypoints[0].0
                             }
                         }
                     };

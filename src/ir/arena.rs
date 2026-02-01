@@ -57,6 +57,8 @@ pub enum EdgePathArena {
         waypoints_start: usize,
         /// Number of waypoints
         waypoints_len: usize,
+        /// Vertical offset for the start of the edge
+        start_y_offset: usize,
     },
 }
 
@@ -217,6 +219,7 @@ impl<'a> LayoutIRArena<'a> {
             EdgePathArena::MultiSegment {
                 waypoints_start,
                 waypoints_len,
+                ..
             } => &self.waypoints[waypoints_start..waypoints_start + waypoints_len],
             _ => &[],
         }
@@ -448,6 +451,7 @@ impl<'a> LayoutIRArena<'a> {
             EdgePathArena::MultiSegment {
                 waypoints_start,
                 waypoints_len,
+                start_y_offset,
             } => {
                 // Multi-segment path: follow waypoints
                 // Match heap scanline logic: build full path, walk windows of 2
@@ -494,7 +498,10 @@ impl<'a> LayoutIRArena<'a> {
                         }
                     } else {
                         // Diagonal segment: use corner routing at y1 + 1
-                        let corner_y = y1 + 1;
+                        let mut corner_y = y1 + 1;
+                        if is_first_segment {
+                            corner_y += start_y_offset;
+                        }
 
                         // Horizontal segment at corner_y
                         if y == corner_y {
@@ -571,55 +578,14 @@ impl<'a> LayoutIRArena<'a> {
             return None;
         }
 
-        // Initialize all to 0
-        for c in color_buffer[..n].iter_mut() {
-            *c = 0;
-        }
-
-        let mut max_color_used = 0usize;
-
-        // Greedy coloring: for each edge, find colors used by adjacent edges
-        // Two edges are "adjacent" if they share from_id or to_id
+        // Fast O(E) modulo coloring
+        // Since the palette is now interleaved (Warm/Cool/Light/Dark),
+        // sequential indices will be visually distinct.
         for i in 0..n {
-            let edge = &self.edges[i];
-
-            // Track colors used by adjacent edges (already colored)
-            // Support up to 32 colors in fixed-size bitset
-            let mut used_colors = 0u32;
-
-            for j in 0..i {
-                let other = &self.edges[j];
-
-                // Check if edges are adjacent (share a node)
-                let adjacent = edge.from_id == other.from_id
-                    || edge.from_id == other.to_id
-                    || edge.to_id == other.from_id
-                    || edge.to_id == other.to_id;
-
-                if adjacent {
-                    let other_color = color_buffer[j];
-                    if other_color < 32 {
-                        used_colors |= 1 << other_color;
-                    }
-                }
-            }
-
-            // Find the first available color
-            let mut color = 0;
-            for c in 0..palette_size.min(32) {
-                if (used_colors & (1 << c)) == 0 {
-                    color = c;
-                    break;
-                }
-            }
-
-            color_buffer[i] = color;
-            if color > max_color_used {
-                max_color_used = color;
-            }
+            color_buffer[i] = i % palette_size;
         }
 
-        Some(max_color_used + 1)
+        Some(palette_size.min(n))
     }
 
     // =========================================================================
@@ -1115,6 +1081,7 @@ impl<'a> LayoutIRArena<'a> {
             EdgePathArena::MultiSegment {
                 waypoints_start,
                 waypoints_len,
+                start_y_offset,
             } => {
                 let waypoints = &self.waypoints[waypoints_start..waypoints_start + waypoints_len];
                 let segment_count = waypoints_len + 1;
@@ -1158,7 +1125,10 @@ impl<'a> LayoutIRArena<'a> {
                         }
                     } else {
                         // Diagonal: corner routing
-                        let corner_y = y1 + 1;
+                        let mut corner_y = y1 + 1;
+                        if is_first_segment {
+                            corner_y += start_y_offset;
+                        }
 
                         if y == corner_y {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };

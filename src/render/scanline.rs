@@ -60,11 +60,11 @@ impl<'a> LayoutIR<'a> {
     }
 
     /// Render scanline with ANSI colors to a String buffer.
-    /// Uses greedy graph coloring to avoid giving adjacent edges the same color.
+    /// Uses O(E) modulo coloring with a high-contrast palette for performance.
     pub fn render_scanline_colored_to(&self, output: &mut String, palette: Palette) {
         let y_index = self.y_index();
 
-        // Compute optimized color assignments (adjacent edges get different colors)
+        // Compute optimized color assignments (modulo based)
         let palette_colors = palette.colors();
         let edge_color_indices = self.compute_edge_colors(palette_colors.len());
 
@@ -174,7 +174,7 @@ impl<'a> LayoutIR<'a> {
         let y_index = self.y_index();
         let mut skipped_labels: Vec<(&'a str, &'a str, &'a str, u8)> = Vec::new();
 
-        // Compute optimized color assignments (adjacent edges get different colors)
+        // Compute optimized color assignments (modulo based)
         let palette_colors = palette.colors();
         let edge_color_indices = self.compute_edge_colors(palette_colors.len());
 
@@ -617,7 +617,7 @@ impl<'a> LayoutIR<'a> {
                     }
                 }
             }
-            EdgePath::MultiSegment { waypoints } => {
+            EdgePath::MultiSegment { waypoints, start_y_offset } => {
                 // Build full path: source → waypoints → target
                 let mut full_path: Vec<(usize, usize)> = Vec::with_capacity(waypoints.len() + 2);
                 full_path.push((edge.from_x, edge.from_y));
@@ -655,7 +655,10 @@ impl<'a> LayoutIR<'a> {
                     } else {
                         // Diagonal segment: use corner routing
                         // Route: from (x1, y1) → corner at (x1, y1+1) → horizontal to x2 → down to (x2, y2)
-                        let corner_y = y1 + 1;
+                        let mut corner_y = y1 + 1;
+                        if is_first_segment {
+                            corner_y += start_y_offset;
+                        }
 
                         // Horizontal segment at corner_y
                         if y == corner_y {
@@ -973,7 +976,7 @@ impl<'a> LayoutIR<'a> {
                     }
                 }
             }
-            EdgePath::MultiSegment { waypoints } => {
+            EdgePath::MultiSegment { waypoints, start_y_offset } => {
                 // Build full path
                 let mut full_path: Vec<(usize, usize)> = Vec::with_capacity(waypoints.len() + 2);
                 full_path.push((edge.from_x, edge.from_y));
@@ -1010,7 +1013,10 @@ impl<'a> LayoutIR<'a> {
                         }
                     } else {
                         // Diagonal: corner routing
-                        let corner_y = y1 + 1;
+                        let mut corner_y = y1 + 1;
+                        if is_first_segment {
+                            corner_y += start_y_offset;
+                        }
 
                         if y == corner_y {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
