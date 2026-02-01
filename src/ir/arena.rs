@@ -428,11 +428,11 @@ impl<'a> LayoutIRArena<'a> {
                     // Horizontal segment
                     for x in min_x..=max_x {
                         if x < line_buffer.len() {
-                             if line_buffer[x] == ' ' {
-                                 line_buffer[x] = H_LINE;
-                             } else if line_buffer[x] == V_LINE {
-                                 line_buffer[x] = CROSS;
-                             }
+                            if line_buffer[x] == ' ' {
+                                line_buffer[x] = H_LINE;
+                            } else if line_buffer[x] == V_LINE {
+                                line_buffer[x] = CROSS;
+                            }
                         }
                     }
                     // Corners
@@ -531,14 +531,14 @@ impl<'a> LayoutIRArena<'a> {
 
                         // FIXED: Draw vertical segment from y1 to corner_y if there is an offset
                         if is_first_segment && start_y_offset > 0 {
-                             let start_drop = y1 + 1;
-                             if y >= start_drop && y < corner_y && x1 < line_buffer.len() {
-                                 if line_buffer[x1] == H_LINE {
-                                     line_buffer[x1] = CROSS;
-                                 } else if line_buffer[x1] == ' ' {
-                                     line_buffer[x1] = V_LINE;
-                                 }
-                             }
+                            let start_drop = y1 + 1;
+                            if y >= start_drop && y < corner_y && x1 < line_buffer.len() {
+                                if line_buffer[x1] == H_LINE {
+                                    line_buffer[x1] = CROSS;
+                                } else if line_buffer[x1] == ' ' {
+                                    line_buffer[x1] = V_LINE;
+                                }
+                            }
                         }
 
                         // Horizontal segment at corner_y
@@ -577,15 +577,12 @@ impl<'a> LayoutIRArena<'a> {
                         }
 
                         // If not first segment, draw vertical at waypoint y-coordinate
-                        if !is_first_segment
-                            && y == y1
-                            && x1 < line_buffer.len()
-                        {
-                             if line_buffer[x1] == H_LINE {
-                                 line_buffer[x1] = CROSS;
-                             } else if line_buffer[x1] == ' ' {
-                                 line_buffer[x1] = V_LINE;
-                             }
+                        if !is_first_segment && y == y1 && x1 < line_buffer.len() {
+                            if line_buffer[x1] == H_LINE {
+                                line_buffer[x1] = CROSS;
+                            } else if line_buffer[x1] == ' ' {
+                                line_buffer[x1] = V_LINE;
+                            }
                         }
                     }
                 }
@@ -1104,14 +1101,14 @@ impl<'a> LayoutIRArena<'a> {
                     // Horizontal segment
                     for x in min_x..=max_x {
                         if x < line_buffer.len() {
-                             if line_buffer[x] == ' ' {
-                                 line_buffer[x] = H_LINE;
-                                 color_buffer[x] = color;
-                             } else if line_buffer[x] == V_LINE {
-                                 // Crossing: Vertical was here first. Upgrade to CROSS.
-                                 line_buffer[x] = CROSS;
-                                 // Keep existing Vertical color (priority)
-                             }
+                            if line_buffer[x] == ' ' {
+                                line_buffer[x] = H_LINE;
+                                color_buffer[x] = color;
+                            } else if line_buffer[x] == V_LINE {
+                                // Crossing: Vertical was here first. Upgrade to CROSS.
+                                line_buffer[x] = CROSS;
+                                // Keep existing Vertical color (priority)
+                            }
                         }
                     }
                     // Corners
@@ -1217,16 +1214,16 @@ impl<'a> LayoutIRArena<'a> {
 
                         // FIXED: Draw vertical segment from y1 to corner_y if there is an offset
                         if is_first_segment && start_y_offset > 0 {
-                             let start_drop = y1 + 1;
-                             if y >= start_drop && y < corner_y && x1 < line_buffer.len() {
-                                 if line_buffer[x1] == H_LINE {
-                                     line_buffer[x1] = CROSS;
-                                     color_buffer[x1] = color;
-                                 } else if line_buffer[x1] == ' ' {
-                                     line_buffer[x1] = V_LINE;
-                                     color_buffer[x1] = color;
-                                 }
-                             }
+                            let start_drop = y1 + 1;
+                            if y >= start_drop && y < corner_y && x1 < line_buffer.len() {
+                                if line_buffer[x1] == H_LINE {
+                                    line_buffer[x1] = CROSS;
+                                    color_buffer[x1] = color;
+                                } else if line_buffer[x1] == ' ' {
+                                    line_buffer[x1] = V_LINE;
+                                    color_buffer[x1] = color;
+                                }
+                            }
                         }
 
                         if y == corner_y {
@@ -1267,17 +1264,14 @@ impl<'a> LayoutIRArena<'a> {
                             }
                         }
 
-                        if !is_first_segment
-                            && y == y1
-                            && x1 < line_buffer.len()
-                        {
-                             if line_buffer[x1] == H_LINE {
-                                 line_buffer[x1] = CROSS;
-                                 color_buffer[x1] = color;
-                             } else if line_buffer[x1] == ' ' {
-                                 line_buffer[x1] = V_LINE;
-                                 color_buffer[x1] = color;
-                             }
+                        if !is_first_segment && y == y1 && x1 < line_buffer.len() {
+                            if line_buffer[x1] == H_LINE {
+                                line_buffer[x1] = CROSS;
+                                color_buffer[x1] = color;
+                            } else if line_buffer[x1] == ' ' {
+                                line_buffer[x1] = V_LINE;
+                                color_buffer[x1] = color;
+                            }
                         }
                     }
                 }

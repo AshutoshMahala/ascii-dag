@@ -10,7 +10,7 @@
 //!
 //! // Get color by index (cycles through palette)
 //! let color = colors::get(Palette::Ansi, 0);
-//! assert_eq!(color, 39); // Blue
+//! assert_eq!(color, 196); // Bright Red
 //! ```
 
 /// ANSI 256-color codes for terminal edge coloring.
@@ -25,7 +25,6 @@ pub const ANSI: &[u8] = &[
     226, // Bright Yellow
     201, // Magenta
     51,  // Cyan
-
     // Set 2: Deep/Rich Tones (Darker)
     160, // Deep Red
     21,  // Deep Blue
@@ -33,7 +32,6 @@ pub const ANSI: &[u8] = &[
     208, // Orange
     93,  // Purple
     30,  // Teal
-
     // Set 3: Light/Pastel (High Luma)
     203, // Salmon
     75,  // Sky Blue
@@ -41,7 +39,6 @@ pub const ANSI: &[u8] = &[
     215, // Gold
     213, // Pink
     159, // Pale Cyan
-
     // Set 4: Earth & Electric (Mixed)
     166, // Burnt Orange
     57,  // Indigo Blue
@@ -49,7 +46,6 @@ pub const ANSI: &[u8] = &[
     190, // Chartreuse
     129, // Violet
     37,  // Dark Cyan
-
     // Set 5: Extended Range
     220, // Goldenrod
     33,  // Dodger Blue
@@ -171,9 +167,9 @@ mod tests {
 
     #[test]
     fn test_get_cycles_through_palette() {
-        assert_eq!(get(Palette::Ansi, 0), 39);
-        assert_eq!(get(Palette::Ansi, 1), 203);
-        assert_eq!(get(Palette::Ansi, 16), 39); // cycles back
+        assert_eq!(get(Palette::Ansi, 0), ANSI[0]);
+        assert_eq!(get(Palette::Ansi, 1), ANSI[1]);
+        assert_eq!(get(Palette::Ansi, ANSI.len()), ANSI[0]); // cycles back
     }
 
     #[test]

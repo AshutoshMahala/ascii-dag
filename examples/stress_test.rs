@@ -86,7 +86,8 @@ fn run_heap_test(name: &str, dag: &DAG) {
         name.contains("Helix") || name.contains("Hairball") || name.contains("Nightmare");
 
     let output = if use_color {
-        dag.compute_layout().render_scanline_colored_with_legend(Palette::Ansi)
+        dag.compute_layout()
+            .render_scanline_colored_with_legend(Palette::Ansi)
     } else {
         dag.render()
     };

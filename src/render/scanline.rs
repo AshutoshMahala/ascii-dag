@@ -650,7 +650,10 @@ impl<'a> LayoutIR<'a> {
                     }
                 }
             }
-            EdgePath::MultiSegment { waypoints, start_y_offset } => {
+            EdgePath::MultiSegment {
+                waypoints,
+                start_y_offset,
+            } => {
                 // Build full path: source → waypoints → target
                 let mut full_path: Vec<(usize, usize)> = Vec::with_capacity(waypoints.len() + 2);
                 full_path.push((edge.from_x, edge.from_y));
@@ -703,14 +706,14 @@ impl<'a> LayoutIR<'a> {
 
                         // FIXED: Draw vertical segment from y1 to corner_y if there is an offset
                         if is_first_segment && *start_y_offset > 0 {
-                             let start_drop = y1 + 1;
-                             if y >= start_drop && y < corner_y && x1 < buffer.len() {
-                                 if buffer[x1] == H_LINE {
-                                     buffer[x1] = CROSS;
-                                 } else if buffer[x1] == ' ' {
-                                     buffer[x1] = V_LINE;
-                                 }
-                             }
+                            let start_drop = y1 + 1;
+                            if y >= start_drop && y < corner_y && x1 < buffer.len() {
+                                if buffer[x1] == H_LINE {
+                                    buffer[x1] = CROSS;
+                                } else if buffer[x1] == ' ' {
+                                    buffer[x1] = V_LINE;
+                                }
+                            }
                         }
 
                         // Horizontal segment at corner_y
@@ -738,24 +741,24 @@ impl<'a> LayoutIR<'a> {
                         // Also draw on y2-1 with arrow if this is the last segment
                         if y > corner_y && y < y2 && x2 < buffer.len() {
                             if is_last_segment && y == y2 - 1 {
-                                        buffer[x2] = ARROW_DOWN;
-                                    } else {
-                                        if buffer[x2] == H_LINE {
-                                            buffer[x2] = CROSS;
-                                        } else {
-                                            buffer[x2] = V_LINE;
-                                        }
-                                    }
+                                buffer[x2] = ARROW_DOWN;
+                            } else {
+                                if buffer[x2] == H_LINE {
+                                    buffer[x2] = CROSS;
+                                } else {
+                                    buffer[x2] = V_LINE;
+                                }
+                            }
                         }
 
                         // If not the first segment, also draw vertical line AT the waypoint y-coordinate
                         // This fills in the "gap" at the waypoint position
                         if !is_first_segment && y == y1 && x1 < buffer.len() {
-                             if buffer[x1] == H_LINE {
-                                 buffer[x1] = CROSS;
-                             } else if buffer[x1] == ' ' {
-                                 buffer[x1] = V_LINE;
-                             }
+                            if buffer[x1] == H_LINE {
+                                buffer[x1] = CROSS;
+                            } else if buffer[x1] == ' ' {
+                                buffer[x1] = V_LINE;
+                            }
                         }
                     }
                 }
@@ -1088,7 +1091,10 @@ impl<'a> LayoutIR<'a> {
                     }
                 }
             }
-            EdgePath::MultiSegment { waypoints, start_y_offset } => {
+            EdgePath::MultiSegment {
+                waypoints,
+                start_y_offset,
+            } => {
                 // Build full path
                 let mut full_path: Vec<(usize, usize)> = Vec::with_capacity(waypoints.len() + 2);
                 full_path.push((edge.from_x, edge.from_y));
@@ -1144,16 +1150,16 @@ impl<'a> LayoutIR<'a> {
 
                         // FIXED: Draw vertical segment from y1 to corner_y if there is an offset
                         if is_first_segment && *start_y_offset > 0 {
-                             let start_drop = y1 + 1;
-                             if y >= start_drop && y < corner_y && x1 < buffer.len() {
-                                 if buffer[x1] == H_LINE {
-                                     buffer[x1] = CROSS;
-                                     colors[x1] = color;
-                                 } else if buffer[x1] == ' ' {
-                                     buffer[x1] = V_LINE;
-                                     colors[x1] = color;
-                                 }
-                             }
+                            let start_drop = y1 + 1;
+                            if y >= start_drop && y < corner_y && x1 < buffer.len() {
+                                if buffer[x1] == H_LINE {
+                                    buffer[x1] = CROSS;
+                                    colors[x1] = color;
+                                } else if buffer[x1] == ' ' {
+                                    buffer[x1] = V_LINE;
+                                    colors[x1] = color;
+                                }
+                            }
                         }
 
                         if y == corner_y {
