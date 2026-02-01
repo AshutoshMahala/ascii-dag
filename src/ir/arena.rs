@@ -389,6 +389,7 @@ impl<'a> LayoutIRArena<'a> {
         const CORNER_DL: char = '┘';
         const CORNER_UR: char = '┌';
         const CORNER_UL: char = '┐';
+        const CROSS: char = '┼';
 
         let from_y = edge.from_y;
         let to_y = edge.to_y;
@@ -408,7 +409,11 @@ impl<'a> LayoutIRArena<'a> {
                     if y == to_y - 1 {
                         line_buffer[from_x] = ARROW_DOWN;
                     } else {
-                        line_buffer[from_x] = V_LINE;
+                        if line_buffer[from_x] == H_LINE {
+                            line_buffer[from_x] = CROSS;
+                        } else {
+                            line_buffer[from_x] = V_LINE;
+                        }
                     }
                 }
             }
@@ -420,9 +425,14 @@ impl<'a> LayoutIRArena<'a> {
 
                 if y == horizontal_y {
                     // Horizontal segment
+                    // Horizontal segment
                     for x in min_x..=max_x {
-                        if x < line_buffer.len() && line_buffer[x] == ' ' {
-                            line_buffer[x] = H_LINE;
+                        if x < line_buffer.len() {
+                             if line_buffer[x] == ' ' {
+                                 line_buffer[x] = H_LINE;
+                             } else if line_buffer[x] == V_LINE {
+                                 line_buffer[x] = CROSS;
+                             }
                         }
                     }
                     // Corners
@@ -435,7 +445,11 @@ impl<'a> LayoutIRArena<'a> {
                 } else if y > from_y && y < horizontal_y {
                     // Vertical from source to horizontal
                     if x1 < line_buffer.len() {
-                        line_buffer[x1] = V_LINE;
+                        if line_buffer[x1] == H_LINE {
+                            line_buffer[x1] = CROSS;
+                        } else {
+                            line_buffer[x1] = V_LINE;
+                        }
                     }
                 } else if y > horizontal_y && y < to_y {
                     // Vertical from horizontal to target
@@ -443,7 +457,11 @@ impl<'a> LayoutIRArena<'a> {
                         if y == to_y - 1 {
                             line_buffer[x2] = ARROW_DOWN;
                         } else {
-                            line_buffer[x2] = V_LINE;
+                            if line_buffer[x2] == H_LINE {
+                                line_buffer[x2] = CROSS;
+                            } else {
+                                line_buffer[x2] = V_LINE;
+                            }
                         }
                     }
                 }
@@ -482,8 +500,12 @@ impl<'a> LayoutIRArena<'a> {
                         if y >= start_y && y < y2 && x1 < line_buffer.len() {
                             if is_last_segment && y == y2 - 1 {
                                 line_buffer[x1] = ARROW_DOWN;
-                            } else if line_buffer[x1] == ' ' {
-                                line_buffer[x1] = V_LINE;
+                            } else {
+                                if line_buffer[x1] == H_LINE {
+                                    line_buffer[x1] = CROSS;
+                                } else if line_buffer[x1] == ' ' {
+                                    line_buffer[x1] = V_LINE;
+                                }
                             }
                         }
                     } else if y1 == y2 {
@@ -491,8 +513,12 @@ impl<'a> LayoutIRArena<'a> {
                         if y == y1 {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
                             for x in min_x..=max_x {
-                                if x < line_buffer.len() && line_buffer[x] == ' ' {
-                                    line_buffer[x] = H_LINE;
+                                if x < line_buffer.len() {
+                                    if line_buffer[x] == ' ' {
+                                        line_buffer[x] = H_LINE;
+                                    } else if line_buffer[x] == V_LINE {
+                                        line_buffer[x] = CROSS;
+                                    }
                                 }
                             }
                         }
@@ -501,6 +527,18 @@ impl<'a> LayoutIRArena<'a> {
                         let mut corner_y = y1 + 1;
                         if is_first_segment {
                             corner_y += start_y_offset;
+                        }
+
+                        // FIXED: Draw vertical segment from y1 to corner_y if there is an offset
+                        if is_first_segment && start_y_offset > 0 {
+                             let start_drop = y1 + 1;
+                             if y >= start_drop && y < corner_y && x1 < line_buffer.len() {
+                                 if line_buffer[x1] == H_LINE {
+                                     line_buffer[x1] = CROSS;
+                                 } else if line_buffer[x1] == ' ' {
+                                     line_buffer[x1] = V_LINE;
+                                 }
+                             }
                         }
 
                         // Horizontal segment at corner_y
@@ -514,8 +552,12 @@ impl<'a> LayoutIRArena<'a> {
                                     } else if x == x2 {
                                         line_buffer[x] =
                                             if x1 < x2 { CORNER_UL } else { CORNER_UR };
-                                    } else if line_buffer[x] == ' ' {
-                                        line_buffer[x] = H_LINE;
+                                    } else {
+                                        if line_buffer[x] == ' ' {
+                                            line_buffer[x] = H_LINE;
+                                        } else if line_buffer[x] == V_LINE {
+                                            line_buffer[x] = CROSS;
+                                        }
                                     }
                                 }
                             }
@@ -525,8 +567,12 @@ impl<'a> LayoutIRArena<'a> {
                         if y > corner_y && y < y2 && x2 < line_buffer.len() {
                             if is_last_segment && y == y2 - 1 {
                                 line_buffer[x2] = ARROW_DOWN;
-                            } else if line_buffer[x2] == ' ' {
-                                line_buffer[x2] = V_LINE;
+                            } else {
+                                if line_buffer[x2] == H_LINE {
+                                    line_buffer[x2] = CROSS;
+                                } else {
+                                    line_buffer[x2] = V_LINE;
+                                }
                             }
                         }
 
@@ -534,9 +580,12 @@ impl<'a> LayoutIRArena<'a> {
                         if !is_first_segment
                             && y == y1
                             && x1 < line_buffer.len()
-                            && line_buffer[x1] == ' '
                         {
-                            line_buffer[x1] = V_LINE;
+                             if line_buffer[x1] == H_LINE {
+                                 line_buffer[x1] = CROSS;
+                             } else if line_buffer[x1] == ' ' {
+                                 line_buffer[x1] = V_LINE;
+                             }
                         }
                     }
                 }
@@ -1017,6 +1066,7 @@ impl<'a> LayoutIRArena<'a> {
         const CORNER_DL: char = '┘';
         const CORNER_UR: char = '┌';
         const CORNER_UL: char = '┐';
+        const CROSS: char = '┼';
 
         let from_y = edge.from_y;
         let to_y = edge.to_y;
@@ -1032,10 +1082,17 @@ impl<'a> LayoutIRArena<'a> {
                 if from_x < line_buffer.len() {
                     if y == to_y - 1 {
                         line_buffer[from_x] = ARROW_DOWN;
+                        color_buffer[from_x] = color;
                     } else {
-                        line_buffer[from_x] = V_LINE;
+                        if line_buffer[from_x] == H_LINE {
+                            line_buffer[from_x] = CROSS;
+                            // Vertical color takes priority
+                            color_buffer[from_x] = color;
+                        } else {
+                            line_buffer[from_x] = V_LINE;
+                            color_buffer[from_x] = color;
+                        }
                     }
-                    color_buffer[from_x] = color;
                 }
             }
             EdgePathArena::Corner { horizontal_y } => {
@@ -1046,9 +1103,15 @@ impl<'a> LayoutIRArena<'a> {
                 if y == horizontal_y {
                     // Horizontal segment
                     for x in min_x..=max_x {
-                        if x < line_buffer.len() && line_buffer[x] == ' ' {
-                            line_buffer[x] = H_LINE;
-                            color_buffer[x] = color;
+                        if x < line_buffer.len() {
+                             if line_buffer[x] == ' ' {
+                                 line_buffer[x] = H_LINE;
+                                 color_buffer[x] = color;
+                             } else if line_buffer[x] == V_LINE {
+                                 // Crossing: Vertical was here first. Upgrade to CROSS.
+                                 line_buffer[x] = CROSS;
+                                 // Keep existing Vertical color (priority)
+                             }
                         }
                     }
                     // Corners
@@ -1063,18 +1126,29 @@ impl<'a> LayoutIRArena<'a> {
                 } else if y > from_y && y < horizontal_y {
                     // Vertical from source to horizontal
                     if x1 < line_buffer.len() {
-                        line_buffer[x1] = V_LINE;
-                        color_buffer[x1] = color;
+                        if line_buffer[x1] == H_LINE {
+                            line_buffer[x1] = CROSS;
+                            color_buffer[x1] = color;
+                        } else {
+                            line_buffer[x1] = V_LINE;
+                            color_buffer[x1] = color;
+                        }
                     }
                 } else if y > horizontal_y && y < to_y {
                     // Vertical from horizontal to target
                     if x2 < line_buffer.len() {
                         if y == to_y - 1 {
                             line_buffer[x2] = ARROW_DOWN;
+                            color_buffer[x2] = color;
                         } else {
-                            line_buffer[x2] = V_LINE;
+                            if line_buffer[x2] == H_LINE {
+                                line_buffer[x2] = CROSS;
+                                color_buffer[x2] = color;
+                            } else {
+                                line_buffer[x2] = V_LINE;
+                                color_buffer[x2] = color;
+                            }
                         }
-                        color_buffer[x2] = color;
                     }
                 }
             }
@@ -1107,19 +1181,30 @@ impl<'a> LayoutIRArena<'a> {
                         if y >= start_y && y < y2 && x1 < line_buffer.len() {
                             if is_last_segment && y == y2 - 1 {
                                 line_buffer[x1] = ARROW_DOWN;
-                            } else if line_buffer[x1] == ' ' {
-                                line_buffer[x1] = V_LINE;
+                                color_buffer[x1] = color;
+                            } else {
+                                if line_buffer[x1] == H_LINE {
+                                    line_buffer[x1] = CROSS;
+                                    color_buffer[x1] = color;
+                                } else if line_buffer[x1] == ' ' {
+                                    line_buffer[x1] = V_LINE;
+                                    color_buffer[x1] = color;
+                                }
                             }
-                            color_buffer[x1] = color;
                         }
                     } else if y1 == y2 {
                         // Pure horizontal segment
                         if y == y1 {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
                             for x in min_x..=max_x {
-                                if x < line_buffer.len() && line_buffer[x] == ' ' {
-                                    line_buffer[x] = H_LINE;
-                                    color_buffer[x] = color;
+                                if x < line_buffer.len() {
+                                    if line_buffer[x] == ' ' {
+                                        line_buffer[x] = H_LINE;
+                                        color_buffer[x] = color;
+                                    } else if line_buffer[x] == V_LINE {
+                                        line_buffer[x] = CROSS;
+                                        // Keep vertical color
+                                    }
                                 }
                             }
                         }
@@ -1130,6 +1215,20 @@ impl<'a> LayoutIRArena<'a> {
                             corner_y += start_y_offset;
                         }
 
+                        // FIXED: Draw vertical segment from y1 to corner_y if there is an offset
+                        if is_first_segment && start_y_offset > 0 {
+                             let start_drop = y1 + 1;
+                             if y >= start_drop && y < corner_y && x1 < line_buffer.len() {
+                                 if line_buffer[x1] == H_LINE {
+                                     line_buffer[x1] = CROSS;
+                                     color_buffer[x1] = color;
+                                 } else if line_buffer[x1] == ' ' {
+                                     line_buffer[x1] = V_LINE;
+                                     color_buffer[x1] = color;
+                                 }
+                             }
+                        }
+
                         if y == corner_y {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
                             for x in min_x..=max_x {
@@ -1137,13 +1236,18 @@ impl<'a> LayoutIRArena<'a> {
                                     if x == x1 {
                                         line_buffer[x] =
                                             if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                                        color_buffer[x] = color;
                                     } else if x == x2 {
                                         line_buffer[x] =
                                             if x1 < x2 { CORNER_UL } else { CORNER_UR };
+                                        color_buffer[x] = color;
                                     } else if line_buffer[x] == ' ' {
                                         line_buffer[x] = H_LINE;
+                                        color_buffer[x] = color;
+                                    } else if line_buffer[x] == V_LINE {
+                                        line_buffer[x] = CROSS;
+                                        // Keep vertical color
                                     }
-                                    color_buffer[x] = color;
                                 }
                             }
                         }
@@ -1151,19 +1255,29 @@ impl<'a> LayoutIRArena<'a> {
                         if y > corner_y && y < y2 && x2 < line_buffer.len() {
                             if is_last_segment && y == y2 - 1 {
                                 line_buffer[x2] = ARROW_DOWN;
-                            } else if line_buffer[x2] == ' ' {
-                                line_buffer[x2] = V_LINE;
+                                color_buffer[x2] = color;
+                            } else {
+                                if line_buffer[x2] == H_LINE {
+                                    line_buffer[x2] = CROSS;
+                                    color_buffer[x2] = color;
+                                } else {
+                                    line_buffer[x2] = V_LINE;
+                                    color_buffer[x2] = color;
+                                }
                             }
-                            color_buffer[x2] = color;
                         }
 
                         if !is_first_segment
                             && y == y1
                             && x1 < line_buffer.len()
-                            && line_buffer[x1] == ' '
                         {
-                            line_buffer[x1] = V_LINE;
-                            color_buffer[x1] = color;
+                             if line_buffer[x1] == H_LINE {
+                                 line_buffer[x1] = CROSS;
+                                 color_buffer[x1] = color;
+                             } else if line_buffer[x1] == ' ' {
+                                 line_buffer[x1] = V_LINE;
+                                 color_buffer[x1] = color;
+                             }
                         }
                     }
                 }
