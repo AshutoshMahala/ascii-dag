@@ -25,6 +25,7 @@ const CORNER_DR: char = '└';
 const CORNER_DL: char = '┘';
 const CORNER_UR: char = '┌';
 const CORNER_UL: char = '┐';
+const CROSS: char = '┼';
 
 impl<'a> LayoutIR<'a> {
     /// Render using the scanline approach with Y-index.
@@ -60,11 +61,11 @@ impl<'a> LayoutIR<'a> {
     }
 
     /// Render scanline with ANSI colors to a String buffer.
-    /// Uses greedy graph coloring to avoid giving adjacent edges the same color.
+    /// Uses O(E) modulo coloring with a high-contrast palette for performance.
     pub fn render_scanline_colored_to(&self, output: &mut String, palette: Palette) {
         let y_index = self.y_index();
 
-        // Compute optimized color assignments (adjacent edges get different colors)
+        // Compute optimized color assignments (modulo based)
         let palette_colors = palette.colors();
         let edge_color_indices = self.compute_edge_colors(palette_colors.len());
 
@@ -174,7 +175,7 @@ impl<'a> LayoutIR<'a> {
         let y_index = self.y_index();
         let mut skipped_labels: Vec<(&'a str, &'a str, &'a str, u8)> = Vec::new();
 
-        // Compute optimized color assignments (adjacent edges get different colors)
+        // Compute optimized color assignments (modulo based)
         let palette_colors = palette.colors();
         let edge_color_indices = self.compute_edge_colors(palette_colors.len());
 
@@ -512,7 +513,11 @@ impl<'a> LayoutIR<'a> {
                         buffer[x] = ARROW_DOWN;
                     } else {
                         // Vertical line in between
-                        buffer[x] = V_LINE;
+                        if buffer[x] == H_LINE {
+                            buffer[x] = CROSS;
+                        } else {
+                            buffer[x] = V_LINE;
+                        }
                     }
                 }
             }
@@ -524,8 +529,12 @@ impl<'a> LayoutIR<'a> {
                 if y == *horizontal_y {
                     // Horizontal segment
                     for x in min_x..=max_x {
-                        if x < buffer.len() && buffer[x] == ' ' {
-                            buffer[x] = H_LINE;
+                        if x < buffer.len() {
+                            if buffer[x] == ' ' {
+                                buffer[x] = H_LINE;
+                            } else if buffer[x] == V_LINE {
+                                buffer[x] = CROSS;
+                            }
                         }
                     }
                     // Corners
@@ -538,7 +547,11 @@ impl<'a> LayoutIR<'a> {
                 } else if y > edge.from_y && y < *horizontal_y {
                     // Vertical from source to horizontal
                     if x1 < buffer.len() {
-                        buffer[x1] = V_LINE;
+                        if buffer[x1] == H_LINE {
+                            buffer[x1] = CROSS;
+                        } else {
+                            buffer[x1] = V_LINE;
+                        }
                     }
                 } else if y > *horizontal_y && y < edge.to_y {
                     // Vertical from horizontal to target
@@ -547,7 +560,11 @@ impl<'a> LayoutIR<'a> {
                         if y == edge.to_y - 1 {
                             buffer[x2] = ARROW_DOWN;
                         } else {
-                            buffer[x2] = V_LINE;
+                            if buffer[x2] == H_LINE {
+                                buffer[x2] = CROSS;
+                            } else {
+                                buffer[x2] = V_LINE;
+                            }
                         }
                     }
                 }
@@ -577,15 +594,23 @@ impl<'a> LayoutIR<'a> {
                                 buffer[x] = CORNER_DR; // └
                             } else if x == *channel_x {
                                 buffer[x] = CORNER_UL; // ┐
-                            } else if buffer[x] == ' ' {
-                                buffer[x] = H_LINE;
+                            } else {
+                                if buffer[x] == ' ' {
+                                    buffer[x] = H_LINE;
+                                } else if buffer[x] == V_LINE {
+                                    buffer[x] = CROSS;
+                                }
                             }
                         }
                     }
                 } else if y > *start_y && y < *end_y {
                     // Vertical line in channel
                     if *channel_x < buffer.len() {
-                        buffer[*channel_x] = V_LINE;
+                        if buffer[*channel_x] == H_LINE {
+                            buffer[*channel_x] = CROSS;
+                        } else {
+                            buffer[*channel_x] = V_LINE;
+                        }
                     }
                 } else if y == *end_y {
                     // Horizontal from channel back to target (going left)
@@ -601,8 +626,12 @@ impl<'a> LayoutIR<'a> {
                                 } else {
                                     buffer[x] = CORNER_UR; // ┌
                                 }
-                            } else if buffer[x] == ' ' {
-                                buffer[x] = H_LINE;
+                            } else {
+                                if buffer[x] == ' ' {
+                                    buffer[x] = H_LINE;
+                                } else if buffer[x] == V_LINE {
+                                    buffer[x] = CROSS;
+                                }
                             }
                         }
                     }
@@ -612,12 +641,19 @@ impl<'a> LayoutIR<'a> {
                         if y == edge.to_y - 1 {
                             buffer[to_x] = ARROW_DOWN;
                         } else {
-                            buffer[to_x] = V_LINE;
+                            if buffer[to_x] == H_LINE {
+                                buffer[to_x] = CROSS;
+                            } else {
+                                buffer[to_x] = V_LINE;
+                            }
                         }
                     }
                 }
             }
-            EdgePath::MultiSegment { waypoints } => {
+            EdgePath::MultiSegment {
+                waypoints,
+                start_y_offset,
+            } => {
                 // Build full path: source → waypoints → target
                 let mut full_path: Vec<(usize, usize)> = Vec::with_capacity(waypoints.len() + 2);
                 full_path.push((edge.from_x, edge.from_y));
@@ -638,8 +674,12 @@ impl<'a> LayoutIR<'a> {
                         if y >= start_y && y < y2 && x1 < buffer.len() {
                             if is_last_segment && y == y2 - 1 {
                                 buffer[x1] = ARROW_DOWN;
-                            } else if buffer[x1] == ' ' {
-                                buffer[x1] = V_LINE;
+                            } else {
+                                if buffer[x1] == H_LINE {
+                                    buffer[x1] = CROSS;
+                                } else if buffer[x1] == ' ' {
+                                    buffer[x1] = V_LINE;
+                                }
                             }
                         }
                     } else if y1 == y2 {
@@ -647,15 +687,34 @@ impl<'a> LayoutIR<'a> {
                         if y == y1 {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
                             for x in min_x..=max_x {
-                                if x < buffer.len() && buffer[x] == ' ' {
-                                    buffer[x] = H_LINE;
+                                if x < buffer.len() {
+                                    if buffer[x] == ' ' {
+                                        buffer[x] = H_LINE;
+                                    } else if buffer[x] == V_LINE {
+                                        buffer[x] = CROSS;
+                                    }
                                 }
                             }
                         }
                     } else {
                         // Diagonal segment: use corner routing
                         // Route: from (x1, y1) → corner at (x1, y1+1) → horizontal to x2 → down to (x2, y2)
-                        let corner_y = y1 + 1;
+                        let mut corner_y = y1 + 1;
+                        if is_first_segment {
+                            corner_y += start_y_offset;
+                        }
+
+                        // FIXED: Draw vertical segment from y1 to corner_y if there is an offset
+                        if is_first_segment && *start_y_offset > 0 {
+                            let start_drop = y1 + 1;
+                            if y >= start_drop && y < corner_y && x1 < buffer.len() {
+                                if buffer[x1] == H_LINE {
+                                    buffer[x1] = CROSS;
+                                } else if buffer[x1] == ' ' {
+                                    buffer[x1] = V_LINE;
+                                }
+                            }
+                        }
 
                         // Horizontal segment at corner_y
                         if y == corner_y {
@@ -666,8 +725,12 @@ impl<'a> LayoutIR<'a> {
                                         buffer[x] = if x1 < x2 { CORNER_DR } else { CORNER_DL };
                                     } else if x == x2 {
                                         buffer[x] = if x1 < x2 { CORNER_UL } else { CORNER_UR };
-                                    } else if buffer[x] == ' ' {
-                                        buffer[x] = H_LINE;
+                                    } else {
+                                        if buffer[x] == ' ' {
+                                            buffer[x] = H_LINE;
+                                        } else if buffer[x] == V_LINE {
+                                            buffer[x] = CROSS;
+                                        }
                                     }
                                 }
                             }
@@ -679,15 +742,23 @@ impl<'a> LayoutIR<'a> {
                         if y > corner_y && y < y2 && x2 < buffer.len() {
                             if is_last_segment && y == y2 - 1 {
                                 buffer[x2] = ARROW_DOWN;
-                            } else if buffer[x2] == ' ' {
-                                buffer[x2] = V_LINE;
+                            } else {
+                                if buffer[x2] == H_LINE {
+                                    buffer[x2] = CROSS;
+                                } else {
+                                    buffer[x2] = V_LINE;
+                                }
                             }
                         }
 
                         // If not the first segment, also draw vertical line AT the waypoint y-coordinate
                         // This fills in the "gap" at the waypoint position
-                        if !is_first_segment && y == y1 && x1 < buffer.len() && buffer[x1] == ' ' {
-                            buffer[x1] = V_LINE;
+                        if !is_first_segment && y == y1 && x1 < buffer.len() {
+                            if buffer[x1] == H_LINE {
+                                buffer[x1] = CROSS;
+                            } else if buffer[x1] == ' ' {
+                                buffer[x1] = V_LINE;
+                            }
                         }
                     }
                 }
@@ -869,10 +940,18 @@ impl<'a> LayoutIR<'a> {
                 if x < buffer.len() && y > edge.from_y && y < edge.to_y {
                     if y == edge.to_y - 1 {
                         buffer[x] = ARROW_DOWN;
+                        colors[x] = color;
                     } else {
-                        buffer[x] = V_LINE;
+                        // Vertical segment: overwrite or form crossing
+                        if buffer[x] == H_LINE {
+                            buffer[x] = CROSS;
+                            // Vertical color takes priority on crossing
+                            colors[x] = color;
+                        } else {
+                            buffer[x] = V_LINE;
+                            colors[x] = color;
+                        }
                     }
-                    colors[x] = color;
                 }
             }
             EdgePath::Corner { horizontal_y } => {
@@ -883,9 +962,15 @@ impl<'a> LayoutIR<'a> {
                 if y == *horizontal_y {
                     // Horizontal segment
                     for x in min_x..=max_x {
-                        if x < buffer.len() && buffer[x] == ' ' {
-                            buffer[x] = H_LINE;
-                            colors[x] = color;
+                        if x < buffer.len() {
+                            if buffer[x] == ' ' {
+                                buffer[x] = H_LINE;
+                                colors[x] = color;
+                            } else if buffer[x] == V_LINE {
+                                // Crossing: Vertical was here first. Upgrade to CROSS.
+                                buffer[x] = CROSS;
+                                // Keep existing Vertical color (priority)
+                            }
                         }
                     }
                     // Corners
@@ -900,18 +985,29 @@ impl<'a> LayoutIR<'a> {
                 } else if y > edge.from_y && y < *horizontal_y {
                     // Vertical from source to horizontal
                     if x1 < buffer.len() {
-                        buffer[x1] = V_LINE;
-                        colors[x1] = color;
+                        if buffer[x1] == H_LINE {
+                            buffer[x1] = CROSS;
+                            colors[x1] = color;
+                        } else {
+                            buffer[x1] = V_LINE;
+                            colors[x1] = color;
+                        }
                     }
                 } else if y > *horizontal_y && y < edge.to_y {
                     // Vertical from horizontal to target
                     if x2 < buffer.len() {
                         if y == edge.to_y - 1 {
                             buffer[x2] = ARROW_DOWN;
+                            colors[x2] = color;
                         } else {
-                            buffer[x2] = V_LINE;
+                            if buffer[x2] == H_LINE {
+                                buffer[x2] = CROSS;
+                                colors[x2] = color;
+                            } else {
+                                buffer[x2] = V_LINE;
+                                colors[x2] = color;
+                            }
                         }
-                        colors[x2] = color;
                     }
                 }
             }
@@ -929,18 +1025,29 @@ impl<'a> LayoutIR<'a> {
                         if x < buffer.len() {
                             if x == from_x {
                                 buffer[x] = CORNER_DR;
+                                colors[x] = color;
                             } else if x == *channel_x {
                                 buffer[x] = CORNER_UL;
-                            } else if buffer[x] == ' ' {
-                                buffer[x] = H_LINE;
+                                colors[x] = color;
+                            } else {
+                                if buffer[x] == ' ' {
+                                    buffer[x] = H_LINE;
+                                    colors[x] = color;
+                                } else if buffer[x] == V_LINE {
+                                    buffer[x] = CROSS;
+                                    // Keep vertical color
+                                }
                             }
-                            colors[x] = color;
                         }
                     }
                 } else if y > *start_y && y < *end_y {
                     // Vertical in channel
                     if *channel_x < buffer.len() {
-                        buffer[*channel_x] = V_LINE;
+                        if buffer[*channel_x] == H_LINE {
+                            buffer[*channel_x] = CROSS;
+                        } else {
+                            buffer[*channel_x] = V_LINE;
+                        }
                         colors[*channel_x] = color;
                     }
                 } else if y == *end_y {
@@ -949,16 +1056,23 @@ impl<'a> LayoutIR<'a> {
                         if x < buffer.len() {
                             if x == *channel_x {
                                 buffer[x] = CORNER_DL;
+                                colors[x] = color;
                             } else if x == to_x {
                                 if *end_y + 1 >= edge.to_y {
                                     buffer[x] = ARROW_DOWN;
                                 } else {
                                     buffer[x] = CORNER_UR;
                                 }
-                            } else if buffer[x] == ' ' {
-                                buffer[x] = H_LINE;
+                                colors[x] = color;
+                            } else {
+                                if buffer[x] == ' ' {
+                                    buffer[x] = H_LINE;
+                                    colors[x] = color;
+                                } else if buffer[x] == V_LINE {
+                                    buffer[x] = CROSS;
+                                    // Keep vertical color
+                                }
                             }
-                            colors[x] = color;
                         }
                     }
                 } else if y > *end_y && y < edge.to_y {
@@ -967,13 +1081,20 @@ impl<'a> LayoutIR<'a> {
                         if y == edge.to_y - 1 {
                             buffer[to_x] = ARROW_DOWN;
                         } else {
-                            buffer[to_x] = V_LINE;
+                            if buffer[to_x] == H_LINE {
+                                buffer[to_x] = CROSS;
+                            } else {
+                                buffer[to_x] = V_LINE;
+                            }
                         }
                         colors[to_x] = color;
                     }
                 }
             }
-            EdgePath::MultiSegment { waypoints } => {
+            EdgePath::MultiSegment {
+                waypoints,
+                start_y_offset,
+            } => {
                 // Build full path
                 let mut full_path: Vec<(usize, usize)> = Vec::with_capacity(waypoints.len() + 2);
                 full_path.push((edge.from_x, edge.from_y));
@@ -992,25 +1113,54 @@ impl<'a> LayoutIR<'a> {
                         if y >= start_y && y < y2 && x1 < buffer.len() {
                             if is_last_segment && y == y2 - 1 {
                                 buffer[x1] = ARROW_DOWN;
-                            } else if buffer[x1] == ' ' {
-                                buffer[x1] = V_LINE;
+                                colors[x1] = color;
+                            } else {
+                                if buffer[x1] == H_LINE {
+                                    buffer[x1] = CROSS;
+                                    // Vertical color priority
+                                    colors[x1] = color;
+                                } else if buffer[x1] == ' ' {
+                                    buffer[x1] = V_LINE;
+                                    colors[x1] = color;
+                                }
                             }
-                            colors[x1] = color;
                         }
                     } else if y1 == y2 {
                         // Horizontal segment
                         if y == y1 {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
                             for x in min_x..=max_x {
-                                if x < buffer.len() && buffer[x] == ' ' {
-                                    buffer[x] = H_LINE;
-                                    colors[x] = color;
+                                if x < buffer.len() {
+                                    if buffer[x] == ' ' {
+                                        buffer[x] = H_LINE;
+                                        colors[x] = color;
+                                    } else if buffer[x] == V_LINE {
+                                        buffer[x] = CROSS;
+                                        // Keep vertical color
+                                    }
                                 }
                             }
                         }
                     } else {
                         // Diagonal: corner routing
-                        let corner_y = y1 + 1;
+                        let mut corner_y = y1 + 1;
+                        if is_first_segment {
+                            corner_y += start_y_offset;
+                        }
+
+                        // FIXED: Draw vertical segment from y1 to corner_y if there is an offset
+                        if is_first_segment && *start_y_offset > 0 {
+                            let start_drop = y1 + 1;
+                            if y >= start_drop && y < corner_y && x1 < buffer.len() {
+                                if buffer[x1] == H_LINE {
+                                    buffer[x1] = CROSS;
+                                    colors[x1] = color;
+                                } else if buffer[x1] == ' ' {
+                                    buffer[x1] = V_LINE;
+                                    colors[x1] = color;
+                                }
+                            }
+                        }
 
                         if y == corner_y {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
@@ -1018,12 +1168,19 @@ impl<'a> LayoutIR<'a> {
                                 if x < buffer.len() {
                                     if x == x1 {
                                         buffer[x] = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                                        colors[x] = color; // Corners use current color
                                     } else if x == x2 {
                                         buffer[x] = if x1 < x2 { CORNER_UL } else { CORNER_UR };
-                                    } else if buffer[x] == ' ' {
-                                        buffer[x] = H_LINE;
+                                        colors[x] = color;
+                                    } else {
+                                        if buffer[x] == ' ' {
+                                            buffer[x] = H_LINE;
+                                            colors[x] = color;
+                                        } else if buffer[x] == V_LINE {
+                                            buffer[x] = CROSS;
+                                            // Keep vertical color
+                                        }
                                     }
-                                    colors[x] = color;
                                 }
                             }
                         }
@@ -1031,15 +1188,26 @@ impl<'a> LayoutIR<'a> {
                         if y > corner_y && y < y2 && x2 < buffer.len() {
                             if is_last_segment && y == y2 - 1 {
                                 buffer[x2] = ARROW_DOWN;
-                            } else if buffer[x2] == ' ' {
-                                buffer[x2] = V_LINE;
+                            } else {
+                                if buffer[x2] == H_LINE {
+                                    buffer[x2] = CROSS;
+                                } else {
+                                    buffer[x2] = V_LINE;
+                                }
                             }
                             colors[x2] = color;
                         }
 
-                        if !is_first_segment && y == y1 && x1 < buffer.len() && buffer[x1] == ' ' {
-                            buffer[x1] = V_LINE;
-                            colors[x1] = color;
+                        if !is_first_segment && y == y1 && x1 < buffer.len() {
+                            // Vertical segment start (MultiSegment corner is handled by previous Horizontal loop usually?)
+                            // Line 1046 overwrites only if ' '
+                            if buffer[x1] == H_LINE {
+                                buffer[x1] = CROSS;
+                                colors[x1] = color;
+                            } else if buffer[x1] == ' ' {
+                                buffer[x1] = V_LINE;
+                                colors[x1] = color;
+                            }
                         }
                     }
                 }

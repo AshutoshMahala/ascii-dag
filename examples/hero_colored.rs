@@ -29,11 +29,52 @@ fn main() {
     dag.add_edge(6, 8, Some("skip"));
 
     println!("With ANSI colors and edge labels:");
-    let ir = dag.compute_layout();
-    println!("{}", ir.render_scanline_colored_with_legend(Palette::Ansi));
+
+    let args: Vec<String> = std::env::args().collect();
+    let use_arena = args.iter().any(|a| a == "--arena");
+
+    if use_arena {
+        use ascii_dag::arena::Arena;
+        println!("(Arena Mode)");
+        // Estimate size and allocate buffers
+        let arena_size = dag.estimate_layout_arena_size();
+        let mut temp_buffer = vec![0u8; arena_size];
+        let mut output_buffer = vec![0u8; arena_size];
+        let mut temp_arena = Arena::new(&mut temp_buffer);
+        let mut output_arena = Arena::new(&mut output_buffer); // Restored
+
+        if let Some(ir) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
+            // Calculate colors manually (Arena API requires provided buffer)
+            let mut edge_colors = vec![0usize; ir.edge_count()];
+            let palette_colors = Palette::Ansi.colors();
+            ir.compute_edge_colors(&mut edge_colors, palette_colors.len());
+
+            // Allocate render buffers
+            // Estimate size: width * height * (~10 chars for color codes + char) + legend
+            let render_size = ir.estimate_render_size() * 10 + 4096;
+            let mut render_buffer = vec![0u8; render_size];
+            let mut line_buffer = vec![' '; ir.width().max(1) + 16];
+            let mut color_buffer = vec![0u8; ir.width().max(1) + 16];
+            let mut skipped_buffer = vec![false; ir.edge_count().max(1)]; // For legend
+
+            if let Some(len) = ir.render_to_buffer_colored_with_legend(
+                &mut render_buffer,
+                &mut line_buffer,
+                &mut color_buffer,
+                &edge_colors,
+                palette_colors,
+                &mut skipped_buffer, // Needs a buffer to track skipped edges for legend
+            ) {
+                println!("{}", std::str::from_utf8(&render_buffer[..len]).unwrap());
+            }
+        }
+    } else {
+        let ir = dag.compute_layout();
+        println!("{}", ir.render_scanline_colored_with_legend(Palette::Ansi));
+    }
 
     // Benchmark: test with many labeled edges
-    println!("\n--- Performance test ---");
+    println!("\n--- Performance test (Heap only for bench section) ---");
     for num_nodes in [20, 50, 100, 200, 500] {
         let mut big_dag = DAG::new();
         for i in 0..num_nodes {

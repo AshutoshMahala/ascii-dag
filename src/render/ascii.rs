@@ -921,7 +921,7 @@ impl<'a> DAG<'a> {
 
                 // Add spacing to reach this node's position (batch operation)
                 if node_x > current_col {
-                    output.extend(std::iter::repeat_n(' ', node_x - current_col));
+                    output.extend(core::iter::repeat_n(' ', node_x - current_col));
                     current_col = node_x;
                 }
 

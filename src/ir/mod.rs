@@ -111,6 +111,8 @@ pub enum EdgePath {
     MultiSegment {
         /// Waypoints: (x, y) coordinates the edge passes through
         waypoints: Vec<(usize, usize)>,
+        /// Vertical offset for the start of the edge (to prevent overlaps at source)
+        start_y_offset: usize,
     },
 }
 
@@ -307,49 +309,17 @@ impl<'a> LayoutIR<'a> {
     /// colors when possible. This reduces visual confusion in complex graphs.
     ///
     /// Returns a Vec where index i is the color index for edge i.
+    /// Returns a Vec where index i is the color index for edge i.
     pub fn compute_edge_colors(&self, palette_size: usize) -> Vec<usize> {
         let n = self.edges.len();
-        let mut colors = vec![0usize; n];
-
         if n == 0 || palette_size == 0 {
-            return colors;
+            return vec![0; n];
         }
 
-        // Build adjacency: for each edge, find edges that share a node
-        // Two edges are "adjacent" if they share from_id or to_id
-        for (i, edge) in self.edges.iter().enumerate() {
-            // Collect colors used by adjacent edges (already colored)
-            let mut used_colors = [false; 32]; // Support up to 32 colors
-
-            for (j, other) in self.edges.iter().enumerate() {
-                if j >= i {
-                    break; // Only look at already-colored edges
-                }
-
-                // Check if edges are adjacent (share a node)
-                let adjacent = edge.from_id == other.from_id
-                    || edge.from_id == other.to_id
-                    || edge.to_id == other.from_id
-                    || edge.to_id == other.to_id;
-
-                if adjacent && colors[j] < 32 {
-                    used_colors[colors[j]] = true;
-                }
-            }
-
-            // Find the first available color
-            let mut color = 0;
-            for c in 0..palette_size.min(32) {
-                if !used_colors[c] {
-                    color = c;
-                    break;
-                }
-            }
-
-            colors[i] = color;
-        }
-
-        colors
+        // Fast O(E) modulo coloring
+        // Since the palette is now interleaved (Warm/Cool/Light/Dark),
+        // sequential indices will be visually distinct.
+        (0..n).map(|i| i % palette_size).collect()
     }
 
     /// Get bounding box for a node (x, y, width, height).

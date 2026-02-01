@@ -72,7 +72,7 @@ fn main() {
             } => {
                 format!("SideChannel x={} y={}..{}", channel_x, start_y, end_y)
             }
-            EdgePath::MultiSegment { waypoints } => {
+            EdgePath::MultiSegment { waypoints, .. } => {
                 format!("MultiSegment ({} waypoints)", waypoints.len())
             }
         };

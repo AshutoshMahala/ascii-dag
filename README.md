@@ -6,27 +6,7 @@
 
 DAG layout engine. Zero dependencies. `no_std` ready.
 
-```text
-                             [Root]
-          ┌──────────┌──────────└──────────┐──────────┐
-       "init"     "spawn"    "fork"     "start"    "begin"
-          ↓          ↓          ↓          ↓          ↓
-      [Task A]   [Task B]   [Task C]   [Task D]   [Task E]
-          └──────────└───────┌──┘─────┌────┘──────────┘
-                           "run"      │            "skip"
-                             ↓        │
-                         [Task F]     │
-                             └──┌─────┘
-                             "done"
-                                ↓
-                            [Output]
-
-
-Edge labels:
-  Task B → Task F: "exec"
-  Task C → Task F: "call"
-  Task D → Task F: "join"
-```
+![Example Image](assets/hero_colored_heap.png)
 
 **ascii-dag** is a high-performance **layout engine** for placing nodes and routing edges in a fixed-width grid.
 
@@ -559,9 +539,9 @@ ascii-dag = { version = "0.8", default-features = false }
 | `arena-idx-u16` | Max 65,535 nodes/edges (small MCUs, 16-256KB RAM) |
 | `arena-idx-u32` | Max 4B nodes/edges (default for desktop) |
 
-**Bundle Size:**
-- **Headless** (IR only): ~46 KB WASM
-- **Full Renderer**: ~55 KB WASM
+**Bundle Size (Optimized WASM):**
+- **Heap Mode** (with `std`): ~69 KB
+- **Arena Mode** (minimal `no_std`): ~14 KB
 
 ### Resource Limits
 
@@ -574,18 +554,18 @@ ascii-dag = { version = "0.8", default-features = false }
 
 | Topology | Nodes | Mode | Build | Compute | Render | **Total** | Speedup |
 | :--- | ---: | :--- | ---: | ---: | ---: | ---: | ---: |
-| **Chain** | 100 | Heap | 50µs | 206µs | 53µs | **311µs** | |
-| | | Arena | 6µs | 29µs | 113µs | **150µs** | **2.1x** |
-| **Chain** | 500 | Heap | 244µs | 1,223µs | 258µs | **1,726µs** | |
-| | | Arena | 14µs | 39µs | 711µs | **765µs** | **2.3x** |
-| **Diamond** | 100 | Heap | 40µs | 536µs | 235µs | **812µs** | |
-| | | Arena | 10µs | 40µs | 293µs | **345µs** | **2.4x** |
-| **Diamond** | 500 | Heap | 307µs | 2,121µs | 744µs | **3,172µs** | |
-| | | Arena | 17µs | 60µs | 1,325µs | **1,403µs** | **2.3x** |
-| **WideFan** | 100 | Heap | 32µs | 139µs | 138µs | **310µs** | |
-| | | Arena | 6µs | 20µs | 239µs | **266µs** | **1.2x** |
-| **WideFan** | 500 | Heap | 146µs | 942µs | 3,419µs | **4,508µs** | |
-| | | Arena | 33µs | 83µs | 3µs | **121µs** | **37.3x** |
+| **Chain** | 100 | Heap | 27µs | 101µs | 27µs | **157µs** | |
+| | | Arena | 3µs | 19µs | 54µs | **77µs** | **2.0x** |
+| **Chain** | 500 | Heap | 97µs | 646µs | 131µs | **875µs** | |
+| | | Arena | 8µs | 32µs | 505µs | **546µs** | **1.6x** |
+| **Diamond** | 100 | Heap | 28µs | 219µs | 79µs | **327µs** | |
+| | | Arena | 2µs | 13µs | 93µs | **109µs** | **3.0x** |
+| **Diamond** | 500 | Heap | 117µs | 1198µs | 391µs | **1708µs** | |
+| | | Arena | 12µs | 48µs | 1024µs | **1085µs** | **1.6x** |
+| **WideFan** | 100 | Heap | 25µs | 107µs | 114µs | **247µs** | |
+| | | Arena | 2µs | 10µs | 231µs | **244µs** | **1.0x** |
+| **WideFan** | 500 | Heap | 121µs | 794µs | 2781µs | **3697µs** | |
+| | | Arena | 17µs | 46µs | 2µs | **65µs** | **56.9x** |
 
 *Chain = linear (best case), Diamond = skip-level edges (stress), WideFan = fan-out/fan-in (crossing worst case)*
 *Measured via `cargo run --example benchmark --release`*

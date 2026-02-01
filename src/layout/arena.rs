@@ -56,6 +56,16 @@ struct LayoutTemps<'a> {
     /// Temporary buffers for crossing reduction
     medians: &'a mut [(Idx, u32)], // u32 for f32 bits storage
     positions: &'a mut [Idx],
+
+    // -- New buffers for vertical optimization --
+    node_is_source: &'a mut [bool],
+    source_counts: &'a mut [Idx],
+    dummy_counts: &'a mut [Idx],
+    level_y_offsets: &'a mut [usize], // Must be usize for coordinates
+    node_slots: &'a mut [usize],
+    level_slot_next: &'a mut [Idx],
+    level_dummy_next: &'a mut [Idx],
+    waypoint_scratch: &'a mut [(usize, usize)],
 }
 
 impl<'a> DAG<'a> {
@@ -113,9 +123,7 @@ impl<'a> DAG<'a> {
         let max_waypoints = (edge_count * 4).min(1000);
 
         // Step 1: Allocate temporary buffers from temp arena
-        let temps = self.alloc_layout_temps(temp_arena, node_count, edge_count)?;
-
-        // Step 2: Calculate levels
+        let mut temps = self.alloc_layout_temps(temp_arena, node_count, edge_count)?;
         let max_level = self.calculate_levels_arena(temps.node_levels);
 
         // Step 3: Build virtual levels with dummy nodes
@@ -169,10 +177,72 @@ impl<'a> DAG<'a> {
             max_width,
         );
 
-        // Step 8: Build the final LayoutIRArena from output arena
-        // Use 4 lines per level when edges have labels (extra row for label)
-        let lines_per_level = if has_labeled_edges { 4 } else { 3 };
-        let total_height = (max_level + 1) * lines_per_level;
+        // Step 8: Compute horizontal slots for edge separation
+        // Count unique sources per level to determine extra rows needed.
+        // We use dynamic arrays from arena to avoid stack overflow or bounds checks on deep graphs.
+
+        // Step 8: Compute horizontal slots for edge separation
+        // Count unique sources per level to determine extra rows needed.
+        // We use dynamic arrays from arena to avoid stack overflow or bounds checks on deep graphs.
+
+        // 1. Mark nodes that are sources for skip-level or adjacent edges that need separation
+        // Initialize buffer since it was allocated as uninit
+        temps.node_is_source.fill(false);
+        let node_is_source = &mut temps.node_is_source;
+
+        for &(from_id, to_id, _) in &self.edges {
+            if let (Some(from_idx), Some(to_idx)) =
+                (self.node_index(from_id), self.node_index(to_id))
+            {
+                let from_level = temps.node_levels[from_idx] as usize;
+                let to_level = temps.node_levels[to_idx] as usize;
+
+                // If edge goes down, the source node claims a slot at its level
+                if to_level > from_level {
+                    node_is_source[from_idx] = true;
+                }
+            }
+        }
+
+        // 2. Count sources per level
+        temps.source_counts.fill(0);
+        let source_counts = &mut temps.source_counts;
+        for (idx, &is_source) in node_is_source.iter().enumerate() {
+            if is_source {
+                let level = temps.node_levels[idx] as usize;
+                if level <= max_level {
+                    source_counts[level] += 1;
+                }
+            }
+        }
+
+        // 3. Count dummy nodes per level
+        temps.dummy_counts.fill(0);
+        let dummy_counts = &mut temps.dummy_counts;
+        let total_dummies = temps.dummy_offsets[edge_count] as usize;
+        for &(level, _) in &temps.dummy_data[..total_dummies] {
+            let lvl = level as usize;
+            if lvl <= max_level {
+                dummy_counts[lvl] += 1;
+            }
+        }
+
+        // Step 9: Build per-level Y offsets (Variable Row Heights)
+        temps.level_y_offsets.fill(0);
+        let level_y_offsets = &mut temps.level_y_offsets;
+
+        let mut current_offset = 0;
+        let base_lines = if has_labeled_edges { 4 } else { 3 };
+
+        for level in 0..=max_level {
+            level_y_offsets[level] = current_offset;
+
+            let slots = source_counts[level].max(dummy_counts[level]);
+            let height = base_lines + slots.saturating_sub(1);
+            current_offset += height as usize;
+        }
+        level_y_offsets[max_level + 1] = current_offset; // Total height
+        let total_height = current_offset;
 
         // Add width margin for labels if present
         let label_margin = if has_labeled_edges { 8 } else { 0 };
@@ -193,13 +263,25 @@ impl<'a> DAG<'a> {
         // Add nodes
         for (idx, &(id, label)) in self.nodes.iter().enumerate() {
             let (level, pos, x, width) = temps.real_coords[idx];
-            let y = level * lines_per_level;
+            let y = level_y_offsets[level];
 
             builder.add_node(id, label, x, y, width, level, pos)?;
             builder.add_node_to_level(level, idx)?;
         }
 
         builder.finalize_levels();
+
+        // Track assigned slots: node_slots[node_idx] = assigned_slot
+        // Initialize to usize::MAX (unassigned)
+        temps.node_slots.fill(usize::MAX);
+        let node_slots = &mut temps.node_slots;
+
+        temps.level_slot_next.fill(0);
+        let level_slot_next = &mut temps.level_slot_next;
+
+        // Track dummy slots for vertical separation of skip-level edges
+        temps.level_dummy_next.fill(0);
+        let level_dummy_next = &mut temps.level_dummy_next;
 
         // Add edges
         for (edge_idx, &(from_id, to_id, _label)) in self.edges.iter().enumerate() {
@@ -211,15 +293,33 @@ impl<'a> DAG<'a> {
 
                 let from_x = from_x_base + from_width / 2;
                 let to_x = to_x_base + to_width / 2;
-                let from_y = from_level * lines_per_level;
-                let to_y = to_level * lines_per_level;
+                let from_y = level_y_offsets[from_level];
+                let to_y = level_y_offsets[to_level];
+
+                // Get or assign slot for this source at this level
+                // We need slots for both adjacent and skip-level edges to prevent horizontal overlap at source
+                let slot = if to_level > from_level {
+                    if node_slots[from_idx] != usize::MAX {
+                        node_slots[from_idx]
+                    } else {
+                        let s = level_slot_next[from_level];
+                        level_slot_next[from_level] += 1;
+                        node_slots[from_idx] = s as usize;
+                        s as usize
+                    }
+                } else {
+                    0
+                };
+
+                // Separation logic
+                let edge_start_row = if has_labeled_edges { 2 } else { 1 };
 
                 let path = if to_level == from_level + 1 {
                     if from_x == to_x {
                         EdgePathArena::Direct
                     } else {
                         EdgePathArena::Corner {
-                            horizontal_y: from_y + 1,
+                            horizontal_y: from_y + edge_start_row + slot,
                         }
                     }
                 } else if to_level > from_level + 1 {
@@ -237,24 +337,40 @@ impl<'a> DAG<'a> {
 
                         for i in 0..waypoint_count {
                             let (level, x) = temps.dummy_data[dummy_start + i];
-                            waypoint_buf[i] = (x as usize, level as usize * lines_per_level);
+                            let lvl_idx = level as usize;
+
+                            // Assign a unique vertical slot for this edge at this level
+                            let dummy_slot = if lvl_idx < level_dummy_next.len() {
+                                let s = level_dummy_next[lvl_idx];
+                                level_dummy_next[lvl_idx] += 1;
+                                s
+                            } else {
+                                0
+                            };
+
+                            waypoint_buf[i] = (
+                                x as usize,
+                                level_y_offsets[lvl_idx] + edge_start_row + dummy_slot as usize,
+                            );
                         }
 
                         if let Some((start, len)) =
                             builder.add_waypoints(&waypoint_buf[..waypoint_count])
                         {
+                            let start_y_offset = (edge_start_row + slot).saturating_sub(1);
                             EdgePathArena::MultiSegment {
                                 waypoints_start: start,
                                 waypoints_len: len,
+                                start_y_offset,
                             }
                         } else {
                             EdgePathArena::Corner {
-                                horizontal_y: from_y + 1,
+                                horizontal_y: from_y + edge_start_row + slot,
                             }
                         }
                     } else {
                         EdgePathArena::Corner {
-                            horizontal_y: from_y + 1,
+                            horizontal_y: from_y + edge_start_row + slot,
                         }
                     }
                 } else {
@@ -353,6 +469,22 @@ impl<'a> DAG<'a> {
         let (medians_ptr, _) = arena.alloc_raw_uninit::<(Idx, u32)>(max_level_size)?;
         let (positions_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_level_size)?;
 
+        // Optimize allocs: boolean array
+        let (node_is_source_ptr, _) = arena.alloc_raw_uninit::<bool>(node_count)?;
+        // Counters per level
+        let (source_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+        let (dummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+        let (level_y_offsets_ptr, _) = arena.alloc_raw_uninit::<usize>(max_levels + 2)?;
+        // Node slots
+        let (node_slots_ptr, _) = arena.alloc_raw_uninit::<usize>(node_count)?;
+        // Next slot counters
+        let (level_slot_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+        let (level_dummy_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+        // Waypoint scratch
+        let (waypoint_scratch_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(max_levels + 1)?;
+
+        // Safety: We just allocated these regions unique to this call.
+        // The pointers are valid within the arena's lifetime.
         unsafe {
             Some(LayoutTemps {
                 node_levels: core::slice::from_raw_parts_mut(node_levels_ptr, node_count),
@@ -366,6 +498,27 @@ impl<'a> DAG<'a> {
                 dummy_data: core::slice::from_raw_parts_mut(dummy_data_ptr, max_dummy_waypoints),
                 medians: core::slice::from_raw_parts_mut(medians_ptr, max_level_size),
                 positions: core::slice::from_raw_parts_mut(positions_ptr, max_level_size),
+
+                node_is_source: core::slice::from_raw_parts_mut(node_is_source_ptr, node_count),
+                source_counts: core::slice::from_raw_parts_mut(source_counts_ptr, max_levels + 1),
+                dummy_counts: core::slice::from_raw_parts_mut(dummy_counts_ptr, max_levels + 1),
+                level_y_offsets: core::slice::from_raw_parts_mut(
+                    level_y_offsets_ptr,
+                    max_levels + 2,
+                ),
+                node_slots: core::slice::from_raw_parts_mut(node_slots_ptr, node_count),
+                level_slot_next: core::slice::from_raw_parts_mut(
+                    level_slot_next_ptr,
+                    max_levels + 1,
+                ),
+                level_dummy_next: core::slice::from_raw_parts_mut(
+                    level_dummy_next_ptr,
+                    max_levels + 1,
+                ),
+                waypoint_scratch: core::slice::from_raw_parts_mut(
+                    waypoint_scratch_ptr,
+                    max_levels + 1,
+                ),
             })
         }
     }
@@ -680,10 +833,34 @@ impl<'a> DAG<'a> {
 
         // Build prefix sums for offsets
         let mut running_offset: Idx = 0;
+        let max_dummies = dummy_data.len() as Idx;
+
         for edge_idx in 0..edge_count {
             dummy_offsets[edge_idx] = running_offset;
             if edge_idx < 512 {
-                running_offset += edge_dummy_counts[edge_idx] as Idx;
+                let count = edge_dummy_counts[edge_idx] as Idx;
+                // Clamp specific edge count if it would overflow total
+                let available = max_dummies.saturating_sub(running_offset);
+                let added = count.min(available);
+                running_offset += added;
+                // Also update the stored count to match the clamped reality
+                // This ensures the write loop doesn't try to write at invalid offsets based on old counts
+                // But wait, the write loop uses base_offset + count.
+                // If we clamp running_offset, base_offset for Next edge is clamped.
+                // But current edge's `edge_dummy_counts` is still high.
+                // We should update `edge_dummy_counts`?
+                // Actually the write loop logic:
+                // let base_offset = dummy_offsets[edge_idx] as usize;
+                // let write_idx = base_offset + edge_dummy_counts[edge_idx] as usize; // This increments 0,1,2...
+                // So write_idx = base + i.
+                // The write loop correctly checks `if write_idx < dummy_data.len()`.
+                // So the Writes are safe.
+                // The issue is `dummy_offsets[edge_count] = running_offset` being used as the Slice End.
+                // If running_offset is clamped, then slice end is valid.
+                // Does the write loop rely on `edge_dummy_counts` being accurate?
+                // It uses `edge_dummy_counts` as a counter: `edge_dummy_counts[edge_idx] += 1`.
+                // It resets them to 0 before the loop: `for count in edge_dummy_counts.iter_mut() { *count = 0; }`.
+                // So the write loop is fine.
             }
         }
         dummy_offsets[edge_count] = running_offset;
@@ -814,7 +991,7 @@ pub fn compute_layout_arena_csr<'b>(
     let max_waypoints = (edge_count * 4).min(1000);
 
     // Step 1: Allocate temporaries
-    let temps = alloc_layout_temps_csr(temp_arena, node_count, edge_count)?;
+    let mut temps = alloc_layout_temps_csr(temp_arena, node_count, edge_count)?;
 
     // Step 2: Calculate levels
     let max_level = calculate_levels_csr(graph, temps.node_levels);
@@ -865,10 +1042,69 @@ pub fn compute_layout_arena_csr<'b>(
         max_width,
     );
 
-    // Step 8: Build LayoutIRArena
-    let lines_per_level: usize = 3;
-    let total_height = (max_level as usize + 1) * lines_per_level;
+    // Step 8: Compute horizontal slots for edge separation
+    // Count unique sources per level to determine extra rows needed.
+    // Use pre-allocated dynamic buffers from temps to avoid borrow errors and stack overflows.
 
+    // 1. Mark nodes that are sources
+    temps.node_is_source.fill(false);
+    let node_is_source = &mut temps.node_is_source;
+    let alloc_size = max_level as usize + 1;
+
+    for (from_id, to_id) in graph.edges_iter() {
+        // CsrGraph yields indices directly
+        let from_idx = from_id;
+        let to_idx = to_id;
+
+        // Safe indexing
+        if from_idx < temps.real_coords.len() && to_idx < temps.real_coords.len() {
+            let from_level = temps.real_coords[from_idx].0;
+            let to_level = temps.real_coords[to_idx].0;
+
+            if to_level > from_level {
+                node_is_source[from_idx] = true;
+            }
+        }
+    }
+
+    // 2. Count sources per level
+    temps.source_counts.fill(0);
+    // Use iterator to count (safer than slice indexing manually)
+    for (idx, &is_source) in node_is_source.iter().enumerate() {
+        if is_source {
+            let level = temps.real_coords[idx].0; // Access level from coords
+            if level <= max_level as usize {
+                temps.source_counts[level] += 1;
+            }
+        }
+    }
+
+    // 3. Count dummy nodes
+    temps.dummy_counts.fill(0);
+    // Limit loop to actual dummy data used
+    let total_dummy_waypoints = temps.dummy_offsets[edge_count] as usize;
+    for &(level, _) in &temps.dummy_data[..total_dummy_waypoints] {
+        let lvl = level as usize;
+        if lvl <= max_level as usize {
+            temps.dummy_counts[lvl] += 1;
+        }
+    }
+
+    // 4. Compute Y offsets
+    temps.level_y_offsets.fill(0);
+    let base_lines = 3;
+    let mut current_offset = 0;
+
+    for level in 0..=max_level as usize {
+        temps.level_y_offsets[level] = current_offset;
+        let diff = temps.source_counts[level].max(temps.dummy_counts[level]);
+        let height = base_lines + diff.saturating_sub(1);
+        current_offset += height as usize;
+    }
+    temps.level_y_offsets[max_level as usize + 1] = current_offset;
+    let total_height = current_offset;
+
+    // Step 9: Build LayoutIRArena
     let mut builder = LayoutIRArenaBuilder::new(
         output_arena,
         node_count,
@@ -885,7 +1121,7 @@ pub fn compute_layout_arena_csr<'b>(
     // Add nodes
     for idx in 0..node_count {
         let (level, pos, x, width) = temps.real_coords[idx];
-        let y = level as usize * lines_per_level;
+        let y = temps.level_y_offsets[level as usize]; // Use dynamic offset
         let id = graph.node_id(idx);
         let label = graph.node_label(idx);
 
@@ -903,6 +1139,19 @@ pub fn compute_layout_arena_csr<'b>(
 
     builder.finalize_levels();
 
+    // Track source slots for horizontal separation during edge iteration
+    // Use optimized node_slots (O(1) lookup) instead of inefficient linear scan
+    temps.node_slots.fill(0);
+    temps.level_slot_next.fill(0);
+    temps.level_dummy_next.fill(0);
+
+    // Access mutable buffers via temps
+    let node_slots = &mut temps.node_slots;
+    let level_slot_next = &mut temps.level_slot_next;
+    let level_dummy_next = &mut temps.level_dummy_next;
+    let waypoint_scratch = &mut temps.waypoint_scratch;
+    let level_y_offsets = &temps.level_y_offsets;
+
     // Add edges
     for (edge_idx, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
         let (from_level, _, from_x_base, from_width) = temps.real_coords[from_idx];
@@ -910,18 +1159,42 @@ pub fn compute_layout_arena_csr<'b>(
 
         let from_x = (from_x_base + from_width / 2) as usize;
         let to_x = (to_x_base + to_width / 2) as usize;
-        let from_y = from_level as usize * lines_per_level;
-        let to_y = to_level as usize * lines_per_level;
+        let from_y = level_y_offsets[from_level as usize];
+        let to_y = level_y_offsets[to_level as usize];
 
         let from_id = graph.node_id(from_idx);
         let to_id = graph.node_id(to_idx);
+
+        // Get or assign slot for this source at this level
+        let slot = if to_level > from_level && (from_level as usize) < max_level as usize + 1 {
+            // Check if already assigned
+            if node_slots[from_idx] != 0 {
+                node_slots[from_idx]
+            } else {
+                if (from_level as usize) < level_slot_next.len() {
+                    let s = level_slot_next[from_level as usize];
+                    node_slots[from_idx] = s as usize;
+                    level_slot_next[from_level as usize] += 1;
+                    s as usize
+                } else {
+                    0
+                }
+            }
+        } else {
+            0
+        };
+
+        // CsR graphs don't support edge labels currently
+        let has_labeled_edges = false;
+        // Separation logic
+        let edge_start_row = if has_labeled_edges { 2 } else { 1 };
 
         let path = if to_level == from_level + 1 {
             if from_x == to_x {
                 EdgePathArena::Direct
             } else {
                 EdgePathArena::Corner {
-                    horizontal_y: from_y + 1,
+                    horizontal_y: from_y + edge_start_row + slot,
                 }
             }
         } else if to_level > from_level + 1 {
@@ -930,29 +1203,46 @@ pub fn compute_layout_arena_csr<'b>(
             let dummy_count = dummy_end - dummy_start;
 
             if dummy_count > 0 && dummy_start < temps.dummy_data.len() {
-                let mut waypoint_buf = [(0usize, 0usize); 64];
-                // Limit waypoint_count to available data
+                // Limit to scratch size
                 let available = temps.dummy_data.len().saturating_sub(dummy_start);
-                let waypoint_count = dummy_count.min(64).min(available);
+                let waypoint_count = dummy_count.min(waypoint_scratch.len()).min(available);
 
                 for i in 0..waypoint_count {
                     let (level, x) = temps.dummy_data[dummy_start + i];
-                    waypoint_buf[i] = (x as usize, level as usize * lines_per_level);
+                    let lvl_idx = level as usize;
+
+                    // Assign a unique vertical slot for this edge at this level
+                    let dummy_slot = if lvl_idx < alloc_size {
+                        let s = level_dummy_next[lvl_idx];
+                        level_dummy_next[lvl_idx] += 1;
+                        s
+                    } else {
+                        0
+                    };
+
+                    // Calculate Y using level_y_offsets
+                    let y_base = level_y_offsets[lvl_idx];
+                    waypoint_scratch[i] =
+                        (x as usize, y_base + edge_start_row + dummy_slot as usize);
                 }
 
-                if let Some((start, len)) = builder.add_waypoints(&waypoint_buf[..waypoint_count]) {
+                if let Some((start, len)) =
+                    builder.add_waypoints(&waypoint_scratch[..waypoint_count])
+                {
+                    let start_y_offset = (edge_start_row + slot).saturating_sub(1);
                     EdgePathArena::MultiSegment {
                         waypoints_start: start,
                         waypoints_len: len,
+                        start_y_offset,
                     }
                 } else {
                     EdgePathArena::Corner {
-                        horizontal_y: from_y + 1,
+                        horizontal_y: from_y + edge_start_row + slot,
                     }
                 }
             } else {
                 EdgePathArena::Corner {
-                    horizontal_y: from_y + 1,
+                    horizontal_y: from_y + edge_start_row + slot,
                 }
             }
         } else {
@@ -1011,6 +1301,19 @@ fn alloc_layout_temps_csr<'b>(
     let (medians_ptr, _) = arena.alloc_raw_uninit::<(Idx, u32)>(max_level_size)?;
     let (positions_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_level_size)?;
 
+    // Optimize allocs: boolean array
+    let (node_is_source_ptr, _) = arena.alloc_raw_uninit::<bool>(node_count)?;
+    // Counters per level
+    let (source_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+    let (dummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+    let (level_y_offsets_ptr, _) = arena.alloc_raw_uninit::<usize>(max_levels + 2)?;
+    // Node slots
+    let (node_slots_ptr, _) = arena.alloc_raw_uninit::<usize>(node_count)?;
+    // Next slot counters
+    let (level_slot_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+    let (level_dummy_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+    let (waypoint_scratch_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(max_levels + 1)?;
+
     unsafe {
         Some(LayoutTemps {
             node_levels: core::slice::from_raw_parts_mut(node_levels_ptr, node_count),
@@ -1021,6 +1324,15 @@ fn alloc_layout_temps_csr<'b>(
             widths: core::slice::from_raw_parts_mut(widths_ptr, max_vnodes),
             real_coords: core::slice::from_raw_parts_mut(real_coords_ptr, node_count),
             dummy_offsets: core::slice::from_raw_parts_mut(dummy_offsets_ptr, edge_count + 1),
+
+            node_is_source: core::slice::from_raw_parts_mut(node_is_source_ptr, node_count),
+            source_counts: core::slice::from_raw_parts_mut(source_counts_ptr, max_levels + 1),
+            dummy_counts: core::slice::from_raw_parts_mut(dummy_counts_ptr, max_levels + 1),
+            level_y_offsets: core::slice::from_raw_parts_mut(level_y_offsets_ptr, max_levels + 2),
+            node_slots: core::slice::from_raw_parts_mut(node_slots_ptr, node_count),
+            level_slot_next: core::slice::from_raw_parts_mut(level_slot_next_ptr, max_levels + 1),
+            level_dummy_next: core::slice::from_raw_parts_mut(level_dummy_next_ptr, max_levels + 1),
+            waypoint_scratch: core::slice::from_raw_parts_mut(waypoint_scratch_ptr, max_levels + 1),
             dummy_data: core::slice::from_raw_parts_mut(dummy_data_ptr, max_dummy_waypoints),
             medians: core::slice::from_raw_parts_mut(medians_ptr, max_level_size),
             positions: core::slice::from_raw_parts_mut(positions_ptr, max_level_size),

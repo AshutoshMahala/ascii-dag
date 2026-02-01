@@ -88,7 +88,7 @@ fn main() {
             ascii_dag::ir::EdgePath::SideChannel { channel_x, .. } => {
                 format!("SideChannel (routed via x={})", channel_x)
             }
-            ascii_dag::ir::EdgePath::MultiSegment { waypoints } => {
+            ascii_dag::ir::EdgePath::MultiSegment { waypoints, .. } => {
                 format!("MultiSegment ({} waypoints)", waypoints.len())
             }
         };
