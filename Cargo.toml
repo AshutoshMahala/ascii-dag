@@ -78,8 +78,8 @@ opt-level = "z"     # Optimize for size
 lto = true          # Enable Link Time Optimization
 codegen-units = 1   # Better optimization
 strip = true        # Strip symbols
-# Note: panic = "abort" removed - let downstream users control panic behavior
-# Embedded users should add panic = "abort" in their own Cargo.toml
+panic = "abort"     # Remove panic unwinding (critical for WASM size)
+# Embedded users should add panic = "abort" in their own Cargo.toml if not using this profile
 
 [profile.dev]
 # Note: panic = "abort" removed - set in downstream project for embedded targets

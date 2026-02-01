@@ -539,9 +539,9 @@ ascii-dag = { version = "0.8", default-features = false }
 | `arena-idx-u16` | Max 65,535 nodes/edges (small MCUs, 16-256KB RAM) |
 | `arena-idx-u32` | Max 4B nodes/edges (default for desktop) |
 
-**Bundle Size:**
-- **Headless** (IR only): ~46 KB WASM
-- **Full Renderer**: ~55 KB WASM
+**Bundle Size (Optimized WASM):**
+- **Heap Mode** (with `std`): ~69 KB
+- **Arena Mode** (minimal `no_std`): ~14 KB
 
 ### Resource Limits
 
