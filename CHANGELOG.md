@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.8.1] - Unreleased
+## [0.8.1] - 2026-02-01
 
 ### Performance
 - **Updated benchmarks**: Fresh measurements on M2 Ultra showing 2.1x-56.9x Arena speedups
