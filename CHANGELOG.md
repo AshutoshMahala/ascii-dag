@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.8.2] - 2026-02-02
+
+### Fixes
+- **Arena Layout Crash**: Fixed index out of bounds panic in `build_dummy_positions_arena` by clamping prefix sum calculations. This resolves crashes on specific graph topologies found via fuzzing.
+
+### Performance
+- **Spatial Indexing**: Implemented spatial indexing for `render_to_buffer`, significantly improving rendering performance for large graphs.
+- **Scalability**: Removed `255` level limit (u8) in fallback mode, allowing for arbitrarily deep graphs (up to `usize::MAX`).
+- **Benchmark Update**: Verified linear scaling up to 200k nodes.
+
+### Breaking Changes
+- **`render_to_buffer` API**: `LayoutIRArena::render_to_buffer` now requires a third argument: `scratch_buffer: &mut [usize]`. This is used for the spatial index optimization.
+- **`estimate_render_size` API**: Now returns a tuple `(usize, usize)` representing `(render_bytes, scratch_slots)`.
+
 ## [0.8.1] - 2026-02-01
 
 ### Performance

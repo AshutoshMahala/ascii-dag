@@ -1,6 +1,6 @@
 [package]
 name = "ascii-dag"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2024"
 authors = ["Ash"]
 license = "MIT OR Apache-2.0"
