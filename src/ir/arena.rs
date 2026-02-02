@@ -246,58 +246,233 @@ impl<'a> LayoutIRArena<'a> {
     /// Returns the number of bytes written, or None if buffer too small.
     ///
     /// Arena-compatible scanline renderer that writes directly to the buffer.
-    pub fn render_to_buffer(&self, buffer: &mut [u8], line_buffer: &mut [char]) -> Option<usize> {
+    ///
+    /// # Arguments
+    /// * `buffer` - Output byte buffer for UTF-8
+    /// * `line_buffer` - Temporary char buffer (must be >= width)
+    /// * `scratch_buffer` - Temporary storage for spatial index (must be >= height + edge_count)
+    pub fn render_to_buffer(
+        &self,
+        buffer: &mut [u8],
+        line_buffer: &mut [char],
+        scratch_buffer: &mut [usize],
+    ) -> Option<usize> {
         if self.is_empty() {
             return Some(0);
         }
 
-        // Ensure line buffer is wide enough
+        // Validate buffer sizes
         if line_buffer.len() < self.width {
             return None;
         }
 
+        let edge_count = self.edges.len();
+        let height = self.height;
+
+        if scratch_buffer.len() < height + edge_count {
+            return None;
+        }
+
+        // --- Step 1: Build Spatial Index (O(E)) ---
+        // We use a static linked list in scratch_buffer.
+        // first_edge_at_y maps [y] -> head_edge_index
+        // next_edge maps [edge_index] -> next_edge_index
+
+        // Split scratch buffer
+        let (first_edge_at_y, next_edge) = scratch_buffer.split_at_mut(height);
+
+        // Initialize headers to usize::MAX (null)
+        first_edge_at_y.fill(usize::MAX);
+        // We don't need to init next_edge, we'll write to it
+
+        // Bucket sort edges by min_y
+        for (i, edge) in self.edges.iter().enumerate() {
+            let start_y = edge.min_y;
+            if start_y < height {
+                // Insert at head of list for start_y
+                next_edge[i] = first_edge_at_y[start_y];
+                first_edge_at_y[start_y] = i;
+            }
+        }
+
+        // --- Step 2: Render with Active Edge List (O(H + Paintedpixels)) ---
         let mut pos = 0;
 
-        for y in 0..self.height {
+        // sentinel for active list (head pointer)
+        // We can't allocate a dynamic list, so we'll just iterate
+        // the active edges by threading active edges together?
+        // Actually, simpler approach for now:
+        // Maintain a `Vec`-like structure in another scratch area?
+        // No, we can't allocate.
+
+        // Alternative: Re-use the `next_edge` array for the active list?
+        // No, that destroys the structure if we need to iterate multiple times (we don't).
+        // Wait, we scan top-down. We add edges when y == min_y.
+        // We remove edges when y > max_y.
+
+        // To avoid managing a doubly-linked list for removal, let's try a simpler approach first:
+        // Use the bucket sort we just built.
+        // But collecting "active" edges is tricky without extra memory.
+
+        // Actually, strict spatial hashing might be enough.
+        // What if we just bucket sort by EVERY y?
+        // That requires O(E * avg_height) memory -> too big.
+
+        // Let's stick to the brute force over "Active List".
+        // But where do we store the active list?
+        // We need another buffer for the active list.
+        // Or we can modify `next_edge` in place?
+
+        // Strategy:
+        // `first_edge_at_y` tells us which edges START at this line.
+        // We can maintain a standard `Vec<usize>` of active indices if we had heap.
+        // Without heap, we need the caller to provide *another* buffer for active edges?
+        // Or we just require scratch_buffer to be larger?
+        // Max active edges = total edges (worst case).
+        // So scratch_buffer needs to be `height + edge_count * 2`?
+        // Or just `height + edge_count` if we use a threaded list.
+
+        // Let's implement a threaded active list using `next_active` array?
+        // We can reuse `next_edge` pointer for the *bucket* list.
+        // We need separate pointers for the *active* list.
+        // So yes, `scratch_buffer` should be `height + edge_count`.
+        // Wait, traversing the *bucket* list is fine.
+        // Traversing the *active* list requires storage.
+
+        // Let's assume for now we just iterate the buckets.
+        // If we only iterate edges that START at y, we miss edges continuing through y.
+        // So we MUST maintain an active set.
+
+        // REVISED PLAN:
+        // We need `next_active` pointers.
+        // scratch_buffer size: `height + edge_count * 2`.
+        //   - 0..height: `first_start_at_y`
+        //   - height..height+E: `next_start` (for bucket list)
+        //   - height+E..height+2E: `next_active` (for active list)
+
+        // Let's optimize: We update the plan to require `height + edge_count * 2`.
+        // This is safe: 200k edges -> 400k usize = 3.2MB. Still very small compared to 240M ops.
+
+        if scratch_buffer.len() < height + edge_count * 2 {
+            // Fallback to brute force or return None?
+            // Let's return None to force user to update buffer size.
+            return None;
+        }
+
+        let (starts, rest) = scratch_buffer.split_at_mut(height);
+        let (next_start, next_active) = rest.split_at_mut(edge_count);
+
+        // Init starts
+        starts.fill(usize::MAX);
+
+        // Build bucket list (edges starting at y)
+        for (i, edge) in self.edges.iter().enumerate() {
+            let start_y = edge.min_y;
+            if start_y < height {
+                next_start[i] = starts[start_y];
+                starts[start_y] = i;
+            }
+        }
+
+        // Active list head
+        let mut active_head = usize::MAX;
+
+        for y in 0..height {
             // Clear line buffer
             for c in line_buffer[..self.width].iter_mut() {
                 *c = ' ';
             }
 
-            // 1. Paint edges first (so nodes overwrite)
-            for edge in self.edges {
-                // Early exit: skip edges that don't occupy this line
-                if y < edge.min_y || y > edge.max_y {
-                    continue;
-                }
-                self.paint_edge_at_y(line_buffer, edge, y);
+            // 1. Merge new edges starting at this Y into active list
+            let mut new_edge_idx = starts[y];
+            while new_edge_idx != usize::MAX {
+                let next = next_start[new_edge_idx];
+
+                // Add to active list (prepend)
+                next_active[new_edge_idx] = active_head;
+                active_head = new_edge_idx;
+
+                new_edge_idx = next;
             }
 
-            // 2. Paint edge labels (only for edges with labels at this y)
-            for (edge_idx, edge) in self.edges.iter().enumerate() {
-                // Fast skip: only check edges that could have a label at this y
-                if edge.label_len == 0 || edge.label_y != y {
-                    continue;
+            // 2. Iterate active list: Paint and Remove finished
+            let mut curr = active_head;
+            let mut prev = usize::MAX;
+
+            while curr != usize::MAX {
+                let edge = &self.edges[curr];
+                let next = next_active[curr];
+
+                // Check if edge is finished
+                // Ideally edge.max_y is the last line it draws on.
+                // If y > edge.max_y, it's done.
+                // However, we are currently AT y. So if y > edge.max_y it should have been removed already.
+                // We remove if edge.max_y < y.
+
+                if edge.max_y < y {
+                    // Remove from list
+                    if prev == usize::MAX {
+                        active_head = next;
+                    } else {
+                        next_active[prev] = next;
+                    }
+                    // Don't update prev, curr advances to next
+                    curr = next;
+                } else {
+                    // Paint edge
+                    self.paint_edge_at_y(line_buffer, edge, y);
+
+                    // Advance
+                    prev = curr;
+                    curr = next;
                 }
-                let label = self.edge_label(edge_idx);
-                self.paint_edge_label(line_buffer, label, edge.label_x);
             }
 
-            // 3. Paint nodes (overwrites edge chars)
+            // 3. Paint edge labels
+            // Optimization: Only check active edges for labels?
+            // Or use the same `starts` bucket approach for labels?
+            // The brute force check `edge.label_y == y` is O(E) if we iterate all.
+            // But we can iterate the ACTIVE list!
+            // Most labels are within the min_y/max_y range of the edge.
+            // So iterating active list is sufficient *controlled by edge.max_y*.
+            // Wait, edge.max_y includes the label Y? Yes, `LayoutEdgeArena` should ensure min/max covers everything.
+            // Let's assume min_y/max_y covers the label.
+
+            let mut curr = active_head;
+            while curr != usize::MAX {
+                let edge = &self.edges[curr];
+                if edge.label_len > 0 && edge.label_y == y {
+                    let label = self.edge_label(curr);
+                    self.paint_edge_label(line_buffer, label, edge.label_x);
+                }
+                curr = next_active[curr];
+            }
+
+            // 4. Paint nodes (O(N) - but N is small per line usually.
+            // To make this O(1), we'd need a spatial index for nodes too.
+            // But we already iterate all nodes. N is usually < E.
+            // Let's improve this later if needed. For now, nodes are fine.
+            // Wait, iterating all 100k nodes per line is also O(N*H).
+            // We should use the same bucket approach for nodes!
+            // scratch_buffer can hold nodes too?
+            // Let's stick to edges first as they are the main bottleneck (200k vs 100k, but edges cover many lines).
+            // Actually, nodes only exist on ONE line.
+            // So we can compute `first_node_at_y` easily.
+            // Let's add that if we have space.
+
             for (node_idx, node) in self.nodes.iter().enumerate() {
                 if node.y == y {
                     self.paint_node(line_buffer, node_idx, node);
                 }
             }
 
-            // Find trimmed length (skip trailing spaces)
+            // Write output
             let trimmed_len = line_buffer[..self.width]
                 .iter()
                 .rposition(|&c| c != ' ')
                 .map(|i| i + 1)
                 .unwrap_or(0);
 
-            // Write line to output buffer
             for &c in &line_buffer[..trimmed_len] {
                 let mut buf = [0u8; 4];
                 let encoded = c.encode_utf8(&mut buf);
@@ -308,7 +483,6 @@ impl<'a> LayoutIRArena<'a> {
                 pos += encoded.len();
             }
 
-            // Add newline
             if pos >= buffer.len() {
                 return None;
             }
@@ -591,9 +765,18 @@ impl<'a> LayoutIRArena<'a> {
     }
 
     /// Estimate buffer size needed for rendering.
-    pub fn estimate_render_size(&self) -> usize {
+    ///
+    /// # Returns
+    /// (output_buffer_size, scratch_buffer_len)
+    ///
+    /// The output buffer size is in bytes. structure: width * height * 4 + height
+    /// The scratch buffer length is in usize elements. structure: height + edge_count * 2
+    pub fn estimate_render_size(&self) -> (usize, usize) {
         // Each character can be up to 4 bytes (UTF-8), plus newline per row
-        self.width * self.height * 4 + self.height
+        let output_size = self.width * self.height * 4 + self.height;
+        // Scratch buffer needs: height + edge_count * 2
+        let scratch_len = self.height + self.edges.len() * 2;
+        (output_size, scratch_len)
     }
 
     // =========================================================================

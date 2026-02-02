@@ -87,8 +87,10 @@ fn main() {
         let mut render_buffer2 = vec![0u8; arena_ir.width() * arena_ir.height() * 4];
         let mut line_buffer2 = vec![' '; arena_ir.width() + 16];
 
+        let (_, scratch_len) = arena_ir.estimate_render_size();
+        let mut scratch_buffer = vec![0usize; scratch_len + 1024];
         if let Some(bytes_written) =
-            arena_ir.render_to_buffer(&mut render_buffer2, &mut line_buffer2)
+            arena_ir.render_to_buffer(&mut render_buffer2, &mut line_buffer2, &mut scratch_buffer)
         {
             let output =
                 core::str::from_utf8(&render_buffer2[..bytes_written]).unwrap_or("<invalid utf8>");

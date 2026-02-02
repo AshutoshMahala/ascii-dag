@@ -29,13 +29,15 @@ type Coord = u16;
 #[cfg(not(feature = "arena"))]
 const MAX_NODES: usize = u32::MAX as usize;
 #[cfg(not(feature = "arena"))]
-const MAX_LEVELS: usize = 255;
+const MAX_LEVELS: usize = usize::MAX;
 
 /// Temporary layout data allocated from arena.
 /// Uses configurable index types for memory efficiency.
 struct LayoutTemps<'a> {
     /// Level for each node index
     node_levels: &'a mut [Idx],
+    /// Edge indices (from_idx, to_idx) - pre-conversion from checking map
+    edge_indices: &'a mut [(Idx, Idx)],
     /// Virtual levels: offsets into vnode_data
     vlevel_offsets: &'a mut [Idx],
     /// Count of nodes per level
@@ -124,11 +126,25 @@ impl<'a> DAG<'a> {
 
         // Step 1: Allocate temporary buffers from temp arena
         let mut temps = self.alloc_layout_temps(temp_arena, node_count, edge_count)?;
-        let max_level = self.calculate_levels_arena(temps.node_levels);
+
+        // Step 1.5: Pre-resolve edge indices (O(E)) to avoid HashMap lookups in tight loops
+        for (i, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
+            if let (Some(from_idx), Some(to_idx)) =
+                (self.node_index(from_id), self.node_index(to_id))
+            {
+                temps.edge_indices[i] = (from_idx as Idx, to_idx as Idx);
+            } else {
+                // Should use ensure_node_exists before calling, but handle safely
+                temps.edge_indices[i] = (Idx::MAX, Idx::MAX);
+            }
+        }
+
+        let max_level = self.calculate_levels_arena(temps.node_levels, temps.edge_indices);
 
         // Step 3: Build virtual levels with dummy nodes
         let (_vnode_count, _max_level_size) = self.build_virtual_levels_arena(
             temps.node_levels,
+            temps.edge_indices,
             temps.vlevel_offsets,
             temps.level_counts,
             temps.vnode_data,
@@ -173,6 +189,7 @@ impl<'a> DAG<'a> {
             temps.widths,
             temps.dummy_offsets,
             temps.dummy_data,
+            temps.edge_indices,
             max_level,
             max_width,
         );
@@ -190,10 +207,11 @@ impl<'a> DAG<'a> {
         temps.node_is_source.fill(false);
         let node_is_source = &mut temps.node_is_source;
 
-        for &(from_id, to_id, _) in &self.edges {
-            if let (Some(from_idx), Some(to_idx)) =
-                (self.node_index(from_id), self.node_index(to_id))
-            {
+        for &(from_idx, to_idx) in temps.edge_indices.iter() {
+            if from_idx != Idx::MAX && to_idx != Idx::MAX {
+                // Indices are valid
+                let from_idx = from_idx as usize;
+                let to_idx = to_idx as usize;
                 let from_level = temps.node_levels[from_idx] as usize;
                 let to_level = temps.node_levels[to_idx] as usize;
 
@@ -285,9 +303,13 @@ impl<'a> DAG<'a> {
 
         // Add edges
         for (edge_idx, &(from_id, to_id, _label)) in self.edges.iter().enumerate() {
-            if let (Some(from_idx), Some(to_idx)) =
-                (self.node_index(from_id), self.node_index(to_id))
-            {
+            // Use pre-resolved indices
+            let (from_idx, to_idx) = temps.edge_indices[edge_idx];
+
+            if from_idx != Idx::MAX && to_idx != Idx::MAX {
+                let from_idx = from_idx as usize;
+                let to_idx = to_idx as usize;
+
                 let (from_level, _, from_x_base, from_width) = temps.real_coords[from_idx];
                 let (to_level, _, to_x_base, to_width) = temps.real_coords[to_idx];
 
@@ -457,6 +479,7 @@ impl<'a> DAG<'a> {
 
         // Allocate all buffers using compact types
         let (node_levels_ptr, _) = arena.alloc_raw_uninit::<Idx>(node_count)?;
+        let (edge_indices_ptr, _) = arena.alloc_raw_uninit::<(Idx, Idx)>(edge_count)?;
         let (vlevel_offsets_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
         let (level_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels)?;
         let (vnode_data_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_vnodes * 2)?;
@@ -488,6 +511,7 @@ impl<'a> DAG<'a> {
         unsafe {
             Some(LayoutTemps {
                 node_levels: core::slice::from_raw_parts_mut(node_levels_ptr, node_count),
+                edge_indices: core::slice::from_raw_parts_mut(edge_indices_ptr, edge_count),
                 vlevel_offsets: core::slice::from_raw_parts_mut(vlevel_offsets_ptr, max_levels + 1),
                 level_counts: core::slice::from_raw_parts_mut(level_counts_ptr, max_levels),
                 vnode_data: core::slice::from_raw_parts_mut(vnode_data_ptr, max_vnodes * 2),
@@ -524,7 +548,7 @@ impl<'a> DAG<'a> {
     }
 
     /// Calculate levels using arena-allocated buffer.
-    fn calculate_levels_arena(&self, levels: &mut [Idx]) -> usize {
+    fn calculate_levels_arena(&self, levels: &mut [Idx], edge_indices: &[(Idx, Idx)]) -> usize {
         // Initialize all to 0
         for l in levels.iter_mut() {
             *l = 0;
@@ -533,13 +557,15 @@ impl<'a> DAG<'a> {
         let mut changed = true;
         while changed {
             changed = false;
-            for &(from, to, _) in &self.edges {
-                if let (Some(from_idx), Some(to_idx)) = (self.node_index(from), self.node_index(to))
-                {
-                    let new_level = levels[from_idx] as usize + 1;
-                    if new_level > levels[to_idx] as usize {
+            for &(from_idx, to_idx) in edge_indices {
+                if from_idx != Idx::MAX && to_idx != Idx::MAX {
+                    let from = from_idx as usize;
+                    let to = to_idx as usize;
+
+                    let new_level = levels[from] as usize + 1;
+                    if new_level > levels[to] as usize {
                         // Safe cast - we cap at MAX_LEVELS which fits in Idx
-                        levels[to_idx] = new_level.min(MAX_LEVELS) as Idx;
+                        levels[to] = new_level.min(MAX_LEVELS) as Idx;
                         changed = true;
                     }
                 }
@@ -560,6 +586,7 @@ impl<'a> DAG<'a> {
     fn build_virtual_levels_arena(
         &self,
         node_levels: &[Idx],
+        edge_indices: &[(Idx, Idx)],
         vlevel_offsets: &mut [Idx],
         level_counts: &mut [Idx],
         vnode_data: &mut [Idx],
@@ -579,12 +606,10 @@ impl<'a> DAG<'a> {
         }
 
         // Count dummy nodes per level
-        for &(from_id, to_id, _) in &self.edges {
-            if let (Some(from_idx), Some(to_idx)) =
-                (self.node_index(from_id), self.node_index(to_id))
-            {
-                let from_level = node_levels[from_idx] as usize;
-                let to_level = node_levels[to_idx] as usize;
+        for &(from_idx, to_idx) in edge_indices {
+            if from_idx != Idx::MAX && to_idx != Idx::MAX {
+                let from_level = node_levels[from_idx as usize] as usize;
+                let to_level = node_levels[to_idx as usize] as usize;
 
                 if to_level > from_level + 1 {
                     for level in (from_level + 1)..to_level {
@@ -625,12 +650,10 @@ impl<'a> DAG<'a> {
         }
 
         // Fill with dummy nodes
-        for (edge_idx, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
-            if let (Some(from_idx), Some(to_idx)) =
-                (self.node_index(from_id), self.node_index(to_id))
-            {
-                let from_level = node_levels[from_idx] as usize;
-                let to_level = node_levels[to_idx] as usize;
+        for (edge_idx, &(from_idx, to_idx)) in edge_indices.iter().enumerate() {
+            if from_idx != Idx::MAX && to_idx != Idx::MAX {
+                let from_level = node_levels[from_idx as usize] as usize;
+                let to_level = node_levels[to_idx as usize] as usize;
 
                 if to_level > from_level + 1 {
                     for level in (from_level + 1)..to_level {
@@ -655,22 +678,8 @@ impl<'a> DAG<'a> {
         (total, max_size)
     }
 
-    /// Crossing reduction on arena-allocated virtual levels.
-    fn reduce_crossings_arena(
-        &self,
-        _vlevel_offsets: &mut [Idx],
-        _vnode_data: &mut [Idx],
-        _node_levels: &[Idx],
-        _max_level: usize,
-        _medians: &mut [(Idx, u32)],
-        _positions: &mut [Idx],
-    ) {
-        // TODO: Implement full crossing reduction
-        // For now, skip - nodes stay in insertion order
-        // This is a simplification; full impl would do median heuristic
-    }
-
     /// Assign x-coordinates to virtual nodes.
+    /// Returns the total width of the graph.
     fn assign_x_coords_arena(
         &self,
         vlevel_offsets: &[Idx],
@@ -679,7 +688,7 @@ impl<'a> DAG<'a> {
         widths: &mut [Coord],
         max_level: usize,
     ) -> usize {
-        let mut max_width: usize = 0;
+        let mut max_width = 0;
         let max_pos = x_coords.len();
         let max_vnode_idx = vnode_data.len() / 2;
 
@@ -688,7 +697,7 @@ impl<'a> DAG<'a> {
             let end = (vlevel_offsets[level + 1] as usize)
                 .min(max_pos)
                 .min(max_vnode_idx);
-            let mut x: usize = 0;
+            let mut x = 0;
 
             for pos in start..end {
                 // Bounds check
@@ -699,10 +708,10 @@ impl<'a> DAG<'a> {
                 let vnode_idx = vnode_data[pos * 2 + 1] as usize;
 
                 let width = if vnode_type == 0 {
-                    // Real node
+                    // Real node: use node_widths[vnode_idx]
                     self.get_node_width(vnode_idx)
                 } else {
-                    // Dummy node - use width 3 for visual separation (matches heap mode)
+                    // Dummy node - use width 3
                     3
                 };
 
@@ -710,18 +719,15 @@ impl<'a> DAG<'a> {
                     x_coords[pos] = x as Coord;
                     widths[pos] = width as Coord;
                 }
-                x += width + 3; // spacing between nodes
+                x += width + 3;
             }
 
-            // Level width is the rightmost edge of the last node
             if end > start && end - 1 < x_coords.len() {
                 let last_x = x_coords[end - 1] as usize;
                 let last_width = widths[end - 1] as usize;
-                let level_width = last_x + last_width;
-                max_width = max_width.max(level_width);
+                max_width = max_width.max(last_x + last_width);
             }
         }
-
         max_width
     }
 
@@ -739,40 +745,33 @@ impl<'a> DAG<'a> {
         let max_pos = x_coords.len();
         let max_vnode_idx = vnode_data.len() / 2;
 
-        // Calculate level widths for centering
         for level in 0..=max_level {
             let start = vlevel_offsets[level] as usize;
             let end = (vlevel_offsets[level + 1] as usize)
                 .min(max_pos)
                 .min(max_vnode_idx);
 
-            if end <= start {
-                continue;
-            }
-
-            // Calculate this level's width (with bounds check)
+            // Calculate centering offset for this level
             let level_width = if end > start && end - 1 < x_coords.len() {
                 x_coords[end - 1] as usize + widths[end - 1] as usize
             } else {
                 0
             };
-
             let offset = if max_width > level_width {
                 (max_width - level_width) / 2
             } else {
                 0
             };
 
-            // Find real nodes at this level
             for pos in start..end {
                 // Bounds check
-                if pos * 2 + 1 >= vnode_data.len() || pos >= x_coords.len() {
+                if pos * 2 + 1 >= vnode_data.len() {
                     break;
                 }
                 let vnode_type = vnode_data[pos * 2];
                 let vnode_idx = vnode_data[pos * 2 + 1] as usize;
 
-                if vnode_type == 0 && vnode_idx < real_coords.len() {
+                if vnode_type == 0 {
                     // Real node
                     let x = x_coords[pos] as usize + offset;
                     let width = widths[pos] as usize;
@@ -794,27 +793,24 @@ impl<'a> DAG<'a> {
         widths: &[Coord],
         dummy_offsets: &mut [Idx],
         dummy_data: &mut [(Idx, Coord)],
+        _edge_indices: &[(Idx, Idx)],
         max_level: usize,
         max_width: usize,
     ) {
         let edge_count = self.edges.len();
+
+        // 1. Clear offsets (used as counters initially)
+        dummy_offsets.fill(0);
+
         let max_vnode_idx = vnode_data.len() / 2;
+        let vnode_limit = x_coords.len().min(widths.len()).min(max_vnode_idx);
 
-        // Initialize offsets to 0
-        dummy_offsets[0] = 0;
-        for i in 1..=edge_count {
-            if i < dummy_offsets.len() {
-                dummy_offsets[i] = 0;
-            }
-        }
-
-        // Collect dummy positions per edge into a temporary buffer
-        // First, count how many dummy nodes each edge has
-        let mut edge_dummy_counts = [0u16; 512]; // Support up to 512 edges
-
+        // 2. Pass 1: Count extra dummy nodes per edge
+        // Iterate levels and virtual nodes
         for level in 0..=max_level {
+            // Safe casting
             let start = vlevel_offsets[level] as usize;
-            let end = (vlevel_offsets[level + 1] as usize).min(max_vnode_idx);
+            let end = (vlevel_offsets[level + 1] as usize).min(vnode_limit);
 
             for pos in start..end {
                 // Bounds check
@@ -823,66 +819,45 @@ impl<'a> DAG<'a> {
                 }
                 let vnode_type = vnode_data[pos * 2];
                 if vnode_type == 1 {
+                    // Dummy node
                     let edge_idx = vnode_data[pos * 2 + 1] as usize;
-                    if edge_idx < 512 {
-                        edge_dummy_counts[edge_idx] += 1;
+                    if edge_idx < edge_count {
+                        dummy_offsets[edge_idx] += 1;
                     }
                 }
             }
         }
 
-        // Build prefix sums for offsets
-        let mut running_offset: Idx = 0;
-        let max_dummies = dummy_data.len() as Idx;
-
-        for edge_idx in 0..edge_count {
-            dummy_offsets[edge_idx] = running_offset;
-            if edge_idx < 512 {
-                let count = edge_dummy_counts[edge_idx] as Idx;
-                // Clamp specific edge count if it would overflow total
-                let available = max_dummies.saturating_sub(running_offset);
-                let added = count.min(available);
-                running_offset += added;
-                // Also update the stored count to match the clamped reality
-                // This ensures the write loop doesn't try to write at invalid offsets based on old counts
-                // But wait, the write loop uses base_offset + count.
-                // If we clamp running_offset, base_offset for Next edge is clamped.
-                // But current edge's `edge_dummy_counts` is still high.
-                // We should update `edge_dummy_counts`?
-                // Actually the write loop logic:
-                // let base_offset = dummy_offsets[edge_idx] as usize;
-                // let write_idx = base_offset + edge_dummy_counts[edge_idx] as usize; // This increments 0,1,2...
-                // So write_idx = base + i.
-                // The write loop correctly checks `if write_idx < dummy_data.len()`.
-                // So the Writes are safe.
-                // The issue is `dummy_offsets[edge_count] = running_offset` being used as the Slice End.
-                // If running_offset is clamped, then slice end is valid.
-                // Does the write loop rely on `edge_dummy_counts` being accurate?
-                // It uses `edge_dummy_counts` as a counter: `edge_dummy_counts[edge_idx] += 1`.
-                // It resets them to 0 before the loop: `for count in edge_dummy_counts.iter_mut() { *count = 0; }`.
-                // So the write loop is fine.
+        // 3. Convert counts to Prefix Sums (Start Indices)
+        let mut current = 0;
+        for count in dummy_offsets.iter_mut().take(edge_count) {
+            let c = *count;
+            *count = current;
+            current += c;
+            // Clamp to prevent OOB
+            if (current as usize) > dummy_data.len() {
+                current = dummy_data.len() as Idx;
             }
         }
-        dummy_offsets[edge_count] = running_offset;
+        dummy_offsets[edge_count] = current;
 
-        // Reset counts for use as write indices
-        for count in edge_dummy_counts.iter_mut() {
-            *count = 0;
-        }
+        // 4. Pass 2: Fill dummy_data
+        // We reuse dummy_offsets as current write pointers.
+        // We will fix them up later.
 
-        // Second pass: write dummy data in level order (important for waypoints)
         for level in 0..=max_level {
             let start = vlevel_offsets[level] as usize;
-            let end = (vlevel_offsets[level + 1] as usize)
-                .min(max_vnode_idx)
-                .min(x_coords.len());
+            let end = (vlevel_offsets[level + 1] as usize).min(vnode_limit);
 
             // Calculate centering offset for this level
-            let level_width = if end > start && end - 1 < x_coords.len() {
-                x_coords[end - 1] as usize + widths[end - 1] as usize
+            // Need to match logic in build_real_coords / assign_x_coords
+            let level_width = if end > start {
+                let last_idx = end - 1;
+                x_coords[last_idx] as usize + widths[last_idx] as usize
             } else {
                 0
             };
+
             let offset = if max_width > level_width {
                 (max_width - level_width) / 2
             } else {
@@ -890,29 +865,36 @@ impl<'a> DAG<'a> {
             };
 
             for pos in start..end {
-                // Bounds check
-                if pos * 2 + 1 >= vnode_data.len() || pos >= x_coords.len() {
-                    break;
-                }
                 let vnode_type = vnode_data[pos * 2];
                 if vnode_type == 1 {
                     let edge_idx = vnode_data[pos * 2 + 1] as usize;
 
-                    let base_x = x_coords[pos] as usize + offset;
-                    let edge_offset = edge_idx % 4;
-                    let x = base_x + edge_offset;
+                    if edge_idx < edge_count {
+                        let base_x = x_coords[pos] as usize + offset;
+                        // Add offset based on edge index to separate overlapping edges visually
+                        let edge_shift = edge_idx % 4;
+                        let x = base_x + edge_shift;
 
-                    if edge_idx < 512 && edge_idx < edge_count {
-                        let base_offset = dummy_offsets[edge_idx] as usize;
-                        let write_idx = base_offset + edge_dummy_counts[edge_idx] as usize;
-                        if write_idx < dummy_data.len() {
-                            dummy_data[write_idx] = (level as Idx, x as Coord);
-                            edge_dummy_counts[edge_idx] += 1;
+                        // Write to buffer
+                        let write_pos = dummy_offsets[edge_idx] as usize;
+                        if write_pos < dummy_data.len() {
+                            dummy_data[write_pos] = (level as Idx, x as Coord);
+                            dummy_offsets[edge_idx] += 1;
                         }
                     }
                 }
             }
         }
+
+        // 5. Restore dummy_offsets to point to Start Indices
+        // Currently each entry points to the End Index (Start + Count).
+        // This is exactly equal to the Start Index of the NEXT edge.
+        // So offset[i] now holds Start[i+1].
+        // We shift right by 1.
+        for i in (0..edge_count).rev() {
+            dummy_offsets[i + 1] = dummy_offsets[i];
+        }
+        dummy_offsets[0] = 0;
     }
 
     /// Estimate arena size needed for layout computation.
@@ -930,6 +912,7 @@ impl<'a> DAG<'a> {
         // Calculate actual temporary buffer sizes (matching alloc_layout_temps)
         // Using core::mem::size_of for each type
         let temps_size = node_count * core::mem::size_of::<Idx>()                      // node_levels
+            + edge_count * core::mem::size_of::<(Idx, Idx)>()                          // edge_indices
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // vlevel_offsets
             + max_levels * core::mem::size_of::<Idx>()                    // level_counts
             + max_vnodes * 2 * core::mem::size_of::<Idx>()                // vnode_data
@@ -952,6 +935,21 @@ impl<'a> DAG<'a> {
         );
 
         temps_size + ir_size
+    }
+
+    /// Crossing reduction on arena-allocated virtual levels.
+    fn reduce_crossings_arena(
+        &self,
+        _vlevel_offsets: &mut [Idx],
+        _vnode_data: &mut [Idx],
+        _node_levels: &[Idx],
+        _max_level: usize,
+        _medians: &mut [(Idx, u32)],
+        _positions: &mut [Idx],
+    ) {
+        // TODO: Implement full crossing reduction
+        // For now, skip - nodes stay in insertion order
+        // This is a simplification; full impl would do median heuristic
     }
 }
 
@@ -1256,6 +1254,7 @@ pub fn compute_layout_arena_csr<'b>(
             from_y,
             to_x,
             to_y,
+
             path,
             edge_index: edge_idx,
             label_offset: 0,
@@ -1289,6 +1288,7 @@ fn alloc_layout_temps_csr<'b>(
     let max_dummy_waypoints = (edge_count * 4).min(500000);
 
     let (node_levels_ptr, _) = arena.alloc_raw_uninit::<Idx>(node_count)?;
+    let (edge_indices_ptr, _) = arena.alloc_raw_uninit::<(Idx, Idx)>(0)?; // Optimization for CSR
     let (vlevel_offsets_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (level_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels)?;
     let (vnode_data_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_vnodes * 2)?;
@@ -1317,6 +1317,7 @@ fn alloc_layout_temps_csr<'b>(
     unsafe {
         Some(LayoutTemps {
             node_levels: core::slice::from_raw_parts_mut(node_levels_ptr, node_count),
+            edge_indices: core::slice::from_raw_parts_mut(edge_indices_ptr, 0),
             vlevel_offsets: core::slice::from_raw_parts_mut(vlevel_offsets_ptr, max_levels + 1),
             level_counts: core::slice::from_raw_parts_mut(level_counts_ptr, max_levels),
             vnode_data: core::slice::from_raw_parts_mut(vnode_data_ptr, max_vnodes * 2),

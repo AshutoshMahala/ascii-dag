@@ -74,12 +74,18 @@ fn main() {
 
         println!("> Reusing Temp Buffer for Rendering...");
 
-        if let Some(bytes) = layout.render_to_buffer(render_buffer, &mut line_chars) {
-            let s = unsafe { core::str::from_utf8_unchecked(&render_buffer[..bytes]) };
-            println!("\n{}", s);
-            println!("> Rendered {} bytes into reused memory.", bytes);
-        } else {
-            println!("> Render failed: Output buffer too small!");
+        let (_, scratch_size) = layout.estimate_render_size();
+        {
+            let mut scratch_buffer = vec![0usize; scratch_size + 1024];
+            if let Some(bytes) =
+                layout.render_to_buffer(render_buffer, &mut line_chars, &mut scratch_buffer)
+            {
+                let s = unsafe { core::str::from_utf8_unchecked(&render_buffer[..bytes]) };
+                println!("\n{}", s);
+                println!("> Rendered {} bytes into reused memory.", bytes);
+            } else {
+                println!("> Render failed: Output buffer too small!");
+            }
         }
     } else {
         println!("> Layout failed (OOM)");

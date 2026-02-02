@@ -134,11 +134,14 @@ fn render_with_arena(dag: &DAG) -> String {
 
     if let Some(layout) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
         // Render buffer
-        let render_size = layout.estimate_render_size();
+        let (render_size, scratch_size) = layout.estimate_render_size();
         let mut render_buffer = vec![0u8; render_size + 1024];
+        let mut scratch_buffer = vec![0usize; scratch_size + 1024];
         let mut line_buffer = vec![' '; layout.width() + 16];
 
-        if let Some(bytes) = layout.render_to_buffer(&mut render_buffer, &mut line_buffer) {
+        if let Some(bytes) =
+            layout.render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
+        {
             String::from_utf8_lossy(&render_buffer[..bytes]).into_owned()
         } else {
             "(Render failed)".to_string()

@@ -102,12 +102,13 @@ fn try_render(dag: &DAG, temp_size: usize, output_size: usize) -> bool {
         }
 
         // Try to render too
-        let render_size = layout.estimate_render_size();
+        let (render_size, scratch_size) = layout.estimate_render_size();
         let mut render_buffer = vec![0u8; render_size + 1024];
+        let mut scratch_buffer = vec![0usize; scratch_size + 1024];
         let mut line_buffer = vec![' '; layout.width() + 16];
 
         layout
-            .render_to_buffer(&mut render_buffer, &mut line_buffer)
+            .render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
             .is_some()
     } else {
         // Debug: why None?
@@ -240,11 +241,12 @@ fn debug_100_node_chain() {
 
         let result = match dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
             Some(layout) if !layout.is_empty() => {
-                let render_size = layout.estimate_render_size();
+                let (render_size, scratch_size) = layout.estimate_render_size();
                 let mut render_buffer = vec![0u8; render_size + 1024];
+                let mut scratch_buffer = vec![0usize; scratch_size + 1024];
                 let mut line_buffer = vec![' '; layout.width() + 16];
                 layout
-                    .render_to_buffer(&mut render_buffer, &mut line_buffer)
+                    .render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
                     .is_some()
             }
             _ => false,

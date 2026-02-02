@@ -152,7 +152,9 @@ fn run_comparison(topology: Topology, count: usize) {
         let render_start = Instant::now();
         let mut render_buf = vec![0u8; count * 500 + 10000];
         let mut line_buf = vec![' '; 2048];
-        let _ = layout.render_to_buffer(&mut render_buf, &mut line_buf);
+        let (_, scratch_len) = layout.estimate_render_size();
+        let mut scratch_buf = vec![0usize; scratch_len + 1024];
+        let _ = layout.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf);
         arena_render_us = render_start.elapsed().as_micros();
 
         arena_total_us = start.elapsed().as_micros();

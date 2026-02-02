@@ -51,7 +51,8 @@ fn main() {
 
             // Allocate render buffers
             // Estimate size: width * height * (~10 chars for color codes + char) + legend
-            let render_size = ir.estimate_render_size() * 10 + 4096;
+            let (render_bytes, _) = ir.estimate_render_size();
+            let render_size = render_bytes * 10 + 4096;
             let mut render_buffer = vec![0u8; render_size];
             let mut line_buffer = vec![' '; ir.width().max(1) + 16];
             let mut color_buffer = vec![0u8; ir.width().max(1) + 16];

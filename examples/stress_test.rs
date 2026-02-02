@@ -180,8 +180,10 @@ fn run_arena_test(name: &str, dag: &DAG, low_mem: bool) {
                     )
                     .unwrap_or(0)
             } else {
+                let (_, scratch_len) = layout.estimate_render_size();
+                let mut scratch_buffer = vec![0usize; scratch_len + 1024];
                 layout
-                    .render_to_buffer(&mut render_buffer, &mut line_buffer)
+                    .render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
                     .unwrap_or(0)
             };
 
