@@ -748,9 +748,18 @@ impl<'a> DAG<'a> {
         // Build lookup: for each real node, find its (level, position, x, width)
         let mut real_node_coords: Vec<(usize, usize, usize, usize)> =
             vec![(0, 0, 0, 0); self.nodes.len()];
+        
+        for (lvl_idx, level_vnodes) in virtual_levels.iter().enumerate() {
+            for (idx, vnode) in level_vnodes.iter().enumerate() {
+                if let VNode::Real(node_idx) = vnode {
+                    let x = x_coords[lvl_idx][idx];
+                    let w = widths[lvl_idx][idx];
+                    real_node_coords[*node_idx] = (lvl_idx, idx, x, w);
+                }
+            }
+        }
 
-        // Add real nodes to IR and build coordinate lookup
-        // We do this BEFORE edges so we know if edges are vertical
+        // Apply centering offsets to real node coordinates
         for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
             let level_width = level_widths[level_idx];
             let level_offset = if max_width > level_width {
@@ -761,8 +770,6 @@ impl<'a> DAG<'a> {
 
             for (pos, vnode) in level_vnodes.iter().enumerate() {
                 if let VNode::Real(idx) = vnode {
-                    // Note: We don't have Y coordinates yet, those depend on slots!
-                    // But we have (Level, X).
                     let x = x_coords[level_idx][pos] + level_offset;
                     let width = widths[level_idx][pos];
                     real_node_coords[*idx] = (level_idx, pos, x, width);
@@ -771,16 +778,15 @@ impl<'a> DAG<'a> {
         }
 
         let mut node_slots = vec![usize::MAX; self.nodes.len()];
-        // Replaces target_slots HashMap: Stores the slot index assigned to each edge
         let mut edge_slots = vec![0usize; self.edges.len()];
-
-        // Track the last assigned slot for a target node from a specific source level
-        // Index: target_node_idx
-        // Value: (source_level, slot_index)
-        let mut target_slot_tracker: Vec<(usize, usize)> = vec![(usize::MAX, 0); self.nodes.len()];
 
         let mut level_occupied_slots: Vec<Vec<Vec<(usize, usize)>>> =
             vec![Vec::new(); max_level + 1];
+
+        // Maximum horizontal routing rows per level.
+        // Gives full visual separation for typical fan-in (≤8 sources),
+        // and graceful degradation (shared rows) for extreme fan-in.
+        const MAX_SLOTS_PER_LEVEL: usize = 8;
 
         // 1. Assign slots greedy
         for (i, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
@@ -793,13 +799,8 @@ impl<'a> DAG<'a> {
                 // Get coordinates to determine geometry
                 let (_, _, from_x, from_w) = real_node_coords[from_idx];
                 let (_, _, to_x, to_w) = real_node_coords[to_idx];
-
+                
                 // Calculate interval required for this edge
-                // Edges usually connect centers or specific ports, but here we approximate with node boundaries
-                // For safety, reserve the full span between nodes.
-                // Correct logic: Edge goes from center of From to center of To?
-                // ascii-dag routes from specific ports, but x_coords are left-aligned.
-                // Let's assume center-to-center for routing protection.
                 let start_x = from_x + from_w / 2;
                 let end_x = to_x + to_w / 2;
                 let (min_x, max_x) = if start_x < end_x {
@@ -809,162 +810,80 @@ impl<'a> DAG<'a> {
                 };
 
                 if to_level > from_level {
-                    // Vertical Optimization: If straight vertical, we DON'T need a slot!
-                    // We add a tiny epsilon to min/max check? No, if min_x == max_x it's vertical.
-                    // But we should check overlapping ranges.
-                    // CRITICAL FIX: Skip-level edges are NEVER purely vertical because they route through
-                    // dummy nodes which have offsets (edge_idx % 4). They require slots.
                     let is_vertical = min_x == max_x && to_level == from_level + 1;
 
-                    // Target Bus Logic
-                    if in_degrees[to_idx] > 1 {
-                        let (last_level, last_slot) = target_slot_tracker[to_idx];
-                        if last_level == from_level && last_slot != usize::MAX {
-                            // Reuse slot only if it's a real slot!
-                            // If last_slot was MAX (Vertical), and WE are diagonal, we can't reuse "no slot".
-                            edge_slots[i] = last_slot;
+                    // Source-based slot assignment (unified for all edges)
+                    // Each source node gets a unique horizontal slot at its level,
+                    // matching arena layout for visual parity.
+                    if is_vertical {
+                        edge_slots[i] = usize::MAX;
+                    } else {
+                        if node_slots[from_idx] != usize::MAX {
+                            // Reuse existing slot for this source node
+                            let slot = node_slots[from_idx];
+                            edge_slots[i] = slot;
 
-                            // CRITICAL FIX: We MUST extend the occupied interval for this slot!
-                            // Optimization: Merge into existing interval if overlapping to prevent O(N^2) explosion
-                            if last_slot < level_occupied_slots[from_level].len() {
-                                let intervals = &mut level_occupied_slots[from_level][last_slot];
+                            // Mark interval as occupied (Merge)
+                            if slot < level_occupied_slots[from_level].len() {
+                                let intervals = &mut level_occupied_slots[from_level][slot];
                                 let mut merged = false;
-                                // Fast path: check last added interval (common for sorted fan-in)
                                 if let Some(last) = intervals.last_mut() {
-                                    // Check if new (min_x, max_x) overlaps or touches (last.0, last.1)
-                                    // Use slight tolerance or direct? Direct is safer.
                                     if min_x <= last.1 && max_x >= last.0 {
                                         last.0 = last.0.min(min_x);
                                         last.1 = last.1.max(max_x);
                                         merged = true;
                                     }
                                 }
-
                                 if !merged {
                                     intervals.push((min_x, max_x));
                                 }
                             }
                         } else {
-                            if is_vertical {
-                                // Don't allocate slot for vertical edge
-                                edge_slots[i] = usize::MAX;
-                                target_slot_tracker[to_idx] = (from_level, usize::MAX);
-                            } else {
-                                // Allocate new slot greedy
-                                let slots = &mut level_occupied_slots[from_level];
-                                let mut chosen_slot = None;
+                            let slots = &mut level_occupied_slots[from_level];
+                            let mut chosen_slot = None;
 
-                                for (s_idx, occupied) in slots.iter_mut().enumerate() {
-                                    // Optimization: Fast path for ordered insertions
-                                    if let Some(last) = occupied.last() {
-                                        if min_x >= last.1 {
-                                            occupied.push((min_x, max_x));
-                                            chosen_slot = Some(s_idx);
-                                            break;
-                                        }
-                                    }
-
-                                    // Check collision
-                                    let collide =
-                                        occupied.iter().any(|&(s, e)| s < max_x && e > min_x);
-                                    if !collide {
+                            for (s_idx, occupied) in slots.iter_mut().enumerate() {
+                                if let Some(last) = occupied.last() {
+                                    if min_x >= last.1 {
                                         occupied.push((min_x, max_x));
                                         chosen_slot = Some(s_idx);
                                         break;
                                     }
                                 }
 
-                                let slot = if let Some(s) = chosen_slot {
-                                    s
-                                } else {
-                                    slots.push(vec![(min_x, max_x)]);
-                                    slots.len() - 1
-                                };
-
-                                target_slot_tracker[to_idx] = (from_level, slot);
-                                edge_slots[i] = slot;
-                            }
-                        }
-                    } else {
-                        // Source Bus Logic
-                        if is_vertical {
-                            // Check if we already have a slot?
-                            // If `node_slots` has a slot, using it is fine (Vertical ignores it).
-                            // But we shouldn't ALLOCATE one if missing.
-                            if node_slots[from_idx] != usize::MAX {
-                                // Reuse existing (even if we don't need it, for consistency)
-                                // Actually edge_slots[i] isn't used for Direct edges.
-                            }
-                            edge_slots[i] = usize::MAX;
-                        } else {
-                            if node_slots[from_idx] != usize::MAX {
-                                // Reuse existing slot
-                                let slot = node_slots[from_idx];
-                                edge_slots[i] = slot;
-
-                                // UPDATE: Mark interval as occupied (Merge)
-                                if slot < level_occupied_slots[from_level].len() {
-                                    let intervals = &mut level_occupied_slots[from_level][slot];
-                                    let mut merged = false;
-                                    if let Some(last) = intervals.last_mut() {
-                                        if min_x <= last.1 && max_x >= last.0 {
-                                            last.0 = last.0.min(min_x);
-                                            last.1 = last.1.max(max_x);
-                                            merged = true;
-                                        }
-                                    }
-                                    if !merged {
-                                        intervals.push((min_x, max_x));
-                                    }
+                                let collide =
+                                    occupied.iter().any(|&(s, e)| s < max_x && e > min_x);
+                                if !collide {
+                                    occupied.push((min_x, max_x));
+                                    chosen_slot = Some(s_idx);
+                                    break;
                                 }
+                            }
+
+                            let slot = if let Some(s) = chosen_slot {
+                                s
+                            } else if slots.len() < MAX_SLOTS_PER_LEVEL {
+                                slots.push(vec![(min_x, max_x)]);
+                                slots.len() - 1
                             } else {
-                                let slots = &mut level_occupied_slots[from_level];
-                                let mut chosen_slot = None;
+                                // Cap reached: reuse slot 0 to bound level height.
+                                // For extreme fan-in (e.g. 50k→1) all intervals
+                                // overlap at the target X anyway, so visual overlap
+                                // is unavoidable and this keeps output bounded.
+                                slots[0].push((min_x, max_x));
+                                0
+                            };
 
-                                for (s_idx, occupied) in slots.iter_mut().enumerate() {
-                                    // Optimization: Fast path for ordered insertions (common)
-                                    // If we are strictly after the last interval, no collision.
-                                    if let Some(last) = occupied.last() {
-                                        if min_x >= last.1 {
-                                            occupied.push((min_x, max_x));
-                                            chosen_slot = Some(s_idx);
-                                            break;
-                                        }
-                                    }
-
-                                    let collide =
-                                        occupied.iter().any(|&(s, e)| s < max_x && e > min_x);
-                                    if !collide {
-                                        occupied.push((min_x, max_x));
-                                        chosen_slot = Some(s_idx);
-                                        break;
-                                    }
-                                }
-
-                                let slot = if let Some(s) = chosen_slot {
-                                    s
-                                } else {
-                                    slots.push(vec![(min_x, max_x)]);
-                                    slots.len() - 1
-                                };
-
-                                node_slots[from_idx] = slot;
-                            }
-                            // Use assigned slot
-                            // edge_slots[i] = 0; // Not strictly used for Source Bus edges in current logic?
-                            // Wait, edge_slots IS used later! "base_y + slot".
-                            // For Source Bus, we assume "node_slots" is the slot.
-                            // But let's populate edge_slots to be safe.
-                            edge_slots[i] = node_slots[from_idx];
+                            node_slots[from_idx] = slot;
                         }
+                        edge_slots[i] = node_slots[from_idx];
                     }
                 }
             }
         }
 
-        // Calculate per-level heights dynamically to reduce whitespace
-        // Instead of a global `lines_per_level`, we compute `level_heights` and `level_y_offsets`
-        let base_lines = if has_labeled_edges { 4 } else { 3 };
+        // Calculate per-level heights: base + extra rows for slot separation
+        let base_lines = if has_labeled_edges { 5 } else { 3 };
         let mut level_y_offsets = Vec::with_capacity(max_level + 1);
         let mut current_offset = 0;
 
@@ -996,9 +915,6 @@ impl<'a> DAG<'a> {
 
         let total_height = current_offset;
 
-        // Build lookup: for each real node, find its (level, position, x, width)
-        // real_node_coords was already populated above
-
         // Add real nodes to IR
         for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
             for vnode in level_vnodes {
@@ -1021,12 +937,8 @@ impl<'a> DAG<'a> {
             }
         }
 
-        // Build lookup for dummy node positions: edge_idx -> Vec<(level, x)>
-        // Use the actual dummy node positions from virtual_levels after crossing reduction.
-        // This ensures edges route around nodes from the natural layout ordering.
+        // Collect dummy node X positions for skip-level edge routing
         let mut dummy_positions: Vec<Vec<(usize, usize)>> = vec![Vec::new(); self.edges.len()];
-
-        // Iterate through virtual_levels to find dummy nodes and their actual positions
         for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
             let level_width = level_widths[level_idx];
             let level_offset = if max_width > level_width {
@@ -1053,7 +965,6 @@ impl<'a> DAG<'a> {
             positions.sort_by_key(|(level, _)| *level);
         }
 
-        // Initialize counters for dynamic edge slot assignment (replacing level_edge_slots map)
         let mut level_edge_next = vec![0usize; max_level + 1];
 
         // Step 6: Add edges with proper routing
@@ -1073,9 +984,8 @@ impl<'a> DAG<'a> {
                 let from_y = level_y_offsets[from_level];
                 let to_y = level_y_offsets[to_level];
 
-                // Calculate separation: Row 1 is reserved for labels if they exist.
-                // Breakouts start at Row 2 (if labels) or Row 1 (if no labels).
-                let edge_start_row = if has_labeled_edges { 2 } else { 1 };
+                // Horizontal edges start at row 1 below the node
+                let edge_start_row = 1;
 
                 let path = if to_level == from_level + 1 {
                     // Adjacent levels - direct or corner connection
@@ -1083,16 +993,10 @@ impl<'a> DAG<'a> {
                         EdgePath::Direct
                     } else {
                         // Get horizontal slot for this source at this level
-                        let slot = if in_degrees[to_idx] > 1 {
-                            // Use Target Bus
-                            edge_slots[edge_idx]
+                        let slot = if node_slots[from_idx] != usize::MAX {
+                            node_slots[from_idx]
                         } else {
-                            // Use Source Bus
-                            if node_slots[from_idx] != usize::MAX {
-                                node_slots[from_idx]
-                            } else {
-                                0
-                            }
+                            0
                         };
 
                         EdgePath::Corner {
@@ -1104,14 +1008,10 @@ impl<'a> DAG<'a> {
                     let dummies = &dummy_positions[edge_idx];
                     if dummies.is_empty() {
                         // Fallback to corner if no dummies (shouldn't happen)
-                        let slot = if in_degrees[to_idx] > 1 {
-                            edge_slots[edge_idx]
+                        let slot = if node_slots[from_idx] != usize::MAX {
+                            node_slots[from_idx]
                         } else {
-                            if node_slots[from_idx] != usize::MAX {
-                                node_slots[from_idx]
-                            } else {
-                                0
-                            }
+                            0
                         };
                         EdgePath::Corner {
                             horizontal_y: from_y + edge_start_row + slot,
@@ -1128,21 +1028,14 @@ impl<'a> DAG<'a> {
                             waypoints.push((x, level_y_offsets[level] + edge_start_row + slot));
                         }
 
-                        // Use slot for initial horizontal offset
-                        let source_slot = if in_degrees[to_idx] > 1 {
-                            edge_slots[edge_idx]
+                        let slot = if node_slots[from_idx] != usize::MAX {
+                            node_slots[from_idx]
                         } else {
-                            if node_slots[from_idx] != usize::MAX {
-                                node_slots[from_idx]
-                            } else {
-                                0
-                            }
+                            0
                         };
 
                         // Calculate offset from (y+1)
-                        // Target Y = y + edge_start + slot
-                        // Offset = Target Y - (y+1) = edge_start + slot - 1
-                        let start_y_offset = (edge_start_row + source_slot).saturating_sub(1);
+                        let start_y_offset = (edge_start_row + slot).saturating_sub(1);
 
                         EdgePath::MultiSegment {
                             waypoints,
@@ -1151,18 +1044,17 @@ impl<'a> DAG<'a> {
                     }
                 };
 
-                // Compute label position
-                // With lines_per_level=4, we have a dedicated label row at from_y + 2:
-                //   y=from_y:   [Source Node]
-                //   y=from_y+1: corner/horizontal routing
-                //   y=from_y+2: LABEL ROW (vertical line + label text)
-                //   y=from_y+3: arrow (to_y - 1)
-                //   y=to_y:     [Target Node]
+                // Label placement row layout:
+                //   from_y+0: [Source Node]
+                //   from_y+1: horizontal edge routing
+                //   from_y+2: vertical connector
+                //   from_y+3: label text row
+                //   to_y:     [Target Node]
                 let label_position = label.map(|lbl| {
                     let label_len = lbl.chars().count() + 2; // +2 for quotes
 
-                    // Label Y is always at from_y + 1 (immediately below the source node)
-                    let label_y = from_y + 1;
+                    // Label Y at from_y + 3 (dedicated label row with base_lines=5)
+                    let label_y = from_y + 3;
 
                     // Find the edge's X position at the label row
                     let edge_x_at_label = match &path {

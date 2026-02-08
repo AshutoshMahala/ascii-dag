@@ -250,7 +250,7 @@ impl<'a> DAG<'a> {
         let level_y_offsets = &mut temps.level_y_offsets;
 
         let mut current_offset = 0;
-        let base_lines = if has_labeled_edges { 4 } else { 3 };
+        let base_lines = if has_labeled_edges { 5 } else { 3 };
 
         for level in 0..=max_level {
             level_y_offsets[level] = current_offset;
@@ -289,15 +289,12 @@ impl<'a> DAG<'a> {
 
         builder.finalize_levels();
 
-        // Track assigned slots: node_slots[node_idx] = assigned_slot
-        // Initialize to usize::MAX (unassigned)
         temps.node_slots.fill(usize::MAX);
         let node_slots = &mut temps.node_slots;
 
         temps.level_slot_next.fill(0);
         let level_slot_next = &mut temps.level_slot_next;
 
-        // Track dummy slots for vertical separation of skip-level edges
         temps.level_dummy_next.fill(0);
         let level_dummy_next = &mut temps.level_dummy_next;
 
@@ -318,8 +315,7 @@ impl<'a> DAG<'a> {
                 let from_y = level_y_offsets[from_level];
                 let to_y = level_y_offsets[to_level];
 
-                // Get or assign slot for this source at this level
-                // We need slots for both adjacent and skip-level edges to prevent horizontal overlap at source
+                // Assign a horizontal slot for this source node
                 let slot = if to_level > from_level {
                     if node_slots[from_idx] != usize::MAX {
                         node_slots[from_idx]
@@ -333,8 +329,8 @@ impl<'a> DAG<'a> {
                     0
                 };
 
-                // Separation logic
-                let edge_start_row = if has_labeled_edges { 2 } else { 1 };
+                // Horizontal edges start at row 1 below the node
+                let edge_start_row = 1;
 
                 let path = if to_level == from_level + 1 {
                     if from_x == to_x {
@@ -404,8 +400,8 @@ impl<'a> DAG<'a> {
                     if let Some(label) = self.edges[edge_idx].2 {
                         // Add label to arena's label storage
                         if let Some((offset, len)) = builder.add_edge_label(label) {
-                            // Compute label position: label_y at from_y + 2
-                            let l_y = from_y + 2;
+                            // Compute label position: label_y at from_y + 3
+                            let l_y = from_y + 3;
                             // Center label on edge's vertical line at that row
                             let edge_x_at_label =
                                 match &path {
@@ -549,7 +545,6 @@ impl<'a> DAG<'a> {
 
     /// Calculate levels using arena-allocated buffer.
     fn calculate_levels_arena(&self, levels: &mut [Idx], edge_indices: &[(Idx, Idx)]) -> usize {
-        // Initialize all to 0
         for l in levels.iter_mut() {
             *l = 0;
         }
@@ -850,7 +845,6 @@ impl<'a> DAG<'a> {
             let end = (vlevel_offsets[level + 1] as usize).min(vnode_limit);
 
             // Calculate centering offset for this level
-            // Need to match logic in build_real_coords / assign_x_coords
             let level_width = if end > start {
                 let last_idx = end - 1;
                 x_coords[last_idx] as usize + widths[last_idx] as usize
@@ -947,9 +941,8 @@ impl<'a> DAG<'a> {
         _medians: &mut [(Idx, u32)],
         _positions: &mut [Idx],
     ) {
-        // TODO: Implement full crossing reduction
-        // For now, skip - nodes stay in insertion order
-        // This is a simplification; full impl would do median heuristic
+        // Crossing reduction not yet implemented for arena;
+        // nodes remain in insertion order.
     }
 }
 
@@ -1003,8 +996,6 @@ pub fn compute_layout_arena_csr<'b>(
         temps.vnode_data,
         max_level,
     );
-
-    // Step 4: Crossing reduction (skipped for now, same as DAG impl)
 
     // Step 5: Assign x-coordinates
     let max_width = assign_x_coords_csr(
@@ -1184,7 +1175,6 @@ pub fn compute_layout_arena_csr<'b>(
 
         // CsR graphs don't support edge labels currently
         let has_labeled_edges = false;
-        // Separation logic
         let edge_start_row = if has_labeled_edges { 2 } else { 1 };
 
         let path = if to_level == from_level + 1 {
@@ -1270,9 +1260,7 @@ pub fn compute_layout_arena_csr<'b>(
     Some(builder.build())
 }
 
-// Helpers for CSR layout
-// Duplicated from DAG implementation but using CsrGraph logic
-// This is cleaner than trying to abstract it with Traits right now
+// Helpers for CSR layout (parallel implementation for CsrGraph)
 
 fn alloc_layout_temps_csr<'b>(
     arena: &'b mut Arena<'_>,

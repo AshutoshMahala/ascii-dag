@@ -26,6 +26,75 @@ const CORNER_DL: char = '┘';
 const CORNER_UR: char = '┌';
 const CORNER_UL: char = '┐';
 const CROSS: char = '┼';
+const TEE_DOWN: char = '┬';
+const TEE_UP: char = '┴';
+const TEE_RIGHT: char = '├';
+const TEE_LEFT: char = '┤';
+
+fn char_direction_mask(c: char) -> u8 {
+    match c {
+        V_LINE => 1 | 2,       // Up | Down
+        H_LINE => 4 | 8,       // Left | Right
+        CORNER_DR => 1 | 8,    // Up | Right
+        CORNER_DL => 1 | 4,    // Up | Left
+        CORNER_UR => 2 | 8,    // Down | Right
+        CORNER_UL => 2 | 4,    // Down | Left
+        TEE_UP => 1 | 4 | 8,   // Up | Left | Right
+        TEE_DOWN => 2 | 4 | 8, // Down | Left | Right
+        TEE_LEFT => 1 | 2 | 4, // Up | Down | Left
+        TEE_RIGHT => 1 | 2 | 8, // Up | Down | Right
+        CROSS => 15,           // All
+        ARROW_DOWN => 1,       // Connects Up
+        _ => 0,
+    }
+}
+
+fn mask_to_char(mask: u8) -> char {
+    match mask {
+        3 => V_LINE,
+        12 => H_LINE,
+        9 => CORNER_DR,
+        5 => CORNER_DL,
+        10 => CORNER_UR,
+        6 => CORNER_UL,
+        13 => TEE_UP,
+        14 => TEE_DOWN,
+        7 => TEE_LEFT,
+        11 => TEE_RIGHT,
+        15 => CROSS,
+        // Fallbacks
+        m if (m & 15) == 15 => CROSS,
+        m if (m & 13) == 13 => TEE_UP,
+        m if (m & 14) == 14 => TEE_DOWN,
+        m if (m & 7) == 7 => TEE_LEFT,
+        m if (m & 11) == 11 => TEE_RIGHT,
+        m if (m & 9) == 9 => CORNER_DR,
+        m if (m & 5) == 5 => CORNER_DL,
+        m if (m & 10) == 10 => CORNER_UR,
+        m if (m & 6) == 6 => CORNER_UL,
+        m if (m & 12) == 12 => H_LINE,
+        m if (m & 3) == 3 => V_LINE,
+        1 | 2 => V_LINE,
+        4 | 8 => H_LINE,
+        _ => ' ',
+    }
+}
+
+fn merge_chars(c1: char, c2: char) -> char {
+    if c1 == ' ' { return c2; }
+    if c2 == ' ' { return c1; }
+    if c1 == c2 { return c1; }
+    if c1 == ARROW_DOWN || c2 == ARROW_DOWN { return ARROW_DOWN; } // Arrows take precedence
+
+    let m1 = char_direction_mask(c1);
+    let m2 = char_direction_mask(c2);
+    if m1 == 0 { return c2; }
+    if m2 == 0 { return c1; }
+
+    let union = m1 | m2;
+    let merged = mask_to_char(union);
+    if merged == ' ' { c1 } else { merged }
+}
 
 impl<'a> LayoutIR<'a> {
     /// Render using the scanline approach with Y-index.
@@ -183,6 +252,27 @@ impl<'a> LayoutIR<'a> {
         let mut line_buffer: Vec<char> = vec![' '; self.width()];
         let mut color_buffer: Vec<u8> = vec![0; self.width()]; // 0 = no color
 
+        // Greedy label placement: track pending labels that haven't been placed yet
+        // Each entry: (edge_idx, min_y, max_y, placed)
+        let mut pending_labels: Vec<(usize, usize, usize, bool)> = Vec::new();
+        for (edge_idx, edge) in self.edges().iter().enumerate() {
+            if edge.label.is_some() {
+                // strict placement: use the pre-calculated label_y if available
+                // This prevents "stacking" labels and forces collisions to the legend,
+                // which results in a cleaner graph (preferred by user).
+                if let Some((_, label_y)) = edge.label_position {
+                    pending_labels.push((edge_idx, label_y, label_y, false));
+                } else {
+                     // Fallback for edges without pre-calculated position (shouldn't happen with valid layout)
+                    let min_y = edge.from_y.saturating_add(2);
+                    let max_y = edge.to_y.saturating_sub(2);
+                    if max_y >= min_y {
+                        pending_labels.push((edge_idx, min_y, max_y, false));
+                    }
+                }
+            }
+        }
+
         for y in 0..self.height() {
             // Clear buffers
             line_buffer.fill(' ');
@@ -203,16 +293,32 @@ impl<'a> LayoutIR<'a> {
                     );
                 }
 
-                // 2. Paint edge labels (same color as the edge line), track skipped ones
-                for &edge_idx in &occupancy.edge_indices {
-                    let edge = &self.edges()[edge_idx];
-                    if let (Some(label), Some((label_x, label_y))) =
-                        (edge.label, edge.label_position)
-                    {
-                        if y == label_y {
-                            let color_idx = edge_color_indices.get(edge_idx).copied().unwrap_or(0);
-                            let color = palette_colors[color_idx % palette_colors.len()];
+                // 2. Greedy label placement: try to place pending labels at this Y
+                // Skip rows that have nodes to avoid label-node collisions
+                let has_nodes = !occupancy.node_indices.is_empty();
+                
+                if !has_nodes {
+                    for (edge_idx, min_y, max_y, placed) in pending_labels.iter_mut() {
+                        if *placed {
+                            continue;
+                        }
+                        // Ensure we are within the valid vertical range for this edge
+                        if y < *min_y || y > *max_y {
+                            continue; 
+                        }
+
+                        let edge = &self.edges()[*edge_idx];
+                        if let Some(label) = edge.label {
+                            // Compute label X at this Y based on edge path
+                            let label_x = self.compute_label_x_at_y(edge, y);
+                            let label_len = label.chars().count() + 2; // +2 for quotes
+                            let half_len = label_len / 2;
+                            let label_x = label_x.saturating_sub(half_len);
+
+                            // Check collision with line buffer
                             if self.can_place_label(&line_buffer, label, label_x) {
+                                let color_idx = edge_color_indices.get(*edge_idx).copied().unwrap_or(0);
+                                let color = palette_colors[color_idx % palette_colors.len()];
                                 self.paint_edge_label_colored(
                                     &mut line_buffer,
                                     &mut color_buffer,
@@ -220,18 +326,7 @@ impl<'a> LayoutIR<'a> {
                                     label_x,
                                     color,
                                 );
-                            } else {
-                                // Track this skipped label for the legend
-                                if let (Some(from_node), Some(to_node)) = (
-                                    self.id_to_index
-                                        .get(&edge.from_id)
-                                        .map(|&i| self.nodes()[i].label),
-                                    self.id_to_index
-                                        .get(&edge.to_id)
-                                        .map(|&i| self.nodes()[i].label),
-                                ) {
-                                    skipped_labels.push((from_node, to_node, label, color));
-                                }
+                                *placed = true;
                             }
                         }
                     }
@@ -247,6 +342,27 @@ impl<'a> LayoutIR<'a> {
             // Write line with ANSI color escapes
             self.write_colored_line(output, &line_buffer, &color_buffer);
             output.push('\n');
+        }
+
+        // Collect skipped labels (those that were never placed)
+        for (edge_idx, _min_y, _max_y, placed) in pending_labels {
+            if !placed {
+                let edge = &self.edges()[edge_idx];
+                if let Some(label) = edge.label {
+                    let color_idx = edge_color_indices.get(edge_idx).copied().unwrap_or(0);
+                    let color = palette_colors[color_idx % palette_colors.len()];
+                    if let (Some(from_node), Some(to_node)) = (
+                        self.id_to_index
+                            .get(&edge.from_id)
+                            .map(|&i| self.nodes()[i].label),
+                        self.id_to_index
+                            .get(&edge.to_id)
+                            .map(|&i| self.nodes()[i].label),
+                    ) {
+                        skipped_labels.push((from_node, to_node, label, color));
+                    }
+                }
+            }
         }
 
         skipped_labels
@@ -857,6 +973,39 @@ impl<'a> LayoutIR<'a> {
         }
     }
 
+    /// Compute the edge's center X position at a given Y for label placement.
+    /// This accounts for edge path type (direct, corner, sidechannel, multisegment).
+    #[inline]
+    fn compute_label_x_at_y(&self, edge: &crate::ir::LayoutEdge<'a>, y: usize) -> usize {
+        use crate::ir::EdgePath;
+
+        match &edge.path {
+            EdgePath::Direct => edge.from_x,
+            EdgePath::Corner { horizontal_y } => {
+                if y <= *horizontal_y {
+                    edge.from_x
+                } else {
+                    edge.to_x
+                }
+            }
+            EdgePath::SideChannel { channel_x, start_y, .. } => {
+                if y < *start_y {
+                    edge.from_x
+                } else {
+                    *channel_x
+                }
+            }
+            EdgePath::MultiSegment { waypoints, start_y_offset } => {
+                let horizontal_y = edge.from_y + 1 + start_y_offset;
+                if y <= horizontal_y || waypoints.is_empty() {
+                    edge.from_x
+                } else {
+                    waypoints[0].0
+                }
+            }
+        }
+    }
+
     /// Check if a label can be placed without collision.
     /// Returns true if all positions are empty (space) or the edge's vertical line (│).
     /// The "through" approach allows labels to pass through their own edge line.
@@ -942,13 +1091,9 @@ impl<'a> LayoutIR<'a> {
                         buffer[x] = ARROW_DOWN;
                         colors[x] = color;
                     } else {
-                        // Vertical segment: overwrite or form crossing
-                        if buffer[x] == H_LINE {
-                            buffer[x] = CROSS;
-                            // Vertical color takes priority on crossing
-                            colors[x] = color;
-                        } else {
-                            buffer[x] = V_LINE;
+                        // Vertical segment: overwrite or form crossing/tee
+                        if x < buffer.len() {
+                            buffer[x] = merge_chars(buffer[x], V_LINE);
                             colors[x] = color;
                         }
                     }
@@ -961,37 +1106,27 @@ impl<'a> LayoutIR<'a> {
 
                 if y == *horizontal_y {
                     // Horizontal segment
-                    for x in min_x..=max_x {
+                    for x in (min_x + 1)..max_x {
                         if x < buffer.len() {
-                            if buffer[x] == ' ' {
-                                buffer[x] = H_LINE;
-                                colors[x] = color;
-                            } else if buffer[x] == V_LINE {
-                                // Crossing: Vertical was here first. Upgrade to CROSS.
-                                buffer[x] = CROSS;
-                                // Keep existing Vertical color (priority)
-                            }
+                            buffer[x] = merge_chars(buffer[x], H_LINE);
+                            colors[x] = color;
                         }
                     }
-                    // Corners
                     if x1 < buffer.len() {
-                        buffer[x1] = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                        let proposed = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                        buffer[x1] = merge_chars(buffer[x1], proposed);
                         colors[x1] = color;
                     }
                     if x2 < buffer.len() {
-                        buffer[x2] = if x1 < x2 { CORNER_UL } else { CORNER_UR };
+                        let proposed = if x1 < x2 { CORNER_UL } else { CORNER_UR };
+                        buffer[x2] = merge_chars(buffer[x2], proposed);
                         colors[x2] = color;
                     }
                 } else if y > edge.from_y && y < *horizontal_y {
                     // Vertical from source to horizontal
                     if x1 < buffer.len() {
-                        if buffer[x1] == H_LINE {
-                            buffer[x1] = CROSS;
-                            colors[x1] = color;
-                        } else {
-                            buffer[x1] = V_LINE;
-                            colors[x1] = color;
-                        }
+                        buffer[x1] = merge_chars(buffer[x1], V_LINE);
+                        colors[x1] = color;
                     }
                 } else if y > *horizontal_y && y < edge.to_y {
                     // Vertical from horizontal to target
@@ -1000,13 +1135,8 @@ impl<'a> LayoutIR<'a> {
                             buffer[x2] = ARROW_DOWN;
                             colors[x2] = color;
                         } else {
-                            if buffer[x2] == H_LINE {
-                                buffer[x2] = CROSS;
-                                colors[x2] = color;
-                            } else {
-                                buffer[x2] = V_LINE;
-                                colors[x2] = color;
-                            }
+                            buffer[x2] = merge_chars(buffer[x2], V_LINE);
+                            colors[x2] = color;
                         }
                     }
                 }
@@ -1115,14 +1245,8 @@ impl<'a> LayoutIR<'a> {
                                 buffer[x1] = ARROW_DOWN;
                                 colors[x1] = color;
                             } else {
-                                if buffer[x1] == H_LINE {
-                                    buffer[x1] = CROSS;
-                                    // Vertical color priority
-                                    colors[x1] = color;
-                                } else if buffer[x1] == ' ' {
-                                    buffer[x1] = V_LINE;
-                                    colors[x1] = color;
-                                }
+                                buffer[x1] = merge_chars(buffer[x1], V_LINE);
+                                colors[x1] = color;
                             }
                         }
                     } else if y1 == y2 {
@@ -1131,13 +1255,8 @@ impl<'a> LayoutIR<'a> {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
                             for x in min_x..=max_x {
                                 if x < buffer.len() {
-                                    if buffer[x] == ' ' {
-                                        buffer[x] = H_LINE;
-                                        colors[x] = color;
-                                    } else if buffer[x] == V_LINE {
-                                        buffer[x] = CROSS;
-                                        // Keep vertical color
-                                    }
+                                    buffer[x] = merge_chars(buffer[x], H_LINE);
+                                    colors[x] = color;
                                 }
                             }
                         }
@@ -1152,13 +1271,8 @@ impl<'a> LayoutIR<'a> {
                         if is_first_segment && *start_y_offset > 0 {
                             let start_drop = y1 + 1;
                             if y >= start_drop && y < corner_y && x1 < buffer.len() {
-                                if buffer[x1] == H_LINE {
-                                    buffer[x1] = CROSS;
-                                    colors[x1] = color;
-                                } else if buffer[x1] == ' ' {
-                                    buffer[x1] = V_LINE;
-                                    colors[x1] = color;
-                                }
+                                buffer[x1] = merge_chars(buffer[x1], V_LINE);
+                                colors[x1] = color;
                             }
                         }
 
@@ -1167,19 +1281,16 @@ impl<'a> LayoutIR<'a> {
                             for x in min_x..=max_x {
                                 if x < buffer.len() {
                                     if x == x1 {
-                                        buffer[x] = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                                        let proposed = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                                        buffer[x] = merge_chars(buffer[x], proposed);
                                         colors[x] = color; // Corners use current color
                                     } else if x == x2 {
-                                        buffer[x] = if x1 < x2 { CORNER_UL } else { CORNER_UR };
+                                        let proposed = if x1 < x2 { CORNER_UL } else { CORNER_UR };
+                                        buffer[x] = merge_chars(buffer[x], proposed);
                                         colors[x] = color;
                                     } else {
-                                        if buffer[x] == ' ' {
-                                            buffer[x] = H_LINE;
-                                            colors[x] = color;
-                                        } else if buffer[x] == V_LINE {
-                                            buffer[x] = CROSS;
-                                            // Keep vertical color
-                                        }
+                                        buffer[x] = merge_chars(buffer[x], H_LINE);
+                                        colors[x] = color;
                                     }
                                 }
                             }
@@ -1189,11 +1300,7 @@ impl<'a> LayoutIR<'a> {
                             if is_last_segment && y == y2 - 1 {
                                 buffer[x2] = ARROW_DOWN;
                             } else {
-                                if buffer[x2] == H_LINE {
-                                    buffer[x2] = CROSS;
-                                } else {
-                                    buffer[x2] = V_LINE;
-                                }
+                                    buffer[x2] = merge_chars(buffer[x2], V_LINE);
                             }
                             colors[x2] = color;
                         }
@@ -1201,13 +1308,8 @@ impl<'a> LayoutIR<'a> {
                         if !is_first_segment && y == y1 && x1 < buffer.len() {
                             // Vertical segment start (MultiSegment corner is handled by previous Horizontal loop usually?)
                             // Line 1046 overwrites only if ' '
-                            if buffer[x1] == H_LINE {
-                                buffer[x1] = CROSS;
-                                colors[x1] = color;
-                            } else if buffer[x1] == ' ' {
-                                buffer[x1] = V_LINE;
-                                colors[x1] = color;
-                            }
+                            buffer[x1] = merge_chars(buffer[x1], V_LINE);
+                            colors[x1] = color;
                         }
                     }
                 }
