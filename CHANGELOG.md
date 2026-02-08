@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.3] - 2026-02-07
+
+### Fixes
+- **Horizontal Edge Overlap**: Replaced lane-based slot system (`rank % MAX_LANES`) with unified source-node-based slot assignment. Edges from 5+ sources converging on one target no longer collide. Heap layout now matches Arena behavior.
+- **Memory Explosion on Extreme Fan-in**: Added `MAX_SLOTS_PER_LEVEL = 8` cap to prevent unbounded horizontal growth. "Massive Fan (50k→1)" dropped from 14.9 GB / 67.7s to 5.8 MB / 29.1s.
+- **Performance Regression**: Replaced O(N×E) inner loop scanning all edges per target with O(N+E) adjacency-list lookup via `get_parents_indices()`.
+- **Clippy Dead-if**: Removed `if has_labeled_edges { 1 } else { 1 }` in both `graph.rs` and `layout/arena.rs`.
+- **Arena Labels Example**: Fixed missing `scratch_buffer` argument in `arena_labels_test.rs` after API change.
+
+### Code Quality
+- **Comment Cleanup**: Removed ~100 lines of thinking-out-loud / stale comments across `graph.rs`, `layout/arena.rs`, `render/scanline.rs`, and `ir/arena.rs`. Replaced with concise, descriptive comments.
+
 ## [0.8.2] - 2026-02-02
 
 ### Fixes
