@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example arena_limits --release
 
-use ascii_dag::arena::Arena;
+use ascii_dag::graph::arena::Arena;
 use ascii_dag::graph::DAG;
 
 fn main() {

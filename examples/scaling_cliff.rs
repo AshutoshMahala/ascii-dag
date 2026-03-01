@@ -1,4 +1,4 @@
-use ascii_dag::arena::Arena;
+use ascii_dag::graph::arena::Arena;
 use ascii_dag::graph::DAG;
 use std::time::Instant;
 

@@ -1,4 +1,4 @@
-use ascii_dag::layout::generic::{TopologicallySortable, topological_sort_fn};
+use ascii_dag::algorithms::generic::{TopologicallySortable, topological_sort_fn};
 use std::collections::HashMap;
 
 fn main() {

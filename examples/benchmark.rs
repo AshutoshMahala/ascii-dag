@@ -1,5 +1,5 @@
-use ascii_dag::arena::Arena;
-use ascii_dag::csr::CsrGraphBuilder;
+use ascii_dag::graph::arena::Arena;
+use ascii_dag::graph::csr::CsrGraphBuilder;
 use ascii_dag::graph::DAG;
 use std::io::{self, Write};
 use std::time::Instant;
@@ -77,6 +77,14 @@ fn generate_graph(topology: Topology, n: usize) -> GraphData {
 fn run_comparison(topology: Topology, count: usize) {
     let (nodes, edges) = generate_graph(topology, count);
 
+    // Build heap DAG once for both benchmarking and arena size estimation
+    let node_refs: Vec<(usize, &str)> = nodes.iter().map(|(id, s)| (*id, s.as_str())).collect();
+    let dag = DAG::from_edges(&node_refs, &edges);
+
+    // Use the DAG's estimator for arena buffer sizing with 2x safety margin.
+    let layout_estimate = dag.estimate_layout_arena_size();
+    let arena_size = (layout_estimate * 2).max(256 * 1024);
+
     // --- HEAP BENCHMARK ---
     let heap_total_us;
     let heap_build_us;
@@ -87,7 +95,6 @@ fn run_comparison(topology: Topology, count: usize) {
 
         // 1. Build
         let build_start = Instant::now();
-        let node_refs: Vec<(usize, &str)> = nodes.iter().map(|(id, s)| (*id, s.as_str())).collect();
         let dag = DAG::from_edges(&node_refs, &edges);
         heap_build_us = build_start.elapsed().as_micros();
 
@@ -111,18 +118,19 @@ fn run_comparison(topology: Topology, count: usize) {
     let arena_compute_us;
     let arena_render_us;
     {
-        // Allocate Memory Buffers
-        let mut graph_mem = vec![0u8; 2 * 1024 * 1024];
-        let mut temp_mem = vec![0u8; 8 * 1024 * 1024];
-        let mut output_mem = vec![0u8; 8 * 1024 * 1024];
+        // Scale graph arena: labels + node/edge structs + overhead
+        let label_bytes: usize = nodes.iter().map(|(_, l)| l.len()).sum::<usize>() + 256;
+        let graph_size = (label_bytes + (nodes.len() + edges.len()) * 64 + 64 * 1024).max(256 * 1024);
+
+        let mut graph_mem = vec![0u8; graph_size];
+        let mut temp_mem = vec![0u8; arena_size];
+        let mut output_mem = vec![0u8; arena_size];
 
         let start = Instant::now();
 
         // 1. Build
         let build_start = Instant::now();
         let mut graph_arena = Arena::new(&mut graph_mem);
-
-        let label_bytes = nodes.iter().map(|(_, l)| l.len()).sum::<usize>() + 256;
 
         let mut builder =
             CsrGraphBuilder::new(&mut graph_arena, nodes.len(), edges.len(), label_bytes)
@@ -145,13 +153,14 @@ fn run_comparison(topology: Topology, count: usize) {
 
         let layout = graph
             .compute_layout_arena(&mut temp_arena, &mut final_arena)
-            .expect("Layout computation failed (None returned)");
+            .expect("Layout computation failed (None returned). Use --features arena, not --all-features.");
         arena_compute_us = compute_start.elapsed().as_micros();
 
         // 3. Render
         let render_start = Instant::now();
-        let mut render_buf = vec![0u8; count * 500 + 10000];
-        let mut line_buf = vec![' '; 2048];
+        let estimated_render = dag.estimate_size();
+        let mut render_buf = vec![0u8; estimated_render + 65536];
+        let mut line_buf = vec![' '; (estimated_render as f64).sqrt() as usize + 1024];
         let (_, scratch_len) = layout.estimate_render_size();
         let mut scratch_buf = vec![0usize; scratch_len + 1024];
         let _ = layout.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf);
@@ -193,11 +202,13 @@ fn main() {
     );
     io::stdout().flush().unwrap();
 
+    // Note: Chain depth = N-1, Diamond depth ≈ N-1, and arena layout caps at MAX_LEVELS=255.
+    // Chain/Diamond 250 is the safe max (249 levels). WideFan has only 3 levels regardless.
     let tests = [
         (Topology::Chain, 100),
-        (Topology::Chain, 500),
+        (Topology::Chain, 250),
         (Topology::Diamond, 100),
-        (Topology::Diamond, 500),
+        (Topology::Diamond, 200),
         (Topology::WideFan, 100),
         (Topology::WideFan, 500),
     ];

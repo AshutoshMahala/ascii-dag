@@ -6,7 +6,7 @@
 //!
 //! Run with: cargo run --example arena_benchmark --release
 
-use ascii_dag::arena::Arena;
+use ascii_dag::graph::arena::Arena;
 use ascii_dag::graph::DAG;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};

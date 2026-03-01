@@ -3,7 +3,7 @@
 //! Demonstrates a real-world error handling system that prevents
 //! circular error dependencies using the generic cycle detector.
 
-use ascii_dag::cycles::generic::{detect_cycle_fn, has_cycle_fn};
+use ascii_dag::algorithms::cycles::generic::{detect_cycle_fn, has_cycle_fn};
 use std::collections::HashMap;
 
 /// A chainable error type with causal relationships

@@ -29,7 +29,7 @@ use core::hash::Hash;
 
 use super::impact::compute_ancestors_fn;
 use super::impact::compute_descendants_fn;
-use crate::cycles::generic::roots::find_roots_fn;
+use crate::algorithms::cycles::generic::roots::find_roots_fn;
 
 /// Statistical metrics for a dependency graph.
 ///

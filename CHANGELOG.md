@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Refactor
+- **Module restructure**: Reorganized `src/` into `graph/`, `algorithms/`, `ir/`, `render/` hierarchy — split 4 monolithic files into 15 focused modules (no file over ~750 lines), and regrouped `cycles/` + `layout/` under `algorithms/` with `arena.rs` and `csr.rs` under `graph/`.
+
 ## [0.8.3] - 2026-02-07
 
 ### Fixes

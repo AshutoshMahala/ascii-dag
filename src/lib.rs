@@ -125,23 +125,46 @@
 
 extern crate alloc;
 
-// Core modules (always available)
-pub mod arena;
-pub mod csr;
-pub mod cycles;
+// ── Module hierarchy ─────────────────────────────────────────────────────
+//
+//   graph/          DAG struct + arena allocator + CSR graph
+//   algorithms/     cycles, generic analysis, Sugiyama layout
+//   ir/             layout intermediate representation
+//   render/         ASCII / scanline renderers
+
 pub mod graph;
+pub mod algorithms;
 pub mod ir;
-pub mod layout;
 pub mod render;
 
-// Re-export CSR types
-pub use csr::CsrGraph;
+// ── Convenience re-exports ──────────────────────────────────────────────
 
-// Re-export IR types for convenience
+pub use graph::{DAG, RenderMode};
 pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode};
 
-// Backward compatibility re-exports
-pub use graph::{DAG, RenderMode};
+// ── Deprecated re-exports (removed in 0.10) ────────────────────────────
+//
+// These keep old `ascii_dag::arena`, `ascii_dag::csr`, `ascii_dag::cycles`,
+// and `ascii_dag::layout` import paths working but emit deprecation warnings.
+
+#[deprecated(since = "0.9.0", note = "use `ascii_dag::graph::arena` instead")]
+pub use graph::arena;
+
+#[deprecated(since = "0.9.0", note = "use `ascii_dag::graph::csr` instead")]
+pub use graph::csr;
+
+#[deprecated(since = "0.9.0", note = "use `ascii_dag::graph::csr::CsrGraph` instead")]
+pub use graph::csr::CsrGraph;
+
+#[deprecated(since = "0.9.0", note = "use `ascii_dag::algorithms::cycles` instead")]
+pub use algorithms::cycles;
+
+#[cfg(feature = "generic")]
+#[deprecated(since = "0.9.0", note = "use `ascii_dag::algorithms::generic` instead")]
+pub use algorithms::generic;
+
+#[deprecated(since = "0.9.0", note = "use `ascii_dag::algorithms::sugiyama` instead")]
+pub use algorithms::sugiyama as layout;
 
 #[cfg(test)]
 mod tests {

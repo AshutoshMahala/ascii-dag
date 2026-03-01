@@ -21,7 +21,7 @@
 //! └─────────────────────────────────────────┘
 //! ```
 
-use crate::arena::Arena;
+use crate::graph::arena::Arena;
 
 /// Node data stride: fields per node
 const NODE_STRIDE: usize = 3;
@@ -215,7 +215,7 @@ impl<'a> CsrGraph<'a> {
         temp_arena: &mut Arena<'_>,
         output_arena: &'b mut Arena<'b>,
     ) -> Option<crate::ir::arena::LayoutIRArena<'b>> {
-        crate::layout::arena::compute_layout_arena_csr(self, temp_arena, output_arena)
+        crate::algorithms::sugiyama::arena::compute_layout_arena_csr(self, temp_arena, output_arena)
     }
 }
 
@@ -490,7 +490,7 @@ impl<'a> CsrGraphBuilder<'a> {
 }
 
 #[cfg(feature = "alloc")]
-impl<'a> crate::DAG<'a> {
+impl<'a> super::DAG<'a> {
     /// Convert heap-based DAG to CSR format using the provided arena.
     ///
     /// This is useful for transitioning to arena mode or for

@@ -3,7 +3,7 @@
 //! This demonstrates how to use the higher-order cycle detection
 //! with a custom error type that has a `caused_by` relationship.
 
-use ascii_dag::cycles::generic::{CycleDetectable, detect_cycle_fn};
+use ascii_dag::algorithms::cycles::generic::{CycleDetectable, detect_cycle_fn};
 
 // Custom error type with causal relationships
 #[derive(Debug, Clone)]
@@ -102,7 +102,7 @@ fn example_trait_based() {
     ];
 
     // Using the trait
-    let cycle = ascii_dag::cycles::generic::detect_cycle(&errors);
+    let cycle = ascii_dag::algorithms::cycles::generic::detect_cycle(&errors);
 
     if let Some(path) = cycle {
         println!("   ❌ Cycle in error chain: {:?}", path);
@@ -135,7 +135,7 @@ fn example_complex_chain() {
 
     println!("   Checking error chain for circular dependencies...");
 
-    let cycle = ascii_dag::cycles::generic::detect_cycle(&errors);
+    let cycle = ascii_dag::algorithms::cycles::generic::detect_cycle(&errors);
 
     if let Some(path) = cycle {
         println!("   ❌ CRITICAL: Circular error dependency detected!");

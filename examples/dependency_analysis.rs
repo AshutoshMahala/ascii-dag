@@ -1,9 +1,9 @@
-use ascii_dag::cycles::generic::roots::{RootFindable, find_leaves_fn, find_roots_fn};
+use ascii_dag::algorithms::cycles::generic::roots::{RootFindable, find_leaves_fn, find_roots_fn};
 use ascii_dag::graph::DAG;
-use ascii_dag::layout::generic::impact::{
+use ascii_dag::algorithms::generic::impact::{
     ImpactAnalyzable, compute_blast_radius_fn, compute_descendants_fn,
 };
-use ascii_dag::layout::generic::metrics::GraphMetrics;
+use ascii_dag::algorithms::generic::metrics::GraphMetrics;
 use std::collections::HashMap;
 
 fn main() {

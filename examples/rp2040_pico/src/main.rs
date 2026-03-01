@@ -48,8 +48,8 @@ use embedded_alloc::Heap;
 // ascii-dag
 // ascii-dag
 use ascii_dag::DAG;
-use ascii_dag::arena::Arena;
-use ascii_dag::csr::CsrGraphBuilder;
+use ascii_dag::graph::arena::Arena;
+use ascii_dag::graph::csr::CsrGraphBuilder;
 
 /// Boot2 bootloader (W25Q080 flash)
 #[link_section = ".boot2"]

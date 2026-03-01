@@ -34,7 +34,7 @@ fn main() {
     let use_arena = args.iter().any(|a| a == "--arena");
 
     if use_arena {
-        use ascii_dag::arena::Arena;
+        use ascii_dag::graph::arena::Arena;
         println!("(Arena Mode)");
         // Estimate size and allocate buffers
         let arena_size = dag.estimate_layout_arena_size();

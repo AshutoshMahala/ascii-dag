@@ -91,7 +91,7 @@ Output:
 Detect cycles in **any data structure** using higher-order functions:
 
 ```rust
-use ascii_dag::cycles::generic::detect_cycle_fn;
+use ascii_dag::algorithms::cycles::generic::detect_cycle_fn;
 
 // Example: Check for circular dependencies in a package manager
 let get_deps = |package: &str| match package {
@@ -241,7 +241,7 @@ if dag.has_cycle() {
 Use the trait-based API for cleaner code:
 
 ```rust
-use ascii_dag::cycles::generic::CycleDetectable;
+use ascii_dag::algorithms::cycles::generic::CycleDetectable;
 
 struct ErrorRegistry {
     errors: HashMap<usize, Error>,
@@ -266,8 +266,8 @@ if registry.has_cycle() {
 ### Root Finding & Impact Analysis
 
 ```rust
-use ascii_dag::cycles::generic::roots::find_roots_fn;
-use ascii_dag::layout::generic::impact::compute_descendants_fn;
+use ascii_dag::algorithms::cycles::generic::roots::find_roots_fn;
+use ascii_dag::algorithms::generic::impact::compute_descendants_fn;
 
 let get_deps = |pkg: &&str| match *pkg {
     "app" => vec!["lib-a", "lib-b"],
@@ -291,7 +291,7 @@ let impacted = compute_descendants_fn(&packages, &"core", get_deps);
 ### Node Collection and Traversal
 
 ```rust
-use ascii_dag::layout::generic::traversal::collect_all_nodes_fn;
+use ascii_dag::algorithms::generic::traversal::collect_all_nodes_fn;
 
 // Collect all reachable nodes (handles cycles automatically)
 let all_nodes = collect_all_nodes_fn(&["start"], |node| {
@@ -313,7 +313,7 @@ for error_id in error_ids {
 ### Graph Metrics
 
 ```rust
-use ascii_dag::layout::generic::metrics::GraphMetrics;
+use ascii_dag::algorithms::generic::metrics::GraphMetrics;
 
 let metrics = GraphMetrics::compute(&packages, get_deps);
 println!("Total packages: {}", metrics.node_count());
@@ -403,7 +403,7 @@ The library is organized into focused, independently-usable modules:
 
 #### `ascii_dag::graph` - DAG Structure
 ```rust
-use ascii_dag::graph::DAG;  // or just `use ascii_dag::DAG;` for backward compat
+use ascii_dag::graph::DAG;  // or just `use ascii_dag::DAG;`
 
 impl<'a> DAG<'a> {
     // Construction
@@ -424,9 +424,9 @@ impl<'a> DAG<'a> {
 }
 ```
 
-#### `ascii_dag::cycles::generic` - Generic Cycle Detection
+#### `ascii_dag::algorithms::cycles::generic` - Generic Cycle Detection
 ```rust
-use ascii_dag::cycles::generic::{detect_cycle_fn, CycleDetectable};
+use ascii_dag::algorithms::cycles::generic::{detect_cycle_fn, CycleDetectable};
 
 // Function-based API
 pub fn detect_cycle_fn<Id, F>(
@@ -446,11 +446,28 @@ pub trait CycleDetectable {
 }
 ```
 
-#### `ascii_dag::layout` - Graph Layout
+#### `ascii_dag::algorithms::sugiyama` - Graph Layout
 Sugiyama hierarchical layout algorithm for positioning nodes.
+
+#### `ascii_dag::algorithms::generic` - Generic Graph Algorithms
+Impact analysis, traversal, and metrics for any graph-like data structure.
 
 #### `ascii_dag::render` - ASCII Rendering
 Vertical, horizontal, and cycle visualization modes.
+
+## Migrating to 0.9.0
+
+The module hierarchy was reorganized for clarity. Old paths still compile but emit deprecation warnings.
+
+| Old Path (deprecated) | New Path |
+|---|---|
+| `ascii_dag::arena` | `ascii_dag::graph::arena` |
+| `ascii_dag::csr` | `ascii_dag::graph::csr` |
+| `ascii_dag::cycles` | `ascii_dag::algorithms::cycles` |
+| `ascii_dag::layout` | `ascii_dag::algorithms::sugiyama` |
+| `ascii_dag::layout::generic` | `ascii_dag::algorithms::generic` |
+
+Top-level convenience re-exports (`ascii_dag::DAG`, `ascii_dag::LayoutIR`, etc.) remain unchanged.
 
 ## How it Works (Algorithms & Tradeoffs)
 
@@ -715,7 +732,7 @@ if let Some(node) = ir.node_at(5, 2) {       // Hit testing for mouse interactio
 For embedded/no_std environments, use `compute_layout_arena()` which returns `LayoutIRArena`:
 
 ```rust
-use ascii_dag::arena::Arena;
+use ascii_dag::graph::arena::Arena;
 
 let mut temp_buffer = [0u8; 16384];
 let mut output_buffer = [0u8; 16384];

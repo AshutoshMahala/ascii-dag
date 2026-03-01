@@ -1,18 +1,18 @@
-//! Graph layout algorithms for hierarchical rendering.
+//! Sugiyama hierarchical layout algorithm.
 //!
-//! This module implements the Sugiyama layered graph layout algorithm
-//! for positioning nodes in a hierarchical DAG visualization.
+//! Implements level assignment, crossing reduction, and coordinate assignment
+//! for positioning DAG nodes in a layered hierarchy.
 //!
 //! ## Submodules
 //!
-//! - [`generic`] - Generic topological sorting for any data structure (requires `generic` feature)
 //! - [`arena`] - Arena-based layout computation for `no_std`/embedded
+//! - [`heap`] - Heap-based layout computation (produces `LayoutIR`)
 //! - `idx` - Configurable index types for memory optimization (requires `arena` feature)
 
-#[cfg(feature = "generic")]
-pub mod generic;
-
 pub mod arena;
+pub(crate) mod arena_csr;
+pub(crate) mod arena_phases;
+pub(crate) mod heap;
 
 #[cfg(feature = "arena")]
 pub mod idx;

@@ -1,5 +1,5 @@
-use ascii_dag::arena::Arena;
-use ascii_dag::csr::CsrGraphBuilder;
+use ascii_dag::graph::arena::Arena;
+use ascii_dag::graph::csr::CsrGraphBuilder;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

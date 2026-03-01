@@ -70,7 +70,7 @@ where
     Id: Clone + Eq + Hash + Ord,
     F: Fn(&Id) -> Vec<Id>,
 {
-    use crate::cycles::generic::detect_cycle_fn;
+    use crate::algorithms::cycles::generic::detect_cycle_fn;
 
     // First check for cycles
     if let Some(cycle) = detect_cycle_fn(items, &get_dependencies) {

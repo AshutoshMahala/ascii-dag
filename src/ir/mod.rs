@@ -38,6 +38,9 @@
 //! ```
 
 pub mod arena;
+pub(crate) mod arena_builder;
+pub(crate) mod arena_colored;
+pub(crate) mod arena_render;
 
 use alloc::vec;
 use alloc::vec::Vec;

@@ -10,8 +10,8 @@
 //! 4. ... Layout finishes ...
 //! 5. Buffer C -> Render Storage (Text output, reuses Temp memory)
 
-use ascii_dag::arena::Arena;
-use ascii_dag::csr::CsrGraphBuilder;
+use ascii_dag::graph::arena::Arena;
+use ascii_dag::graph::csr::CsrGraphBuilder;
 
 fn main() {
     // 1. Single Block Allocation (e.g. 16KB on stack)

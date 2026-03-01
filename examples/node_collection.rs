@@ -3,7 +3,7 @@
 //! This demonstrates the `collect_all_nodes_fn` utility for traversing
 //! graphs and collecting all reachable nodes while handling cycles.
 
-use ascii_dag::layout::generic::traversal::{collect_all_nodes_dfs_fn, collect_all_nodes_fn};
+use ascii_dag::algorithms::generic::traversal::{collect_all_nodes_dfs_fn, collect_all_nodes_fn};
 
 fn main() {
     println!("=== Node Collection Examples ===\n");

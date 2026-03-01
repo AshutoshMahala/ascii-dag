@@ -7,7 +7,7 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use ascii_dag::arena::Arena;
+use ascii_dag::graph::arena::Arena;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 

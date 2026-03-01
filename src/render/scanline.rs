@@ -11,90 +11,14 @@
 //! - Optimized for speed over visual perfection
 
 use crate::ir::{EdgePath, LayoutIR};
+use crate::render::chars::{
+    merge_chars, ARROW_DOWN, CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR, CROSS, H_LINE, V_LINE,
+};
 use crate::render::colors::{self, Palette};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Write;
-
-// Box drawing characters
-const V_LINE: char = '│';
-const H_LINE: char = '─';
-const ARROW_DOWN: char = '↓';
-const CORNER_DR: char = '└';
-const CORNER_DL: char = '┘';
-const CORNER_UR: char = '┌';
-const CORNER_UL: char = '┐';
-const CROSS: char = '┼';
-const TEE_DOWN: char = '┬';
-const TEE_UP: char = '┴';
-const TEE_RIGHT: char = '├';
-const TEE_LEFT: char = '┤';
-
-fn char_direction_mask(c: char) -> u8 {
-    match c {
-        V_LINE => 1 | 2,       // Up | Down
-        H_LINE => 4 | 8,       // Left | Right
-        CORNER_DR => 1 | 8,    // Up | Right
-        CORNER_DL => 1 | 4,    // Up | Left
-        CORNER_UR => 2 | 8,    // Down | Right
-        CORNER_UL => 2 | 4,    // Down | Left
-        TEE_UP => 1 | 4 | 8,   // Up | Left | Right
-        TEE_DOWN => 2 | 4 | 8, // Down | Left | Right
-        TEE_LEFT => 1 | 2 | 4, // Up | Down | Left
-        TEE_RIGHT => 1 | 2 | 8, // Up | Down | Right
-        CROSS => 15,           // All
-        ARROW_DOWN => 1,       // Connects Up
-        _ => 0,
-    }
-}
-
-fn mask_to_char(mask: u8) -> char {
-    match mask {
-        3 => V_LINE,
-        12 => H_LINE,
-        9 => CORNER_DR,
-        5 => CORNER_DL,
-        10 => CORNER_UR,
-        6 => CORNER_UL,
-        13 => TEE_UP,
-        14 => TEE_DOWN,
-        7 => TEE_LEFT,
-        11 => TEE_RIGHT,
-        15 => CROSS,
-        // Fallbacks
-        m if (m & 15) == 15 => CROSS,
-        m if (m & 13) == 13 => TEE_UP,
-        m if (m & 14) == 14 => TEE_DOWN,
-        m if (m & 7) == 7 => TEE_LEFT,
-        m if (m & 11) == 11 => TEE_RIGHT,
-        m if (m & 9) == 9 => CORNER_DR,
-        m if (m & 5) == 5 => CORNER_DL,
-        m if (m & 10) == 10 => CORNER_UR,
-        m if (m & 6) == 6 => CORNER_UL,
-        m if (m & 12) == 12 => H_LINE,
-        m if (m & 3) == 3 => V_LINE,
-        1 | 2 => V_LINE,
-        4 | 8 => H_LINE,
-        _ => ' ',
-    }
-}
-
-fn merge_chars(c1: char, c2: char) -> char {
-    if c1 == ' ' { return c2; }
-    if c2 == ' ' { return c1; }
-    if c1 == c2 { return c1; }
-    if c1 == ARROW_DOWN || c2 == ARROW_DOWN { return ARROW_DOWN; } // Arrows take precedence
-
-    let m1 = char_direction_mask(c1);
-    let m2 = char_direction_mask(c2);
-    if m1 == 0 { return c2; }
-    if m2 == 0 { return c1; }
-
-    let union = m1 | m2;
-    let merged = mask_to_char(union);
-    if merged == ' ' { c1 } else { merged }
-}
 
 impl<'a> LayoutIR<'a> {
     /// Render using the scanline approach with Y-index.
