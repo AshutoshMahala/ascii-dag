@@ -12,11 +12,14 @@
 pub mod arena;
 pub(crate) mod arena_csr;
 pub(crate) mod arena_phases;
+pub mod crossing;
+pub mod error;
 pub(crate) mod heap;
 
 #[cfg(feature = "arena")]
 pub mod idx;
 
+use crate::algorithms::sugiyama::crossing::{count_crossings_pair, CrossingReducer};
 use crate::graph::DAG;
 use alloc::{vec, vec::Vec};
 
@@ -88,27 +91,98 @@ impl<'a> DAG<'a> {
             .collect()
     }
 
-    /// PASS 1: Reduce edge crossings using median heuristic.
+    /// PASS 1: Reduce edge crossings using a composable pipeline.
     ///
-    /// Applies the Sugiyama crossing reduction algorithm by iteratively
-    /// reordering nodes within levels to minimize edge crossings.
+    /// Iterates through the configured [`CrossingReducer`] pipeline,
+    /// applying each strategy in sequence to refine the node ordering.
     pub(crate) fn reduce_crossings(&self, levels: &mut [Vec<usize>], max_level: usize) {
-        // Iterate a variable number of times based on configuration
-        for _ in 0..self.crossing_reduction_passes {
-            // Top-down pass: order nodes by median of parents
-            for level_idx in 1..=max_level {
-                // Split borrows to avoid clone
-                let (prev_levels, rest) = levels.split_at_mut(level_idx);
-                let parent_level = &prev_levels[level_idx - 1];
-                self.order_by_median_parents(&mut rest[0], parent_level);
+        for reducer in &self.crossing_pipeline {
+            match reducer {
+                CrossingReducer::Median(passes) => {
+                    for _ in 0..*passes {
+                        // Top-down pass: order nodes by median of parents
+                        for level_idx in 1..=max_level {
+                            let (prev_levels, rest) = levels.split_at_mut(level_idx);
+                            let parent_level = &prev_levels[level_idx - 1];
+                            self.order_by_median_parents(&mut rest[0], parent_level);
+                        }
+
+                        // Bottom-up pass: order nodes by median of children
+                        for level_idx in (0..max_level).rev() {
+                            let (left, right) = levels.split_at_mut(level_idx + 1);
+                            let child_level = &right[0];
+                            self.order_by_median_children(&mut left[level_idx], child_level);
+                        }
+                    }
+                }
+                CrossingReducer::AdjacentExchange(passes) => {
+                    for _ in 0..*passes {
+                        // Top-down pass
+                        for level_idx in 1..=max_level {
+                            let (prev_levels, rest) = levels.split_at_mut(level_idx);
+                            let adj = &prev_levels[level_idx - 1];
+                            self.adjacent_exchange_real(&mut rest[0], adj, true);
+                        }
+
+                        // Bottom-up pass
+                        for level_idx in (0..max_level).rev() {
+                            let (left, right) = levels.split_at_mut(level_idx + 1);
+                            let adj = &right[0];
+                            self.adjacent_exchange_real(&mut left[level_idx], adj, false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Adjacent exchange on real-node levels: swap adjacent pairs if it reduces crossings.
+    fn adjacent_exchange_real(
+        &self,
+        level_nodes: &mut [usize],
+        adj_level: &[usize],
+        use_parents: bool,
+    ) {
+        if level_nodes.len() < 2 {
+            return;
+        }
+
+        let mut u_positions: Vec<usize> = Vec::with_capacity(4);
+        let mut v_positions: Vec<usize> = Vec::with_capacity(4);
+
+        for i in 0..level_nodes.len() - 1 {
+            let u_idx = level_nodes[i];
+            let v_idx = level_nodes[i + 1];
+
+            // Gather neighbour positions for u and v in the adjacent level
+            u_positions.clear();
+            v_positions.clear();
+
+            let u_neighbours = if use_parents {
+                self.get_parents_indices(u_idx)
+            } else {
+                self.get_children_indices(u_idx)
+            };
+            let v_neighbours = if use_parents {
+                self.get_parents_indices(v_idx)
+            } else {
+                self.get_children_indices(v_idx)
+            };
+
+            for &n in u_neighbours {
+                if let Some(pos) = adj_level.iter().position(|&x| x == n) {
+                    u_positions.push(pos);
+                }
+            }
+            for &n in v_neighbours {
+                if let Some(pos) = adj_level.iter().position(|&x| x == n) {
+                    v_positions.push(pos);
+                }
             }
 
-            // Bottom-up pass: order nodes by median of children
-            for level_idx in (0..max_level).rev() {
-                // Split borrows to avoid clone
-                let (left, right) = levels.split_at_mut(level_idx + 1);
-                let child_level = &right[0];
-                self.order_by_median_children(&mut left[level_idx], child_level);
+            let (cross_uv, cross_vu) = count_crossings_pair(&u_positions, &v_positions);
+            if cross_vu < cross_uv {
+                level_nodes.swap(i, i + 1);
             }
         }
     }

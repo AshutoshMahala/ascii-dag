@@ -7,6 +7,7 @@ use crate::graph::arena::Arena;
 use crate::graph::csr::CsrGraph;
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
 use super::arena::LayoutTemps;
+use super::error::LayoutError;
 
 // Import configurable index types
 #[cfg(feature = "arena")]
@@ -29,13 +30,14 @@ pub fn compute_layout_arena_csr<'b>(
     graph: &CsrGraph<'_>,
     temp_arena: &mut Arena<'_>,
     output_arena: &'b mut Arena<'b>,
-) -> Option<LayoutIRArena<'b>> {
+) -> Result<LayoutIRArena<'b>, LayoutError> {
     let node_count = graph.node_count();
     let edge_count = graph.edge_count();
 
     // Validate against index type limits
-    if node_count > MAX_NODES || edge_count > MAX_NODES {
-        return None; // Graph too large for selected index type
+    let max_count = node_count.max(edge_count);
+    if max_count > MAX_NODES {
+        return Err(LayoutError::ExceedsMaxNodes { count: max_count, max: MAX_NODES });
     }
 
     // Calculate total label bytes (iterating CSR is cheap)
@@ -52,7 +54,8 @@ pub fn compute_layout_arena_csr<'b>(
     let max_waypoints = (edge_count * 4).min(1000);
 
     // Step 1: Allocate temporaries
-    let mut temps = alloc_layout_temps_csr(temp_arena, node_count, edge_count)?;
+    let mut temps = alloc_layout_temps_csr(temp_arena, node_count, edge_count)
+        .ok_or(LayoutError::ArenaOom)?;
 
     // Step 2: Calculate levels
     let max_level = calculate_levels_csr(graph, temps.node_levels);
@@ -171,7 +174,7 @@ pub fn compute_layout_arena_csr<'b>(
         max_waypoints,
         total_label_bytes,
         max_level as usize + 1,
-    )?;
+    ).ok_or(LayoutError::BuilderFailed)?;
 
     // Add buffer for edge routing (+4)
     builder.set_dimensions(max_width as usize + 4, total_height);
@@ -192,8 +195,9 @@ pub fn compute_layout_arena_csr<'b>(
             width as usize,
             level as usize,
             pos as usize,
-        )?;
-        builder.add_node_to_level(level as usize, idx)?;
+        ).ok_or(LayoutError::ArenaOom)?;
+        builder.add_node_to_level(level as usize, idx)
+            .ok_or(LayoutError::ArenaOom)?;
     }
 
     builder.finalize_levels();
@@ -327,7 +331,7 @@ pub fn compute_layout_arena_csr<'b>(
         });
     }
 
-    Some(builder.build())
+    Ok(builder.build())
 }
 
 // Helpers for CSR layout (parallel implementation for CsrGraph)

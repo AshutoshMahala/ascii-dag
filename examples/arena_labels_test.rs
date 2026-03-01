@@ -42,7 +42,7 @@ fn main() {
     let mut temp_arena = Arena::new(&mut temp_buffer);
     let mut output_arena = Arena::new(&mut output_buffer);
 
-    if let Some(arena_ir) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
+    if let Ok(arena_ir) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
         println!(
             "Arena layout: {}x{}, {} nodes, {} edges",
             arena_ir.width(),
@@ -127,7 +127,7 @@ fn main() {
     let mut temp = Arena::new(&mut temp_buf);
     let mut out = Arena::new(&mut out_buf);
 
-    if let Some(diamond_arena) = diamond.compute_layout_arena(&mut temp, &mut out) {
+    if let Ok(diamond_arena) = diamond.compute_layout_arena(&mut temp, &mut out) {
         let mut arena_colors = vec![0usize; diamond_arena.edge_count()];
         diamond_arena.compute_edge_colors(&mut arena_colors, Palette::Ansi.colors().len());
         println!(

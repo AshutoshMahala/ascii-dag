@@ -16,6 +16,7 @@
 use crate::graph::arena::Arena;
 use crate::graph::DAG;
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
+use super::error::LayoutError;
 
 // Re-export CSR layout function for backward compatibility
 pub use super::arena_csr::compute_layout_arena_csr;
@@ -83,32 +84,32 @@ impl<'a> DAG<'a> {
     /// * `arena` - Arena for all allocations (must have sufficient space)
     ///
     /// # Returns
-    /// `Some(LayoutIRArena)` on success, `None` if arena runs out of space
-    /// or the graph has cycles.
+    /// `Ok(LayoutIRArena)` on success, `Err(LayoutError)` with a diagnostic
+    /// if the arena runs out of space, the graph has cycles, etc.
     ///
     /// # Note
     /// This function requires two arenas: one for temporaries and one for output.
-    /// Use `compute_layout_arena_split` for the two-arena version.
     pub fn compute_layout_arena<'b>(
         &self,
         temp_arena: &mut Arena<'_>,
         output_arena: &'b mut Arena<'b>,
-    ) -> Option<LayoutIRArena<'b>> {
+    ) -> Result<LayoutIRArena<'b>, LayoutError> {
         if self.nodes.is_empty() {
             return self.build_empty_layout_arena(output_arena);
         }
 
         // Check for cycles
         if self.has_cycle() {
-            return self.build_empty_layout_arena(output_arena);
+            return Err(LayoutError::CycleDetected);
         }
 
         let node_count = self.nodes.len();
         let edge_count = self.edges.len();
 
         // Validate against index type limits
-        if node_count > MAX_NODES || edge_count > MAX_NODES {
-            return None; // Graph too large for selected index type
+        let max_count = node_count.max(edge_count);
+        if max_count > MAX_NODES {
+            return Err(LayoutError::ExceedsMaxNodes { count: max_count, max: MAX_NODES });
         }
 
         // Calculate total label bytes (nodes + edge labels)
@@ -128,7 +129,8 @@ impl<'a> DAG<'a> {
         let max_waypoints = (edge_count * 4).min(1000);
 
         // Step 1: Allocate temporary buffers from temp arena
-        let mut temps = self.alloc_layout_temps(temp_arena, node_count, edge_count)?;
+        let mut temps = self.alloc_layout_temps(temp_arena, node_count, edge_count)
+            .ok_or(LayoutError::ArenaOom)?;
 
         // Step 1.5: Pre-resolve edge indices (O(E)) to avoid HashMap lookups in tight loops
         for (i, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
@@ -162,6 +164,7 @@ impl<'a> DAG<'a> {
             max_level,
             temps.medians,
             temps.positions,
+            temps.edge_indices,
         );
 
         // Step 5: Assign x-coordinates
@@ -275,7 +278,7 @@ impl<'a> DAG<'a> {
             max_waypoints,
             total_label_bytes,
             max_level + 1,
-        )?;
+        ).ok_or(LayoutError::BuilderFailed)?;
 
         // Add buffer for edge routing (+4) plus label margin
         builder.set_dimensions(max_width + 4 + label_margin, total_height);
@@ -286,8 +289,10 @@ impl<'a> DAG<'a> {
             let (level, pos, x, width) = temps.real_coords[idx];
             let y = level_y_offsets[level];
 
-            builder.add_node(id, label, x, y, width, level, pos)?;
-            builder.add_node_to_level(level, idx)?;
+            builder.add_node(id, label, x, y, width, level, pos)
+                .ok_or(LayoutError::ArenaOom)?;
+            builder.add_node_to_level(level, idx)
+                .ok_or(LayoutError::ArenaOom)?;
         }
 
         builder.finalize_levels();
@@ -444,13 +449,14 @@ impl<'a> DAG<'a> {
             }
         }
 
-        Some(builder.build())
+        Ok(builder.build())
     }
 
     /// Build an empty layout IR.
-    fn build_empty_layout_arena<'b>(&self, arena: &'b mut Arena<'b>) -> Option<LayoutIRArena<'b>> {
-        let builder = LayoutIRArenaBuilder::new(arena, 0, 0, 0, 0, 1)?;
-        Some(builder.build())
+    fn build_empty_layout_arena<'b>(&self, arena: &'b mut Arena<'b>) -> Result<LayoutIRArena<'b>, LayoutError> {
+        let builder = LayoutIRArenaBuilder::new(arena, 0, 0, 0, 0, 1)
+            .ok_or(LayoutError::BuilderFailed)?;
+        Ok(builder.build())
     }
 
     /// Allocate temporary buffers for layout computation.

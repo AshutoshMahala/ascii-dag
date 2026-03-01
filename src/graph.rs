@@ -26,7 +26,9 @@
 pub mod arena;
 pub mod csr;
 
-use alloc::{string::String, vec::Vec};
+use alloc::{vec, string::String, vec::Vec};
+
+use crate::algorithms::sugiyama::crossing::{CrossingReducer, STANDARD};
 
 #[cfg(feature = "std")]
 use std::collections::{HashMap, HashSet};
@@ -74,7 +76,7 @@ pub struct DAG<'a> {
     pub(crate) node_widths: Vec<usize>,      // Cached formatted widths
     pub(crate) children: Vec<Vec<usize>>,    // Adjacency list: children[idx] = child indices
     pub(crate) parents: Vec<Vec<usize>>,     // Adjacency list: parents[idx] = parent indices
-    pub(crate) crossing_reduction_passes: usize, // Number of passes for crossing reduction algorithm
+    pub(crate) crossing_pipeline: Vec<CrossingReducer>, // Composable crossing reduction pipeline
 }
 
 impl<'a> Default for DAG<'a> {
@@ -88,7 +90,7 @@ impl<'a> Default for DAG<'a> {
             node_widths: Vec::new(),
             children: Vec::new(),
             parents: Vec::new(),
-            crossing_reduction_passes: 4, // Default to 4 passes as per original implementation
+            crossing_pipeline: STANDARD.to_vec(),
         }
     }
 }
@@ -131,7 +133,7 @@ impl<'a> DAG<'a> {
             node_widths: Vec::new(),
             children: Vec::new(),
             parents: Vec::new(),
-            crossing_reduction_passes: 4,
+            crossing_pipeline: STANDARD.to_vec(),
         };
 
         // Build id_to_index map and widths cache
@@ -178,7 +180,7 @@ impl<'a> DAG<'a> {
             node_widths: Vec::new(),
             children: Vec::new(),
             parents: Vec::new(),
-            crossing_reduction_passes: 4,
+            crossing_pipeline: STANDARD.to_vec(),
         };
 
         // Build id_to_index map and widths cache
@@ -216,14 +218,43 @@ impl<'a> DAG<'a> {
 
     /// Set the number of passes for the crossing reduction algorithm.
     ///
-    /// - `0`: Skip crossing reduction entirely (fastest, useful for debugging or simple graphs)
-    /// - `1-4`: Good for most graphs (default is 4)
+    /// This is a **compatibility shim** — it replaces the entire pipeline
+    /// with `[Median(passes)]`.  Prefer [`set_crossing_pipeline`](Self::set_crossing_pipeline)
+    /// for full control.
+    ///
+    /// - `0`: Skip crossing reduction entirely
+    /// - `1-4`: Good for most graphs
     /// - `8-10`: Better layouts for complex tangled graphs, but slower
     ///
-    /// Values > 20 will trigger a warning (diminishing returns).
-    /// Values > 1000 are clamped to 0 with a warning (likely accidental).
+    /// Values > 20 trigger a warning.  Values > 1000 are clamped to 0.
     pub fn set_crossing_reduction_passes(&mut self, passes: usize) {
-        self.crossing_reduction_passes = Self::validate_passes(passes);
+        let p = Self::validate_passes(passes);
+        self.crossing_pipeline = if p == 0 {
+            Vec::new()
+        } else {
+            vec![CrossingReducer::Median(p)]
+        };
+    }
+
+    /// Set the crossing reduction pipeline.
+    ///
+    /// The pipeline is a sequence of [`CrossingReducer`] strategies applied
+    /// in order.  Use the presets [`FAST`](crate::algorithms::sugiyama::crossing::FAST),
+    /// [`STANDARD`](crate::algorithms::sugiyama::crossing::STANDARD), or
+    /// [`QUALITY`](crate::algorithms::sugiyama::crossing::QUALITY), or build
+    /// your own.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ascii_dag::graph::DAG;
+    /// use ascii_dag::algorithms::sugiyama::crossing::{CrossingReducer, QUALITY};
+    ///
+    /// let mut dag = DAG::new();
+    /// dag.set_crossing_pipeline(QUALITY);
+    /// ```
+    pub fn set_crossing_pipeline(&mut self, pipeline: &[CrossingReducer]) {
+        self.crossing_pipeline = pipeline.to_vec();
     }
 
     /// Validate crossing reduction passes, returning a safe value.
@@ -232,7 +263,6 @@ impl<'a> DAG<'a> {
     #[inline]
     fn validate_passes(passes: usize) -> usize {
         if passes > 1000 {
-            // Likely accidental: -1 as usize wraps to usize::MAX
             #[cfg(feature = "std")]
             eprintln!(
                 "[ascii-dag] Warning: crossing_reduction_passes={} is unreasonably large (possibly from negative value). Clamping to 0.",
@@ -269,7 +299,7 @@ impl<'a> DAG<'a> {
 
     /// Builder method: set crossing reduction passes (chainable).
     ///
-    /// See [`set_crossing_reduction_passes`](Self::set_crossing_reduction_passes) for valid ranges.
+    /// **Compatibility shim** — see [`set_crossing_reduction_passes`](Self::set_crossing_reduction_passes).
     ///
     /// # Examples
     ///
@@ -280,7 +310,23 @@ impl<'a> DAG<'a> {
     ///     .with_crossing_reduction_passes(8);  // More passes for complex graphs
     /// ```
     pub fn with_crossing_reduction_passes(mut self, passes: usize) -> Self {
-        self.crossing_reduction_passes = Self::validate_passes(passes);
+        self.set_crossing_reduction_passes(passes);
+        self
+    }
+
+    /// Builder method: set crossing reduction pipeline (chainable).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ascii_dag::DAG;
+    /// use ascii_dag::algorithms::sugiyama::crossing::QUALITY;
+    ///
+    /// let dag = DAG::new()
+    ///     .with_crossing_pipeline(QUALITY);
+    /// ```
+    pub fn with_crossing_pipeline(mut self, pipeline: &[CrossingReducer]) -> Self {
+        self.crossing_pipeline = pipeline.to_vec();
         self
     }
 
@@ -639,5 +685,32 @@ impl<'a> DAG<'a> {
     pub fn compute_layout(&self) -> crate::ir::LayoutIR<'a> {
         crate::algorithms::sugiyama::heap::compute_layout(self)
     }
-}
 
+    /// Compute the layout using a custom [`LayoutConfig`].
+    ///
+    /// Temporarily applies the config's crossing pipeline and render mode,
+    /// computes the layout, then restores the original settings.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ascii_dag::{DAG, LayoutConfig};
+    ///
+    /// let dag = DAG::from_edges(
+    ///     &[(1, "A"), (2, "B"), (3, "C")],
+    ///     &[(1, 2), (2, 3)]
+    /// );
+    ///
+    /// let ir = dag.compute_layout_with(&LayoutConfig::quality());
+    /// ```
+    pub fn compute_layout_with(
+        &self,
+        config: &crate::algorithms::sugiyama::crossing::LayoutConfig,
+    ) -> crate::ir::LayoutIR<'a> {
+        // Clone self, apply config, compute.
+        let mut dag = self.clone();
+        dag.crossing_pipeline = config.crossing_pipeline.clone();
+        dag.render_mode = config.render_mode;
+        crate::algorithms::sugiyama::heap::compute_layout(&dag)
+    }
+}

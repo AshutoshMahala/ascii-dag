@@ -43,7 +43,7 @@ fn main() {
         let mut temp_arena = Arena::new(&mut temp_buffer);
         let mut output_arena = Arena::new(&mut output_buffer); // Restored
 
-        if let Some(ir) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
+        if let Ok(ir) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
             // Calculate colors manually (Arena API requires provided buffer)
             let mut edge_colors = vec![0usize; ir.edge_count()];
             let palette_colors = Palette::Ansi.colors();

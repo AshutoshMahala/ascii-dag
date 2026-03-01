@@ -214,7 +214,7 @@ impl<'a> CsrGraph<'a> {
         &self,
         temp_arena: &mut Arena<'_>,
         output_arena: &'b mut Arena<'b>,
-    ) -> Option<crate::ir::arena::LayoutIRArena<'b>> {
+    ) -> Result<crate::ir::arena::LayoutIRArena<'b>, crate::algorithms::sugiyama::error::LayoutError> {
         crate::algorithms::sugiyama::arena::compute_layout_arena_csr(self, temp_arena, output_arena)
     }
 }

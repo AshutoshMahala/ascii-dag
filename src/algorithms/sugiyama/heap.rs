@@ -18,6 +18,7 @@
 //! using arena allocation and `Idx`-typed indices. The two paths produce
 //! visually compatible output but operate on different type systems.
 
+use crate::algorithms::sugiyama::crossing::{count_crossings_pair, CrossingReducer};
 use crate::graph::DAG;
 use crate::ir::{EdgePath, LayoutEdge, LayoutIRBuilder, LayoutIR, LayoutNode};
 use alloc::vec;
@@ -576,39 +577,197 @@ fn reduce_crossings_virtual(
     let mut node_medians: Vec<(VNode, f32)> = Vec::with_capacity(max_level_size);
     let mut connected_positions: Vec<usize> = Vec::with_capacity(8); // Most nodes have few connections
 
-    // Run multiple passes of median heuristic
-    for _ in 0..dag.crossing_reduction_passes {
-        // Top-down pass
-        for level_idx in 1..=max_level {
-            let (prev_levels, rest) = levels.split_at_mut(level_idx);
-            let parent_level = &prev_levels[level_idx - 1];
-            order_virtual_by_median(
-                dag,
-                &mut rest[0],
-                parent_level,
-                true,
-                &mut real_pos,
-                &mut dummy_pos,
-                &mut node_medians,
-                &mut connected_positions,
-            );
-        }
+    // Reusable buffers for adjacent exchange
+    let mut u_positions: Vec<usize> = Vec::with_capacity(8);
+    let mut v_positions: Vec<usize> = Vec::with_capacity(8);
 
-        // Bottom-up pass
-        for level_idx in (0..max_level).rev() {
-            let (left, right) = levels.split_at_mut(level_idx + 1);
-            let child_level = &right[0];
-            order_virtual_by_median(
-                dag,
-                &mut left[level_idx],
-                child_level,
-                false,
-                &mut real_pos,
-                &mut dummy_pos,
-                &mut node_medians,
-                &mut connected_positions,
-            );
+    for reducer in &dag.crossing_pipeline {
+        match reducer {
+            CrossingReducer::Median(passes) => {
+                // Run multiple passes of median heuristic
+                for _ in 0..*passes {
+                    // Top-down pass
+                    for level_idx in 1..=max_level {
+                        let (prev_levels, rest) = levels.split_at_mut(level_idx);
+                        let parent_level = &prev_levels[level_idx - 1];
+                        order_virtual_by_median(
+                            dag,
+                            &mut rest[0],
+                            parent_level,
+                            true,
+                            &mut real_pos,
+                            &mut dummy_pos,
+                            &mut node_medians,
+                            &mut connected_positions,
+                        );
+                    }
+
+                    // Bottom-up pass
+                    for level_idx in (0..max_level).rev() {
+                        let (left, right) = levels.split_at_mut(level_idx + 1);
+                        let child_level = &right[0];
+                        order_virtual_by_median(
+                            dag,
+                            &mut left[level_idx],
+                            child_level,
+                            false,
+                            &mut real_pos,
+                            &mut dummy_pos,
+                            &mut node_medians,
+                            &mut connected_positions,
+                        );
+                    }
+                }
+            }
+            CrossingReducer::AdjacentExchange(passes) => {
+                for _ in 0..*passes {
+                    // Top-down pass
+                    for level_idx in 1..=max_level {
+                        let (prev_levels, rest) = levels.split_at_mut(level_idx);
+                        let parent_level = &prev_levels[level_idx - 1];
+                        adjacent_exchange_virtual(
+                            dag,
+                            &mut rest[0],
+                            parent_level,
+                            true,
+                            &mut real_pos,
+                            &mut dummy_pos,
+                            &mut u_positions,
+                            &mut v_positions,
+                        );
+                    }
+
+                    // Bottom-up pass
+                    for level_idx in (0..max_level).rev() {
+                        let (left, right) = levels.split_at_mut(level_idx + 1);
+                        let child_level = &right[0];
+                        adjacent_exchange_virtual(
+                            dag,
+                            &mut left[level_idx],
+                            child_level,
+                            false,
+                            &mut real_pos,
+                            &mut dummy_pos,
+                            &mut u_positions,
+                            &mut v_positions,
+                        );
+                    }
+                }
+            }
         }
+    }
+}
+
+/// Adjacent exchange on virtual-node levels: swap adjacent pairs if it reduces crossings.
+fn adjacent_exchange_virtual(
+    dag: &DAG<'_>,
+    level_nodes: &mut [VNode],
+    adj_level: &[VNode],
+    use_parents: bool,
+    real_pos: &mut HashMap<usize, usize>,
+    dummy_pos: &mut HashMap<usize, usize>,
+    u_positions: &mut Vec<usize>,
+    v_positions: &mut Vec<usize>,
+) {
+    if level_nodes.len() < 2 {
+        return;
+    }
+
+    // Build position maps for the adjacent level
+    real_pos.clear();
+    dummy_pos.clear();
+
+    for (pos, vnode) in adj_level.iter().enumerate() {
+        match vnode {
+            VNode::Real(idx) => {
+                real_pos.insert(*idx, pos);
+            }
+            VNode::Dummy { edge_idx } => {
+                dummy_pos.insert(*edge_idx, pos);
+            }
+        }
+    }
+
+    for i in 0..level_nodes.len() - 1 {
+        u_positions.clear();
+        v_positions.clear();
+
+        // Gather neighbour positions for node at position i
+        gather_vnode_positions(
+            dag,
+            &level_nodes[i],
+            use_parents,
+            real_pos,
+            dummy_pos,
+            u_positions,
+        );
+
+        // Gather neighbour positions for node at position i+1
+        gather_vnode_positions(
+            dag,
+            &level_nodes[i + 1],
+            use_parents,
+            real_pos,
+            dummy_pos,
+            v_positions,
+        );
+
+        let (cross_uv, cross_vu) = count_crossings_pair(u_positions, v_positions);
+        if cross_vu < cross_uv {
+            level_nodes.swap(i, i + 1);
+        }
+    }
+}
+
+/// Gather positions of a VNode's neighbours in the adjacent level.
+#[inline]
+fn gather_vnode_positions(
+    dag: &DAG<'_>,
+    vnode: &VNode,
+    use_parents: bool,
+    real_pos: &HashMap<usize, usize>,
+    dummy_pos: &HashMap<usize, usize>,
+    out: &mut Vec<usize>,
+) {
+    match (vnode.real_index(), vnode.dummy_edge()) {
+        (Some(idx), _) => {
+            let connected_indices = if use_parents {
+                dag.get_parents_indices(idx)
+            } else {
+                dag.get_children_indices(idx)
+            };
+            for &conn_idx in connected_indices {
+                if let Some(&p) = real_pos.get(&conn_idx) {
+                    out.push(p);
+                }
+            }
+        }
+        (_, Some(edge_idx)) => {
+            let &(from_id, to_id, _) = &dag.edges[edge_idx];
+            let from_idx = dag.node_index(from_id);
+            let to_idx = dag.node_index(to_id);
+
+            // Check for same edge's dummy in adjacent level
+            if let Some(&dpos) = dummy_pos.get(&edge_idx) {
+                out.push(dpos);
+            }
+
+            // Check for real endpoint in adjacent level
+            if use_parents {
+                if let Some(fidx) = from_idx {
+                    if let Some(&rpos) = real_pos.get(&fidx) {
+                        out.push(rpos);
+                    }
+                }
+            } else {
+                if let Some(tidx) = to_idx {
+                    if let Some(&rpos) = real_pos.get(&tidx) {
+                        out.push(rpos);
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 

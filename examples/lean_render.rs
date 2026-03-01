@@ -57,7 +57,7 @@ fn main() {
         graph.compute_layout_arena(&mut temp_arena, &mut output_arena)
     };
 
-    if let Some(layout) = layout {
+    if let Ok(layout) = layout {
         println!(
             "> Layout Success! Size: {}x{}",
             layout.width(),

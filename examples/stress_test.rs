@@ -149,7 +149,7 @@ fn run_arena_test(name: &str, dag: &DAG, low_mem: bool) {
     let mut temp_arena = Arena::new(&mut temp_buffer);
     let mut output_arena = Arena::new(&mut output_buffer);
 
-    let output_len = if let Some(layout) =
+    let output_len = if let Ok(layout) =
         dag.compute_layout_arena(&mut temp_arena, &mut output_arena)
     {
         if layout.is_empty() {

@@ -38,7 +38,7 @@ fn measure_chain(n: usize) {
         let mut temp_arena = Arena::new(&mut temp_buffer);
         let mut output_arena = Arena::new(&mut output_buffer);
         dag.compute_layout_arena(&mut temp_arena, &mut output_arena)
-            .is_some()
+            .is_ok()
     };
 
     if success {

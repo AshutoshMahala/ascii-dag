@@ -94,7 +94,7 @@ fn try_render(dag: &DAG, temp_size: usize, output_size: usize) -> bool {
     let mut temp_arena = Arena::new(&mut temp_buffer);
     let mut output_arena = Arena::new(&mut output_buffer);
 
-    if let Some(layout) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
+    if let Ok(layout) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
         if layout.is_empty() && dag.node_count() > 0 {
             // Debug: print why empty
             // println!("      (empty layout for non-empty graph)");
@@ -111,8 +111,8 @@ fn try_render(dag: &DAG, temp_size: usize, output_size: usize) -> bool {
             .render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
             .is_some()
     } else {
-        // Debug: why None?
-        // println!("      (compute_layout_arena returned None)");
+        // Debug: why Err?
+        // println!("      (compute_layout_arena returned Err)");
         false
     }
 }
@@ -133,14 +133,14 @@ fn crash_test() {
         let result = dag.compute_layout_arena(&mut temp_arena, &mut output_arena);
 
         match result {
-            Some(layout) if !layout.is_empty() => {
+            Ok(layout) if !layout.is_empty() => {
                 println!("  {} bytes: ✓ Success (unexpected!)", size * 2);
             }
-            Some(_) => {
+            Ok(_) => {
                 println!("  {} bytes: ⚠ Empty layout returned", size * 2);
             }
-            None => {
-                println!("  {} bytes: ✗ Graceful failure (None returned)", size * 2);
+            Err(e) => {
+                println!("  {} bytes: ✗ Graceful failure ({e})", size * 2);
             }
         }
     }
@@ -240,7 +240,7 @@ fn debug_100_node_chain() {
         let mut output_arena = Arena::new(&mut output_buffer);
 
         let result = match dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
-            Some(layout) if !layout.is_empty() => {
+            Ok(layout) if !layout.is_empty() => {
                 let (render_size, scratch_size) = layout.estimate_render_size();
                 let mut render_buffer = vec![0u8; render_size + 1024];
                 let mut scratch_buffer = vec![0usize; scratch_size + 1024];

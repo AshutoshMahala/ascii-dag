@@ -132,7 +132,7 @@ fn render_with_arena(dag: &DAG) -> String {
     let mut temp_arena = Arena::new(&mut temp_buffer);
     let mut output_arena = Arena::new(&mut output_buffer);
 
-    if let Some(layout) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
+    if let Ok(layout) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
         // Render buffer
         let (render_size, scratch_size) = layout.estimate_render_size();
         let mut render_buffer = vec![0u8; render_size + 1024];

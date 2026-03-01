@@ -56,7 +56,7 @@ fn run_test(nodes: usize, dag: &DAG) {
     let mut temp_arena = Arena::new(&mut temp_buffer);
     let mut output_arena = Arena::new(&mut output_buffer);
 
-    if let Some(layout) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
+    if let Ok(layout) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
         let layout_duration = start_layout.elapsed();
 
         // Render buffer
