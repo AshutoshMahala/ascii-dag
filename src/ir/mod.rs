@@ -70,6 +70,19 @@ impl LineOccupancy {
     }
 }
 
+/// Classification of a node in the layout.
+///
+/// Mirrors zigraph's `NodeKind` for IR parity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    /// User-defined node added explicitly via `add_node` or `from_edges`.
+    Explicit,
+    /// Auto-created node (e.g., referenced only in an edge but never added).
+    Implicit,
+    /// Dummy (virtual) node inserted by the layout algorithm for edge routing.
+    Dummy,
+}
+
 /// A node in the laid-out graph with computed position and dimensions.
 #[derive(Debug, Clone)]
 pub struct LayoutNode<'a> {
@@ -89,6 +102,8 @@ pub struct LayoutNode<'a> {
     pub level: usize,
     /// Position within the level (0-indexed from left)
     pub level_position: usize,
+    /// Classification: explicit, implicit, or dummy
+    pub kind: NodeKind,
 }
 
 /// How an edge is routed between nodes.
@@ -143,6 +158,14 @@ pub struct LayoutEdge<'a> {
     /// Computed position for rendering the label: (x, y)
     /// Calculated during layout as the midpoint of the edge path.
     pub label_position: Option<(usize, usize)>,
+    /// Whether this edge has an arrowhead (true for directed edges).
+    /// Mirrors zigraph's `LayoutEdge.directed`.
+    pub directed: bool,
+    /// Whether this edge was reversed during cycle breaking.
+    /// When true, the edge represents a back-edge that was temporarily
+    /// flipped for layering; renderers should draw it with dashed lines.
+    /// Mirrors zigraph's `LayoutEdge.reversed`.
+    pub reversed: bool,
 }
 
 /// Intermediate representation of a laid-out graph.

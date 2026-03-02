@@ -40,6 +40,20 @@ pub const H_LINE: char = '─';
 /// Downward arrow: `↓`
 pub const ARROW_DOWN: char = '↓';
 
+// ── Dashed characters for reversed (back) edges ─────────────────────────
+// Mirrors zigraph's `CP_V_LINE_DASH`, `CP_H_LINE_DASH`, etc.
+
+/// Dashed vertical line: `┊` (light quadruple dash vertical)
+pub const V_LINE_DASHED: char = '┊';
+/// Dashed horizontal line: `┈` (light quadruple dash horizontal)
+pub const H_LINE_DASHED: char = '┈';
+/// Dashed downward arrow: `⇣`
+pub const ARROW_DOWN_DASHED: char = '⇣';
+/// Dashed upward arrow: `⇡`
+pub const ARROW_UP_DASHED: char = '⇡';
+/// Self-loop indicator: `↺`
+pub const SELF_LOOP: char = '↺';
+
 /// Corner: down-right `└` (connects Up + Right)
 pub const CORNER_DR: char = '└';
 /// Corner: down-left `┘` (connects Up + Left)
@@ -81,8 +95,8 @@ pub const DIR_RIGHT: u8 = 8;
 #[inline]
 pub fn char_direction_mask(c: char) -> u8 {
     match c {
-        V_LINE => DIR_UP | DIR_DOWN,
-        H_LINE => DIR_LEFT | DIR_RIGHT,
+        V_LINE | V_LINE_DASHED => DIR_UP | DIR_DOWN,
+        H_LINE | H_LINE_DASHED => DIR_LEFT | DIR_RIGHT,
         CORNER_DR => DIR_UP | DIR_RIGHT,
         CORNER_DL => DIR_UP | DIR_LEFT,
         CORNER_UR => DIR_DOWN | DIR_RIGHT,
@@ -92,7 +106,8 @@ pub fn char_direction_mask(c: char) -> u8 {
         TEE_LEFT => DIR_UP | DIR_DOWN | DIR_LEFT,
         TEE_RIGHT => DIR_UP | DIR_DOWN | DIR_RIGHT,
         CROSS => DIR_UP | DIR_DOWN | DIR_LEFT | DIR_RIGHT,
-        ARROW_DOWN => DIR_UP, // Arrow tip connects upward to the line above
+        ARROW_DOWN | ARROW_DOWN_DASHED => DIR_UP, // Arrow tip connects upward to the line above
+        ARROW_UP_DASHED => DIR_DOWN, // Upward arrow connects downward
         _ => 0,
     }
 }
@@ -171,6 +186,12 @@ pub fn merge_chars(c1: char, c2: char) -> char {
     if c1 == ARROW_DOWN || c2 == ARROW_DOWN {
         return ARROW_DOWN;
     }
+    if c1 == ARROW_DOWN_DASHED || c2 == ARROW_DOWN_DASHED {
+        return ARROW_DOWN_DASHED;
+    }
+    if c1 == ARROW_UP_DASHED || c2 == ARROW_UP_DASHED {
+        return ARROW_UP_DASHED;
+    }
 
     let m1 = char_direction_mask(c1);
     let m2 = char_direction_mask(c2);
@@ -184,4 +205,18 @@ pub fn merge_chars(c1: char, c2: char) -> char {
     let union = m1 | m2;
     let merged = mask_to_char(union);
     if merged == ' ' { c1 } else { merged }
+}
+
+/// Convert a solid box-drawing character to its dashed equivalent.
+///
+/// Used when rendering reversed (back) edges with dashed lines.
+/// Characters without a dashed variant are returned unchanged.
+#[inline]
+pub fn to_dashed(c: char) -> char {
+    match c {
+        V_LINE => V_LINE_DASHED,
+        H_LINE => H_LINE_DASHED,
+        ARROW_DOWN => ARROW_DOWN_DASHED,
+        _ => c, // corners, tees, etc. have no dashed variant — keep solid
+    }
 }

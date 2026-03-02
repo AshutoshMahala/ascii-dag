@@ -20,7 +20,7 @@
 
 use crate::algorithms::sugiyama::crossing::{count_crossings_pair, CrossingReducer};
 use crate::graph::DAG;
-use crate::ir::{EdgePath, LayoutEdge, LayoutIRBuilder, LayoutIR, LayoutNode};
+use crate::ir::{EdgePath, LayoutEdge, LayoutIRBuilder, LayoutIR, LayoutNode, NodeKind};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -73,13 +73,13 @@ pub(crate) fn compute_layout<'a>(dag: &DAG<'a>) -> LayoutIR<'a> {
         return LayoutIRBuilder::new().build();
     }
 
-    // Check for cycles - can't layout cyclic graphs
-    if dag.has_cycle() {
-        return LayoutIRBuilder::new().build();
-    }
+    // Cycle breaking: detect back edges via three-color DFS.
+    // Back edges are temporarily treated as reversed for layering/routing
+    // and marked `reversed: true` in the final IR (zigraph parity).
+    let back_edges = dag.detect_back_edges();
 
-    // Step 1: Calculate levels for real nodes
-    let level_data = dag.calculate_levels();
+    // Step 1: Calculate levels, treating back edges as reversed
+    let level_data = dag.calculate_levels_with_back_edges(&back_edges);
     let max_level = level_data.iter().map(|(_, l)| *l).max().unwrap_or(0);
 
     // Create level mapping for real nodes
@@ -97,16 +97,22 @@ pub(crate) fn compute_layout<'a>(dag: &DAG<'a>) -> LayoutIR<'a> {
     }
 
     // Identify skip-level edges and insert dummy nodes
+    // For back edges, the layout direction is reversed (to → from in level space)
     for (edge_idx, &(from_id, to_id, _label)) in dag.edges.iter().enumerate() {
+        let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
         if let (Some(from_idx), Some(to_idx)) =
             (dag.node_index(from_id), dag.node_index(to_id))
         {
-            let from_level = node_levels[from_idx];
-            let to_level = node_levels[to_idx];
+            // For back edges, layout-direction is reversed
+            let (layout_from, layout_to) = if is_back {
+                (node_levels[to_idx], node_levels[from_idx])
+            } else {
+                (node_levels[from_idx], node_levels[to_idx])
+            };
 
-            if to_level > from_level + 1 {
+            if layout_to > layout_from + 1 {
                 // Skip-level edge - insert dummy nodes at intermediate levels
-                for level in (from_level + 1)..to_level {
+                for level in (layout_from + 1)..layout_to {
                     virtual_levels[level].push(VNode::Dummy { edge_idx });
                 }
             }
@@ -351,6 +357,11 @@ pub(crate) fn compute_layout<'a>(dag: &DAG<'a>) -> LayoutIR<'a> {
                 let y = level_y_offsets[level];
 
                 let (id, label) = dag.nodes[*idx];
+                let kind = if dag.auto_created.contains(&id) {
+                    NodeKind::Implicit
+                } else {
+                    NodeKind::Explicit
+                };
                 builder.add_node(LayoutNode {
                     id,
                     label,
@@ -360,6 +371,7 @@ pub(crate) fn compute_layout<'a>(dag: &DAG<'a>) -> LayoutIR<'a> {
                     center_x: x + width / 2,
                     level: level_idx,
                     level_position: pos,
+                    kind,
                 });
             }
         }
@@ -400,29 +412,42 @@ pub(crate) fn compute_layout<'a>(dag: &DAG<'a>) -> LayoutIR<'a> {
         if let (Some(from_idx), Some(to_idx)) =
             (dag.node_index(from_id), dag.node_index(to_id))
         {
-            let from_level = node_levels[from_idx];
-            let to_level = node_levels[to_idx];
+            let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
 
-            let (_, _, from_x_base, from_width) = real_node_coords[from_idx];
-            let (_, _, to_x_base, to_width) = real_node_coords[to_idx];
+            // Self-loops: skip layout routing (rendered as ↺ indicator by renderer)
+            if from_id == to_id {
+                continue;
+            }
 
-            let from_x = from_x_base + from_width / 2;
-            let to_x = to_x_base + to_width / 2;
-            // Calculate Y positions based on variable level heights
-            let from_y = level_y_offsets[from_level];
-            let to_y = level_y_offsets[to_level];
+            // For back edges, layout direction is reversed (to→from in level space).
+            // We compute coordinates in layout order, then store semantic IDs in the IR.
+            let (layout_src_idx, layout_dst_idx) = if is_back {
+                (to_idx, from_idx)
+            } else {
+                (from_idx, to_idx)
+            };
+            let layout_from_level = node_levels[layout_src_idx];
+            let layout_to_level = node_levels[layout_dst_idx];
+
+            let (_, _, src_x_base, src_width) = real_node_coords[layout_src_idx];
+            let (_, _, dst_x_base, dst_width) = real_node_coords[layout_dst_idx];
+
+            let from_x = src_x_base + src_width / 2;
+            let to_x = dst_x_base + dst_width / 2;
+            let from_y = level_y_offsets[layout_from_level];
+            let to_y = level_y_offsets[layout_to_level];
 
             // Horizontal edges start at row 1 below the node
             let edge_start_row = 1;
 
-            let path = if to_level == from_level + 1 {
+            let path = if layout_to_level == layout_from_level + 1 {
                 // Adjacent levels - direct or corner connection
                 if from_x == to_x {
                     EdgePath::Direct
                 } else {
                     // Get horizontal slot for this source at this level
-                    let slot = if node_slots[from_idx] != usize::MAX {
-                        node_slots[from_idx]
+                    let slot = if node_slots[layout_src_idx] != usize::MAX {
+                        node_slots[layout_src_idx]
                     } else {
                         0
                     };
@@ -436,8 +461,8 @@ pub(crate) fn compute_layout<'a>(dag: &DAG<'a>) -> LayoutIR<'a> {
                 let dummies = &dummy_positions[edge_idx];
                 if dummies.is_empty() {
                     // Fallback to corner if no dummies (shouldn't happen)
-                    let slot = if node_slots[from_idx] != usize::MAX {
-                        node_slots[from_idx]
+                    let slot = if node_slots[layout_src_idx] != usize::MAX {
+                        node_slots[layout_src_idx]
                     } else {
                         0
                     };
@@ -456,8 +481,8 @@ pub(crate) fn compute_layout<'a>(dag: &DAG<'a>) -> LayoutIR<'a> {
                         waypoints.push((x, level_y_offsets[level] + edge_start_row + slot));
                     }
 
-                    let slot = if node_slots[from_idx] != usize::MAX {
-                        node_slots[from_idx]
+                    let slot = if node_slots[layout_src_idx] != usize::MAX {
+                        node_slots[layout_src_idx]
                     } else {
                         0
                     };
@@ -536,6 +561,7 @@ pub(crate) fn compute_layout<'a>(dag: &DAG<'a>) -> LayoutIR<'a> {
                 (clamped_x, label_y)
             });
 
+            let reversed = back_edges.get(edge_idx).copied().unwrap_or(false);
             builder.add_edge(LayoutEdge {
                 from_id,
                 to_id,
@@ -547,6 +573,8 @@ pub(crate) fn compute_layout<'a>(dag: &DAG<'a>) -> LayoutIR<'a> {
                 edge_index: edge_idx,
                 label,
                 label_position,
+                directed: true,
+                reversed,
             });
         }
     }
@@ -557,25 +585,49 @@ pub(crate) fn compute_layout<'a>(dag: &DAG<'a>) -> LayoutIR<'a> {
 
 // ── Crossing reduction ───────────────────────────────────────────────────
 
+/// Build a mapping from each node index to the edge indices it participates in.
+/// This enables real nodes to find their skip-level edge dummies during crossing
+/// reduction (the key fix for incomplete neighbor gathering).
+fn build_node_edge_indices(dag: &DAG<'_>) -> Vec<Vec<usize>> {
+    let mut node_edges: Vec<Vec<usize>> = vec![Vec::new(); dag.nodes.len()];
+    for (edge_idx, &(from_id, to_id, _)) in dag.edges.iter().enumerate() {
+        if let Some(from_idx) = dag.node_index(from_id) {
+            node_edges[from_idx].push(edge_idx);
+        }
+        if let Some(to_idx) = dag.node_index(to_id) {
+            node_edges[to_idx].push(edge_idx);
+        }
+    }
+    node_edges
+}
+
 /// Crossing reduction for virtual levels (includes dummy nodes).
-/// Uses median heuristic with both real and dummy nodes participating.
+///
+/// Dispatches through the DAG's [`CrossingReducer`] pipeline.  Each reducer
+/// (Median / AdjacentExchange) runs its configured number of passes, each
+/// consisting of a top-down sweep followed by a bottom-up sweep.  The
+/// pipeline runs uniformly regardless of graph size — behaviour is controlled
+/// only by the user-facing presets or manual configuration.
 fn reduce_crossings_virtual(
     dag: &DAG<'_>,
     levels: &mut [Vec<VNode>],
     _node_levels: &[usize],
     max_level: usize,
 ) {
+    // Build edge lookup for complete neighbor gathering (real + dummy).
+    // This lets real nodes discover skip-level edge dummies on the adjacent
+    // level, which is critical for correct median and adjacent-exchange.
+    let node_edge_indices = build_node_edge_indices(dag);
+
     // Pre-allocate reusable buffers to avoid allocations in the hot loop
-    // Estimate max level size for capacity hints
     let max_level_size = levels.iter().map(|l| l.len()).max().unwrap_or(0);
 
-    // Reusable lookup tables (use new() for BTreeMap compatibility in no_std)
     let mut real_pos: HashMap<usize, usize> = HashMap::new();
     let mut dummy_pos: HashMap<usize, usize> = HashMap::new();
 
     // Reusable buffers for median computation
     let mut node_medians: Vec<(VNode, f32)> = Vec::with_capacity(max_level_size);
-    let mut connected_positions: Vec<usize> = Vec::with_capacity(8); // Most nodes have few connections
+    let mut connected_positions: Vec<usize> = Vec::with_capacity(8);
 
     // Reusable buffers for adjacent exchange
     let mut u_positions: Vec<usize> = Vec::with_capacity(8);
@@ -584,8 +636,7 @@ fn reduce_crossings_virtual(
     for reducer in &dag.crossing_pipeline {
         match reducer {
             CrossingReducer::Median(passes) => {
-                // Run multiple passes of median heuristic
-                for _ in 0..*passes {
+                for _pass in 0..*passes {
                     // Top-down pass
                     for level_idx in 1..=max_level {
                         let (prev_levels, rest) = levels.split_at_mut(level_idx);
@@ -599,9 +650,9 @@ fn reduce_crossings_virtual(
                             &mut dummy_pos,
                             &mut node_medians,
                             &mut connected_positions,
+                            &node_edge_indices,
                         );
                     }
-
                     // Bottom-up pass
                     for level_idx in (0..max_level).rev() {
                         let (left, right) = levels.split_at_mut(level_idx + 1);
@@ -615,12 +666,13 @@ fn reduce_crossings_virtual(
                             &mut dummy_pos,
                             &mut node_medians,
                             &mut connected_positions,
+                            &node_edge_indices,
                         );
                     }
                 }
             }
             CrossingReducer::AdjacentExchange(passes) => {
-                for _ in 0..*passes {
+                for _pass in 0..*passes {
                     // Top-down pass
                     for level_idx in 1..=max_level {
                         let (prev_levels, rest) = levels.split_at_mut(level_idx);
@@ -634,9 +686,9 @@ fn reduce_crossings_virtual(
                             &mut dummy_pos,
                             &mut u_positions,
                             &mut v_positions,
+                            &node_edge_indices,
                         );
                     }
-
                     // Bottom-up pass
                     for level_idx in (0..max_level).rev() {
                         let (left, right) = levels.split_at_mut(level_idx + 1);
@@ -650,6 +702,7 @@ fn reduce_crossings_virtual(
                             &mut dummy_pos,
                             &mut u_positions,
                             &mut v_positions,
+                            &node_edge_indices,
                         );
                     }
                 }
@@ -668,6 +721,7 @@ fn adjacent_exchange_virtual(
     dummy_pos: &mut HashMap<usize, usize>,
     u_positions: &mut Vec<usize>,
     v_positions: &mut Vec<usize>,
+    node_edge_indices: &[Vec<usize>],
 ) {
     if level_nodes.len() < 2 {
         return;
@@ -699,6 +753,7 @@ fn adjacent_exchange_virtual(
             use_parents,
             real_pos,
             dummy_pos,
+            node_edge_indices,
             u_positions,
         );
 
@@ -709,6 +764,7 @@ fn adjacent_exchange_virtual(
             use_parents,
             real_pos,
             dummy_pos,
+            node_edge_indices,
             v_positions,
         );
 
@@ -720,50 +776,74 @@ fn adjacent_exchange_virtual(
 }
 
 /// Gather positions of a VNode's neighbours in the adjacent level.
+///
+/// For real nodes, checks ALL edges (both direct and skip-level) by looking up
+/// both `real_pos` (for the other endpoint) and `dummy_pos` (for intermediate
+/// dummy nodes). This ensures skip-level edges are properly accounted for in
+/// crossing reduction.
+///
+/// For dummy nodes, checks both endpoints of the edge (handling back edges
+/// correctly) and the same edge's dummy on the adjacent level.
 #[inline]
 fn gather_vnode_positions(
     dag: &DAG<'_>,
     vnode: &VNode,
-    use_parents: bool,
+    _use_parents: bool,
     real_pos: &HashMap<usize, usize>,
     dummy_pos: &HashMap<usize, usize>,
+    node_edge_indices: &[Vec<usize>],
     out: &mut Vec<usize>,
 ) {
     match (vnode.real_index(), vnode.dummy_edge()) {
         (Some(idx), _) => {
-            let connected_indices = if use_parents {
-                dag.get_parents_indices(idx)
-            } else {
-                dag.get_children_indices(idx)
-            };
-            for &conn_idx in connected_indices {
-                if let Some(&p) = real_pos.get(&conn_idx) {
-                    out.push(p);
+            // Real node: check all edges this node participates in.
+            // For each edge, look for the other endpoint OR a dummy on the adjacent level.
+            // The position maps (real_pos/dummy_pos) are built from the adjacent level,
+            // so only entries actually present on that level will be found.
+            for &edge_idx in &node_edge_indices[idx] {
+                let &(from_id, to_id, _) = &dag.edges[edge_idx];
+
+                // Check if the other real endpoint is on the adjacent level
+                if let Some(from_idx) = dag.node_index(from_id) {
+                    if from_idx != idx {
+                        if let Some(&rp) = real_pos.get(&from_idx) {
+                            out.push(rp);
+                        }
+                    }
+                }
+                if let Some(to_idx) = dag.node_index(to_id) {
+                    if to_idx != idx {
+                        if let Some(&rp) = real_pos.get(&to_idx) {
+                            out.push(rp);
+                        }
+                    }
+                }
+
+                // Check if this edge has a dummy on the adjacent level
+                if let Some(&dp) = dummy_pos.get(&edge_idx) {
+                    out.push(dp);
                 }
             }
         }
         (_, Some(edge_idx)) => {
             let &(from_id, to_id, _) = &dag.edges[edge_idx];
-            let from_idx = dag.node_index(from_id);
-            let to_idx = dag.node_index(to_id);
 
             // Check for same edge's dummy in adjacent level
             if let Some(&dpos) = dummy_pos.get(&edge_idx) {
                 out.push(dpos);
             }
 
-            // Check for real endpoint in adjacent level
-            if use_parents {
-                if let Some(fidx) = from_idx {
-                    if let Some(&rpos) = real_pos.get(&fidx) {
-                        out.push(rpos);
-                    }
+            // Check for BOTH real endpoints in adjacent level.
+            // This correctly handles back edges where from/to are reversed
+            // relative to the layout direction.
+            if let Some(fidx) = dag.node_index(from_id) {
+                if let Some(&rpos) = real_pos.get(&fidx) {
+                    out.push(rpos);
                 }
-            } else {
-                if let Some(tidx) = to_idx {
-                    if let Some(&rpos) = real_pos.get(&tidx) {
-                        out.push(rpos);
-                    }
+            }
+            if let Some(tidx) = dag.node_index(to_id) {
+                if let Some(&rpos) = real_pos.get(&tidx) {
+                    out.push(rpos);
                 }
             }
         }
@@ -778,11 +858,12 @@ fn order_virtual_by_median(
     dag: &DAG<'_>,
     level_nodes: &mut Vec<VNode>,
     adj_level: &[VNode],
-    use_parents: bool,
+    _use_parents: bool,
     real_pos: &mut HashMap<usize, usize>,
     dummy_pos: &mut HashMap<usize, usize>,
     node_medians: &mut Vec<(VNode, f32)>,
     connected_positions: &mut Vec<usize>,
+    node_edge_indices: &[Vec<usize>],
 ) {
     // Clear and rebuild lookup tables (reuses allocated capacity)
     real_pos.clear();
@@ -808,43 +889,50 @@ fn order_virtual_by_median(
 
         match (vnode.real_index(), vnode.dummy_edge()) {
             (Some(idx), _) => {
-                // Real node - find connected real nodes in adjacent level
-                let connected_indices = if use_parents {
-                    dag.get_parents_indices(idx)
-                } else {
-                    dag.get_children_indices(idx)
-                };
+                // Real node: check all edges for connections on adjacent level
+                for &edge_idx in &node_edge_indices[idx] {
+                    let &(from_id, to_id, _) = &dag.edges[edge_idx];
 
-                // O(1) lookup per connected node
-                for &conn_idx in connected_indices {
-                    if let Some(&p) = real_pos.get(&conn_idx) {
-                        connected_positions.push(p);
+                    // Check other real endpoint
+                    if let Some(from_idx) = dag.node_index(from_id) {
+                        if from_idx != idx {
+                            if let Some(&p) = real_pos.get(&from_idx) {
+                                connected_positions.push(p);
+                            }
+                        }
+                    }
+                    if let Some(to_idx) = dag.node_index(to_id) {
+                        if to_idx != idx {
+                            if let Some(&p) = real_pos.get(&to_idx) {
+                                connected_positions.push(p);
+                            }
+                        }
+                    }
+
+                    // Check for dummy on adjacent level
+                    if let Some(&dp) = dummy_pos.get(&edge_idx) {
+                        connected_positions.push(dp);
                     }
                 }
             }
             (_, Some(edge_idx)) => {
                 // Dummy node - find the connected node or dummy for this edge
                 let &(from_id, to_id, _) = &dag.edges[edge_idx];
-                let from_idx = dag.node_index(from_id);
-                let to_idx = dag.node_index(to_id);
 
                 // Check for same edge's dummy in adjacent level
                 if let Some(&dpos) = dummy_pos.get(&edge_idx) {
                     connected_positions.push(dpos);
                 }
 
-                // Check for real endpoint in adjacent level
-                if use_parents {
-                    if let Some(fidx) = from_idx {
-                        if let Some(&rpos) = real_pos.get(&fidx) {
-                            connected_positions.push(rpos);
-                        }
+                // Check both real endpoints (handles back edges correctly)
+                if let Some(fidx) = dag.node_index(from_id) {
+                    if let Some(&rpos) = real_pos.get(&fidx) {
+                        connected_positions.push(rpos);
                     }
-                } else {
-                    if let Some(tidx) = to_idx {
-                        if let Some(&rpos) = real_pos.get(&tidx) {
-                            connected_positions.push(rpos);
-                        }
+                }
+                if let Some(tidx) = dag.node_index(to_id) {
+                    if let Some(&rpos) = real_pos.get(&tidx) {
+                        connected_positions.push(rpos);
                     }
                 }
             }

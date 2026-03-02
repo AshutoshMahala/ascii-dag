@@ -217,6 +217,42 @@ impl<'a> Arena<'a> {
         self.alloc_count.set(0);
     }
 
+    /// Save the current allocation position (watermark).
+    ///
+    /// Use with [`restore_position`] to implement arena "bands" — allocate
+    /// scratch buffers, do work, then rewind the arena pointer so the
+    /// scratch region can be reused by the next phase.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mark = arena.save_position();
+    /// let scratch = arena.alloc_slice_zeroed::<u8>(1024).unwrap();
+    /// // ... use scratch ...
+    /// arena.restore_position(mark); // scratch memory is now reusable
+    /// ```
+    #[inline]
+    pub fn save_position(&self) -> usize {
+        self.ptr.get() as usize - self.start as usize
+    }
+
+    /// Restore the allocation pointer to a previously saved position.
+    ///
+    /// All allocations made *after* the saved position are invalidated.
+    /// The caller must ensure no references to those allocations are used
+    /// after this call.
+    ///
+    /// # Safety
+    ///
+    /// This is safe at the API level (no `unsafe` needed), but the caller
+    /// must treat all allocations made after the watermark as freed.
+    #[inline]
+    pub fn restore_position(&self, saved: usize) {
+        let target = (self.start as usize + saved) as *mut u8;
+        debug_assert!(target as usize <= self.end as usize);
+        debug_assert!(target as usize >= self.start as usize);
+        self.ptr.set(target);
+    }
+
     /// Returns the number of bytes currently used.
     #[inline]
     pub fn used(&self) -> usize {

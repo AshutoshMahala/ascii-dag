@@ -21,6 +21,7 @@ const MAX_LEVELS: usize = usize::MAX;
 
 impl<'a> DAG<'a> {
     /// Calculate levels using arena-allocated buffer.
+    #[allow(dead_code)]
     pub(super) fn calculate_levels_arena(&self, levels: &mut [Idx], edge_indices: &[(Idx, Idx)]) -> usize {
         for l in levels.iter_mut() {
             *l = 0;
@@ -63,6 +64,7 @@ impl<'a> DAG<'a> {
         level_counts: &mut [Idx],
         vnode_data: &mut [Idx],
         max_level: usize,
+        level_vdummy_counts: &mut [Idx],
     ) -> (usize, usize) {
         // Zero level_counts
         for c in level_counts.iter_mut() {
@@ -77,7 +79,11 @@ impl<'a> DAG<'a> {
             }
         }
 
-        // Count dummy nodes per level
+        // Count dummy nodes per level (and record per-level counts for
+        // the crossing-reduction short-circuit).
+        for c in level_vdummy_counts.iter_mut() {
+            *c = 0;
+        }
         for &(from_idx, to_idx) in edge_indices {
             if from_idx != Idx::MAX && to_idx != Idx::MAX {
                 let from_level = node_levels[from_idx as usize] as usize;
@@ -87,6 +93,9 @@ impl<'a> DAG<'a> {
                     for level in (from_level + 1)..to_level {
                         if level < level_counts.len() {
                             level_counts[level] += 1;
+                        }
+                        if level < level_vdummy_counts.len() {
+                            level_vdummy_counts[level] += 1;
                         }
                     }
                 }
@@ -383,7 +392,12 @@ impl<'a> DAG<'a> {
         medians: &mut [(Idx, u32)],
         positions: &mut [Idx],
         edge_indices: &[(Idx, Idx)],
+        level_vdummy_counts: &[Idx],
     ) {
+        // One-time init: positions is alloc_raw_uninit, fill with sentinel.
+        // Per-level calls use sparse-clear to maintain this invariant.
+        for p in positions.iter_mut() { *p = Idx::MAX; }
+
         for reducer in &self.crossing_pipeline {
             match reducer {
                 CrossingReducer::Median(passes) => {
@@ -399,6 +413,7 @@ impl<'a> DAG<'a> {
                                 true,
                                 medians,
                                 positions,
+                                level_vdummy_counts,
                             );
                         }
                         // Bottom-up pass
@@ -412,6 +427,7 @@ impl<'a> DAG<'a> {
                                 false,
                                 medians,
                                 positions,
+                                level_vdummy_counts,
                             );
                         }
                     }
@@ -428,6 +444,7 @@ impl<'a> DAG<'a> {
                                 level - 1,
                                 true,
                                 positions,
+                                level_vdummy_counts,
                             );
                         }
                         // Bottom-up pass
@@ -440,6 +457,7 @@ impl<'a> DAG<'a> {
                                 level + 1,
                                 false,
                                 positions,
+                                level_vdummy_counts,
                             );
                         }
                     }
@@ -463,6 +481,7 @@ impl<'a> DAG<'a> {
         use_parents: bool,
         medians: &mut [(Idx, u32)],
         positions: &mut [Idx],
+        level_vdummy_counts: &[Idx],
     ) {
         let cur_start = vlevel_offsets[level] as usize;
         let cur_end = vlevel_offsets[level + 1] as usize;
@@ -474,27 +493,37 @@ impl<'a> DAG<'a> {
         let adj_start = vlevel_offsets[adj_level] as usize;
         let adj_end = vlevel_offsets[adj_level + 1] as usize;
 
+        // Short-circuit: is there any dummy on the adjacent level?
+        let adj_has_dummies = adj_level < level_vdummy_counts.len()
+            && level_vdummy_counts[adj_level] > 0;
+
         // Build position map for real nodes in the adjacent level.
-        // positions[node_idx] = position within adjacent level (or Idx::MAX if absent).
-        for p in positions.iter_mut() {
-            *p = Idx::MAX;
+        // OPTIMIZATION: Track which indices we write so we can reset
+        // only those afterwards — avoids O(node_count) fill per level.
+        let adj_size = adj_end - adj_start;
+        let mut written_buf: [usize; 512] = [0; 512];
+        let mut written_count: usize = 0;
+        let use_sparse_clear = adj_size <= 512;
+
+        if !use_sparse_clear {
+            for p in positions.iter_mut() { *p = Idx::MAX; }
         }
         for adj_pos in adj_start..adj_end {
             if adj_pos * 2 + 1 >= vnode_data.len() {
                 break;
             }
             if vnode_data[adj_pos * 2] == 0 {
-                // Real node
                 let node_idx = vnode_data[adj_pos * 2 + 1] as usize;
                 if node_idx < positions.len() {
                     positions[node_idx] = (adj_pos - adj_start) as Idx;
+                    if use_sparse_clear && written_count < 512 {
+                        written_buf[written_count] = node_idx;
+                        written_count += 1;
+                    }
                 }
             }
         }
 
-        // Compute median for each node on the current level.
-        // medians[i] = (i as Idx, median_fixed_point)
-        // We encode the median as u32 with 10-bit fractional part (×1024).
         for i in 0..count {
             let pos = cur_start + i;
             if pos * 2 + 1 >= vnode_data.len() {
@@ -504,13 +533,11 @@ impl<'a> DAG<'a> {
             let vtype = vnode_data[pos * 2];
             let vidx = vnode_data[pos * 2 + 1] as usize;
 
-            // Collect neighbour positions in the adjacent level.
-            // We gather inline (up to ~8 neighbours for most graphs).
             let mut neigh: [usize; 16] = [0; 16];
             let mut neigh_count: usize = 0;
 
             if vtype == 0 {
-                // Real node — lookup adjacency lists
+                // Real node — direct neighbours via adjacency lists
                 let neighbours = if use_parents {
                     self.get_parents_indices(vidx)
                 } else {
@@ -524,35 +551,52 @@ impl<'a> DAG<'a> {
                         }
                     }
                 }
+                // Dummy scan — only when adjacent level actually has dummies
+                if adj_has_dummies {
+                    for adj_pos in adj_start..adj_end {
+                        if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+                        if vnode_data[adj_pos * 2] == 1 {
+                            let eidx = vnode_data[adj_pos * 2 + 1] as usize;
+                            if eidx < edge_indices.len() {
+                                let (from_idx, to_idx) = edge_indices[eidx];
+                                if from_idx as usize == vidx || to_idx as usize == vidx {
+                                    if neigh_count < 16 {
+                                        neigh[neigh_count] = adj_pos - adj_start;
+                                        neigh_count += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             } else {
                 // Dummy node (edge_idx = vidx)
                 if vidx < edge_indices.len() {
                     let (from_idx, to_idx) = edge_indices[vidx];
 
-                    // Check real endpoint
-                    let endpoint = if use_parents {
-                        from_idx as usize
-                    } else {
-                        to_idx as usize
-                    };
-                    if endpoint < positions.len() && positions[endpoint] != Idx::MAX {
-                        neigh[neigh_count] = positions[endpoint] as usize;
-                        neigh_count += 1;
-                    }
-
-                    // Check for same-edge dummy in adjacent level
-                    for adj_pos in adj_start..adj_end {
-                        if adj_pos * 2 + 1 >= vnode_data.len() {
-                            break;
-                        }
-                        if vnode_data[adj_pos * 2] == 1
-                            && vnode_data[adj_pos * 2 + 1] as usize == vidx
-                        {
+                    // Check BOTH real endpoints
+                    for &endpoint in &[from_idx as usize, to_idx as usize] {
+                        if endpoint < positions.len() && positions[endpoint] != Idx::MAX {
                             if neigh_count < 16 {
-                                neigh[neigh_count] = (adj_pos - adj_start) as usize;
+                                neigh[neigh_count] = positions[endpoint] as usize;
                                 neigh_count += 1;
                             }
-                            break; // only one dummy per edge per level
+                        }
+                    }
+
+                    // Same-edge dummy in adjacent level — only when dummies exist
+                    if adj_has_dummies {
+                        for adj_pos in adj_start..adj_end {
+                            if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+                            if vnode_data[adj_pos * 2] == 1
+                                && vnode_data[adj_pos * 2 + 1] as usize == vidx
+                            {
+                                if neigh_count < 16 {
+                                    neigh[neigh_count] = (adj_pos - adj_start) as usize;
+                                    neigh_count += 1;
+                                }
+                                break;
+                            }
                         }
                     }
                 }
@@ -567,7 +611,6 @@ impl<'a> DAG<'a> {
                 } else {
                     let mid = neigh_count / 2;
                     let sum = neigh[mid - 1] + neigh[mid];
-                    // (sum / 2) in fixed-point: (sum × 1024) / 2 = sum × 512
                     (sum as u32) * 512
                 }
             };
@@ -594,6 +637,13 @@ impl<'a> DAG<'a> {
             vnode_data[dst * 2] = medians[j].0;
             vnode_data[dst * 2 + 1] = medians[j].1 as Idx;
         }
+
+        // Sparse-clear: reset only the positions we wrote
+        if use_sparse_clear {
+            for i in 0..written_count {
+                positions[written_buf[i]] = Idx::MAX;
+            }
+        }
     }
 
     /// Adjacent exchange on one arena level: swap adjacent pairs if it reduces crossings.
@@ -606,6 +656,7 @@ impl<'a> DAG<'a> {
         adj_level: usize,
         use_parents: bool,
         positions: &mut [Idx],
+        level_vdummy_counts: &[Idx],
     ) {
         let cur_start = vlevel_offsets[level] as usize;
         let cur_end = vlevel_offsets[level + 1] as usize;
@@ -614,12 +665,20 @@ impl<'a> DAG<'a> {
             return;
         }
 
+        let adj_has_dummies = adj_level < level_vdummy_counts.len()
+            && level_vdummy_counts[adj_level] > 0;
+
         let adj_start = vlevel_offsets[adj_level] as usize;
         let adj_end = vlevel_offsets[adj_level + 1] as usize;
 
-        // Build position map for real nodes in the adjacent level.
-        for p in positions.iter_mut() {
-            *p = Idx::MAX;
+        // Build position map — sparse clear optimization.
+        let adj_size = adj_end - adj_start;
+        let mut written_buf: [usize; 512] = [0; 512];
+        let mut written_count: usize = 0;
+        let use_sparse_clear = adj_size <= 512;
+
+        if !use_sparse_clear {
+            for p in positions.iter_mut() { *p = Idx::MAX; }
         }
         for adj_pos in adj_start..adj_end {
             if adj_pos * 2 + 1 >= vnode_data.len() {
@@ -629,6 +688,10 @@ impl<'a> DAG<'a> {
                 let node_idx = vnode_data[adj_pos * 2 + 1] as usize;
                 if node_idx < positions.len() {
                     positions[node_idx] = (adj_pos - adj_start) as Idx;
+                    if use_sparse_clear && written_count < 512 {
+                        written_buf[written_count] = node_idx;
+                        written_count += 1;
+                    }
                 }
             }
         }
@@ -658,6 +721,7 @@ impl<'a> DAG<'a> {
                 adj_start,
                 adj_end,
                 use_parents,
+                adj_has_dummies,
                 &mut u_neigh,
                 &mut u_count,
             );
@@ -673,6 +737,7 @@ impl<'a> DAG<'a> {
                 adj_start,
                 adj_end,
                 use_parents,
+                adj_has_dummies,
                 &mut v_neigh,
                 &mut v_count,
             );
@@ -700,9 +765,20 @@ impl<'a> DAG<'a> {
                 vnode_data[v_pos * 2 + 1] = u_idx;
             }
         }
+
+        // Sparse-clear: reset only the positions we wrote
+        if use_sparse_clear {
+            for i in 0..written_count {
+                positions[written_buf[i]] = Idx::MAX;
+            }
+        }
     }
 
     /// Gather neighbour positions for a single vnode in the adjacent level.
+    ///
+    /// When `adj_has_dummies` is false, the O(adj_level_size) linear scans
+    /// for dummy nodes are skipped entirely — this is the key short-circuit
+    /// that makes grid/chain/fan graphs fast.
     #[inline]
     #[allow(clippy::too_many_arguments)]
     fn gather_arena_neighbours(
@@ -715,6 +791,7 @@ impl<'a> DAG<'a> {
         adj_start: usize,
         adj_end: usize,
         use_parents: bool,
+        adj_has_dummies: bool,
         out: &mut [usize; 16],
         out_count: &mut usize,
     ) {
@@ -723,7 +800,7 @@ impl<'a> DAG<'a> {
         let vidx = vnode_data[pos * 2 + 1] as usize;
 
         if vtype == 0 {
-            // Real node
+            // Real node — check direct neighbors via adjacency lists
             let neighbours = if use_parents {
                 &parents[vidx]
             } else {
@@ -738,30 +815,48 @@ impl<'a> DAG<'a> {
                     *out_count += 1;
                 }
             }
-        } else if vidx < edge_indices.len() {
-            // Dummy node
-            let (from_idx, to_idx) = edge_indices[vidx];
-            let endpoint = if use_parents {
-                from_idx as usize
-            } else {
-                to_idx as usize
-            };
-            if endpoint < positions.len() && positions[endpoint] != Idx::MAX && *out_count < 16 {
-                out[*out_count] = positions[endpoint] as usize;
-                *out_count += 1;
-            }
-            // Same-edge dummy in adjacent level
-            for adj_pos in adj_start..adj_end {
-                if adj_pos * 2 + 1 >= vnode_data.len() {
-                    break;
+            // Dummy scan — only when adjacent level has dummies
+            if adj_has_dummies {
+                for adj_pos in adj_start..adj_end {
+                    if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+                    if vnode_data[adj_pos * 2] == 1 {
+                        let eidx = vnode_data[adj_pos * 2 + 1] as usize;
+                        if eidx < edge_indices.len() {
+                            let (from_idx, to_idx) = edge_indices[eidx];
+                            if (from_idx as usize == vidx || to_idx as usize == vidx)
+                                && *out_count < 16
+                            {
+                                out[*out_count] = (adj_pos - adj_start) as usize;
+                                *out_count += 1;
+                            }
+                        }
+                    }
                 }
-                if vnode_data[adj_pos * 2] == 1
-                    && vnode_data[adj_pos * 2 + 1] as usize == vidx
+            }
+        } else if vidx < edge_indices.len() {
+            // Dummy node — check both real endpoints
+            let (from_idx, to_idx) = edge_indices[vidx];
+            for &endpoint in &[from_idx as usize, to_idx as usize] {
+                if endpoint < positions.len()
+                    && positions[endpoint] != Idx::MAX
                     && *out_count < 16
                 {
-                    out[*out_count] = (adj_pos - adj_start) as usize;
+                    out[*out_count] = positions[endpoint] as usize;
                     *out_count += 1;
-                    break;
+                }
+            }
+            // Same-edge dummy in adjacent level — only when dummies exist
+            if adj_has_dummies {
+                for adj_pos in adj_start..adj_end {
+                    if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+                    if vnode_data[adj_pos * 2] == 1
+                        && vnode_data[adj_pos * 2 + 1] as usize == vidx
+                        && *out_count < 16
+                    {
+                        out[*out_count] = (adj_pos - adj_start) as usize;
+                        *out_count += 1;
+                        break;
+                    }
                 }
             }
         }

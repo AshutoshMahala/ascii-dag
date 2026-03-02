@@ -140,7 +140,7 @@ pub mod render;
 // ── Convenience re-exports ──────────────────────────────────────────────
 
 pub use graph::{DAG, RenderMode};
-pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode};
+pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, NodeKind};
 pub use algorithms::sugiyama::error::LayoutError;
 pub use algorithms::sugiyama::crossing::{CrossingReducer, LayoutConfig, FAST, STANDARD, QUALITY};
 

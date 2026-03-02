@@ -29,19 +29,39 @@ impl<'a> DAG<'a> {
     /// Uses a fixed-point algorithm to assign each node to a level,
     /// where a node's level is one more than the maximum level of its parents.
     pub(crate) fn calculate_levels(&self) -> Vec<(usize, usize)> {
+        self.calculate_levels_with_back_edges(&[])
+    }
+
+    /// Calculate node levels, treating back edges as reversed.
+    ///
+    /// Back edges (identified by index in `back_edges`) have their direction
+    /// flipped for level assignment: the target becomes the "parent" and the
+    /// source becomes the "child". This breaks cycles so the fixed-point
+    /// iteration converges.
+    pub(crate) fn calculate_levels_with_back_edges(
+        &self,
+        back_edges: &[bool],
+    ) -> Vec<(usize, usize)> {
         let mut levels = vec![0usize; self.nodes.len()];
         let mut changed = true;
 
         while changed {
             changed = false;
-            for &(from, to, _) in &self.edges {
-                // Guard against missing nodes - O(1) HashMap lookups
-                if let Some(from_idx) = self.node_index(from)
-                    && let Some(to_idx) = self.node_index(to)
+            for (ei, &(from, to, _)) in self.edges.iter().enumerate() {
+                // Skip self-loops (they can't affect level assignment)
+                if from == to {
+                    continue;
+                }
+                let is_back = back_edges.get(ei).copied().unwrap_or(false);
+                // For back edges, flip direction: treat `to → from`
+                let (src, dst) = if is_back { (to, from) } else { (from, to) };
+
+                if let Some(src_idx) = self.node_index(src)
+                    && let Some(dst_idx) = self.node_index(dst)
                 {
-                    let new_level = levels[from_idx] + 1;
-                    if new_level > levels[to_idx] {
-                        levels[to_idx] = new_level;
+                    let new_level = levels[src_idx] + 1;
+                    if new_level > levels[dst_idx] {
+                        levels[dst_idx] = new_level;
                         changed = true;
                     }
                 }

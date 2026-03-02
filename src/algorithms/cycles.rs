@@ -36,7 +36,88 @@ pub mod generic;
 use crate::graph::DAG;
 use alloc::{vec, vec::Vec};
 
+/// Three-color DFS states for back-edge detection.
+const WHITE: u8 = 0; // Not yet visited
+const GRAY: u8 = 1;  // On the current DFS stack (ancestor)
+const BLACK: u8 = 2; // Fully processed
+
 impl<'a> DAG<'a> {
+    /// Detect back edges using three-color DFS (zigraph parity).
+    ///
+    /// Returns a `Vec<bool>` of length `self.edges.len()`, where `true` marks
+    /// an edge as a back edge. The graph is **not** mutated.
+    ///
+    /// Self-loops (from == to) are always marked as back edges.
+    ///
+    /// # Algorithm
+    ///
+    /// Classic three-color DFS: WHITE → GRAY (on stack) → BLACK (done).
+    /// An edge whose target is GRAY is a back edge. Handles disconnected
+    /// graphs by iterating over all roots.
+    pub fn detect_back_edges(&self) -> Vec<bool> {
+        let n = self.nodes.len();
+        let e = self.edges.len();
+        let mut color = vec![WHITE; n];
+        let mut back = vec![false; e];
+
+        // Mark self-loops immediately
+        for (ei, &(from, to, _)) in self.edges.iter().enumerate() {
+            if from == to {
+                back[ei] = true;
+            }
+        }
+
+        // Build edge-index lookup: for each node index, the edge indices where it is the source
+        let mut edges_from: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (ei, &(from, _, _)) in self.edges.iter().enumerate() {
+            if let Some(idx) = self.node_index(from) {
+                edges_from[idx].push(ei);
+            }
+        }
+
+        // Explicit-stack DFS for each unvisited root
+        for start in 0..n {
+            if color[start] != WHITE {
+                continue;
+            }
+
+            // Stack entries: (node_index, edge_iterator_position)
+            let mut stack: Vec<(usize, usize)> = Vec::new();
+            color[start] = GRAY;
+            stack.push((start, 0));
+
+            while let Some(&mut (node_idx, ref mut ei_pos)) = stack.last_mut() {
+                let edge_list = &edges_from[node_idx];
+                if *ei_pos < edge_list.len() {
+                    let edge_idx = edge_list[*ei_pos];
+                    // Advance iterator before processing (so we don't re-visit)
+                    *ei_pos += 1;
+
+                    let (_, to_id, _) = self.edges[edge_idx];
+                    if let Some(to_idx) = self.node_index(to_id) {
+                        match color[to_idx] {
+                            GRAY => {
+                                // Target is an ancestor on the current path → back edge
+                                back[edge_idx] = true;
+                            }
+                            WHITE => {
+                                color[to_idx] = GRAY;
+                                stack.push((to_idx, 0));
+                            }
+                            _ => {} // BLACK — already fully processed, skip
+                        }
+                    }
+                } else {
+                    // All edges from this node exhausted
+                    color[node_idx] = BLACK;
+                    stack.pop();
+                }
+            }
+        }
+
+        back
+    }
+
     /// Check if the graph contains cycles (making it not a valid DAG).
     ///
     /// # Examples
@@ -53,42 +134,45 @@ impl<'a> DAG<'a> {
     /// assert!(dag.has_cycle());
     /// ```
     pub fn has_cycle(&self) -> bool {
-        let mut visited = vec![false; self.nodes.len()];
-        let mut rec_stack = vec![false; self.nodes.len()];
+        let n = self.nodes.len();
+        // Three-color DFS using pre-built adjacency lists → O(V+E).
+        // Uses explicit stack to avoid recursion-depth limits on deep graphs.
+        const WHITE: u8 = 0;
+        const GRAY: u8 = 1;
+        const BLACK: u8 = 2;
 
-        for i in 0..self.nodes.len() {
-            if self.has_cycle_util(i, &mut visited, &mut rec_stack) {
-                return true;
+        let mut color = vec![WHITE; n];
+
+        for start in 0..n {
+            if color[start] != WHITE {
+                continue;
             }
-        }
-        false
-    }
 
-    /// Helper function for cycle detection using DFS.
-    fn has_cycle_util(&self, idx: usize, visited: &mut [bool], rec_stack: &mut [bool]) -> bool {
-        if rec_stack[idx] {
-            return true;
-        }
-        if visited[idx] {
-            return false;
-        }
+            // Explicit-stack DFS: (node_idx, position in children iterator)
+            let mut stack: Vec<(usize, usize)> = Vec::new();
+            color[start] = GRAY;
+            stack.push((start, 0));
 
-        visited[idx] = true;
-        rec_stack[idx] = true;
+            while let Some(&mut (node_idx, ref mut child_pos)) = stack.last_mut() {
+                let children = &self.children[node_idx];
+                if *child_pos < children.len() {
+                    let child_idx = children[*child_pos];
+                    *child_pos += 1;
 
-        let node_id = self.nodes[idx].0;
-        for &(from, to, _) in &self.edges {
-            if from == node_id {
-                // O(1) HashMap lookup instead of O(n) scan
-                if let Some(child_idx) = self.node_index(to)
-                    && self.has_cycle_util(child_idx, visited, rec_stack)
-                {
-                    return true;
+                    match color[child_idx] {
+                        GRAY => return true,   // back edge → cycle
+                        WHITE => {
+                            color[child_idx] = GRAY;
+                            stack.push((child_idx, 0));
+                        }
+                        _ => {} // BLACK — already fully processed
+                    }
+                } else {
+                    color[node_idx] = BLACK;
+                    stack.pop();
                 }
             }
         }
-
-        rec_stack[idx] = false;
         false
     }
 

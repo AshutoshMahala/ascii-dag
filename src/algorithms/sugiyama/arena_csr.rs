@@ -376,6 +376,7 @@ fn alloc_layout_temps_csr<'b>(
     let (level_slot_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (level_dummy_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (waypoint_scratch_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(max_levels + 1)?;
+    let (level_vdummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
 
     unsafe {
         Some(LayoutTemps {
@@ -397,6 +398,7 @@ fn alloc_layout_temps_csr<'b>(
             level_slot_next: core::slice::from_raw_parts_mut(level_slot_next_ptr, max_levels + 1),
             level_dummy_next: core::slice::from_raw_parts_mut(level_dummy_next_ptr, max_levels + 1),
             waypoint_scratch: core::slice::from_raw_parts_mut(waypoint_scratch_ptr, max_levels + 1),
+            level_vdummy_counts: core::slice::from_raw_parts_mut(level_vdummy_counts_ptr, max_levels + 1),
             dummy_data: core::slice::from_raw_parts_mut(dummy_data_ptr, max_dummy_waypoints),
             medians: core::slice::from_raw_parts_mut(medians_ptr, max_level_size),
             positions: core::slice::from_raw_parts_mut(positions_ptr, max_level_size),

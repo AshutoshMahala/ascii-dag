@@ -1,7 +1,10 @@
-use ascii_dag::graph::arena::Arena;
 use ascii_dag::graph::DAG;
 use ascii_dag::render::colors::Palette;
+use ascii_dag::LayoutConfig;
 use std::time::Instant;
+
+#[cfg(feature = "arena")]
+use ascii_dag::graph::arena::Arena;
 
 // Simple Linear Congruential Generator to avoid adding 'rand' dependency
 struct SimpleRng {
@@ -29,11 +32,20 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let use_arena = args.iter().any(|a| a == "--arena");
     let low_mem = args.iter().any(|a| a == "--low-mem");
+    let preset_name = args
+        .iter()
+        .position(|a| a == "--preset")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str());
 
     if use_arena {
         println!("=== ASCII DAG Stress Test Suite (ARENA MODE) ===\n");
     } else {
         println!("=== ASCII DAG Stress Test Suite (HEAP MODE) ===\n");
+    }
+
+    if let Some(p) = preset_name {
+        println!(">>> PRESET: {} <<<\n", p.to_uppercase());
     }
 
     if low_mem {
@@ -53,6 +65,7 @@ fn main() {
         ("The Skip-Level Nightmare", test_skip_level_nightmare),
         ("The Verbose Logger", test_verbose_logger),
         ("The Ouroboros", test_ouroboros),
+        ("Cycle Breaking Demo", test_cycle_breaking_demo),
         ("Massive Diamond (20k)", test_massive_diamond_20k),
         ("Massive Diamond (50k)", test_massive_diamond_50k),
         ("Massive Fan (50k)", test_massive_fan_50k),
@@ -64,9 +77,15 @@ fn main() {
         let dag = test_fn();
 
         if use_arena {
+            #[cfg(feature = "arena")]
             run_arena_test(name, &dag, low_mem);
+            #[cfg(not(feature = "arena"))]
+            {
+                let _ = (name, &dag, low_mem);
+                println!("(arena feature not enabled — skipping)");
+            }
         } else {
-            run_heap_test(name, &dag);
+            run_heap_test(name, &dag, preset_name);
         }
 
         println!("------------------------------------------------------------");
@@ -74,24 +93,45 @@ fn main() {
 
     if !use_arena {
         println!("\nTip: Run with --arena flag to test arena mode:");
-        println!("  cargo run --example stress_test --release -- --arena");
+        println!("  cargo run --example stress_test --release --features arena -- --arena");
+        println!("\nTip: Run with presets:");
+        println!("  cargo run --example stress_test --release -- --preset fast");
+        println!("  cargo run --example stress_test --release -- --preset quality");
     }
 }
 
-fn run_heap_test(name: &str, dag: &DAG) {
+fn run_heap_test(name: &str, dag: &DAG, preset_name: Option<&str>) {
     let start = Instant::now();
 
-    // Use colored rendering for Helix and Hairball
-    let use_color =
-        name.contains("Helix") || name.contains("Hairball") || name.contains("Nightmare");
+    // Build layout config from preset
+    let config = match preset_name {
+        Some("fast") => LayoutConfig::fast(),
+        Some("quality") => LayoutConfig::quality(),
+        _ => LayoutConfig::standard(), // default
+    };
+
+    // Use colored rendering for Helix, Hairball, and cycle-related tests
+    let use_color = name.contains("Helix")
+        || name.contains("Hairball")
+        || name.contains("Nightmare")
+        || name.contains("Cycle")
+        || name.contains("Ouroboros");
+
+    // Use the new preset API: compute_layout_with()
+    let ir = dag.compute_layout_with(&config);
 
     let output = if use_color {
-        dag.compute_layout()
-            .render_scanline_colored_with_legend(Palette::Ansi)
+        ir.render_scanline_colored_with_legend(Palette::Ansi)
     } else {
-        dag.render()
+        ir.render_scanline()
     };
     let duration = start.elapsed();
+
+    // Show reversed edge info for cyclic graphs
+    let reversed_count = ir.edges().iter().filter(|e| e.reversed).count();
+    if reversed_count > 0 {
+        println!("  [Cycle breaking: {} reversed edge(s) rendered with dashed lines]\n", reversed_count);
+    }
 
     if name.contains("Massive") {
         println!("(Output suppressed. Length: {} chars)", output.len());
@@ -103,10 +143,11 @@ fn run_heap_test(name: &str, dag: &DAG) {
     println!(">>> [HEAP] Rendered in {:?} <<<\n", duration);
 }
 
+#[cfg(feature = "arena")]
 fn run_arena_test(name: &str, dag: &DAG, low_mem: bool) {
     // Check for cycles first
     if dag.has_cycle() {
-        println!("(Graph has cycles - skipping layout)");
+        println!("(Graph has cycles - arena layout does not yet support cycle breaking, skipping)");
         return;
     }
 
@@ -387,6 +428,38 @@ fn test_ouroboros() -> DAG<'static> {
     dag.add_edge(1, 2, None);
     dag.add_edge(2, 3, None);
     dag.add_edge(3, 1, None); // Cycle!
+    dag
+}
+
+/// Demonstrates cycle breaking with dashed reversed edges.
+///
+/// This graph has back edges that form cycles. The layout algorithm detects
+/// them, temporarily reverses them for layering, then renders them with
+/// dashed lines (┊ ⇣) to visually distinguish from normal edges.
+fn test_cycle_breaking_demo() -> DAG<'static> {
+    let mut dag = DAG::new();
+
+    // A build system with feedback loops:
+    //   compile → link → test → deploy
+    //              ↑              │
+    //              └──────────────┘  (back edge: deploy triggers recompile)
+    //   Also: test → compile (back edge: test failure triggers recompile)
+    dag.add_node(10, "compile");
+    dag.add_node(20, "link");
+    dag.add_node(30, "test");
+    dag.add_node(40, "deploy");
+
+    dag.add_edge(10, 20, None); // compile → link
+    dag.add_edge(20, 30, None); // link → test
+    dag.add_edge(30, 40, None); // test → deploy
+    dag.add_edge(40, 20, None); // deploy → link (BACK EDGE)
+    dag.add_edge(30, 10, None); // test → compile (BACK EDGE)
+
+    // Self-loop: metrics reports itself
+    dag.add_node(50, "metrics");
+    dag.add_edge(10, 50, None);
+    dag.add_edge(50, 50, None); // self-loop (BACK EDGE)
+
     dag
 }
 
