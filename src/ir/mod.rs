@@ -17,9 +17,9 @@
 //! # Example
 //!
 //! ```
-//! use ascii_dag::DAG;
+//! use ascii_dag::Graph;
 //!
-//! let dag = DAG::from_edges(
+//! let dag = Graph::from_edges(
 //!     &[(1, "A"), (2, "B"), (3, "C")],
 //!     &[(1, 2), (1, 3), (2, 3)]
 //! );

@@ -214,7 +214,7 @@ impl<'a> CsrGraph<'a> {
         &self,
         temp_arena: &mut Arena<'_>,
         output_arena: &'b mut Arena<'b>,
-    ) -> Result<crate::ir::arena::LayoutIRArena<'b>, crate::algorithms::sugiyama::error::LayoutError> {
+    ) -> Result<crate::ir::arena::LayoutIRArena<'b>, crate::errors::GraphError> {
         crate::algorithms::sugiyama::arena::compute_layout_arena_csr(self, temp_arena, output_arena)
     }
 }
@@ -490,7 +490,7 @@ impl<'a> CsrGraphBuilder<'a> {
 }
 
 #[cfg(feature = "alloc")]
-impl<'a> super::DAG<'a> {
+impl<'a> super::Graph<'a> {
     /// Convert heap-based DAG to CSR format using the provided arena.
     ///
     /// This is useful for transitioning to arena mode or for
@@ -499,9 +499,10 @@ impl<'a> super::DAG<'a> {
     /// # Example
     ///
     /// ```
-    /// use ascii_dag::{DAG, arena::Arena};
+    /// use ascii_dag::Graph;
+    /// use ascii_dag::graph::arena::Arena;
     ///
-    /// let dag = DAG::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
+    /// let dag = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
     ///
     /// // Calculate required arena size
     /// let size = dag.estimate_csr_arena_size();
@@ -520,9 +521,10 @@ impl<'a> super::DAG<'a> {
     /// # Example
     ///
     /// ```
-    /// use ascii_dag::{DAG, arena::Arena};
+    /// use ascii_dag::Graph;
+    /// use ascii_dag::graph::arena::Arena;
     ///
-    /// let dag = DAG::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
+    /// let dag = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
     ///
     /// // Calculate required arena size
     /// let size = dag.estimate_csr_arena_size();

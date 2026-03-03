@@ -1,9 +1,9 @@
-use ascii_dag::graph::{DAG, RenderMode};
+use ascii_dag::graph::{Graph, RenderMode};
 
 fn main() {
     println!("=== Horizontal Mode Test ===\n");
 
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.set_render_mode(RenderMode::Horizontal);
 
     println!("1. Simple Chain (Should work):");
@@ -15,7 +15,7 @@ fn main() {
     println!("{}", dag.render());
 
     println!("2. Branching (Potential Data Loss):");
-    let mut dag2 = DAG::new();
+    let mut dag2 = Graph::new();
     dag2.set_render_mode(RenderMode::Horizontal);
     dag2.add_node(10, "Root");
     dag2.add_node(11, "Branch_1");

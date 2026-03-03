@@ -1,6 +1,6 @@
 //! Edge case tests to identify rendering issues and limitations.
 
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     println!("=== Edge Case Rendering Tests ===\n");
@@ -38,7 +38,7 @@ fn main() {
 
 fn test_asymmetric_diamond() {
     println!("1. Asymmetric Diamond (different path lengths):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Root"),
             (2, "Short"),
@@ -60,7 +60,7 @@ fn test_asymmetric_diamond() {
 
 fn test_skip_level() {
     println!("2. Skip-Level Connections (A→D skipping B,C):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[(1, "A"), (2, "B"), (3, "C"), (4, "D")],
         &[
             (1, 2),
@@ -75,7 +75,7 @@ fn test_skip_level() {
 
 fn test_very_wide() {
     println!("3. Very Wide (8 children):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (0, "Root"),
             (1, "N1"),
@@ -104,7 +104,7 @@ fn test_very_wide() {
 
 fn test_cross_connections() {
     println!("4. Cross Connections (A1→B2, A2→B1):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[(1, "A1"), (2, "A2"), (3, "B1"), (4, "B2")],
         &[
             (1, 3), // A1 → B1
@@ -119,7 +119,7 @@ fn test_cross_connections() {
 
 fn test_disconnected_subgraphs() {
     println!("5. Disconnected Subgraphs (2 separate DAGs):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[(1, "X1"), (2, "X2"), (3, "X3"), (10, "Y1"), (11, "Y2")],
         &[
             (1, 2),
@@ -133,7 +133,7 @@ fn test_disconnected_subgraphs() {
 
 fn test_highway_with_exits() {
     println!("6. Highway with Exits (main path + skip connections):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Start"),
             (2, "Stop1"),
@@ -157,7 +157,7 @@ fn test_highway_with_exits() {
 
 fn test_nested_diamonds() {
     println!("7. Nested Diamonds (diamond within diamond):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Top"),
             (2, "L"),
@@ -187,7 +187,7 @@ fn test_nested_diamonds() {
 
 fn test_partial_grid() {
     println!("8. Partial Grid (missing some connections):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "A1"),
             (2, "A2"),
@@ -218,7 +218,7 @@ fn test_partial_grid() {
 
 fn test_hourglass() {
     println!("9. Hourglass (fan-in then fan-out):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "In1"),
             (2, "In2"),
@@ -243,7 +243,7 @@ fn test_hourglass() {
 
 fn test_build_pipeline() {
     println!("10. Build Pipeline (realistic example):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Checkout"),
             (2, "Install"),

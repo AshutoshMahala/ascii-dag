@@ -4,14 +4,14 @@
 //! and renders it to an output string, including node placement and
 //! connection routing between levels.
 
-use crate::graph::DAG;
+use crate::graph::Graph;
 use alloc::{vec, vec::Vec};
 use core::fmt::Write;
 
 use super::ascii::{RenderBuffers, VirtualLayout};
 use super::chars::V_LINE;
 
-impl<'a> DAG<'a> {
+impl<'a> Graph<'a> {
     /// Render the virtual layout to output.
     pub(super) fn render_virtual_layout(
         &self,

@@ -1,7 +1,7 @@
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
 
     dag.add_node(1, "L");
     dag.add_node(2, "R");

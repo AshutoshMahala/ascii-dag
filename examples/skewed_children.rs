@@ -1,9 +1,9 @@
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     // Create a graph where a level's children are clustered on opposite sides
     // This tests that nodes are rendered in x-coordinate order (left-to-right)
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
 
     // Level 0: Root nodes
     dag.add_node(1, "LeftRoot");

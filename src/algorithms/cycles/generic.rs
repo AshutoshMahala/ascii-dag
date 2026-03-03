@@ -59,7 +59,7 @@ pub trait CycleDetectable {
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::cycles::generic::detect_cycle_fn;
+/// use ascii_dag::algorithms::cycles::generic::detect_cycle_fn;
 ///
 /// // Example: Error chain where errors can be caused by other errors
 /// let get_dependencies = |error_id: &usize| -> Vec<usize> {

@@ -6,7 +6,7 @@
 //! # Examples
 //!
 //! ```
-//! use ascii_dag::layout::generic::impact::compute_descendants_fn;
+//! use ascii_dag::algorithms::generic::impact::compute_descendants_fn;
 //!
 //! let get_deps = |file: &&str| match *file {
 //!     "app.exe" => vec!["main.o", "utils.o"],
@@ -47,7 +47,7 @@ use std::collections::{HashSet, VecDeque};
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::layout::generic::impact::compute_descendants_fn;
+/// use ascii_dag::algorithms::generic::impact::compute_descendants_fn;
 ///
 /// // Build dependency graph
 /// let get_deps = |pkg: &&str| match *pkg {
@@ -107,7 +107,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::layout::generic::impact::compute_ancestors_fn;
+/// use ascii_dag::algorithms::generic::impact::compute_ancestors_fn;
 ///
 /// let get_deps = |task: &&str| match *task {
 ///     "deploy" => vec!["test", "build"],
@@ -164,7 +164,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::layout::generic::impact::compute_blast_radius_fn;
+/// use ascii_dag::algorithms::generic::impact::compute_blast_radius_fn;
 ///
 /// let get_deps = |id: &usize| vec![
 ///     if *id == 2 { 1 } else if *id == 3 || *id == 4 { 2 } else { 0 }
@@ -195,7 +195,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::layout::generic::impact::ImpactAnalyzable;
+/// use ascii_dag::algorithms::generic::impact::ImpactAnalyzable;
 /// use std::collections::HashMap;
 ///
 /// struct PackageRegistry {

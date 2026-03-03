@@ -1,5 +1,5 @@
 // Clear test case for cross-level edges
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     println!("=== Testing Cross-Level Edge Rendering ===\n");
@@ -17,7 +17,7 @@ fn main() {
     println!("  │   └─→ C (level 2) - normal edge");
     println!("  └─────→ C (level 2) - CROSS-LEVEL edge (skips level 1)\n");
 
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "A");
     dag.add_node(2, "B");
     dag.add_node(3, "C");
@@ -38,7 +38,7 @@ fn main() {
     println!("  │   └─→ End (level 2)");
     println!("  └─────→ End (level 2) - CROSS-LEVEL\n");
 
-    let mut dag2 = DAG::new();
+    let mut dag2 = Graph::new();
     dag2.add_node(1, "Root");
     dag2.add_node(2, "Mid");
     dag2.add_node(3, "End");

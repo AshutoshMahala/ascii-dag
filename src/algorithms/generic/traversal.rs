@@ -6,7 +6,7 @@
 //! # Examples
 //!
 //! ```
-//! use ascii_dag::layout::generic::traversal::collect_all_nodes_fn;
+//! use ascii_dag::algorithms::generic::traversal::collect_all_nodes_fn;
 //!
 //! let get_children = |node: &usize| match node {
 //!     1 => vec![2, 3],
@@ -46,7 +46,7 @@ use std::collections::{HashSet, VecDeque};
 ///
 /// ## Simple Tree Traversal
 /// ```
-/// use ascii_dag::layout::generic::traversal::collect_all_nodes_fn;
+/// use ascii_dag::algorithms::generic::traversal::collect_all_nodes_fn;
 ///
 /// let get_children = |file: &&str| match *file {
 ///     "app.exe" => vec!["main.o", "utils.o"],
@@ -62,7 +62,7 @@ use std::collections::{HashSet, VecDeque};
 ///
 /// ## Handling Cycles
 /// ```
-/// use ascii_dag::layout::generic::traversal::collect_all_nodes_fn;
+/// use ascii_dag::algorithms::generic::traversal::collect_all_nodes_fn;
 ///
 /// // Graph with cycle: 1 -> 2 -> 3 -> 1
 /// let get_children = |&node: &usize| match node {
@@ -79,7 +79,7 @@ use std::collections::{HashSet, VecDeque};
 ///
 /// ## Multiple Starting Points
 /// ```
-/// use ascii_dag::layout::generic::traversal::collect_all_nodes_fn;
+/// use ascii_dag::algorithms::generic::traversal::collect_all_nodes_fn;
 ///
 /// let get_children = |&node: &usize| match node {
 ///     1 => vec![3],
@@ -131,7 +131,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::layout::generic::traversal::collect_all_nodes_dfs_fn;
+/// use ascii_dag::algorithms::generic::traversal::collect_all_nodes_dfs_fn;
 ///
 /// let get_children = |&node: &usize| match node {
 ///     1 => vec![2, 3],
@@ -183,7 +183,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::layout::generic::traversal::NodeCollectable;
+/// use ascii_dag::algorithms::generic::traversal::NodeCollectable;
 /// use std::collections::HashMap;
 ///
 /// struct Graph {

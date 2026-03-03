@@ -31,10 +31,10 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use ascii_dag::graph::{DAG, RenderMode};
+//! use ascii_dag::graph::{Graph, RenderMode};
 //!
 //! // Batch construction (fast!)
-//! let dag = DAG::from_edges(
+//! let dag = Graph::from_edges(
 //!     &[(1, "Error1"), (2, "Error2"), (3, "Error3")],
 //!     &[(1, 2), (2, 3)]
 //! );
@@ -48,9 +48,9 @@
 //!
 //! ### [`graph`] - Core DAG Structure
 //! ```rust
-//! use ascii_dag::graph::DAG;
+//! use ascii_dag::graph::Graph;
 //!
-//! let mut dag = DAG::new();
+//! let mut dag = Graph::new();
 //! dag.add_node(1, "A");
 //! dag.add_node(2, "B");
 //! dag.add_edge(1, 2, None);
@@ -58,9 +58,9 @@
 //!
 //! ### [`cycles`] - Cycle Detection
 //! ```rust
-//! use ascii_dag::graph::DAG;
+//! use ascii_dag::graph::Graph;
 //!
-//! let mut dag = DAG::new();
+//! let mut dag = Graph::new();
 //! dag.add_edge(1, 2, None);
 //! dag.add_edge(2, 1, None);
 //! assert!(dag.has_cycle());
@@ -71,7 +71,7 @@
 //! ```rust
 //! # #[cfg(feature = "generic")]
 //! # {
-//! use ascii_dag::cycles::generic::detect_cycle_fn;
+//! use ascii_dag::algorithms::cycles::generic::detect_cycle_fn;
 //!
 //! let get_deps = |id: &usize| match id {
 //!     1 => vec![2],
@@ -89,7 +89,7 @@
 //! ```rust
 //! # #[cfg(feature = "generic")]
 //! # {
-//! use ascii_dag::layout::generic::topological_sort_fn;
+//! use ascii_dag::algorithms::generic::topological_sort_fn;
 //!
 //! let get_deps = |task: &&str| match *task {
 //!     "deploy" => vec!["build"],
@@ -134,53 +134,33 @@ extern crate alloc;
 
 pub mod graph;
 pub mod algorithms;
+pub mod errors;
 pub mod ir;
 pub mod render;
+pub mod validation;
 
 // ── Convenience re-exports ──────────────────────────────────────────────
 
-pub use graph::{DAG, RenderMode};
+pub use graph::{Graph, RenderMode};
+pub use errors::GraphError;
+pub use errors::Diagnostic;
+pub use validation::Requirements;
 pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, NodeKind};
-pub use algorithms::sugiyama::error::LayoutError;
 pub use algorithms::sugiyama::crossing::{CrossingReducer, LayoutConfig, FAST, STANDARD, QUALITY};
-
-// ── Deprecated re-exports (removed in 0.10) ────────────────────────────
-//
-// These keep old `ascii_dag::arena`, `ascii_dag::csr`, `ascii_dag::cycles`,
-// and `ascii_dag::layout` import paths working but emit deprecation warnings.
-
-#[deprecated(since = "0.9.0", note = "use `ascii_dag::graph::arena` instead")]
-pub use graph::arena;
-
-#[deprecated(since = "0.9.0", note = "use `ascii_dag::graph::csr` instead")]
-pub use graph::csr;
-
-#[deprecated(since = "0.9.0", note = "use `ascii_dag::graph::csr::CsrGraph` instead")]
-pub use graph::csr::CsrGraph;
-
-#[deprecated(since = "0.9.0", note = "use `ascii_dag::algorithms::cycles` instead")]
-pub use algorithms::cycles;
-
-#[cfg(feature = "generic")]
-#[deprecated(since = "0.9.0", note = "use `ascii_dag::algorithms::generic` instead")]
-pub use algorithms::generic;
-
-#[deprecated(since = "0.9.0", note = "use `ascii_dag::algorithms::sugiyama` instead")]
-pub use algorithms::sugiyama as layout;
 
 #[cfg(test)]
 mod tests {
-    use crate::graph::DAG;
+    use crate::graph::Graph;
 
     #[test]
     fn test_empty_dag() {
-        let dag = DAG::new();
+        let dag = Graph::new();
         assert_eq!(dag.render(), "Empty DAG");
     }
 
     #[test]
     fn test_simple_chain() {
-        let dag = DAG::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (2, 3)]);
+        let dag = Graph::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (2, 3)]);
 
         let output = dag.render();
         assert!(output.contains("A"));
@@ -190,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_cycle_detection() {
-        let mut dag = DAG::new();
+        let mut dag = Graph::new();
         dag.add_node(1, "A");
         dag.add_node(2, "B");
         dag.add_edge(1, 2, None);
@@ -201,14 +181,14 @@ mod tests {
 
     #[test]
     fn test_no_cycle() {
-        let dag = DAG::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
+        let dag = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
 
         assert!(!dag.has_cycle());
     }
 
     #[test]
     fn test_diamond() {
-        let dag = DAG::from_edges(
+        let dag = Graph::from_edges(
             &[(1, "A"), (2, "B"), (3, "C"), (4, "D")],
             &[(1, 2), (1, 3), (2, 4), (3, 4)],
         );
@@ -221,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_auto_created_nodes() {
-        let mut dag = DAG::new();
+        let mut dag = Graph::new();
         dag.add_node(1, "A");
         dag.add_edge(1, 2, None); // Auto-creates node 2
         dag.add_node(3, "C");
@@ -244,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_no_auto_creation_when_explicit() {
-        let mut dag = DAG::new();
+        let mut dag = Graph::new();
         dag.add_node(1, "A");
         dag.add_node(2, "B"); // Explicit!
         dag.add_edge(1, 2, None);
@@ -263,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_edge_to_missing_node_no_panic() {
-        let mut dag = DAG::new();
+        let mut dag = Graph::new();
         dag.add_node(1, "A");
         dag.add_edge(1, 2, None); // Node 2 doesn't exist - should auto-create
 
@@ -277,7 +257,7 @@ mod tests {
 
     #[test]
     fn test_cross_level_edges() {
-        let mut dag = DAG::new();
+        let mut dag = Graph::new();
 
         dag.add_node(1, "Root");
         dag.add_node(2, "Middle");
@@ -297,7 +277,7 @@ mod tests {
     #[test]
     fn test_crossing_reduction() {
         // Diamond graph to test that crossing reduction runs without panicking
-        let mut dag = DAG::new();
+        let mut dag = Graph::new();
 
         dag.add_node(1, "Top");
         dag.add_node(2, "Right");
@@ -328,7 +308,7 @@ mod tests {
 
     #[test]
     fn test_cycle_with_auto_created_nodes() {
-        let mut dag = DAG::new();
+        let mut dag = Graph::new();
         dag.add_node(1, "A");
         // Node 2 will be auto-created
         dag.add_edge(1, 2, None);
@@ -348,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_auto_created_node_promotion() {
-        let mut dag = DAG::new();
+        let mut dag = Graph::new();
 
         dag.add_node(1, "A");
         dag.add_edge(1, 2, None); // Auto-creates node 2 as placeholder
@@ -389,7 +369,7 @@ mod tests {
     fn test_skewed_children_rendering_order() {
         // Test that nodes are rendered left-to-right by x-coordinate,
         // even when median centering moves nodes around.
-        let mut dag = DAG::new();
+        let mut dag = Graph::new();
 
         // Create a level with multiple nodes
         dag.add_node(1, "Top");

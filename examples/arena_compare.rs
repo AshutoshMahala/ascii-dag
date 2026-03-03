@@ -3,33 +3,33 @@
 //! Run with: cargo run --example arena_compare --release
 
 use ascii_dag::graph::arena::Arena;
-use ascii_dag::graph::{DAG, RenderMode};
+use ascii_dag::graph::{Graph, RenderMode};
 
 fn main() {
     println!("=== Arena vs Heap Rendering Comparison ===\n");
     println!("(Note: Both use Vertical mode for fair comparison)\n");
 
-    let tests: Vec<(&str, DAG)> = vec![
+    let tests: Vec<(&str, Graph)> = vec![
         ("Simple Chain", {
-            DAG::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (2, 3)])
+            Graph::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (2, 3)])
                 .with_render_mode(RenderMode::Vertical)
         }),
         ("Diamond Pattern", {
-            DAG::from_edges(
+            Graph::from_edges(
                 &[(1, "Root"), (2, "Left"), (3, "Right"), (4, "Merge")],
                 &[(1, 2), (1, 3), (2, 4), (3, 4)],
             )
             .with_render_mode(RenderMode::Vertical)
         }),
         ("Multi-Convergence", {
-            DAG::from_edges(
+            Graph::from_edges(
                 &[(1, "E1"), (2, "E2"), (3, "E3"), (4, "Final")],
                 &[(1, 4), (2, 4), (3, 4)],
             )
             .with_render_mode(RenderMode::Vertical)
         }),
         ("Cross-Level Simple", {
-            let mut dag = DAG::new().with_render_mode(RenderMode::Vertical);
+            let mut dag = Graph::new().with_render_mode(RenderMode::Vertical);
             dag.add_node(1, "Root");
             dag.add_node(2, "Middle");
             dag.add_node(3, "End");
@@ -39,7 +39,7 @@ fn main() {
             dag
         }),
         ("Cross-Level Chain", {
-            let mut dag = DAG::new().with_render_mode(RenderMode::Vertical);
+            let mut dag = Graph::new().with_render_mode(RenderMode::Vertical);
             dag.add_node(1, "A");
             dag.add_node(2, "B");
             dag.add_node(3, "C");
@@ -51,7 +51,7 @@ fn main() {
             dag
         }),
         ("Readme Hero", {
-            let mut dag = DAG::new().with_render_mode(RenderMode::Vertical);
+            let mut dag = Graph::new().with_render_mode(RenderMode::Vertical);
             dag.add_node(1, "Root");
             dag.add_node(2, "Task A");
             dag.add_node(3, "Task B");
@@ -74,7 +74,7 @@ fn main() {
             dag
         }),
         ("Wide Fan", {
-            let mut dag = DAG::new().with_render_mode(RenderMode::Vertical);
+            let mut dag = Graph::new().with_render_mode(RenderMode::Vertical);
             dag.add_node(0, "Source");
             dag.add_node(1, "Sink");
             for i in 2..12 {
@@ -117,7 +117,7 @@ fn main() {
     }
 }
 
-fn render_with_arena(dag: &DAG) -> String {
+fn render_with_arena(dag: &Graph) -> String {
     // Use estimate_size() to get a reasonable arena size estimate
     let estimated = dag.estimate_size();
 

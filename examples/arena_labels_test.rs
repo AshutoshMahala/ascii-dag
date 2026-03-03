@@ -3,14 +3,14 @@
 //! Run with: cargo run --example arena_labels_test --release
 
 use ascii_dag::graph::arena::Arena;
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 use ascii_dag::render::colors::Palette;
 
 fn main() {
     println!("=== Arena vs Heap: Edge Labels & Colors Test ===\n");
 
     // Create DAG with edge labels
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "Parser");
     dag.add_node(2, "Lexer");
     dag.add_node(3, "AST");
@@ -106,7 +106,7 @@ fn main() {
     println!("--- GREEDY COLORING TEST ---\n");
 
     // Create a diamond pattern where adjacent edges should get different colors
-    let mut diamond = DAG::new();
+    let mut diamond = Graph::new();
     diamond.add_node(1, "A");
     diamond.add_node(2, "B");
     diamond.add_node(3, "C");

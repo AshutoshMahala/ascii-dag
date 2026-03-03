@@ -1,9 +1,9 @@
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     // Test 1: Simple skip edge (A->D spanning 3 levels)
     println!("=== Test 1: Simple Skip Edge (A->D spans 3 levels) ===");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[(1, "A"), (2, "B"), (3, "C"), (4, "D")],
         &[(1, 2), (2, 3), (3, 4), (1, 4)], // A->D is the skip edge
     );
@@ -12,7 +12,7 @@ fn main() {
 
     // Test 2: Two parallel paths with different lengths
     println!("=== Test 2: Asymmetric Parallel Paths ===");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Root"),
             (2, "Short"),
@@ -27,7 +27,7 @@ fn main() {
 
     // Test 3: Cross connections (should show crossing pattern)
     println!("=== Test 3: Cross Connections (K2,2) ===");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[(1, "A1"), (2, "A2"), (3, "B1"), (4, "B2")],
         &[(1, 3), (1, 4), (2, 3), (2, 4)],
     );
@@ -36,7 +36,7 @@ fn main() {
 
     // Test 4: Diamond (pure convergence then divergence)
     println!("=== Test 4: Diamond ===");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[(1, "Top"), (2, "Left"), (3, "Right"), (4, "Bottom")],
         &[(1, 2), (1, 3), (2, 4), (3, 4)],
     );
@@ -45,7 +45,7 @@ fn main() {
 
     // Test 5: Wide graph with skip edge
     println!("=== Test 5: Wide Graph with Skip ===");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[(1, "A"), (2, "B"), (3, "C"), (4, "X"), (5, "Y"), (6, "Z")],
         &[
             (1, 4),

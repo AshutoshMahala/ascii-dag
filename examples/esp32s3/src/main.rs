@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use esp_hal::time::Instant;
 use esp_println::println;
 use embedded_alloc::LlffHeap as Heap;
-use ascii_dag::DAG;
+use ascii_dag::Graph;
 
 // Import esp-backtrace to get panic handler
 use esp_backtrace as _;
@@ -46,7 +46,7 @@ fn main() -> ! {
     let heap_before = HEAP.used();
     let start = Instant::now();
     
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "Root");
     dag.add_node(2, "Left");
     dag.add_node(3, "Right");
@@ -83,7 +83,7 @@ fn main() -> ! {
     let heap_before = HEAP.used();
     let start = Instant::now();
     
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Source"), (2, "Parse"), (3, "Validate"), (4, "Transform"),
             (5, "Optimize"), (6, "CodeGen"), (7, "Link"), (8, "Test"),
@@ -123,7 +123,7 @@ fn main() -> ! {
     let heap_before = HEAP.used();
     let start = Instant::now();
     
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Start"),
             (2, "Worker1"), (3, "Worker2"), (4, "Worker3"), (5, "Worker4"), (6, "Worker5"),
@@ -185,7 +185,7 @@ fn main() -> ! {
     let heap_before = HEAP.used();
     let start = Instant::now();
     
-    let dag = DAG::from_edges(&nodes, &edges);
+    let dag = Graph::from_edges(&nodes, &edges);
     
     let build_time = start.elapsed();
     let render_start = Instant::now();
@@ -243,7 +243,7 @@ fn main() -> ! {
     let heap_before = HEAP.used();
     let start = Instant::now();
     
-    let dag = DAG::from_edges(&nodes, &edges);
+    let dag = Graph::from_edges(&nodes, &edges);
     
     let build_time = start.elapsed();
     let render_start = Instant::now();
@@ -315,7 +315,7 @@ fn main() -> ! {
     let heap_before = HEAP.used();
     let start = Instant::now();
     
-    let dag = DAG::from_edges(&nodes, &edges);
+    let dag = Graph::from_edges(&nodes, &edges);
     
     let build_time = start.elapsed();
     let render_start = Instant::now();

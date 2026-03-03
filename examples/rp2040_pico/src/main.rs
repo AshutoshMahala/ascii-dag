@@ -47,7 +47,7 @@ use embedded_alloc::Heap;
 
 // ascii-dag
 // ascii-dag
-use ascii_dag::DAG;
+use ascii_dag::Graph;
 use ascii_dag::graph::arena::Arena;
 use ascii_dag::graph::csr::CsrGraphBuilder;
 
@@ -332,7 +332,7 @@ fn run_heap_benchmark(nodes: &[(usize, &str)], edges: &[(usize, usize)], timer: 
     
     // Phase 1: Build
     let build_start = timer.get_counter();
-    let dag = DAG::from_edges(nodes, edges);
+    let dag = Graph::from_edges(nodes, edges);
     let build_time = timer.get_counter() - build_start;
     
     // Phase 2: Compute layout

@@ -12,7 +12,7 @@
 //! ```
 //! # #[cfg(feature = "generic")]
 //! # {
-//! use ascii_dag::cycles::generic::detect_cycle_fn;
+//! use ascii_dag::algorithms::cycles::generic::detect_cycle_fn;
 //!
 //! // Example: Error chain
 //! let get_caused_by = |error_id: &usize| -> Vec<usize> {
@@ -33,7 +33,7 @@
 #[cfg(feature = "generic")]
 pub mod generic;
 
-use crate::graph::DAG;
+use crate::graph::Graph;
 use alloc::{vec, vec::Vec};
 
 /// Three-color DFS states for back-edge detection.
@@ -41,7 +41,7 @@ const WHITE: u8 = 0; // Not yet visited
 const GRAY: u8 = 1;  // On the current DFS stack (ancestor)
 const BLACK: u8 = 2; // Fully processed
 
-impl<'a> DAG<'a> {
+impl<'a> Graph<'a> {
     /// Detect back edges using three-color DFS (zigraph parity).
     ///
     /// Returns a `Vec<bool>` of length `self.edges.len()`, where `true` marks
@@ -123,9 +123,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::DAG;
+    /// use ascii_dag::graph::Graph;
     ///
-    /// let mut dag = DAG::new();
+    /// let mut dag = Graph::new();
     /// dag.add_node(1, "A");
     /// dag.add_node(2, "B");
     /// dag.add_edge(1, 2, None);
@@ -233,11 +233,11 @@ impl<'a> DAG<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::graph::DAG;
+    use crate::graph::Graph;
 
     #[test]
     fn test_cycle_detection() {
-        let mut dag = DAG::new();
+        let mut dag = Graph::new();
         dag.add_node(1, "A");
         dag.add_node(2, "B");
         dag.add_edge(1, 2, None);
@@ -248,14 +248,14 @@ mod tests {
 
     #[test]
     fn test_no_cycle() {
-        let dag = DAG::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
+        let dag = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
 
         assert!(!dag.has_cycle());
     }
 
     #[test]
     fn test_cycle_with_auto_created_nodes() {
-        let mut dag = DAG::new();
+        let mut dag = Graph::new();
         dag.add_node(1, "A");
         // Node 2 will be auto-created
         dag.add_edge(1, 2, None);

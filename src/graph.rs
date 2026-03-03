@@ -1,6 +1,7 @@
-//! Core DAG (Directed Acyclic Graph) data structure.
+//! Core graph data structure.
 //!
 //! This module provides the fundamental graph structure with nodes and edges.
+//! The primary type is [`Graph`].
 //!
 //! ## Performance Characteristics
 //!
@@ -50,24 +51,30 @@ pub enum RenderMode {
     Auto,
 }
 
-/// A Directed Acyclic Graph (DAG) with ASCII rendering capabilities.
+/// A directed graph with ASCII rendering capabilities.
+///
+/// Despite the crate name (`ascii-dag`), `Graph` supports cycles — they are
+/// detected and broken automatically during layout.  Use [`Requirements::dag()`]
+/// if you need to validate acyclicity before layout.
+///
+/// [`Requirements::dag()`]: crate::Requirements::dag
 ///
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::graph::DAG;
+/// use ascii_dag::Graph;
 ///
-/// let mut dag = DAG::new();
-/// dag.add_node(1, "Start");
-/// dag.add_node(2, "End");
-/// dag.add_edge(1, 2, None);
+/// let mut g = Graph::new();
+/// g.add_node(1, "Start");
+/// g.add_node(2, "End");
+/// g.add_edge(1, 2, None);
 ///
-/// let output = dag.render();
+/// let output = g.render();
 /// assert!(output.contains("Start"));
 /// assert!(output.contains("End"));
 /// ```
 #[derive(Clone)]
-pub struct DAG<'a> {
+pub struct Graph<'a> {
     pub(crate) nodes: Vec<(usize, &'a str)>,
     pub(crate) edges: Vec<(usize, usize, Option<&'a str>)>,
     pub(crate) render_mode: RenderMode,
@@ -79,7 +86,7 @@ pub struct DAG<'a> {
     pub(crate) crossing_pipeline: Vec<CrossingReducer>, // Composable crossing reduction pipeline
 }
 
-impl<'a> Default for DAG<'a> {
+impl<'a> Default for Graph<'a> {
     fn default() -> Self {
         Self {
             nodes: Vec::new(),
@@ -95,14 +102,14 @@ impl<'a> Default for DAG<'a> {
     }
 }
 
-impl<'a> DAG<'a> {
+impl<'a> Graph<'a> {
     /// Create a new empty DAG.
     ///
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::DAG;
-    /// let dag = DAG::new();
+    /// use ascii_dag::graph::Graph;
+    /// let dag = Graph::new();
     /// ```
     pub fn new() -> Self {
         Self::default()
@@ -116,9 +123,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::DAG;
+    /// use ascii_dag::graph::Graph;
     ///
-    /// let dag = DAG::from_edges(
+    /// let dag = Graph::from_edges(
     ///     &[(1, "A"), (2, "B"), (3, "C")],
     ///     &[(1, 2), (2, 3)]
     /// );
@@ -160,9 +167,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::DAG;
+    /// use ascii_dag::graph::Graph;
     ///
-    /// let dag = DAG::from_edges_labeled(
+    /// let dag = Graph::from_edges_labeled(
     ///     &[(1, "A"), (2, "B"), (3, "C")],
     ///     &[(1, 2, Some("uses")), (2, 3, None)]
     /// );
@@ -207,9 +214,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::{DAG, RenderMode};
+    /// use ascii_dag::graph::{Graph, RenderMode};
     ///
-    /// let mut dag = DAG::new();
+    /// let mut dag = Graph::new();
     /// dag.set_render_mode(RenderMode::Horizontal);
     /// ```
     pub fn set_render_mode(&mut self, mode: RenderMode) {
@@ -247,10 +254,10 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::DAG;
+    /// use ascii_dag::graph::Graph;
     /// use ascii_dag::algorithms::sugiyama::crossing::{CrossingReducer, QUALITY};
     ///
-    /// let mut dag = DAG::new();
+    /// let mut dag = Graph::new();
     /// dag.set_crossing_pipeline(QUALITY);
     /// ```
     pub fn set_crossing_pipeline(&mut self, pipeline: &[CrossingReducer]) {
@@ -286,9 +293,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::{DAG, RenderMode};
+    /// use ascii_dag::graph::{Graph, RenderMode};
     ///
-    /// let dag = DAG::new()
+    /// let dag = Graph::new()
     ///     .with_render_mode(RenderMode::Horizontal)
     ///     .with_crossing_reduction_passes(6);
     /// ```
@@ -304,9 +311,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::DAG;
+    /// use ascii_dag::Graph;
     ///
-    /// let dag = DAG::new()
+    /// let dag = Graph::new()
     ///     .with_crossing_reduction_passes(8);  // More passes for complex graphs
     /// ```
     pub fn with_crossing_reduction_passes(mut self, passes: usize) -> Self {
@@ -319,10 +326,10 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::DAG;
+    /// use ascii_dag::Graph;
     /// use ascii_dag::algorithms::sugiyama::crossing::QUALITY;
     ///
-    /// let dag = DAG::new()
+    /// let dag = Graph::new()
     ///     .with_crossing_pipeline(QUALITY);
     /// ```
     pub fn with_crossing_pipeline(mut self, pipeline: &[CrossingReducer]) -> Self {
@@ -332,14 +339,14 @@ impl<'a> DAG<'a> {
 
     /// Create a DAG with a specific render mode.
     ///
-    /// **Deprecated**: Prefer `DAG::new().with_render_mode(mode)` for consistency.
+    /// **Deprecated**: Prefer `Graph::new().with_render_mode(mode)` for consistency.
     ///
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::{DAG, RenderMode};
+    /// use ascii_dag::graph::{Graph, RenderMode};
     ///
-    /// let dag = DAG::with_mode(RenderMode::Horizontal);
+    /// let dag = Graph::with_mode(RenderMode::Horizontal);
     /// ```
     pub fn with_mode(mode: RenderMode) -> Self {
         Self::new().with_render_mode(mode)
@@ -353,9 +360,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::DAG;
+    /// use ascii_dag::graph::Graph;
     ///
-    /// let mut dag = DAG::new();
+    /// let mut dag = Graph::new();
     /// dag.add_node(1, "MyNode");
     /// ```
     pub fn add_node(&mut self, id: usize, label: &'a str) {
@@ -396,9 +403,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::DAG;
+    /// use ascii_dag::graph::Graph;
     ///
-    /// let mut dag = DAG::new();
+    /// let mut dag = Graph::new();
     /// // Node with explicit width of 20 units (ignores label length)
     /// dag.add_node_with_width(1, "Short", 20);
     /// ```
@@ -432,9 +439,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::DAG;
+    /// use ascii_dag::graph::Graph;
     ///
-    /// let mut dag = DAG::new();
+    /// let mut dag = Graph::new();
     /// dag.add_node(1, "A");
     /// dag.add_node(2, "B");
     /// dag.add_node(3, "C");
@@ -630,9 +637,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::DAG;
+    /// use ascii_dag::graph::Graph;
     ///
-    /// let dag = DAG::from_edges(
+    /// let dag = Graph::from_edges(
     ///     &[(1, "A"), (2, "B")],
     ///     &[(1, 2)]
     /// );
@@ -667,9 +674,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::DAG;
+    /// use ascii_dag::Graph;
     ///
-    /// let dag = DAG::from_edges(
+    /// let dag = Graph::from_edges(
     ///     &[(1, "A"), (2, "B"), (3, "C")],
     ///     &[(1, 2), (1, 3), (2, 3)]
     /// );
@@ -694,9 +701,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::{DAG, LayoutConfig};
+    /// use ascii_dag::{Graph, LayoutConfig};
     ///
-    /// let dag = DAG::from_edges(
+    /// let dag = Graph::from_edges(
     ///     &[(1, "A"), (2, "B"), (3, "C")],
     ///     &[(1, 2), (2, 3)]
     /// );
@@ -714,3 +721,4 @@ impl<'a> DAG<'a> {
         crate::algorithms::sugiyama::heap::compute_layout(&dag)
     }
 }
+

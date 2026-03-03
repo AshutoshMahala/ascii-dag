@@ -7,7 +7,7 @@
 //! Run with: cargo run --example arena_benchmark --release
 
 use ascii_dag::graph::arena::Arena;
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -86,7 +86,7 @@ impl SimpleRng {
     }
 }
 
-fn generate_layered_graph<'a>(dag: &mut DAG<'a>, node_count: usize, rng: &mut SimpleRng) {
+fn generate_layered_graph<'a>(dag: &mut Graph<'a>, node_count: usize, rng: &mut SimpleRng) {
     for i in 0..node_count {
         let label = Box::leak(format!("N{}", i).into_boxed_str());
         dag.add_node(i, label);
@@ -106,7 +106,7 @@ fn generate_layered_graph<'a>(dag: &mut DAG<'a>, node_count: usize, rng: &mut Si
     }
 }
 
-fn generate_wide_graph<'a>(dag: &mut DAG<'a>, width: usize, levels: usize, rng: &mut SimpleRng) {
+fn generate_wide_graph<'a>(dag: &mut Graph<'a>, width: usize, levels: usize, rng: &mut SimpleRng) {
     let mut id = 0;
     for level in 0..levels {
         for _ in 0..width {
@@ -132,7 +132,7 @@ fn generate_wide_graph<'a>(dag: &mut DAG<'a>, width: usize, levels: usize, rng: 
     }
 }
 
-fn generate_deep_chain<'a>(dag: &mut DAG<'a>, depth: usize) {
+fn generate_deep_chain<'a>(dag: &mut Graph<'a>, depth: usize) {
     for i in 0..depth {
         let label = Box::leak(format!("D{}", i).into_boxed_str());
         dag.add_node(i, label);
@@ -142,7 +142,7 @@ fn generate_deep_chain<'a>(dag: &mut DAG<'a>, depth: usize) {
     }
 }
 
-fn generate_skip_heavy<'a>(dag: &mut DAG<'a>, nodes: usize, rng: &mut SimpleRng) {
+fn generate_skip_heavy<'a>(dag: &mut Graph<'a>, nodes: usize, rng: &mut SimpleRng) {
     for i in 0..nodes {
         let label = Box::leak(format!("S{}", i).into_boxed_str());
         dag.add_node(i, label);
@@ -223,7 +223,7 @@ impl BenchResult {
 
 fn run_heap_benchmark<F>(name: &str, generator: F, rng: &mut SimpleRng) -> BenchResult
 where
-    F: Fn(&mut SimpleRng) -> DAG<'static>,
+    F: Fn(&mut SimpleRng) -> Graph<'static>,
 {
     // Phase 1: Build
     reset_metrics();
@@ -288,7 +288,7 @@ fn run_arena_test(name: &str, arena_size: usize) -> BenchResult {
 /// Benchmark using arena-based CSR graph conversion
 fn run_csr_benchmark<F>(name: &str, generator: F, rng: &mut SimpleRng) -> BenchResult
 where
-    F: Fn(&mut SimpleRng) -> DAG<'static>,
+    F: Fn(&mut SimpleRng) -> Graph<'static>,
 {
     // Phase 1: Build DAG (same as heap)
     reset_metrics();
@@ -335,10 +335,10 @@ where
     }
 }
 
-/// Benchmark full arena pipeline: DAG -> CSR -> Render (no heap allocs)
+/// Benchmark full arena pipeline: Graph -> CSR -> Render (no heap allocs)
 fn run_full_arena_benchmark<F>(name: &str, generator: F, rng: &mut SimpleRng) -> BenchResult
 where
-    F: Fn(&mut SimpleRng) -> DAG<'static>,
+    F: Fn(&mut SimpleRng) -> Graph<'static>,
 {
     // Phase 1: Build DAG (heap-based, unavoidable for now)
     reset_metrics();
@@ -412,7 +412,7 @@ fn run_test_suite() {
         let result = run_heap_benchmark(
             name,
             |rng| {
-                let mut dag = DAG::new();
+                let mut dag = Graph::new();
                 match graph_type {
                     0 => generate_layered_graph(&mut dag, *count, rng),
                     1 => generate_wide_graph(&mut dag, *count, *extra, rng),
@@ -434,7 +434,7 @@ fn run_test_suite() {
         let result = run_buffer_benchmark(
             name,
             |rng| {
-                let mut dag = DAG::new();
+                let mut dag = Graph::new();
                 match graph_type {
                     0 => generate_layered_graph(&mut dag, *count, rng),
                     1 => generate_wide_graph(&mut dag, *count, *extra, rng),
@@ -457,7 +457,7 @@ fn run_test_suite() {
         let result = run_csr_benchmark(
             name,
             |rng| {
-                let mut dag = DAG::new();
+                let mut dag = Graph::new();
                 match graph_type {
                     0 => generate_layered_graph(&mut dag, *count, rng),
                     1 => generate_wide_graph(&mut dag, *count, *extra, rng),
@@ -473,14 +473,14 @@ fn run_test_suite() {
     }
 
     println!("\n## Full Arena Pipeline (CSR + Render)\n");
-    println!("Complete no-alloc path: DAG -> CSR -> Buffer render:\n");
+    println!("Complete no-alloc path: Graph -> CSR -> Buffer render:\n");
     BenchResult::print_header();
 
     for (name, count, graph_type, extra) in &test_configs {
         let result = run_full_arena_benchmark(
             name,
             |rng| {
-                let mut dag = DAG::new();
+                let mut dag = Graph::new();
                 match graph_type {
                     0 => generate_layered_graph(&mut dag, *count, rng),
                     1 => generate_wide_graph(&mut dag, *count, *extra, rng),
@@ -522,7 +522,7 @@ fn run_test_suite() {
 /// Benchmark using pre-allocated buffers (arena-friendly rendering)
 fn run_buffer_benchmark<F>(name: &str, generator: F, rng: &mut SimpleRng) -> BenchResult
 where
-    F: Fn(&mut SimpleRng) -> DAG<'static>,
+    F: Fn(&mut SimpleRng) -> Graph<'static>,
 {
     // Phase 1: Build (same as heap)
     reset_metrics();

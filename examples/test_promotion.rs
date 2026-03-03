@@ -1,7 +1,7 @@
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
 
     println!("=== Test: Auto-created Node Promotion ===\n");
 

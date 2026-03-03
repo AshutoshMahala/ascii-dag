@@ -12,7 +12,7 @@
 //! # Examples
 //!
 //! ```
-//! use ascii_dag::layout::generic::topological_sort_fn;
+//! use ascii_dag::algorithms::generic::topological_sort_fn;
 //!
 //! // Example: Sort tasks by dependencies
 //! let get_deps = |task: &&str| match *task {
@@ -52,7 +52,7 @@ use core::hash::Hash;
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::layout::generic::topological_sort_fn;
+/// use ascii_dag::algorithms::generic::topological_sort_fn;
 ///
 /// let get_deps = |&id: &usize| match id {
 ///     1 => vec![],      // No dependencies
@@ -133,7 +133,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::layout::generic::TopologicallySortable;
+/// use ascii_dag::algorithms::generic::TopologicallySortable;
 /// use std::collections::HashMap;
 ///
 /// struct TaskGraph {

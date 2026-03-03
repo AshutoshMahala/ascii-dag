@@ -5,7 +5,7 @@
 //! dummy position building, and crossing reduction.
 
 use crate::algorithms::sugiyama::crossing::CrossingReducer;
-use crate::graph::DAG;
+use crate::graph::Graph;
 
 // Import configurable index types
 #[cfg(feature = "arena")]
@@ -19,7 +19,7 @@ type Coord = u16;
 #[cfg(not(feature = "arena"))]
 const MAX_LEVELS: usize = usize::MAX;
 
-impl<'a> DAG<'a> {
+impl<'a> Graph<'a> {
     /// Calculate levels using arena-allocated buffer.
     #[allow(dead_code)]
     pub(super) fn calculate_levels_arena(&self, levels: &mut [Idx], edge_indices: &[(Idx, Idx)]) -> usize {

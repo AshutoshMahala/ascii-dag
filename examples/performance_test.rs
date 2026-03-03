@@ -1,11 +1,11 @@
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 use std::time::Instant;
 
 fn main() {
     println!("=== Performance Test: Large DAG ===\n");
 
     // Create a large graph with 100 nodes and complex structure
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
 
     // Create labels that live long enough
     let labels: Vec<String> = (0..100).map(|i| format!("Node{}", i)).collect();
@@ -41,7 +41,7 @@ fn main() {
 
     // Test auto-created node promotion performance
     let start = Instant::now();
-    let mut dag2 = DAG::new();
+    let mut dag2 = Graph::new();
     let promoted_labels: Vec<String> = (50..100).map(|i| format!("Promoted{}", i)).collect();
     let promoted_strs: Vec<&str> = promoted_labels.iter().map(|s| s.as_str()).collect();
 

@@ -2,14 +2,14 @@
 // Previously, edges that skipped levels were silently dropped
 // Now they render correctly
 
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     println!("=== Cross-Level Edge Examples ===\n");
 
     // Example 1: Simple cross-level edge
     println!("1. Simple cross-level (Root -> Middle -> End, plus Root -> End directly):");
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "Root");
     dag.add_node(2, "Middle");
     dag.add_node(3, "End");
@@ -22,7 +22,7 @@ fn main() {
 
     // Example 2: Multiple cross-level edges
     println!("2. Multiple cross-level edges:");
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "A");
     dag.add_node(2, "B");
     dag.add_node(3, "C");
@@ -37,7 +37,7 @@ fn main() {
 
     // Example 3: Complex with multiple paths
     println!("3. Complex graph with shortcuts:");
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "Start");
     dag.add_node(2, "Parse");
     dag.add_node(3, "Compile");

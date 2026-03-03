@@ -5,7 +5,7 @@
 //! # Examples
 //!
 //! ```
-//! use ascii_dag::layout::generic::metrics::GraphMetrics;
+//! use ascii_dag::algorithms::generic::metrics::GraphMetrics;
 //!
 //! let get_deps = |task: &&str| match *task {
 //!     "deploy" => vec!["build", "test"],
@@ -36,7 +36,7 @@ use crate::algorithms::cycles::generic::roots::find_roots_fn;
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::layout::generic::metrics::GraphMetrics;
+/// use ascii_dag::algorithms::generic::metrics::GraphMetrics;
 ///
 /// let get_deps = |&id: &usize| match id {
 ///     1 => vec![],
@@ -69,7 +69,7 @@ impl GraphMetrics {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::layout::generic::metrics::GraphMetrics;
+    /// use ascii_dag::algorithms::generic::metrics::GraphMetrics;
     ///
     /// let get_deps = |&id: &usize| match id {
     ///     1 => vec![],

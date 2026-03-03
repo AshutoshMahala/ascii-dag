@@ -1,13 +1,13 @@
 // Quick verification of crossing reduction fix on key stress test graphs
 // (skips massive diamond tests that take too long)
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 use ascii_dag::LayoutConfig;
 use std::time::Instant;
 
 fn main() {
     println!("=== Crossing Reduction Fix Verification ===\n");
 
-    let tests: Vec<(&str, Box<dyn Fn() -> DAG<'static>>)> = vec![
+    let tests: Vec<(&str, Box<dyn Fn() -> Graph<'static>>)> = vec![
         ("Double Helix", Box::new(test_double_helix)),
         ("Wide Fan", Box::new(test_wide_fan)),
         ("Diamond Lattice", Box::new(test_diamond_lattice)),
@@ -40,8 +40,8 @@ fn main() {
     println!("=== All tests completed successfully ===");
 }
 
-fn test_double_helix() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_double_helix() -> Graph<'static> {
+    let mut dag = Graph::new();
     for i in 0..10 {
         dag.add_node(i * 2, "A");
         dag.add_node(i * 2 + 1, "B");
@@ -57,8 +57,8 @@ fn test_double_helix() -> DAG<'static> {
     dag
 }
 
-fn test_wide_fan() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_wide_fan() -> Graph<'static> {
+    let mut dag = Graph::new();
     dag.add_node(0, "Root");
     for i in 1..=20 {
         let label: &'static str = Box::leak(format!("C{}", i).into_boxed_str());
@@ -68,8 +68,8 @@ fn test_wide_fan() -> DAG<'static> {
     dag
 }
 
-fn test_diamond_lattice() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_diamond_lattice() -> Graph<'static> {
+    let mut dag = Graph::new();
     let layers = [1, 4, 6, 8, 6, 4, 1]; // diamond shape
     let mut id = 0;
     let mut layer_ids: Vec<Vec<usize>> = Vec::new();
@@ -97,8 +97,8 @@ fn test_diamond_lattice() -> DAG<'static> {
     dag
 }
 
-fn test_random_hairball() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_random_hairball() -> Graph<'static> {
+    let mut dag = Graph::new();
     let mut state: u64 = 42;
     let nodes = 30;
 
@@ -126,8 +126,8 @@ fn test_random_hairball() -> DAG<'static> {
     dag
 }
 
-fn test_skip_level_nightmare() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_skip_level_nightmare() -> Graph<'static> {
+    let mut dag = Graph::new();
     for i in 0..15 {
         let label: &'static str = Box::leak(format!("L{}", i).into_boxed_str());
         dag.add_node(i, label);
@@ -156,8 +156,8 @@ fn test_skip_level_nightmare() -> DAG<'static> {
     dag
 }
 
-fn test_ouroboros() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_ouroboros() -> Graph<'static> {
+    let mut dag = Graph::new();
     for i in 0..8 {
         let label: &'static str = Box::leak(format!("O{}", i).into_boxed_str());
         dag.add_node(i, label);
@@ -168,8 +168,8 @@ fn test_ouroboros() -> DAG<'static> {
     dag
 }
 
-fn test_cycle_breaking_demo() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_cycle_breaking_demo() -> Graph<'static> {
+    let mut dag = Graph::new();
     dag.add_node(0, "A");
     dag.add_node(1, "B");
     dag.add_node(2, "C");

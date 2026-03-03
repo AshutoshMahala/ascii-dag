@@ -1,4 +1,4 @@
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 use std::fs::File;
 use std::io::Write;
 
@@ -7,7 +7,7 @@ fn main() {
 
     // Test: Simple skip edge
     writeln!(f, "=== Debug: Simple Skip Edge ===").unwrap();
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[(1, "A"), (2, "B"), (3, "C"), (4, "D")],
         &[(1, 2), (2, 3), (3, 4), (1, 4)], // A->D is the skip edge
     );
@@ -33,7 +33,7 @@ fn main() {
     writeln!(f, "{}", dag.render()).unwrap();
 
     writeln!(f, "\n=== Debug: Test 5 Wide Graph ===").unwrap();
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[(1, "A"), (2, "B"), (3, "C"), (4, "X"), (5, "Y"), (6, "Z")],
         &[
             (1, 4),

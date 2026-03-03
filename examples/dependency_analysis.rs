@@ -1,5 +1,5 @@
 use ascii_dag::algorithms::cycles::generic::roots::{RootFindable, find_leaves_fn, find_roots_fn};
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 use ascii_dag::algorithms::generic::impact::{
     ImpactAnalyzable, compute_blast_radius_fn, compute_descendants_fn,
 };
@@ -196,7 +196,7 @@ fn example_metrics_dashboard() {
 
     // Visualize with DAG
     println!("   📊 Visualization:");
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "types.h");
     dag.add_node(2, "main.c");
     dag.add_node(3, "main.o");

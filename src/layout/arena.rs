@@ -13,10 +13,9 @@
 //! | `arena-idx-u16` | 65,535 | ~50% vs u32 |
 //! | `arena-idx-u32` | 4B | baseline |
 
-use crate::graph::arena::Arena;
+use crate::arena::Arena;
 use crate::graph::Graph;
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
-use crate::errors::GraphError;
 
 // Re-export CSR layout function for backward compatibility
 pub use super::arena_csr::compute_layout_arena_csr;
@@ -72,12 +71,6 @@ pub(super) struct LayoutTemps<'a> {
     pub(super) level_slot_next: &'a mut [Idx],
     pub(super) level_dummy_next: &'a mut [Idx],
     pub(super) waypoint_scratch: &'a mut [(usize, usize)],
-
-    // -- Crossing-reduction short-circuit --
-    /// Number of dummy vnodes per virtual level (built during build_virtual_levels).
-    /// When `level_vdummy_counts[adj_level] == 0`, the O(adj_level_size) dummy
-    /// scan in crossing reduction can be skipped entirely.
-    pub(super) level_vdummy_counts: &'a mut [Idx],
 }
 
 impl<'a> Graph<'a> {
@@ -90,32 +83,32 @@ impl<'a> Graph<'a> {
     /// * `arena` - Arena for all allocations (must have sufficient space)
     ///
     /// # Returns
-    /// `Ok(LayoutIRArena)` on success, `Err(GraphError)` with a diagnostic
-    /// if the arena runs out of space, the graph has cycles, etc.
+    /// `Some(LayoutIRArena)` on success, `None` if arena runs out of space
+    /// or the graph has cycles.
     ///
     /// # Note
     /// This function requires two arenas: one for temporaries and one for output.
+    /// Use `compute_layout_arena_split` for the two-arena version.
     pub fn compute_layout_arena<'b>(
         &self,
         temp_arena: &mut Arena<'_>,
         output_arena: &'b mut Arena<'b>,
-    ) -> Result<LayoutIRArena<'b>, GraphError> {
+    ) -> Option<LayoutIRArena<'b>> {
         if self.nodes.is_empty() {
             return self.build_empty_layout_arena(output_arena);
         }
 
         // Check for cycles
         if self.has_cycle() {
-            return Err(GraphError::CycleDetected);
+            return self.build_empty_layout_arena(output_arena);
         }
 
         let node_count = self.nodes.len();
         let edge_count = self.edges.len();
 
         // Validate against index type limits
-        let max_count = node_count.max(edge_count);
-        if max_count > MAX_NODES {
-            return Err(GraphError::ExceedsMaxNodes { count: max_count, max: MAX_NODES });
+        if node_count > MAX_NODES || edge_count > MAX_NODES {
+            return None; // Graph too large for selected index type
         }
 
         // Calculate total label bytes (nodes + edge labels)
@@ -134,13 +127,22 @@ impl<'a> Graph<'a> {
         // Most edges are adjacent-level (0 waypoints), use conservative estimate
         let max_waypoints = (edge_count * 4).min(1000);
 
-        // Two-phase allocation: phase 0 computes levels and counts actual
-        // dummies so phase 1 can size buffers precisely.
-        let (mut temps, max_level) = self.alloc_layout_temps(temp_arena, node_count, edge_count)
-            .ok_or(GraphError::ArenaOom)?;
+        // Step 1: Allocate temporary buffers from temp arena
+        let mut temps = self.alloc_layout_temps(temp_arena, node_count, edge_count)?;
 
-        // edge_indices and node_levels are already populated by alloc_layout_temps.
-        // calculate_levels_arena was run inside alloc_layout_temps.
+        // Step 1.5: Pre-resolve edge indices (O(E)) to avoid HashMap lookups in tight loops
+        for (i, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
+            if let (Some(from_idx), Some(to_idx)) =
+                (self.node_index(from_id), self.node_index(to_id))
+            {
+                temps.edge_indices[i] = (from_idx as Idx, to_idx as Idx);
+            } else {
+                // Should use ensure_node_exists before calling, but handle safely
+                temps.edge_indices[i] = (Idx::MAX, Idx::MAX);
+            }
+        }
+
+        let max_level = self.calculate_levels_arena(temps.node_levels, temps.edge_indices);
 
         // Step 3: Build virtual levels with dummy nodes
         let (_vnode_count, _max_level_size) = self.build_virtual_levels_arena(
@@ -150,7 +152,6 @@ impl<'a> Graph<'a> {
             temps.level_counts,
             temps.vnode_data,
             max_level,
-            temps.level_vdummy_counts,
         );
 
         // Step 4: Crossing reduction on virtual levels
@@ -161,8 +162,6 @@ impl<'a> Graph<'a> {
             max_level,
             temps.medians,
             temps.positions,
-            temps.edge_indices,
-            temps.level_vdummy_counts,
         );
 
         // Step 5: Assign x-coordinates
@@ -276,7 +275,7 @@ impl<'a> Graph<'a> {
             max_waypoints,
             total_label_bytes,
             max_level + 1,
-        ).ok_or(GraphError::BuilderFailed)?;
+        )?;
 
         // Add buffer for edge routing (+4) plus label margin
         builder.set_dimensions(max_width + 4 + label_margin, total_height);
@@ -287,10 +286,8 @@ impl<'a> Graph<'a> {
             let (level, pos, x, width) = temps.real_coords[idx];
             let y = level_y_offsets[level];
 
-            builder.add_node(id, label, x, y, width, level, pos)
-                .ok_or(GraphError::ArenaOom)?;
-            builder.add_node_to_level(level, idx)
-                .ok_or(GraphError::ArenaOom)?;
+            builder.add_node(id, label, x, y, width, level, pos)?;
+            builder.add_node_to_level(level, idx)?;
         }
 
         builder.finalize_levels();
@@ -447,96 +444,43 @@ impl<'a> Graph<'a> {
             }
         }
 
-        Ok(builder.build())
+        Some(builder.build())
     }
 
     /// Build an empty layout IR.
-    fn build_empty_layout_arena<'b>(&self, arena: &'b mut Arena<'b>) -> Result<LayoutIRArena<'b>, GraphError> {
-        let builder = LayoutIRArenaBuilder::new(arena, 0, 0, 0, 0, 1)
-            .ok_or(GraphError::BuilderFailed)?;
-        Ok(builder.build())
+    fn build_empty_layout_arena<'b>(&self, arena: &'b mut Arena<'b>) -> Option<LayoutIRArena<'b>> {
+        let builder = LayoutIRArenaBuilder::new(arena, 0, 0, 0, 0, 1)?;
+        Some(builder.build())
     }
 
     /// Allocate temporary buffers for layout computation.
-    ///
-    /// Uses **two-phase allocation** (arena bands) to avoid the pessimistic
-    /// `edge_count * 4` dummy estimate:
-    ///
-    /// 1. **Phase 0** — Allocate `node_levels` + `edge_indices` (tiny).
-    ///    Compute actual levels.  Count the exact number of dummy nodes.
-    /// 2. **Phase 1** — Allocate everything else sized by the *actual* vnode
-    ///    count (`node_count + actual_dummy_count`).
-    ///
-    /// For the 50 k diamond grid this reduces peak temp memory from ~35 MB
-    /// to ~6 MB because the graph has zero skip-level edges → zero dummies.
     fn alloc_layout_temps<'b>(
         &self,
         arena: &'b mut Arena<'_>,
         node_count: usize,
         edge_count: usize,
-    ) -> Option<(LayoutTemps<'b>, usize)> {
+    ) -> Option<LayoutTemps<'b>> {
+        // Tighter size estimates based on actual graph structure
+        // Max levels is min(node_count, MAX_LEVELS)
         let max_levels = node_count.min(MAX_LEVELS);
 
-        // ── Phase 0: allocate the minimum needed to compute levels ──────
-        let (node_levels_ptr, _) = arena.alloc_raw_uninit::<Idx>(node_count)?;
-        let (edge_indices_ptr, _) = arena.alloc_raw_uninit::<(Idx, Idx)>(edge_count)?;
+        // Virtual nodes = real + dummy nodes from skip-level edges.
+        // Most edges span only 1 level (no dummies). Skip-level edges typically span 2-4 levels.
+        // Use a more reasonable estimate: each edge creates at most 4 dummy nodes on average,
+        // which handles most practical graphs while avoiding huge over-allocation.
+        let max_vnodes = (node_count + edge_count * 4).min(MAX_NODES);
 
-        // Safety: these slices are disjoint and live for 'b.
-        let node_levels =
-            unsafe { core::slice::from_raw_parts_mut(node_levels_ptr, node_count) };
-        let edge_indices =
-            unsafe { core::slice::from_raw_parts_mut(edge_indices_ptr, edge_count) };
-
-        // Pre-resolve edge indices (O(E))
-        for (i, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
-            if let (Some(from_idx), Some(to_idx)) =
-                (self.node_index(from_id), self.node_index(to_id))
-            {
-                edge_indices[i] = (from_idx as Idx, to_idx as Idx);
-            } else {
-                edge_indices[i] = (Idx::MAX, Idx::MAX);
-            }
-        }
-
-        // Compute node levels (topological sort)
-        for l in node_levels.iter_mut() { *l = 0; }
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for &(from_idx, to_idx) in edge_indices.iter() {
-                if from_idx != Idx::MAX && to_idx != Idx::MAX {
-                    let new_level = node_levels[from_idx as usize] as usize + 1;
-                    if new_level > node_levels[to_idx as usize] as usize {
-                        node_levels[to_idx as usize] = new_level.min(MAX_LEVELS) as Idx;
-                        changed = true;
-                    }
-                }
-            }
-        }
-        let max_level = node_levels.iter().map(|&l| l as usize).max().unwrap_or(0).min(MAX_LEVELS);
-
-        // Count actual dummy nodes from skip-level edges
-        let mut actual_dummy_count: usize = 0;
-        for &(from_idx, to_idx) in edge_indices.iter() {
-            if from_idx != Idx::MAX && to_idx != Idx::MAX {
-                let fl = node_levels[from_idx as usize] as usize;
-                let tl = node_levels[to_idx as usize] as usize;
-                if tl > fl + 1 {
-                    actual_dummy_count += tl - fl - 1;
-                }
-            }
-        }
-
-        // ── Phase 1: allocate remaining buffers sized by actual counts ──
-        let max_vnodes = (node_count + actual_dummy_count).min(MAX_NODES);
+        // Level size: at most node_count (if all nodes on one level)
         let max_level_size = node_count.min(MAX_NODES);
 
-        // Waypoints: at most actual_dummy_count (one per dummy per skip-level).
-        // Add a small safety margin (+16) for edge cases.
-        let max_dummy_waypoints = (actual_dummy_count + 16).min(MAX_NODES);
+        // Dummy waypoints: each skip-level edge needs waypoints. Use edge_count * 4.
+        let max_dummy_waypoints = (edge_count * 4).min(MAX_NODES);
 
-        let (vlevel_offsets_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 2)?;
-        let (level_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+        // Allocate all buffers using compact types
+        let (node_levels_ptr, _) = arena.alloc_raw_uninit::<Idx>(node_count)?;
+        let (edge_indices_ptr, _) = arena.alloc_raw_uninit::<(Idx, Idx)>(edge_count)?;
+        let (vlevel_offsets_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+        let (level_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels)?;
         let (vnode_data_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_vnodes * 2)?;
         let (x_coords_ptr, _) = arena.alloc_raw_uninit::<Coord>(max_vnodes)?;
         let (widths_ptr, _) = arena.alloc_raw_uninit::<Coord>(max_vnodes)?;
@@ -547,25 +491,28 @@ impl<'a> Graph<'a> {
         let (medians_ptr, _) = arena.alloc_raw_uninit::<(Idx, u32)>(max_level_size)?;
         let (positions_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_level_size)?;
 
-        // Vertical optimization buffers
+        // Optimize allocs: boolean array
         let (node_is_source_ptr, _) = arena.alloc_raw_uninit::<bool>(node_count)?;
+        // Counters per level
         let (source_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
         let (dummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
         let (level_y_offsets_ptr, _) = arena.alloc_raw_uninit::<usize>(max_levels + 2)?;
+        // Node slots
         let (node_slots_ptr, _) = arena.alloc_raw_uninit::<usize>(node_count)?;
+        // Next slot counters
         let (level_slot_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
         let (level_dummy_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+        // Waypoint scratch
         let (waypoint_scratch_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(max_levels + 1)?;
 
-        // Crossing-reduction short-circuit: dummy count per virtual level
-        let (level_vdummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
-
+        // Safety: We just allocated these regions unique to this call.
+        // The pointers are valid within the arena's lifetime.
         unsafe {
-            Some((LayoutTemps {
-                node_levels,
-                edge_indices,
-                vlevel_offsets: core::slice::from_raw_parts_mut(vlevel_offsets_ptr, max_levels + 2),
-                level_counts: core::slice::from_raw_parts_mut(level_counts_ptr, max_levels + 1),
+            Some(LayoutTemps {
+                node_levels: core::slice::from_raw_parts_mut(node_levels_ptr, node_count),
+                edge_indices: core::slice::from_raw_parts_mut(edge_indices_ptr, edge_count),
+                vlevel_offsets: core::slice::from_raw_parts_mut(vlevel_offsets_ptr, max_levels + 1),
+                level_counts: core::slice::from_raw_parts_mut(level_counts_ptr, max_levels),
                 vnode_data: core::slice::from_raw_parts_mut(vnode_data_ptr, max_vnodes * 2),
                 x_coords: core::slice::from_raw_parts_mut(x_coords_ptr, max_vnodes),
                 widths: core::slice::from_raw_parts_mut(widths_ptr, max_vnodes),
@@ -595,82 +542,28 @@ impl<'a> Graph<'a> {
                     waypoint_scratch_ptr,
                     max_levels + 1,
                 ),
-                level_vdummy_counts: core::slice::from_raw_parts_mut(
-                    level_vdummy_counts_ptr,
-                    max_levels + 1,
-                ),
-            }, max_level))
+            })
         }
     }
 
     /// Estimate arena size needed for layout computation.
-    ///
-    /// The estimate is conservative but much tighter than the old
-    /// `edge_count × 4` formula.  For graphs with few skip-level edges
-    /// (grids, chains, fans) the savings are dramatic.
-    ///
-    /// Internally this performs a cheap O(N+E) level computation so that
-    /// the *actual* dummy count can be measured.
     pub fn estimate_layout_arena_size(&self) -> usize {
         let node_count = self.nodes.len();
         let edge_count = self.edges.len();
         let label_bytes: usize = self.nodes.iter().map(|(_, l)| l.len()).sum();
+
+        // Calculate the same values used in alloc_layout_temps
         let max_levels = node_count.min(MAX_LEVELS);
-
-        // ── Cheap level computation to count actual dummies ────────────
-        // We duplicate the level logic inline here rather than requiring
-        // an arena, because this runs before the caller has allocated one.
-        let mut actual_dummies: usize = 0;
-        {
-            // Use a temporary Vec only on std; on no_std callers must
-            // provide their own buffers or use the pessimistic fallback.
-            #[cfg(feature = "std")]
-            {
-                let mut levels = vec![0u32; node_count];
-                // Resolve edge indices
-                let edge_idx: Vec<(usize, usize)> = self.edges.iter().map(|&(from_id, to_id, _)| {
-                    let fi = self.node_index(from_id).unwrap_or(usize::MAX);
-                    let ti = self.node_index(to_id).unwrap_or(usize::MAX);
-                    (fi, ti)
-                }).collect();
-                let mut changed = true;
-                while changed {
-                    changed = false;
-                    for &(fi, ti) in &edge_idx {
-                        if fi != usize::MAX && ti != usize::MAX {
-                            let nl = levels[fi] + 1;
-                            if nl > levels[ti] {
-                                levels[ti] = nl;
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-                for &(fi, ti) in &edge_idx {
-                    if fi != usize::MAX && ti != usize::MAX {
-                        let fl = levels[fi] as usize;
-                        let tl = levels[ti] as usize;
-                        if tl > fl + 1 {
-                            actual_dummies += tl - fl - 1;
-                        }
-                    }
-                }
-            }
-            #[cfg(not(feature = "std"))]
-            {
-                // Pessimistic fallback for no_std (no heap for temp Vec)
-                actual_dummies = edge_count.saturating_mul(4);
-            }
-        }
-
-        let max_vnodes = (node_count + actual_dummies).min(MAX_NODES);
+        let max_vnodes = (node_count + edge_count * 4).min(MAX_NODES);
         let max_level_size = node_count.min(MAX_NODES);
-        let max_dummy_waypoints = (actual_dummies + 16).min(MAX_NODES);
+        let max_dummy_waypoints = (edge_count * 4).min(MAX_NODES);
 
+        // Calculate actual temporary buffer sizes (matching alloc_layout_temps)
+        // Using core::mem::size_of for each type
         let temps_size = node_count * core::mem::size_of::<Idx>()                      // node_levels
             + edge_count * core::mem::size_of::<(Idx, Idx)>()                          // edge_indices
-            + (max_levels + 2) * core::mem::size_of::<Idx>()              // vlevel_offsets
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_counts
+            + (max_levels + 1) * core::mem::size_of::<Idx>()              // vlevel_offsets
+            + max_levels * core::mem::size_of::<Idx>()                    // level_counts
             + max_vnodes * 2 * core::mem::size_of::<Idx>()                // vnode_data
             + max_vnodes * core::mem::size_of::<Coord>()                  // x_coords
             + max_vnodes * core::mem::size_of::<Coord>()                  // widths
@@ -679,18 +572,9 @@ impl<'a> Graph<'a> {
             + max_dummy_waypoints * core::mem::size_of::<(Idx, Coord)>()  // dummy_data
             + max_level_size * core::mem::size_of::<(Idx, u32)>()         // medians
             + max_level_size * core::mem::size_of::<Idx>()                // positions
-            // Vertical optimization buffers
-            + node_count * core::mem::size_of::<bool>()                   // node_is_source
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // source_counts
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // dummy_counts
-            + (max_levels + 2) * core::mem::size_of::<usize>()            // level_y_offsets
-            + node_count * core::mem::size_of::<usize>()                  // node_slots
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_slot_next
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_dummy_next
-            + (max_levels + 1) * core::mem::size_of::<(usize, usize)>()   // waypoint_scratch
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_vdummy_counts
             + 4096; // alignment padding buffer
 
+        // Output IR: waypoints estimate should match max_dummy_waypoints (edge_count * 4)
         let max_ir_waypoints = max_dummy_waypoints;
         let ir_size = crate::ir::arena::estimate_layout_arena_size(
             node_count,

@@ -17,7 +17,7 @@ unsafe impl GlobalAlloc for DummyAllocator {
 #[global_allocator]
 static ALLOCATOR: DummyAllocator = DummyAllocator;
 
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -27,7 +27,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // This is a compilation proof that the library works in a no_std environment.
-    let dag = DAG::from_edges(&[(1, "Core"), (2, "HAL"), (3, "Driver")], &[(1, 2), (2, 3)]);
+    let dag = Graph::from_edges(&[(1, "Core"), (2, "HAL"), (3, "Driver")], &[(1, 2), (2, 3)]);
 
     // We can't print, but we can verify rendering compiles
     let _output = dag.render();

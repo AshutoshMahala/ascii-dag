@@ -1,4 +1,4 @@
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     println!("=== Debug Edge Path Generation ===\n");
@@ -6,7 +6,7 @@ fn main() {
     // Simple skip edge test - A at level 0, D at level 3
     // A -> B -> C -> D (chain)
     // A -> D (skip edge)
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[(1, "A"), (2, "B"), (3, "C"), (4, "D")],
         &[(1, 2), (2, 3), (3, 4), (1, 4)],
     );
@@ -38,7 +38,7 @@ fn main() {
 
     // Skip edge where source and target have different X
     // A at one side, E at the other, with skip edge
-    let dag3 = DAG::from_edges(
+    let dag3 = Graph::from_edges(
         &[
             (1, "A"), // Level 0 left
             (2, "B"), // Level 0 right

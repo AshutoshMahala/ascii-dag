@@ -4,7 +4,7 @@
 //! subgraph rendering, vertical connections, and convergence/divergence
 //! patterns for the classic layout mode.
 
-use crate::graph::DAG;
+use crate::graph::Graph;
 use alloc::{vec, vec::Vec};
 use core::fmt::Write;
 
@@ -13,7 +13,7 @@ use super::chars::{
     ARROW_DOWN, CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR, H_LINE, TEE_DOWN, TEE_UP, V_LINE,
 };
 
-impl<'a> DAG<'a> {
+impl<'a> Graph<'a> {
     /// Render a specific subgraph.
     pub(crate) fn render_subgraph(&self, output: &mut alloc::string::String, subgraph_indices: &[usize]) {
         // Build a mini-DAG with just these nodes

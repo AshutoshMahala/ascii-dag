@@ -1,4 +1,4 @@
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     println!("=== Error Chain Visualization ===\n");
@@ -6,7 +6,7 @@ fn main() {
     // Simulate an error dependency chain
     // FileNotFound -> ParseError -> CompilationFailed -> BuildFailed
 
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
 
     dag.add_node(1, "FileNotFound");
     dag.add_node(2, "ParseError");
@@ -23,7 +23,7 @@ fn main() {
     // More complex error scenario
     println!("\n=== Complex Error Scenario ===\n");
 
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "ConfigMissing"),
             (2, "DBConnFail"),

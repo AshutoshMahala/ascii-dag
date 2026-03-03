@@ -6,7 +6,7 @@
 //! # Examples
 //!
 //! ```
-//! use ascii_dag::cycles::generic::roots::find_roots_fn;
+//! use ascii_dag::algorithms::cycles::generic::roots::find_roots_fn;
 //!
 //! let get_deps = |task: &&str| match *task {
 //!     "deploy" => vec!["build", "test"],
@@ -39,7 +39,7 @@ use core::hash::Hash;
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::cycles::generic::roots::find_roots_fn;
+/// use ascii_dag::algorithms::cycles::generic::roots::find_roots_fn;
 ///
 /// // Build system example
 /// let get_deps = |file: &&str| match *file {
@@ -77,7 +77,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::cycles::generic::roots::find_leaves_fn;
+/// use ascii_dag::algorithms::cycles::generic::roots::find_leaves_fn;
 ///
 /// let get_deps = |task: &&str| match *task {
 ///     "deploy" => vec!["build"],
@@ -120,7 +120,7 @@ where
 /// # Examples
 ///
 /// ```
-/// use ascii_dag::cycles::generic::roots::RootFindable;
+/// use ascii_dag::algorithms::cycles::generic::roots::RootFindable;
 /// use std::collections::HashMap;
 ///
 /// struct DependencyGraph {

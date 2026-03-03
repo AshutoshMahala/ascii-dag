@@ -7,7 +7,7 @@ use embedded_alloc::Heap;
 use longan_nano::hal::{prelude::*, pac};
 use longan_nano::{lcd, lcd_pins};
 use riscv_rt::entry;
-use ascii_dag::DAG;
+use ascii_dag::Graph;
 
 use embedded_graphics::mono_font::{ascii::FONT_4X6, MonoTextStyleBuilder};
 use embedded_graphics::pixelcolor::Rgb565;
@@ -52,7 +52,7 @@ fn main() -> ! {
         .unwrap();
 
     // Build and render DAG
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "Init");
     dag.add_node(2, "Build");
     dag.add_node(3, "Test");

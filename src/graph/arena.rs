@@ -15,7 +15,7 @@
 //! # Usage
 //!
 //! ```
-//! use ascii_dag::arena::Arena;
+//! use ascii_dag::graph::arena::Arena;
 //!
 //! // Provide a buffer (stack or static)
 //! let mut buffer = [0u8; 64 * 1024]; // 64 KB
@@ -78,7 +78,7 @@ impl<'a> Arena<'a> {
     /// # Example
     ///
     /// ```
-    /// use ascii_dag::arena::Arena;
+    /// use ascii_dag::graph::arena::Arena;
     ///
     /// let mut buffer = [0u8; 1024];
     /// let mut arena = Arena::new(&mut buffer);

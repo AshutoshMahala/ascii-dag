@@ -3,12 +3,12 @@
 //! Builds a virtual layout with dummy nodes for skip-level edge routing,
 //! assigns x-coordinates, repositions dummies, and groups edges by level.
 
-use crate::graph::DAG;
+use crate::graph::Graph;
 use alloc::{vec, vec::Vec};
 
 use super::ascii::{VirtualLayout, VirtualNode};
 
-impl<'a> DAG<'a> {
+impl<'a> Graph<'a> {
     /// Build a virtual layout with dummy nodes for skip-level edges.
     /// Memory: O(N + E*D) where N=nodes, E=skip edges, D=avg level span
     pub(super) fn build_virtual_layout(&self) -> VirtualLayout {

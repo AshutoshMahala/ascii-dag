@@ -3,7 +3,7 @@
 //! Run with: cargo run --example arena_limits --release
 
 use ascii_dag::graph::arena::Arena;
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     println!("=== Arena Memory Limit Testing ===\n");
@@ -34,7 +34,7 @@ fn main() {
     debug_100_node_chain();
 }
 
-fn find_minimum_memory(name: &str, dag: &DAG) {
+fn find_minimum_memory(name: &str, dag: &Graph) {
     let csr_estimate = dag.estimate_csr_arena_size();
 
     println!("Testing: {} (CSR estimate: {} bytes)", name, csr_estimate);
@@ -71,7 +71,7 @@ fn find_minimum_memory(name: &str, dag: &DAG) {
 }
 
 #[allow(dead_code)]
-fn binary_search_minimum(dag: &DAG, csr_estimate: usize) -> usize {
+fn binary_search_minimum(dag: &Graph, csr_estimate: usize) -> usize {
     let mut low = 1024usize;
     let mut high = csr_estimate * 6;
 
@@ -87,7 +87,7 @@ fn binary_search_minimum(dag: &DAG, csr_estimate: usize) -> usize {
     high * 2 // temp + output
 }
 
-fn try_render(dag: &DAG, temp_size: usize, output_size: usize) -> bool {
+fn try_render(dag: &Graph, temp_size: usize, output_size: usize) -> bool {
     let mut temp_buffer = vec![0u8; temp_size];
     let mut output_buffer = vec![0u8; output_size];
 
@@ -148,8 +148,8 @@ fn crash_test() {
     println!("\n✓ No crashes! Arena handles insufficient memory gracefully.");
 }
 
-fn build_chain(n: usize) -> DAG<'static> {
-    let mut dag = DAG::new();
+fn build_chain(n: usize) -> Graph<'static> {
+    let mut dag = Graph::new();
     for i in 0..n {
         dag.add_node(i, Box::leak(format!("N{}", i).into_boxed_str()));
         if i > 0 {
@@ -159,8 +159,8 @@ fn build_chain(n: usize) -> DAG<'static> {
     dag
 }
 
-fn build_diamond(layers: usize) -> DAG<'static> {
-    let mut dag = DAG::new();
+fn build_diamond(layers: usize) -> Graph<'static> {
+    let mut dag = Graph::new();
     let mut id = 0;
 
     // Build diamond pattern - each layer has `layer` nodes
@@ -198,8 +198,8 @@ fn build_diamond(layers: usize) -> DAG<'static> {
     dag
 }
 
-fn build_fan(width: usize) -> DAG<'static> {
-    let mut dag = DAG::new();
+fn build_fan(width: usize) -> Graph<'static> {
+    let mut dag = Graph::new();
     dag.add_node(0, "Source");
     dag.add_node(1, "Sink");
 
@@ -217,7 +217,7 @@ trait NodeCount {
     fn node_count(&self) -> usize;
 }
 
-impl NodeCount for DAG<'_> {
+impl NodeCount for Graph<'_> {
     fn node_count(&self) -> usize {
         // Use estimate_size as proxy - roughly 20 bytes per node
         self.estimate_size() / 20

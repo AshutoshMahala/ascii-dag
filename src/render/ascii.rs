@@ -1,6 +1,6 @@
 //! ASCII rendering implementation for DAG visualization.
 
-use crate::graph::{DAG, RenderMode};
+use crate::graph::{Graph, RenderMode};
 use alloc::{string::String, vec::Vec};
 use core::fmt::Write;
 
@@ -158,7 +158,7 @@ pub(super) struct VirtualLayout {
 impl VirtualLayout {
     /// Get width of a virtual node: 1 for dummies, node_width for real nodes
     #[inline]
-    pub(super) fn get_width<'a>(&self, dag: &DAG<'a>, level: usize, pos: usize) -> usize {
+    pub(super) fn get_width<'a>(&self, dag: &Graph<'a>, level: usize, pos: usize) -> usize {
         let vnode = &self.levels[level][pos];
         if vnode.is_real() {
             dag.get_node_width(vnode.index())
@@ -168,15 +168,15 @@ impl VirtualLayout {
     }
 }
 
-impl<'a> DAG<'a> {
+impl<'a> Graph<'a> {
     /// Render the DAG to an ASCII string.
     ///
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::DAG;
+    /// use ascii_dag::graph::Graph;
     ///
-    /// let dag = DAG::from_edges(
+    /// let dag = Graph::from_edges(
     ///     &[(1, "Start"), (2, "End")],
     ///     &[(1, 2)]
     /// );
@@ -203,9 +203,9 @@ impl<'a> DAG<'a> {
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::DAG;
+    /// use ascii_dag::graph::Graph;
     ///
-    /// let dag = DAG::from_edges(
+    /// let dag = Graph::from_edges(
     ///     &[(1, "A")],
     ///     &[]
     /// );

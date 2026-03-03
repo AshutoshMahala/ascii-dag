@@ -13,17 +13,16 @@ pub mod arena;
 pub(crate) mod arena_csr;
 pub(crate) mod arena_phases;
 pub mod crossing;
-pub mod error;
 pub(crate) mod heap;
 
 #[cfg(feature = "arena")]
 pub mod idx;
 
 use crate::algorithms::sugiyama::crossing::{count_crossings_pair, CrossingReducer};
-use crate::graph::DAG;
+use crate::graph::Graph;
 use alloc::{vec, vec::Vec};
 
-impl<'a> DAG<'a> {
+impl<'a> Graph<'a> {
     /// Calculate hierarchical levels for all nodes in the graph.
     ///
     /// Uses a fixed-point algorithm to assign each node to a level,
@@ -343,11 +342,11 @@ impl<'a> DAG<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::graph::DAG;
+    use crate::graph::Graph;
 
     #[test]
     fn test_calculate_levels() {
-        let dag = DAG::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (2, 3)]);
+        let dag = Graph::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (2, 3)]);
 
         let levels = dag.calculate_levels();
 
@@ -364,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_diamond_layout() {
-        let dag = DAG::from_edges(
+        let dag = Graph::from_edges(
             &[(1, "Top"), (2, "Left"), (3, "Right"), (4, "Bottom")],
             &[(1, 2), (1, 3), (2, 4), (3, 4)],
         );

@@ -1,5 +1,5 @@
 use ascii_dag::graph::arena::Arena;
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 use std::time::Instant;
 
 fn main() {
@@ -19,7 +19,7 @@ fn main() {
         let nodes = width * width;
         println!(">>> Testing Width: {} ({} nodes) <<<", width, nodes);
 
-        let mut dag = DAG::new();
+        let mut dag = Graph::new();
         let height = width;
 
         // Generate Graph
@@ -43,7 +43,7 @@ fn main() {
     }
 }
 
-fn run_test(nodes: usize, dag: &DAG) {
+fn run_test(nodes: usize, dag: &Graph) {
     // Estimate size
     let layout_estimate = dag.estimate_layout_arena_size();
     let temp_arena_size = (layout_estimate * 3 / 2).max(1024 * 1024);

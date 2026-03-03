@@ -1,7 +1,7 @@
 //! Heap-based Sugiyama layout pipeline.
 //!
 //! Implements the full layout algorithm using standard heap allocations (`Vec`, `HashMap`).
-//! This is the default layout path for `DAG::compute_layout()`.
+//! This is the default layout path for `Graph::compute_layout()`.
 //!
 //! # Pipeline Stages
 //!
@@ -19,7 +19,7 @@
 //! visually compatible output but operate on different type systems.
 
 use crate::algorithms::sugiyama::crossing::{count_crossings_pair, CrossingReducer};
-use crate::graph::DAG;
+use crate::graph::Graph;
 use crate::ir::{EdgePath, LayoutEdge, LayoutIRBuilder, LayoutIR, LayoutNode, NodeKind};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -39,7 +39,7 @@ use std::collections::HashMap;
 /// uniformly.
 #[derive(Clone, Copy)]
 pub(crate) enum VNode {
-    /// A real node from the input graph, identified by its index in `DAG.nodes`.
+    /// A real node from the input graph, identified by its index in `Graph.nodes`.
     Real(usize),
     /// A dummy node inserted on a skip-level edge, identified by the edge index.
     Dummy { edge_idx: usize },
@@ -65,10 +65,10 @@ impl VNode {
 
 /// Compute the heap-based layout IR for a DAG.
 ///
-/// This is the implementation behind `DAG::compute_layout()`. Returns a
+/// This is the implementation behind `Graph::compute_layout()`. Returns a
 /// renderer-agnostic `LayoutIR` containing node positions, edge routes,
 /// and dimensional information.
-pub(crate) fn compute_layout<'a>(dag: &DAG<'a>) -> LayoutIR<'a> {
+pub(crate) fn compute_layout<'a>(dag: &Graph<'a>) -> LayoutIR<'a> {
     if dag.nodes.is_empty() {
         return LayoutIRBuilder::new().build();
     }
@@ -588,7 +588,7 @@ pub(crate) fn compute_layout<'a>(dag: &DAG<'a>) -> LayoutIR<'a> {
 /// Build a mapping from each node index to the edge indices it participates in.
 /// This enables real nodes to find their skip-level edge dummies during crossing
 /// reduction (the key fix for incomplete neighbor gathering).
-fn build_node_edge_indices(dag: &DAG<'_>) -> Vec<Vec<usize>> {
+fn build_node_edge_indices(dag: &Graph<'_>) -> Vec<Vec<usize>> {
     let mut node_edges: Vec<Vec<usize>> = vec![Vec::new(); dag.nodes.len()];
     for (edge_idx, &(from_id, to_id, _)) in dag.edges.iter().enumerate() {
         if let Some(from_idx) = dag.node_index(from_id) {
@@ -609,7 +609,7 @@ fn build_node_edge_indices(dag: &DAG<'_>) -> Vec<Vec<usize>> {
 /// pipeline runs uniformly regardless of graph size — behaviour is controlled
 /// only by the user-facing presets or manual configuration.
 fn reduce_crossings_virtual(
-    dag: &DAG<'_>,
+    dag: &Graph<'_>,
     levels: &mut [Vec<VNode>],
     _node_levels: &[usize],
     max_level: usize,
@@ -713,7 +713,7 @@ fn reduce_crossings_virtual(
 
 /// Adjacent exchange on virtual-node levels: swap adjacent pairs if it reduces crossings.
 fn adjacent_exchange_virtual(
-    dag: &DAG<'_>,
+    dag: &Graph<'_>,
     level_nodes: &mut [VNode],
     adj_level: &[VNode],
     use_parents: bool,
@@ -786,7 +786,7 @@ fn adjacent_exchange_virtual(
 /// correctly) and the same edge's dummy on the adjacent level.
 #[inline]
 fn gather_vnode_positions(
-    dag: &DAG<'_>,
+    dag: &Graph<'_>,
     vnode: &VNode,
     _use_parents: bool,
     real_pos: &HashMap<usize, usize>,
@@ -855,7 +855,7 @@ fn gather_vnode_positions(
 ///
 /// Reuses pre-allocated buffers to avoid per-pass allocations in the hot loop.
 fn order_virtual_by_median(
-    dag: &DAG<'_>,
+    dag: &Graph<'_>,
     level_nodes: &mut Vec<VNode>,
     adj_level: &[VNode],
     _use_parents: bool,

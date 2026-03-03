@@ -1,9 +1,9 @@
-use ascii_dag::DAG;
+use ascii_dag::Graph;
 use ascii_dag::render::colors::Palette;
 
 fn main() {
     // Create a DAG with edge labels
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "Parser");
     dag.add_node(2, "Lexer");
     dag.add_node(3, "AST");
@@ -31,7 +31,7 @@ fn main() {
     // where labels might collide
     println!("\n--- Legend feature demo (complex graph) ---\n");
 
-    let mut dag2 = DAG::new();
+    let mut dag2 = Graph::new();
     dag2.add_node(1, "A");
     dag2.add_node(2, "B");
     dag2.add_node(3, "C");

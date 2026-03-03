@@ -1,6 +1,6 @@
 /// Diagnostic: verify crossing reduction actually reorders nodes.
 
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 use ascii_dag::QUALITY;
 
 #[cfg(feature = "arena")]
@@ -57,7 +57,7 @@ fn test_forced_crossing() {
 }
 
 fn build_forced_crossing_dag(no_cr: bool) -> ascii_dag::LayoutIR<'static> {
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(0, "D");
     dag.add_node(1, "C");
     dag.add_node(2, "A");
@@ -77,7 +77,7 @@ fn test_triple_crossing() {
     println!("--- Test: Triple Crossing (heap) ---");
     println!("  Natural level-1: [Z, Y, X]. Optimal: [X, Y, Z]");
 
-    let mut dag_none = DAG::new();
+    let mut dag_none = Graph::new();
     dag_none.add_node(0, "Z");
     dag_none.add_node(1, "Y");
     dag_none.add_node(2, "X");
@@ -119,7 +119,7 @@ fn test_interleaved_edges() {
     println!("  Natural level-1: [C4, C3, C2, C1] -> 6 crossings");
     println!("  Optimal: [C1, C2, C3, C4] -> 0 crossings");
 
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(0, "C4");
     dag.add_node(1, "C3");
     dag.add_node(2, "C2");
@@ -168,7 +168,7 @@ fn test_forced_crossing_arena() {
     println!("--- Test: Forced Crossing (arena) ---");
 
     // No crossing reduction
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(0, "D");
     dag.add_node(1, "C");
     dag.add_node(2, "A");
@@ -213,7 +213,7 @@ fn test_forced_crossing_arena() {
 fn test_interleaved_arena() {
     println!("--- Test: Interleaved 4x4 (arena) ---");
 
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(0, "C4");
     dag.add_node(1, "C3");
     dag.add_node(2, "C2");
@@ -274,7 +274,7 @@ fn test_interleaved_arena() {
 fn test_skip_level_crossing() {
     println!("--- Test: Skip-level crossing (heap) ---");
 
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(0, "Y");  // child of B, level 2
     dag.add_node(1, "X");  // child of A, level 2
     dag.add_node(2, "M");  // mid-level node, level 1
@@ -321,7 +321,7 @@ fn test_arena_buffer_overflow() {
     // 4 sources at level 0, 4 sinks at level 3
     // Each source connects to each sink -> skip 2 levels -> 2 dummies per edge
     // Level 1 and 2 will each have 16 dummy nodes with only 8 real nodes
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     // Sinks first (lower IDs for adversarial ordering)
     dag.add_node(0, "S4");
     dag.add_node(1, "S3");

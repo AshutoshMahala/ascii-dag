@@ -1,7 +1,7 @@
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     let width = 224;
     let height = 224;
     for y in 0..height {

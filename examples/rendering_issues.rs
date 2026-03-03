@@ -1,7 +1,7 @@
 //! Focused tests on specific rendering issues.
 //! These tests highlight areas where the ASCII rendering could be improved.
 
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 use std::fs::File;
 use std::io::Write;
 
@@ -31,7 +31,7 @@ fn issue_skip_level_edges(output: &mut String) {
 
     output.push_str("\nGraph: A->B->C->D + A->D (skip edge)\n\n");
 
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[(1, "A"), (2, "B"), (3, "C"), (4, "D")],
         &[(1, 2), (2, 3), (3, 4), (1, 4)],
     );
@@ -46,7 +46,7 @@ fn issue_cross_edges(output: &mut String) {
 
     output.push_str("\nGraph: A1->B1, A1->B2, A2->B1, A2->B2 (full bipartite)\n\n");
 
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[(1, "A1"), (2, "A2"), (3, "B1"), (4, "B2")],
         &[(1, 3), (1, 4), (2, 3), (2, 4)],
     );
@@ -62,7 +62,7 @@ fn issue_asymmetric_paths(output: &mut String) {
     output.push_str("\nGraph: Root->Short->End + Root->Long1->Long2->End\n");
     output.push_str("Short->End is a skip edge (level 1 to 3)\n\n");
 
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Root"),
             (2, "Short"),

@@ -5,13 +5,13 @@
 //! - Interactive features (mouse hit-testing, node selection)
 //! - Layout inspection and debugging
 
-use ascii_dag::{DAG, EdgePath};
+use ascii_dag::{Graph, EdgePath};
 
 fn main() {
     println!("=== Layout IR Demo ===\n");
 
     // Create a sample DAG
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Root"),
             (2, "ChildA"),

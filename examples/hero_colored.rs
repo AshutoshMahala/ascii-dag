@@ -1,8 +1,8 @@
-use ascii_dag::DAG;
+use ascii_dag::Graph;
 use ascii_dag::render::colors::Palette;
 
 fn main() {
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
 
     dag.add_node(1, "Root");
     dag.add_node(2, "Task A");
@@ -77,7 +77,7 @@ fn main() {
     // Benchmark: test with many labeled edges
     println!("\n--- Performance test (Heap only for bench section) ---");
     for num_nodes in [20, 50, 100, 200, 500] {
-        let mut big_dag = DAG::new();
+        let mut big_dag = Graph::new();
         for i in 0..num_nodes {
             big_dag.add_node(i, "N");
         }

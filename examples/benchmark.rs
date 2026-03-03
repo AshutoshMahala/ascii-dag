@@ -1,6 +1,6 @@
 use ascii_dag::graph::arena::Arena;
 use ascii_dag::graph::csr::CsrGraphBuilder;
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 use std::io::{self, Write};
 use std::time::Instant;
 
@@ -79,7 +79,7 @@ fn run_comparison(topology: Topology, count: usize) {
 
     // Build heap DAG once for both benchmarking and arena size estimation
     let node_refs: Vec<(usize, &str)> = nodes.iter().map(|(id, s)| (*id, s.as_str())).collect();
-    let dag = DAG::from_edges(&node_refs, &edges);
+    let dag = Graph::from_edges(&node_refs, &edges);
 
     // Use the DAG's estimator for arena buffer sizing with 2x safety margin.
     let layout_estimate = dag.estimate_layout_arena_size();
@@ -95,7 +95,7 @@ fn run_comparison(topology: Topology, count: usize) {
 
         // 1. Build
         let build_start = Instant::now();
-        let dag = DAG::from_edges(&node_refs, &edges);
+        let dag = Graph::from_edges(&node_refs, &edges);
         heap_build_us = build_start.elapsed().as_micros();
 
         // 2. Compute Layout

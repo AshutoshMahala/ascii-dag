@@ -1,6 +1,6 @@
 //! Test complex graph structures to identify rendering limitations and improvements.
 
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     println!("=== Complex Graph Rendering Tests ===\n");
@@ -38,7 +38,7 @@ fn main() {
 
 fn test_wide_divergence() {
     println!("1. Wide Divergence (1 → 5 children):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Root"),
             (2, "A"),
@@ -55,7 +55,7 @@ fn test_wide_divergence() {
 
 fn test_wide_convergence() {
     println!("2. Wide Convergence (5 → 1):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "A"),
             (2, "B"),
@@ -72,7 +72,7 @@ fn test_wide_convergence() {
 
 fn test_binary_tree() {
     println!("3. Binary Tree (3 levels):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Root"),
             (2, "L1"),
@@ -90,7 +90,7 @@ fn test_binary_tree() {
 
 fn test_deep_with_branches() {
     println!("4. Deep Chain with Side Branches:");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Main1"),
             (2, "Main2"),
@@ -113,7 +113,7 @@ fn test_deep_with_branches() {
 
 fn test_grid_structure() {
     println!("5. Grid-like Structure (2x3):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "A1"),
             (2, "A2"),
@@ -138,7 +138,7 @@ fn test_grid_structure() {
 
 fn test_multiple_roots() {
     println!("6. Multiple Roots → Intermediate → Single Sink:");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "R1"),
             (2, "R2"),
@@ -155,7 +155,7 @@ fn test_multiple_roots() {
 
 fn test_cascade() {
     println!("7. Cascade Pattern (staircase):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Step1"),
             (2, "Step2"),
@@ -172,7 +172,7 @@ fn test_cascade() {
 
 fn test_long_labels() {
     println!("8. Long Labels:");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "InitializeConfiguration"),
             (2, "ValidateInput"),
@@ -187,7 +187,7 @@ fn test_long_labels() {
 
 fn test_mixed_complexity() {
     println!("9. Mixed Complexity (diverge, chain, converge):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Start"),
             (2, "Fork1"),
@@ -217,7 +217,7 @@ fn test_mixed_complexity() {
 
 fn test_inverted_tree() {
     println!("10. Inverted Tree (convergence at each level):");
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "L1"),
             (2, "L2"),

@@ -1,9 +1,9 @@
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     println!("\n=== Git History Visualization ===\n");
 
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
 
     // Key: 1=Initial, 2=Feat, 3=Fix, 4=Merge
     // Topology:
@@ -28,7 +28,7 @@ fn main() {
 
     println!("\n=== Complex Branching ===\n");
     // Diverge -> Diverge -> Converge
-    let mut complex = DAG::new();
+    let mut complex = Graph::new();
     complex.add_node(10, "init");
     complex.add_node(11, "dev");
     complex.add_node(12, "feature-A");

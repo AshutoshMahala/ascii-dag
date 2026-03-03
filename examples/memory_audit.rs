@@ -1,5 +1,5 @@
 use ascii_dag::graph::arena::Arena;
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     println!("=== Precision Memory Audit (Small Graphs) ===\n");
@@ -19,7 +19,7 @@ fn main() {
 }
 
 fn measure_chain(n: usize) {
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     for i in 0..n {
         dag.add_node(i, Box::leak(format!("N{}", i).into_boxed_str()));
         if i > 0 {

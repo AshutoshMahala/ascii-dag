@@ -1,4 +1,4 @@
-use ascii_dag::DAG;
+use ascii_dag::Graph;
 use ascii_dag::render::colors::Palette;
 
 fn main() {
@@ -6,7 +6,7 @@ fn main() {
 
     // Example 1: Simple dependency graph with multiple edges
     println!("1. Build Pipeline:");
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "Source");
     dag.add_node(2, "Compile");
     dag.add_node(3, "Test");
@@ -24,7 +24,7 @@ fn main() {
 
     // Example 2: Diamond dependency (shows edge colors clearly)
     println!("2. Diamond Pattern:");
-    let mut diamond = DAG::new();
+    let mut diamond = Graph::new();
     diamond.add_node(1, "A");
     diamond.add_node(2, "B");
     diamond.add_node(3, "C");
@@ -40,7 +40,7 @@ fn main() {
 
     // Example 3: More complex graph
     println!("3. Module Dependencies:");
-    let mut modules = DAG::new();
+    let mut modules = Graph::new();
     modules.add_node(1, "app");
     modules.add_node(2, "auth");
     modules.add_node(3, "db");

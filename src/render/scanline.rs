@@ -38,10 +38,10 @@ impl<'a> LayoutIR<'a> {
     /// # Example
     ///
     /// ```
-    /// use ascii_dag::DAG;
+    /// use ascii_dag::Graph;
     /// use ascii_dag::render::colors::Palette;
     ///
-    /// let dag = DAG::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (1, 3)]);
+    /// let dag = Graph::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (1, 3)]);
     /// let ir = dag.compute_layout();
     ///
     /// // Render with colored edges
@@ -128,10 +128,10 @@ impl<'a> LayoutIR<'a> {
     /// # Example
     ///
     /// ```
-    /// use ascii_dag::DAG;
+    /// use ascii_dag::Graph;
     /// use ascii_dag::render::colors::Palette;
     ///
-    /// let mut dag = DAG::new();
+    /// let mut dag = Graph::new();
     /// dag.add_node(1, "A");
     /// dag.add_node(2, "B");
     /// dag.add_edge(1, 2, Some("depends"));
@@ -388,9 +388,9 @@ impl<'a> LayoutIR<'a> {
     /// # Example
     ///
     /// ```
-    /// use ascii_dag::DAG;
+    /// use ascii_dag::Graph;
     ///
-    /// let dag = DAG::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
+    /// let dag = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
     /// let ir = dag.compute_layout();
     ///
     /// // Pre-allocate the line buffer (can be on stack or in arena)
@@ -448,9 +448,9 @@ impl<'a> LayoutIR<'a> {
     /// # Example
     ///
     /// ```
-    /// use ascii_dag::DAG;
+    /// use ascii_dag::Graph;
     ///
-    /// let dag = DAG::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
+    /// let dag = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
     /// let ir = dag.compute_layout();
     ///
     /// // Allocate buffers (can be on stack or from arena)

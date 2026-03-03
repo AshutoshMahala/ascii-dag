@@ -9,7 +9,7 @@
 //!   3. Process: Analyze, transform, or export the IR
 //!   4. Render: Output to terminal, SVG, Canvas, or anything else
 
-use ascii_dag::DAG;
+use ascii_dag::Graph;
 
 fn main() {
     println!("=== ascii-dag Architecture Demo ===\n");
@@ -21,7 +21,7 @@ fn main() {
     println!("│ STEP 1: BUILD                           │");
     println!("└─────────────────────────────────────────┘");
 
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Parse"),
             (2, "Analyze"),

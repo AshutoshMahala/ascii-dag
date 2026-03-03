@@ -1,10 +1,10 @@
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     println!("=== Testing Parallel Chains ===\n");
 
     // Two independent chains
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "Chain1-A"),
             (2, "Chain1-B"),
@@ -25,7 +25,7 @@ fn main() {
     println!("{}", dag.render());
 
     // Three independent chains
-    let dag = DAG::from_edges(
+    let dag = Graph::from_edges(
         &[
             (1, "A1"),
             (2, "A2"),
@@ -41,7 +41,7 @@ fn main() {
     println!("{}", dag.render());
 
     // Single chain (control)
-    let dag = DAG::from_edges(&[(1, "X"), (2, "Y"), (3, "Z")], &[(1, 2), (2, 3)]);
+    let dag = Graph::from_edges(&[(1, "X"), (2, "Y"), (3, "Z")], &[(1, 2), (2, 3)]);
 
     println!("\nSingle chain (control):");
     println!("{}", dag.render());

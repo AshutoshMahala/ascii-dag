@@ -1,4 +1,4 @@
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 use ascii_dag::render::colors::Palette;
 use ascii_dag::LayoutConfig;
 use std::time::Instant;
@@ -55,7 +55,7 @@ fn main() {
     let tests = [
         (
             "The Double Helix",
-            test_double_helix as fn() -> DAG<'static>,
+            test_double_helix as fn() -> Graph<'static>,
         ),
         ("The Skyscraper", test_skyscraper),
         ("The Wide Fan", test_wide_fan),
@@ -100,7 +100,7 @@ fn main() {
     }
 }
 
-fn run_heap_test(name: &str, dag: &DAG, preset_name: Option<&str>) {
+fn run_heap_test(name: &str, dag: &Graph, preset_name: Option<&str>) {
     let start = Instant::now();
 
     // Build layout config from preset
@@ -144,7 +144,7 @@ fn run_heap_test(name: &str, dag: &DAG, preset_name: Option<&str>) {
 }
 
 #[cfg(feature = "arena")]
-fn run_arena_test(name: &str, dag: &DAG, low_mem: bool) {
+fn run_arena_test(name: &str, dag: &Graph, low_mem: bool) {
     // Check for cycles first
     if dag.has_cycle() {
         println!("(Graph has cycles - arena layout does not yet support cycle breaking, skipping)");
@@ -262,8 +262,8 @@ fn run_arena_test(name: &str, dag: &DAG, low_mem: bool) {
     println!(">>> [ARENA] Layout+Rendered in {:?} <<<\n", duration);
 }
 
-fn test_double_helix() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_double_helix() -> Graph<'static> {
+    let mut dag = Graph::new();
     // Two intertwined chains
     for i in 0..10 {
         dag.add_node(i * 2, "A");
@@ -283,8 +283,8 @@ fn test_double_helix() -> DAG<'static> {
     dag
 }
 
-fn test_skyscraper() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_skyscraper() -> Graph<'static> {
+    let mut dag = Graph::new();
     // Very deep, narrow graph to test vertical spacing
     for i in 0..50 {
         dag.add_node(i, Box::leak(format!("Floor {}", i).into_boxed_str()));
@@ -295,8 +295,8 @@ fn test_skyscraper() -> DAG<'static> {
     dag
 }
 
-fn test_wide_fan() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_wide_fan() -> Graph<'static> {
+    let mut dag = Graph::new();
     dag.add_node(0, "Source");
     dag.add_node(1000, "Sink");
 
@@ -309,8 +309,8 @@ fn test_wide_fan() -> DAG<'static> {
     dag
 }
 
-fn test_diamond_lattice() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_diamond_lattice() -> Graph<'static> {
+    let mut dag = Graph::new();
     let width = 5;
     let height = 10;
 
@@ -337,8 +337,8 @@ fn test_diamond_lattice() -> DAG<'static> {
     dag
 }
 
-fn test_disconnected_islands() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_disconnected_islands() -> Graph<'static> {
+    let mut dag = Graph::new();
 
     // Create 5 separate small graphs
     for island in 0..5 {
@@ -353,8 +353,8 @@ fn test_disconnected_islands() -> DAG<'static> {
     dag
 }
 
-fn test_random_hairball() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_random_hairball() -> Graph<'static> {
+    let mut dag = Graph::new();
     let mut rng = SimpleRng::new(42);
     let nodes = 30;
 
@@ -375,8 +375,8 @@ fn test_random_hairball() -> DAG<'static> {
     dag
 }
 
-fn test_skip_level_nightmare() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_skip_level_nightmare() -> Graph<'static> {
+    let mut dag = Graph::new();
     // Root
     dag.add_node(0, "Root");
 
@@ -398,8 +398,8 @@ fn test_skip_level_nightmare() -> DAG<'static> {
     dag
 }
 
-fn test_verbose_logger() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_verbose_logger() -> Graph<'static> {
+    let mut dag = Graph::new();
     dag.add_node(1, "A");
     dag.add_node(2, "B");
     // Long text to test centering
@@ -419,8 +419,8 @@ fn test_verbose_logger() -> DAG<'static> {
     dag
 }
 
-fn test_ouroboros() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_ouroboros() -> Graph<'static> {
+    let mut dag = Graph::new();
     dag.add_node(1, "Head");
     dag.add_node(2, "Body");
     dag.add_node(3, "Tail");
@@ -436,8 +436,8 @@ fn test_ouroboros() -> DAG<'static> {
 /// This graph has back edges that form cycles. The layout algorithm detects
 /// them, temporarily reverses them for layering, then renders them with
 /// dashed lines (┊ ⇣) to visually distinguish from normal edges.
-fn test_cycle_breaking_demo() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_cycle_breaking_demo() -> Graph<'static> {
+    let mut dag = Graph::new();
 
     // A build system with feedback loops:
     //   compile → link → test → deploy
@@ -463,8 +463,8 @@ fn test_cycle_breaking_demo() -> DAG<'static> {
     dag
 }
 
-fn test_massive_diamond_20k() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_massive_diamond_20k() -> Graph<'static> {
+    let mut dag = Graph::new();
     let width = 142;
     let height = 142; // ~20k nodes
 
@@ -484,8 +484,8 @@ fn test_massive_diamond_20k() -> DAG<'static> {
     dag
 }
 
-fn test_massive_diamond_50k() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_massive_diamond_50k() -> Graph<'static> {
+    let mut dag = Graph::new();
     let width = 224;
     let height = 224; // ~50k nodes
 
@@ -506,8 +506,8 @@ fn test_massive_diamond_50k() -> DAG<'static> {
 }
 
 #[allow(dead_code)]
-fn test_massive_diamond_100k() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_massive_diamond_100k() -> Graph<'static> {
+    let mut dag = Graph::new();
     let width = 316; // 316*316 ≈ 99,856 nodes
     let height = 316;
 
@@ -527,8 +527,8 @@ fn test_massive_diamond_100k() -> DAG<'static> {
     dag
 }
 
-fn test_massive_fan_50k() -> DAG<'static> {
-    let mut dag = DAG::new();
+fn test_massive_fan_50k() -> Graph<'static> {
+    let mut dag = Graph::new();
     let root = 0;
     let sink = 50001;
     dag.add_node(root, "S");

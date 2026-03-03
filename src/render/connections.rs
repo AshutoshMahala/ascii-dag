@@ -6,7 +6,7 @@
 //! - Pure divergence (one source to multiple targets)
 //! - Simple 1-to-1 connections
 
-use crate::graph::DAG;
+use crate::graph::Graph;
 use alloc::{vec, vec::Vec};
 use core::fmt::Write;
 
@@ -16,7 +16,7 @@ use super::chars::{
     V_LINE,
 };
 
-impl<'a> DAG<'a> {
+impl<'a> Graph<'a> {
     /// Draw connections between adjacent levels using absolute positions.
     pub(super) fn draw_virtual_connections_absolute(
         &self,

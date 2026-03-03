@@ -2,27 +2,27 @@
 // When you add edges to nodes that don't exist, they are automatically created
 // and shown with angle brackets ⟨⟩ instead of square brackets []
 
-use ascii_dag::graph::DAG;
+use ascii_dag::graph::Graph;
 
 fn main() {
     println!("=== Auto-Creation Feature Examples ===\n");
 
     // Example 1: Missing target node
     println!("1. Adding edge to missing node (auto-created):");
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "Defined");
     dag.add_edge(1, 2, None); // Node 2 doesn't exist - will be auto-created
     println!("{}\n", dag.render());
 
     // Example 2: Both nodes missing
     println!("2. Both nodes missing (both auto-created):");
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_edge(10, 20, None); // Neither node exists - both will be auto-created
     println!("{}\n", dag.render());
 
     // Example 3: Mixed explicit and auto-created
     println!("3. Mixed defined and auto-created nodes:");
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "Start");
     dag.add_node(3, "End");
     dag.add_edge(1, 2, None); // Node 2 auto-created
@@ -31,7 +31,7 @@ fn main() {
 
     // Example 4: Complex graph with some auto-created nodes
     println!("4. Complex graph with auto-created nodes:");
-    let mut dag = DAG::new();
+    let mut dag = Graph::new();
     dag.add_node(1, "Root");
     dag.add_node(5, "Leaf");
     dag.add_edge(1, 2, None); // 2 auto-created
