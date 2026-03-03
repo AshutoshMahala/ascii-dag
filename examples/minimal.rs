@@ -1,7 +1,0 @@
-use ascii_dag::graph::Graph;
-
-fn main() {
-    let dag = Graph::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (2, 3)]);
-
-    println!("{}", dag.render());
-}
