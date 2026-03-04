@@ -168,6 +168,28 @@ pub struct LayoutEdge<'a> {
     pub reversed: bool,
 }
 
+/// Bounding box and metadata for a laid-out subgraph (cluster).
+///
+/// Produced by the layout algorithm after coordinate assignment.
+/// Renderers use this to draw box-drawing borders with a label.
+#[derive(Debug, Clone)]
+pub struct SubgraphInfo<'a> {
+    /// Subgraph ID (matches [`Subgraph::id`](crate::graph::Subgraph::id)).
+    pub id: usize,
+    /// Parent subgraph ID (`None` = top-level cluster).
+    pub parent_id: Option<usize>,
+    /// Display label for the border.
+    pub label: &'a str,
+    /// Left edge of the bounding box (character column).
+    pub x: usize,
+    /// Top edge of the bounding box (line number).
+    pub y: usize,
+    /// Width in character cells (including borders).
+    pub width: usize,
+    /// Height in lines (including borders).
+    pub height: usize,
+}
+
 /// Intermediate representation of a laid-out graph.
 ///
 /// This is the output of the layout algorithm and input to renderers.
@@ -178,6 +200,8 @@ pub struct LayoutIR<'a> {
     pub(crate) nodes: Vec<LayoutNode<'a>>,
     /// All edges with routing information
     pub(crate) edges: Vec<LayoutEdge<'a>>,
+    /// All subgraph bounding boxes (empty when no subgraphs)
+    pub(crate) subgraphs: Vec<SubgraphInfo<'a>>,
     /// Total width in character cells
     pub(crate) width: usize,
     /// Total height in lines
@@ -221,6 +245,14 @@ impl<'a> LayoutIR<'a> {
     #[inline]
     pub fn edges(&self) -> &[LayoutEdge<'a>] {
         &self.edges
+    }
+
+    /// Get all laid-out subgraph bounding boxes.
+    ///
+    /// Empty if the graph has no subgraphs.
+    #[inline]
+    pub fn subgraphs(&self) -> &[SubgraphInfo<'a>] {
+        &self.subgraphs
     }
 
     /// Get nodes at a specific level.
@@ -407,6 +439,7 @@ impl<'a> LayoutIR<'a> {
 pub struct LayoutIRBuilder<'a> {
     nodes: Vec<LayoutNode<'a>>,
     edges: Vec<LayoutEdge<'a>>,
+    subgraphs: Vec<SubgraphInfo<'a>>,
     width: usize,
     height: usize,
     level_count: usize,
@@ -443,6 +476,11 @@ impl<'a> LayoutIRBuilder<'a> {
         self.edges.push(edge);
     }
 
+    /// Add a subgraph bounding box to the layout.
+    pub fn add_subgraph(&mut self, info: SubgraphInfo<'a>) {
+        self.subgraphs.push(info);
+    }
+
     /// Set the total dimensions.
     pub fn set_dimensions(&mut self, width: usize, height: usize) {
         self.width = width;
@@ -462,6 +500,7 @@ impl<'a> LayoutIRBuilder<'a> {
         LayoutIR {
             nodes: self.nodes,
             edges: self.edges,
+            subgraphs: self.subgraphs,
             width: self.width,
             height: self.height,
             level_count: self.level_count,

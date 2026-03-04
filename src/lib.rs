@@ -141,12 +141,17 @@ pub mod validation;
 
 // ── Convenience re-exports ──────────────────────────────────────────────
 
-pub use graph::{Graph, RenderMode};
+pub use graph::{Graph, RenderMode, Subgraph};
 pub use errors::GraphError;
 pub use errors::Diagnostic;
 pub use validation::Requirements;
-pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, NodeKind};
-pub use algorithms::sugiyama::crossing::{CrossingReducer, LayoutConfig, FAST, STANDARD, QUALITY};
+pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, NodeKind, SubgraphInfo};
+pub use algorithms::sugiyama::config::{SugiyamaConfig, CycleBreaking, Layering, Positioning};
+pub use algorithms::sugiyama::crossing::{CrossingReducer, FAST, STANDARD, QUALITY};
+
+/// **Deprecated**: Use [`SugiyamaConfig`] instead.
+#[deprecated(since = "0.9.0", note = "renamed to SugiyamaConfig")]
+pub type LayoutConfig = SugiyamaConfig;
 
 #[cfg(test)]
 mod tests {

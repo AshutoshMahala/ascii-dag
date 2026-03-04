@@ -91,74 +91,11 @@ pub(crate) fn count_crossings_pair(u_positions: &[usize], v_positions: &[usize])
     (cross_uv, cross_vu)
 }
 
-// ── LayoutConfig ─────────────────────────────────────────────────────────
+// ── LayoutConfig (backward compatibility) ────────────────────────────────
 
-use crate::graph::RenderMode;
-
-/// Bundled layout configuration — crossing pipeline + render mode.
+/// **Deprecated**: Use [`SugiyamaConfig`](super::config::SugiyamaConfig) instead.
 ///
-/// Use the [`fast()`], [`standard()`], or [`quality()`] constructors for
-/// curated presets, or build a custom configuration.
-///
-/// # Examples
-///
-/// ```
-/// use ascii_dag::LayoutConfig;
-/// use ascii_dag::algorithms::sugiyama::crossing::CrossingReducer;
-///
-/// // Use a preset
-/// let cfg = LayoutConfig::quality();
-///
-/// // Or build a custom one
-/// let cfg = LayoutConfig::new(
-///     &[CrossingReducer::Median(6), CrossingReducer::AdjacentExchange(3)],
-/// );
-/// ```
-#[derive(Debug, Clone)]
-pub struct LayoutConfig {
-    /// Crossing reduction pipeline.
-    pub crossing_pipeline: alloc::vec::Vec<CrossingReducer>,
-
-    /// Rendering mode.
-    pub render_mode: RenderMode,
-}
-
-impl LayoutConfig {
-    /// Create a custom layout config with the given crossing pipeline
-    /// and [`RenderMode::Auto`].
-    pub fn new(pipeline: &[CrossingReducer]) -> Self {
-        Self {
-            crossing_pipeline: pipeline.to_vec(),
-            render_mode: RenderMode::default(),
-        }
-    }
-
-    /// Create a custom layout config with the given pipeline and render mode.
-    pub fn with_mode(pipeline: &[CrossingReducer], mode: RenderMode) -> Self {
-        Self {
-            crossing_pipeline: pipeline.to_vec(),
-            render_mode: mode,
-        }
-    }
-
-    /// Fast preset — minimal crossing reduction, maximum speed.
-    pub fn fast() -> Self {
-        Self::new(FAST)
-    }
-
-    /// Standard preset — good balance of quality and speed.
-    pub fn standard() -> Self {
-        Self::new(STANDARD)
-    }
-
-    /// Quality preset — thorough reduction for complex graphs.
-    pub fn quality() -> Self {
-        Self::new(QUALITY)
-    }
-}
-
-impl Default for LayoutConfig {
-    fn default() -> Self {
-        Self::standard()
-    }
-}
+/// This re-export preserves backward compatibility for code using the
+/// old `LayoutConfig` name.
+#[allow(deprecated)]
+pub use super::config::LayoutConfig;

@@ -104,7 +104,7 @@ impl<'a> Graph<'a> {
             return self.build_empty_layout_arena(output_arena);
         }
 
-        // Check for cycles
+        // Arena path does not support back-edge reversal — reject cycles
         if self.has_cycle() {
             return Err(GraphError::CycleDetected);
         }

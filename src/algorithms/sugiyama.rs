@@ -12,8 +12,10 @@
 pub mod arena;
 pub(crate) mod arena_csr;
 pub(crate) mod arena_phases;
+pub mod config;
 pub mod crossing;
 pub(crate) mod heap;
+pub(crate) mod subgraph;
 
 #[cfg(feature = "arena")]
 pub mod idx;
@@ -115,7 +117,7 @@ impl<'a> Graph<'a> {
     /// Iterates through the configured [`CrossingReducer`] pipeline,
     /// applying each strategy in sequence to refine the node ordering.
     pub(crate) fn reduce_crossings(&self, levels: &mut [Vec<usize>], max_level: usize) {
-        for reducer in &self.crossing_pipeline {
+        for reducer in &self.sugiyama_config.crossing_pipeline {
             match reducer {
                 CrossingReducer::Median(passes) => {
                     for _ in 0..*passes {
@@ -279,8 +281,8 @@ impl<'a> Graph<'a> {
         *level_nodes = node_medians.iter().map(|(idx, _)| *idx).collect();
     }
 
-    /// Find disconnected subgraphs in the DAG.
-    pub(crate) fn find_subgraphs(&self) -> Vec<Vec<usize>> {
+    /// Find disconnected components in the DAG.
+    pub(crate) fn find_connected_components(&self) -> Vec<Vec<usize>> {
         let mut visited = vec![false; self.nodes.len()];
         let mut subgraphs = Vec::new();
 
@@ -295,7 +297,7 @@ impl<'a> Graph<'a> {
         subgraphs
     }
 
-    /// Collect all nodes connected to the given node (helper for find_subgraphs).
+    /// Collect all nodes connected to the given node (helper for find_connected_components).
     #[inline]
     fn collect_connected(&self, start_idx: usize, visited: &mut [bool], subgraph: &mut Vec<usize>) {
         let mut stack = Vec::new();

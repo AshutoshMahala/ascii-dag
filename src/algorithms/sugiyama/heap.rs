@@ -19,6 +19,7 @@
 //! visually compatible output but operate on different type systems.
 
 use crate::algorithms::sugiyama::crossing::{count_crossings_pair, CrossingReducer};
+use crate::algorithms::sugiyama::config::CycleBreaking;
 use crate::graph::Graph;
 use crate::ir::{EdgePath, LayoutEdge, LayoutIRBuilder, LayoutIR, LayoutNode, NodeKind};
 use alloc::vec;
@@ -73,10 +74,13 @@ pub(crate) fn compute_layout<'a>(dag: &Graph<'a>) -> LayoutIR<'a> {
         return LayoutIRBuilder::new().build();
     }
 
-    // Cycle breaking: detect back edges via three-color DFS.
-    // Back edges are temporarily treated as reversed for layering/routing
-    // and marked `reversed: true` in the final IR (zigraph parity).
-    let back_edges = dag.detect_back_edges();
+    // Cycle breaking: dispatch based on SugiyamaConfig.
+    // DepthFirst detects back edges via three-color DFS.
+    // None treats every edge as forward (caller asserts acyclicity).
+    let back_edges = match dag.sugiyama_config.cycle_breaking {
+        CycleBreaking::DepthFirst => dag.detect_back_edges(),
+        CycleBreaking::None => vec![false; dag.edges.len()],
+    };
 
     // Step 1: Calculate levels, treating back edges as reversed
     let level_data = dag.calculate_levels_with_back_edges(&back_edges);
@@ -122,6 +126,14 @@ pub(crate) fn compute_layout<'a>(dag: &Graph<'a>) -> LayoutIR<'a> {
     // Step 3: Apply crossing reduction WITH dummy nodes included
     reduce_crossings_virtual(dag, &mut virtual_levels, &node_levels, max_level);
 
+    // Step 3b: Block-partitioned level ordering for subgraph adjacency
+    if dag.has_subgraphs() {
+        use crate::algorithms::sugiyama::subgraph::block_partition_level;
+        for level in virtual_levels.iter_mut() {
+            *level = block_partition_level(dag, level);
+        }
+    }
+
     // Step 4: Assign x-coordinates to virtual nodes
     let mut x_coords: Vec<Vec<usize>> = Vec::with_capacity(virtual_levels.len());
     let mut widths: Vec<Vec<usize>> = Vec::with_capacity(virtual_levels.len());
@@ -146,23 +158,34 @@ pub(crate) fn compute_layout<'a>(dag: &Graph<'a>) -> LayoutIR<'a> {
     }
 
     // Calculate total width and centering offsets
-    let level_widths: Vec<usize> = x_coords
-        .iter()
-        .zip(widths.iter())
-        .map(|(xs, ws)| {
-            xs.iter()
-                .zip(ws.iter())
-                .map(|(x, w)| x + w)
-                .max()
-                .unwrap_or(0)
-        })
-        .collect();
+    let level_widths: Vec<usize> = if dag.has_subgraphs() {
+        // Insert extra horizontal padding at subgraph boundary transitions
+        crate::algorithms::sugiyama::subgraph::subgraph_padding(
+            dag,
+            &virtual_levels,
+            &mut x_coords,
+            &widths,
+        )
+    } else {
+        x_coords
+            .iter()
+            .zip(widths.iter())
+            .map(|(xs, ws)| {
+                xs.iter()
+                    .zip(ws.iter())
+                    .map(|(x, w)| x + w)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect()
+    };
 
     // Add small buffer for bounded edge offsets (max 3 chars) plus 1 for routing
     // Also add limited expansion for labels (4 chars each side) if any edges have labels
     let has_labeled_edges = dag.edges.iter().any(|(_, _, label)| label.is_some());
     let label_margin = if has_labeled_edges { 8 } else { 0 }; // 4 chars each side
-    let max_width = level_widths.iter().max().unwrap_or(&0) + 4 + label_margin;
+    let subgraph_margin = if dag.has_subgraphs() { 6 } else { 0 }; // border padding
+    let max_width = level_widths.iter().max().unwrap_or(&0) + 4 + label_margin + subgraph_margin;
 
     // Step 5: Build LayoutIR
     let mut builder = LayoutIRBuilder::new().with_levels(max_level + 1);
@@ -321,7 +344,19 @@ pub(crate) fn compute_layout<'a>(dag: &Graph<'a>) -> LayoutIR<'a> {
     // Calculate per-level heights: base + extra rows for slot separation
     let base_lines = if has_labeled_edges { 5 } else { 3 };
     let mut level_y_offsets = Vec::with_capacity(max_level + 1);
-    let mut current_offset = 0;
+
+    // When subgraphs exist, compute per-boundary extra rows for opening/closing borders
+    let (sg_initial_offset, sg_boundary_extras, sg_trailing_extra) = if dag.has_subgraphs() {
+        crate::algorithms::sugiyama::subgraph::compute_level_y_extras(
+            dag,
+            &node_levels,
+            max_level,
+        )
+    } else {
+        (0, vec![0; max_level + 1], 0)
+    };
+
+    let mut current_offset = sg_initial_offset;
 
     for level in 0..=max_level {
         level_y_offsets.push(current_offset);
@@ -343,11 +378,13 @@ pub(crate) fn compute_layout<'a>(dag: &Graph<'a>) -> LayoutIR<'a> {
         let slots_needed = adjacent_slots.max(skip_slots);
         let extra_lines = slots_needed.saturating_sub(1);
 
-        let height = base_lines + extra_lines;
+        let height = base_lines + extra_lines + sg_boundary_extras[level];
         current_offset += height;
     }
 
-    let total_height = current_offset;
+    // Total height: current_offset already includes all subgraph border spacing
+    // plus trailing extra for subgraphs closing after the last level
+    let total_height = current_offset + sg_trailing_extra;
 
     // Add real nodes to IR
     for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
@@ -580,6 +617,20 @@ pub(crate) fn compute_layout<'a>(dag: &Graph<'a>) -> LayoutIR<'a> {
     }
 
     builder.set_dimensions(max_width, total_height);
+
+    // Compute subgraph bounding boxes if any subgraphs are defined
+    if dag.has_subgraphs() {
+        let sg_infos = crate::algorithms::sugiyama::subgraph::compute_bounding_boxes(
+            dag,
+            &real_node_coords,
+            &level_y_offsets,
+            total_height,
+        );
+        for info in sg_infos {
+            builder.add_subgraph(info);
+        }
+    }
+
     builder.build()
 }
 
@@ -633,7 +684,7 @@ fn reduce_crossings_virtual(
     let mut u_positions: Vec<usize> = Vec::with_capacity(8);
     let mut v_positions: Vec<usize> = Vec::with_capacity(8);
 
-    for reducer in &dag.crossing_pipeline {
+    for reducer in &dag.sugiyama_config.crossing_pipeline {
         match reducer {
             CrossingReducer::Median(passes) => {
                 for _pass in 0..*passes {

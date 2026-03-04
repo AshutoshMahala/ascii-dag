@@ -398,7 +398,7 @@ impl<'a> Graph<'a> {
         // Per-level calls use sparse-clear to maintain this invariant.
         for p in positions.iter_mut() { *p = Idx::MAX; }
 
-        for reducer in &self.crossing_pipeline {
+        for reducer in &self.sugiyama_config.crossing_pipeline {
             match reducer {
                 CrossingReducer::Median(passes) => {
                     for _ in 0..*passes {

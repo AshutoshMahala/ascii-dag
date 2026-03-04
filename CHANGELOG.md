@@ -2,8 +2,18 @@
 
 ## [Unreleased]
 
-### Refactor
-- **Module restructure**: Reorganized `src/` into `graph/`, `algorithms/`, `ir/`, `render/` hierarchy — split 4 monolithic files into 15 focused modules (no file over ~750 lines), and regrouped `cycles/` + `layout/` under `algorithms/` with `arena.rs` and `csr.rs` under `graph/`.
+### Added
+- **Subgraph / cluster support**: Group nodes into labeled, nestable clusters with `add_subgraph()`, `put_nodes().inside()`, and `put_subgraphs().inside()`. Rendered as double-line boxes (`╔═╗║╚═╝`) with labels inside, matching zigraph's visual style.
+- **Edge–border junction characters**: Edges crossing subgraph borders produce proper junction glyphs (`╤ ╧ ╪ ╫ ╞ ╡`).
+- **New example**: `examples/subgraphs.rs` — 5 demos covering simple, sibling, nested, and pipeline clusters.
+
+### Breaking Changes
+- **`DAG` → `Graph`**: Core type renamed throughout the public API.
+- **`find_subgraphs()` → `find_connected_components()`**: Renamed to avoid confusion with the new cluster feature.
+- **`LayoutError` enum**: Errors now use structured WDP codes (`E.Graph.…`, `W.Graph.…`) instead of plain strings.
+
+### Internal
+- **Module restructure**: Split 4 monolithic files into 15 focused modules under `graph/`, `algorithms/`, `ir/`, `render/`.
 
 ## [0.8.3] - 2026-02-07
 

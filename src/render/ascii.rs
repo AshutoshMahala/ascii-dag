@@ -327,9 +327,9 @@ impl<'a> Graph<'a> {
             return false;
         }
 
-        // If we have multiple disconnected subgraphs, it's not a simple chain
-        let subgraphs = self.find_subgraphs();
-        if subgraphs.len() > 1 {
+        // If we have multiple disconnected components, it's not a simple chain
+        let components = self.find_connected_components();
+        if components.len() > 1 {
             return false;
         }
 
@@ -393,12 +393,12 @@ impl<'a> Graph<'a> {
 
     /// Render in vertical mode (Sugiyama layout with dummy nodes for skip-level edges).
     fn render_vertical(&self, output: &mut String) {
-        // Detect if we have multiple disconnected subgraphs
-        let subgraphs = self.find_subgraphs();
+        // Detect if we have multiple disconnected components
+        let components = self.find_connected_components();
 
-        if subgraphs.len() > 1 {
-            // Render each subgraph separately
-            for (i, subgraph_nodes) in subgraphs.iter().enumerate() {
+        if components.len() > 1 {
+            // Render each component separately
+            for (i, subgraph_nodes) in components.iter().enumerate() {
                 if i > 0 {
                     writeln!(output).ok();
                 }

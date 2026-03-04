@@ -10,7 +10,7 @@
 //! - Simpler edge routing (may not handle complex crossings as elegantly)
 //! - Optimized for speed over visual perfection
 
-use crate::ir::{EdgePath, LayoutIR};
+use crate::ir::{EdgePath, LayoutIR, SubgraphInfo};
 use crate::render::chars::{
     merge_chars, ARROW_DOWN, ARROW_DOWN_DASHED, CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR, CROSS, H_LINE, H_LINE_DASHED, V_LINE,
     V_LINE_DASHED,
@@ -73,7 +73,7 @@ impl<'a> LayoutIR<'a> {
             color_buffer.fill(0);
 
             if let Some(occupancy) = y_index.get(y) {
-                // 1. Paint edge lines with colors
+                // 0. Paint edge lines with colors
                 for &edge_idx in &occupancy.edge_indices {
                     let edge = &self.edges()[edge_idx];
                     let color_idx = edge_color_indices.get(edge_idx).copied().unwrap_or(0);
@@ -86,7 +86,16 @@ impl<'a> LayoutIR<'a> {
                         color,
                     );
                 }
+            }
 
+            // 1. Paint subgraph borders AFTER edges (merge produces mixed junctions)
+            if !self.subgraphs.is_empty() {
+                for sg in &self.subgraphs {
+                    self.paint_subgraph_border(&mut line_buffer, sg, y);
+                }
+            }
+
+            if let Some(occupancy) = y_index.get(y) {
                 // 2. Paint edge labels (same color as the edge line)
                 for &edge_idx in &occupancy.edge_indices {
                     let edge = &self.edges()[edge_idx];
@@ -111,6 +120,13 @@ impl<'a> LayoutIR<'a> {
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
                     self.paint_node_colored(&mut line_buffer, &mut color_buffer, node);
+                }
+            }
+
+            // 4. Paint subgraph labels last (always readable)
+            if !self.subgraphs.is_empty() {
+                for sg in &self.subgraphs {
+                    self.paint_subgraph_label(&mut line_buffer, sg, y);
                 }
             }
 
@@ -204,7 +220,7 @@ impl<'a> LayoutIR<'a> {
             color_buffer.fill(0);
 
             if let Some(occupancy) = y_index.get(y) {
-                // 1. Paint edge lines with colors
+                // 0. Paint edge lines with colors
                 for &edge_idx in &occupancy.edge_indices {
                     let edge = &self.edges()[edge_idx];
                     let color_idx = edge_color_indices.get(edge_idx).copied().unwrap_or(0);
@@ -217,7 +233,16 @@ impl<'a> LayoutIR<'a> {
                         color,
                     );
                 }
+            }
 
+            // 1. Paint subgraph borders AFTER edges (merge produces mixed junctions)
+            if !self.subgraphs.is_empty() {
+                for sg in &self.subgraphs {
+                    self.paint_subgraph_border(&mut line_buffer, sg, y);
+                }
+            }
+
+            if let Some(occupancy) = y_index.get(y) {
                 // 2. Greedy label placement: try to place pending labels at this Y
                 // Skip rows that have nodes to avoid label-node collisions
                 let has_nodes = !occupancy.node_indices.is_empty();
@@ -261,6 +286,13 @@ impl<'a> LayoutIR<'a> {
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
                     self.paint_node_colored(&mut line_buffer, &mut color_buffer, node);
+                }
+            }
+
+            // 4. Paint subgraph labels last (always readable)
+            if !self.subgraphs.is_empty() {
+                for sg in &self.subgraphs {
+                    self.paint_subgraph_label(&mut line_buffer, sg, y);
                 }
             }
 
@@ -341,12 +373,21 @@ impl<'a> LayoutIR<'a> {
             line_buffer.fill(' ');
 
             if let Some(occupancy) = y_index.get(y) {
-                // 1. Paint edge lines FIRST (connectors, arrows)
+                // 0. Paint edge lines FIRST (connectors, arrows)
                 for &edge_idx in &occupancy.edge_indices {
                     let edge = &self.edges()[edge_idx];
                     self.paint_edge_at_y(&mut line_buffer, edge, y);
                 }
+            }
 
+            // 1. Paint subgraph borders AFTER edges (merge produces mixed junctions)
+            if !self.subgraphs.is_empty() {
+                for sg in &self.subgraphs {
+                    self.paint_subgraph_border(&mut line_buffer, sg, y);
+                }
+            }
+
+            if let Some(occupancy) = y_index.get(y) {
                 // 2. Paint edge labels (overwrites edge lines where needed)
                 for &edge_idx in &occupancy.edge_indices {
                     let edge = &self.edges()[edge_idx];
@@ -363,6 +404,13 @@ impl<'a> LayoutIR<'a> {
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
                     self.paint_node(&mut line_buffer, node);
+                }
+            }
+
+            // 4. Paint subgraph labels last (always readable)
+            if !self.subgraphs.is_empty() {
+                for sg in &self.subgraphs {
+                    self.paint_subgraph_label(&mut line_buffer, sg, y);
                 }
             }
 
@@ -410,16 +458,32 @@ impl<'a> LayoutIR<'a> {
             }
 
             if let Some(occupancy) = y_index.get(y) {
-                // Paint edges FIRST so nodes take precedence
+                // 0. Paint edges FIRST
                 for &edge_idx in &occupancy.edge_indices {
                     let edge = &self.edges()[edge_idx];
                     self.paint_edge_at_y(&mut line_buffer[..width], edge, y);
                 }
+            }
 
-                // Paint nodes on this line (overwrites any edge characters)
+            // 1. Paint subgraph borders AFTER edges (merge produces mixed junctions)
+            if !self.subgraphs.is_empty() {
+                for sg in &self.subgraphs {
+                    self.paint_subgraph_border(&mut line_buffer[..width], sg, y);
+                }
+            }
+
+            if let Some(occupancy) = y_index.get(y) {
+                // 2. Paint nodes (overwrites any edge/border characters)
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
                     self.paint_node(&mut line_buffer[..width], node);
+                }
+            }
+
+            // 3. Paint subgraph labels last (always readable)
+            if !self.subgraphs.is_empty() {
+                for sg in &self.subgraphs {
+                    self.paint_subgraph_label(&mut line_buffer[..width], sg, y);
                 }
             }
 
@@ -472,16 +536,32 @@ impl<'a> LayoutIR<'a> {
             }
 
             if let Some(occupancy) = y_index.get(y) {
-                // Paint edges FIRST so nodes take precedence
+                // 0. Paint edges FIRST
                 for &edge_idx in &occupancy.edge_indices {
                     let edge = &self.edges()[edge_idx];
                     self.paint_edge_at_y(&mut line_buffer[..width], edge, y);
                 }
+            }
 
-                // Paint nodes on this line (overwrites any edge characters)
+            // 1. Paint subgraph borders AFTER edges (merge produces mixed junctions)
+            if !self.subgraphs.is_empty() {
+                for sg in &self.subgraphs {
+                    self.paint_subgraph_border(&mut line_buffer[..width], sg, y);
+                }
+            }
+
+            if let Some(occupancy) = y_index.get(y) {
+                // 2. Paint nodes (overwrites any edge/border characters)
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
                     self.paint_node(&mut line_buffer[..width], node);
+                }
+            }
+
+            // 3. Paint subgraph labels last (always readable)
+            if !self.subgraphs.is_empty() {
+                for sg in &self.subgraphs {
+                    self.paint_subgraph_label(&mut line_buffer[..width], sg, y);
                 }
             }
 
@@ -509,6 +589,129 @@ impl<'a> LayoutIR<'a> {
         }
 
         offset
+    }
+
+    /// Paint a subgraph border at the given Y coordinate.
+    ///
+    /// Uses **double-line** box-drawing characters (matching zigraph):
+    /// - Top border:    `╔═══════════╗`
+    /// - Label row:     `║ Label     ║`  (inside, y+1)
+    /// - Side borders:  `║`
+    /// - Bottom border: `╚═══════════╝`
+    ///
+    /// When painted **after** edges, horizontal/vertical border segments
+    /// merge with existing single-line edge characters to produce mixed
+    /// junction characters (`╤ ╧ ╪ ╞ ╡ ╫`).
+    fn paint_subgraph_border(&self, buffer: &mut [char], sg: &SubgraphInfo<'_>, y: usize) {
+        if y < sg.y || y >= sg.y + sg.height {
+            return;
+        }
+        let left = sg.x;
+        let right = sg.x + sg.width.saturating_sub(1);
+
+        if left >= buffer.len() {
+            return;
+        }
+        let right = right.min(buffer.len() - 1);
+
+        if y == sg.y {
+            // ── Top border ╔═══════╗ ──
+            if left < buffer.len() {
+                buffer[left] = '╔';
+            }
+            if right < buffer.len() && right > left {
+                buffer[right] = '╗';
+            }
+            for col in (left + 1)..right {
+                if col < buffer.len() {
+                    buffer[col] = Self::merge_h_border(buffer[col]);
+                }
+            }
+        } else if y == sg.y + sg.height - 1 {
+            // ── Bottom border ╚═══════╝ ──
+            if left < buffer.len() {
+                buffer[left] = '╚';
+            }
+            if right < buffer.len() && right > left {
+                buffer[right] = '╝';
+            }
+            for col in (left + 1)..right {
+                if col < buffer.len() {
+                    buffer[col] = Self::merge_h_border(buffer[col]);
+                }
+            }
+        } else {
+            // ── Side borders ║ ──
+            if left < buffer.len() {
+                buffer[left] = Self::merge_v_border(buffer[left]);
+            }
+            if right < buffer.len() && right > left {
+                buffer[right] = Self::merge_v_border(buffer[right]);
+            }
+        }
+    }
+
+    /// Merge a double-line horizontal border (`═`) with an existing cell.
+    ///
+    /// Produces mixed single/double junction characters where single-line
+    /// edges cross the double-line subgraph border.
+    #[inline]
+    fn merge_h_border(existing: char) -> char {
+        match existing {
+            // Vertical edge crossing horizontal border
+            '│' | '┊' | '┼' | '├' | '┤' => '╪',
+            // Edge going downward from border (T-down)
+            '↓' | '⇣' | '┌' | '┐' | '┬' => '╤',
+            // Edge going upward to border (T-up)
+            '↑' | '⇡' | '└' | '┘' | '┴' => '╧',
+            // Already a double-line char (nested border overlap) — keep it
+            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => existing,
+            // Everything else (space, etc.) → plain horizontal double
+            _ => '═',
+        }
+    }
+
+    /// Merge a double-line vertical border (`║`) with an existing cell.
+    #[inline]
+    fn merge_v_border(existing: char) -> char {
+        match existing {
+            // Horizontal edge crossing vertical border
+            '─' | '┈' | '┼' | '┬' | '┴' => '╫',
+            // Edge going right from border (T-right)
+            '→' | '┌' | '└' | '├' => '╞',
+            // Edge going left from border (T-left)
+            '←' | '┐' | '┘' | '┤' => '╡',
+            // Already a double-line char — keep it
+            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => existing,
+            // Everything else → plain vertical double
+            _ => '║',
+        }
+    }
+
+    /// Paint subgraph label text **inside** the box, one row below the top
+    /// border, starting at x+2.  Matches zigraph's label positioning.
+    ///
+    /// Called last so the label is always readable.
+    fn paint_subgraph_label(&self, buffer: &mut [char], sg: &SubgraphInfo<'_>, y: usize) {
+        // Label goes on the row just below the top border
+        let label_y = sg.y + 1;
+        if y != label_y || sg.label.is_empty() {
+            return;
+        }
+        if sg.width < 4 || sg.height < 3 {
+            return;
+        }
+
+        let label_start = sg.x + 2;
+        let max_len = sg.width.saturating_sub(4); // room for ║ + space + ... + space + ║
+
+        let mut col = label_start;
+        for ch in sg.label.chars().take(max_len) {
+            if col < buffer.len() {
+                buffer[col] = ch;
+                col += 1;
+            }
+        }
     }
 
     /// Paint a node onto the line buffer.
