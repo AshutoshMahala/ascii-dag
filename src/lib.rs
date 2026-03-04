@@ -123,6 +123,7 @@
 #![allow(clippy::collapsible_if)]
 #![allow(clippy::collapsible_else_if)]
 
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
 // ── Module hierarchy ─────────────────────────────────────────────────────
@@ -139,16 +140,24 @@ pub mod ir;
 pub mod render;
 pub mod validation;
 
-// ── Convenience re-exports ──────────────────────────────────────────────
+// ── Convenience re-exports (alloc-dependent) ────────────────────────────
 
-pub use graph::{Graph, RenderMode, Subgraph};
-pub use errors::GraphError;
+#[cfg(feature = "alloc")]
+pub use graph::{Graph, Subgraph};
+pub use graph::RenderMode;
+#[cfg(feature = "alloc")]
 pub use errors::Diagnostic;
+pub use errors::GraphError;
 pub use validation::Requirements;
-pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, NodeKind, SubgraphInfo};
-pub use algorithms::sugiyama::config::{SugiyamaConfig, CycleBreaking, Layering, Positioning};
+#[cfg(feature = "alloc")]
+pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};
+pub use ir::NodeKind;
+#[cfg(feature = "alloc")]
+pub use algorithms::sugiyama::config::SugiyamaConfig;
+pub use algorithms::sugiyama::config::{CycleBreaking, Layering, Positioning};
 pub use algorithms::sugiyama::crossing::{CrossingReducer, FAST, STANDARD, QUALITY};
 
+#[cfg(feature = "alloc")]
 /// **Deprecated**: Use [`SugiyamaConfig`] instead.
 #[deprecated(since = "0.9.0", note = "renamed to SugiyamaConfig")]
 pub type LayoutConfig = SugiyamaConfig;

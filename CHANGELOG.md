@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- **True `no_alloc` support**: The arena/CSR layout path now compiles without the `alloc` feature. Use `--no-default-features --features arena` for a fully heap-free build suitable for `no_std` embedded targets.
+- **Feature flag cleanup**: `generic` feature now implies `alloc` (all generic algorithms require heap allocation). `render::chars` and `render::colors` are available without alloc.
 - **Subgraph / cluster support**: Group nodes into labeled, nestable clusters with `add_subgraph()`, `put_nodes().inside()`, and `put_subgraphs().inside()`. Rendered as double-line boxes (`╔═╗║╚═╝`) with labels inside, matching zigraph's visual style.
 - **Edge–border junction characters**: Edges crossing subgraph borders produce proper junction glyphs (`╤ ╧ ╪ ╫ ╞ ╡`).
 - **New example**: `examples/subgraphs.rs` — 5 demos covering simple, sibling, nested, and pipeline clusters.

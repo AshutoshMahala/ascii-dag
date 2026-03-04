@@ -97,5 +97,6 @@ pub(crate) fn count_crossings_pair(u_positions: &[usize], v_positions: &[usize])
 ///
 /// This re-export preserves backward compatibility for code using the
 /// old `LayoutConfig` name.
+#[cfg(feature = "alloc")]
 #[allow(deprecated)]
 pub use super::config::LayoutConfig;

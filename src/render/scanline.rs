@@ -473,14 +473,26 @@ impl<'a> LayoutIR<'a> {
             }
 
             if let Some(occupancy) = y_index.get(y) {
-                // 2. Paint nodes (overwrites any edge/border characters)
+                // 2. Paint edge labels (overwrites edge lines where needed)
+                for &edge_idx in &occupancy.edge_indices {
+                    let edge = &self.edges()[edge_idx];
+                    if let (Some(label), Some((label_x, label_y))) =
+                        (edge.label, edge.label_position)
+                    {
+                        if y == label_y {
+                            self.paint_edge_label(&mut line_buffer[..width], label, label_x);
+                        }
+                    }
+                }
+
+                // 3. Paint nodes (overwrites any edge/border characters)
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
                     self.paint_node(&mut line_buffer[..width], node);
                 }
             }
 
-            // 3. Paint subgraph labels last (always readable)
+            // 4. Paint subgraph labels last (always readable)
             if !self.subgraphs.is_empty() {
                 for sg in &self.subgraphs {
                     self.paint_subgraph_label(&mut line_buffer[..width], sg, y);
@@ -551,14 +563,26 @@ impl<'a> LayoutIR<'a> {
             }
 
             if let Some(occupancy) = y_index.get(y) {
-                // 2. Paint nodes (overwrites any edge/border characters)
+                // 2. Paint edge labels (overwrites edge lines where needed)
+                for &edge_idx in &occupancy.edge_indices {
+                    let edge = &self.edges()[edge_idx];
+                    if let (Some(label), Some((label_x, label_y))) =
+                        (edge.label, edge.label_position)
+                    {
+                        if y == label_y {
+                            self.paint_edge_label(&mut line_buffer[..width], label, label_x);
+                        }
+                    }
+                }
+
+                // 3. Paint nodes (overwrites any edge/border characters)
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
                     self.paint_node(&mut line_buffer[..width], node);
                 }
             }
 
-            // 3. Paint subgraph labels last (always readable)
+            // 4. Paint subgraph labels last (always readable)
             if !self.subgraphs.is_empty() {
                 for sg in &self.subgraphs {
                     self.paint_subgraph_label(&mut line_buffer[..width], sg, y);
@@ -1010,12 +1034,9 @@ impl<'a> LayoutIR<'a> {
             }
         }
 
-        // Paint edge label if this line contains it
-        if let (Some(label), Some((label_x, label_y))) = (edge.label, edge.label_position) {
-            if y == label_y {
-                self.paint_edge_label(buffer, label, label_x);
-            }
-        }
+        // NOTE: Edge labels are painted separately in render_scanline_to step 2,
+        // AFTER all edge lines are drawn. This prevents later edges from overwriting
+        // label characters with their own vertical lines.
     }
 
     /// Paint an edge label centered on the edge's path.

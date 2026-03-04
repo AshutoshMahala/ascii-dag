@@ -76,3 +76,4 @@ target/package/
 fuzz/
 .agent/
 scripts/
+temp/

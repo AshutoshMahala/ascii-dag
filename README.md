@@ -6,7 +6,39 @@
 
 Graph layout engine. Zero dependencies. `no_std` ready.
 
-![Example Image](assets/hero_colored_heap.png)
+```
+                   [Client]
+                   ┌───└────┐
+                   │        │
+                "http"   "trace"
+                   ↓        │
+               [Gateway]    │
+              ┌────└─────┐  │
+              │          │  └──────┐
+         ╔════╪══════════╪════╗    │
+         ║ Services      │    ║    │
+         ║    ↓          ↓    ║    │
+         ║ [Users]   [Orders] ║    │
+         ║   ┌┘          │    ║    │
+         ╚═══╤═════════╤═╧════╝    │
+          "read"    "emit"         │
+         ╔═══╪═════════╪══════╗    │
+         ║ Data   ╔════╪════╗ ║    │
+         ║   ↓    ║ Async   ║ ║    │
+         ║ [DB]   ║    ↓    ║ ║    │
+         ║   └──┐ ║ [Queue] ║ ║    │
+         ║      │ ╚════╪════╝ ║    │
+         ║   "sync""notify"   ║┌───┘
+         ╚══════╪══════╪══════╝│
+                │      ↓       │
+                │  [Mailer]    │
+                └──────┤───────┘
+                       ↓
+                    [Dash]
+```
+
+> *Subgraphs, edge labels, skip-level routing, nested clusters — all from ~30 lines of Rust.*
+> Run it: `cargo run --example hero` (plain) or `cargo run --example hero -- --color` (ANSI colors)
 
 **ascii-dag** is a high-performance **layout engine** for placing nodes and routing edges in a fixed-width grid.
 
@@ -16,7 +48,7 @@ Graph layout engine. Zero dependencies. `no_std` ready.
 - **Fast**: ~5ms for 1000 nodes with Arena layout.
 
 ## Features
-- **Tiny**: ~55KB WASM
+- **Tiny**: ~47KB WASM (arena), ~77KB (full)
 - **Fast**: Sugiyama layout with configurable crossing reduction
 - **Headless**: Layout IR for custom renderers (Canvas, SVG, TUI)
 - **Robust**: Handles diamonds, cycles, skip-level edges
@@ -47,7 +79,7 @@ Graph layout engine. Zero dependencies. `no_std` ready.
 |---|---:|:---:|:---:|
 | Primary Goal | Visualization (Terminal) | Algorithms (Shortest Path, etc.) | Visualization (Image / SVG / PDF) |
 | Dependencies | 0 (Zero) | Minimal | Heavy (binary / C libs) |
-| WASM Size | **~46 - 55 KB** | ~30 KB | 2 MB+ (via Viz.js) |
+| WASM Size | **~47 - 77 KB** | ~30 KB | 2 MB+ (via Viz.js) |
 | Layout Engine | Built-in (Sugiyama) | None (manual positioning) | Built-in (advanced, many options) |
 | Environment | Terminal / Web / Headless | Code / Logic | Desktop / Web |
 
@@ -413,14 +445,25 @@ println!("Is tree: {}", metrics.is_tree());
 
 ## no_std Support
 
+`ascii-dag` is `#![no_std]` compatible with two modes:
+
+**With `alloc`** — heap-based `Graph` API, needs `#[global_allocator]`:
 ```rust
 #![no_std]
 extern crate alloc;
-
 use ascii_dag::Graph;
-
-// Works in embedded environments!
 ```
+
+**Without `alloc`** — pure arena/CSR path, no global allocator needed:
+```rust
+#![no_std]
+use ascii_dag::graph::csr::CsrGraphBuilder;
+use ascii_dag::algorithms::sugiyama::arena::compute_layout_arena_csr;
+use ascii_dag::graph::arena::Arena;
+// Build, layout, render — all on caller-provided buffers.
+```
+
+See [Feature Flags](#feature-flags) for the exact `Cargo.toml` lines.
 
 ## WASM Integration
 
@@ -590,41 +633,47 @@ cargo run --example git_log          # Git-log style visualization
 
 ### Feature Flags
 
-```toml
-[dependencies]
-ascii-dag = { version = "0.9", default-features = false, features = ["std"] }
-```
-
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `std`   | ✓ | Standard library support |
-| `generic` | ✓ | Cycle detection, topological sort, impact analysis, metrics |
+| `std`   | ✓ | Standard library support (implies `alloc`) |
+| `alloc` | ✓ (via `std`) | Heap allocation (`Vec`, `HashMap`, `Graph`, `SugiyamaConfig`) |
+| `generic` | ✓ | Cycle detection, topological sort, impact analysis, metrics (implies `alloc`) |
 | `warnings` | | Debug warnings for auto-created nodes |
-| `arena` | | Arena allocator (no heap, fixed memory) |
+| `arena` | | Arena-based layout — bump allocator using caller-provided buffers |
 | `arena-idx-u8` | | Max 255 nodes/edges (tiny MCUs, 2-8KB RAM) |
 | `arena-idx-u16` | | Max 65,535 nodes/edges (small MCUs, 16-256KB RAM) |
 | `arena-idx-u32` | | Max 4B nodes/edges (default for desktop) |
 
-**Bundle Size (Optimized WASM):**
-- **Heap Mode** (with `std`): ~69 KB
-- **Arena Mode** (minimal `no_std`): ~14 KB
+#### Which features do I need?
+
+| Scenario | Cargo.toml | What you get |
+|----------|-----------|--------------|
+| **Default (just works)** | `ascii-dag = "0.9"` | Heap-based `Graph` API with full Sugiyama layout |
+| **No-alloc embedded** | `default-features = false, features = ["arena"]` | `CsrGraphBuilder` → arena layout → `render_to_buffer`. No `extern crate alloc`, no global allocator needed. |
+| **Alloc + arena speed** | `features = ["arena"]` | Ergonomic `Graph` API for construction + fast arena-based layout/render |
+| **`no_std` with alloc** | `default-features = false, features = ["alloc"]` | `Graph` API works via `alloc` crate. Needs `#[global_allocator]`. No `std`. |
+| **Small index arena** | `default-features = false, features = ["arena-idx-u16"]` | No-alloc arena with `u16` indices (~50% memory savings vs u32) |
+
+**Bundle Size (WASM, `wasm-opt -Oz`):**
+- **Heap Mode** (`std` + `generic`): **~77 KB**
+- **Arena Mode** (`alloc` + `arena`): **~47 KB**
 
 ### Benchmark Results (Apple M2 Ultra, ARM64, Release Build)
 
 | Topology | Nodes | Mode | Build | Compute | Render | **Total** | Speedup |
 | :--- | ---: | :--- | ---: | ---: | ---: | ---: | ---: |
-| **Chain** | 100 | Heap | 27µs | 101µs | 27µs | **157µs** | |
-| | | Arena | 3µs | 19µs | 54µs | **77µs** | **2.0x** |
-| **Chain** | 500 | Heap | 97µs | 646µs | 131µs | **875µs** | |
-| | | Arena | 8µs | 32µs | 505µs | **546µs** | **1.6x** |
-| **Diamond** | 100 | Heap | 28µs | 219µs | 79µs | **327µs** | |
-| | | Arena | 2µs | 13µs | 93µs | **109µs** | **3.0x** |
-| **Diamond** | 500 | Heap | 117µs | 1198µs | 391µs | **1708µs** | |
-| | | Arena | 12µs | 48µs | 1024µs | **1085µs** | **1.6x** |
-| **WideFan** | 100 | Heap | 25µs | 107µs | 114µs | **247µs** | |
-| | | Arena | 2µs | 10µs | 231µs | **244µs** | **1.0x** |
-| **WideFan** | 500 | Heap | 121µs | 794µs | 2781µs | **3697µs** | |
-| | | Arena | 17µs | 46µs | 2µs | **65µs** | **56.9x** |
+| **Chain** | 100 | Heap | 20µs | 202µs | 25µs | **248µs** | |
+| | | Arena | 2µs | 12µs | 28µs | **43µs** | **5.8x** |
+| **Chain** | 250 | Heap | 52µs | 473µs | 62µs | **588µs** | |
+| | | Arena | 3µs | 22µs | 108µs | **134µs** | **4.4x** |
+| **Diamond** | 100 | Heap | 25µs | 698µs | 76µs | **800µs** | |
+| | | Arena | 2µs | 11µs | 49µs | **63µs** | **12.7x** |
+| **Diamond** | 200 | Heap | 53µs | 2067µs | 302µs | **2422µs** | |
+| | | Arena | 7µs | 50µs | 247µs | **305µs** | **7.9x** |
+| **WideFan** | 100 | Heap | 115µs | 763µs | 253µs | **1133µs** | |
+| | | Arena | 5µs | 31µs | 730µs | **767µs** | **1.5x** |
+| **WideFan** | 500 | Heap | 258µs | 3502µs | 4180µs | **7942µs** | |
+| | | Arena | 20µs | 103µs | 6µs | **131µs** | **60.6x** |
 
 *Chain = linear (best case), Diamond = skip-level edges (stress), WideFan = fan-out/fan-in (crossing worst case)*
 
@@ -658,12 +707,12 @@ ascii-dag = { version = "0.9", default-features = false, features = ["std"] }
 
 | Topology | Nodes | Mode | Time | Output Size | Speedup |
 | :--- | ---: | :--- | ---: | ---: | ---: |
-| **Diamond** | 20,164 | Heap | 1.77s | 0.61 MB | |
-| | | Arena | 0.50s | | **3.5x** |
-| **Diamond** | 50,176 | Heap | 10.8s | 1.52 MB | |
-| | | Arena | 3.07s | | **3.5x** |
-| **Wide Fan** | 50,000 | Heap | 26.6s | 2.81 MB | |
-| | | Arena | 3.08s | | **8.6x** |
+| **Diamond** | 20,164 | Heap | 139ms | 0.61 MB | |
+| | | Arena | 119ms | | **1.2x** |
+| **Diamond** | 50,176 | Heap | 357ms | 1.52 MB | |
+| | | Arena | 348ms | | **1.0x** |
+| **Wide Fan** | 50,000 | Heap | 15.9s | 5.82 MB | |
+| | | Arena | 13ms | | **1,223x** |
 
 *Tested on Apple M2 Ultra (ARM64), release build. Wide Fan is worst-case for crossing reduction.*
 

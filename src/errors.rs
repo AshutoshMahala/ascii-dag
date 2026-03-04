@@ -34,6 +34,7 @@
 //! `wdp!`. Any unrecognised token causes a compile error.
 
 use core::fmt;
+#[cfg(feature = "alloc")]
 use alloc::boxed::Box;
 
 // ── WDP code composition ────────────────────────────────────────────────
@@ -371,6 +372,7 @@ impl std::error::Error for GraphError {}
 
 // ── Diagnostic (error + causal chain) ───────────────────────────────────
 
+#[cfg(feature = "alloc")]
 /// A diagnostic pairs a [`GraphError`] with an optional causal chain.
 ///
 /// Both the outer error and every inner cause carry their own WDP code,
@@ -418,6 +420,7 @@ pub struct Diagnostic {
     cause: Option<Box<Diagnostic>>,
 }
 
+#[cfg(feature = "alloc")]
 impl Diagnostic {
     /// Create a leaf diagnostic (no cause).
     #[inline]
@@ -471,6 +474,7 @@ impl Diagnostic {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl From<GraphError> for Diagnostic {
     #[inline]
     fn from(error: GraphError) -> Self {
@@ -478,6 +482,7 @@ impl From<GraphError> for Diagnostic {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Outer error
@@ -499,7 +504,7 @@ impl fmt::Display for Diagnostic {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "alloc", feature = "std"))]
 impl std::error::Error for Diagnostic {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.cause.as_deref().map(|d| d as &dyn std::error::Error)
@@ -507,10 +512,12 @@ impl std::error::Error for Diagnostic {
 }
 
 /// Iterator over the [`Diagnostic`] chain (outer → innermost cause).
+#[cfg(feature = "alloc")]
 pub struct DiagnosticChain<'a> {
     current: Option<&'a Diagnostic>,
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> Iterator for DiagnosticChain<'a> {
     type Item = &'a Diagnostic;
 

@@ -13,9 +13,13 @@
 //! | `arena-idx-u16` | 65,535 | ~50% vs u32 |
 //! | `arena-idx-u32` | 4B | baseline |
 
+#[cfg(feature = "alloc")]
 use crate::graph::arena::Arena;
+#[cfg(feature = "alloc")]
 use crate::graph::Graph;
+#[cfg(feature = "alloc")]
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
+#[cfg(feature = "alloc")]
 use crate::errors::GraphError;
 
 // Re-export CSR layout function for backward compatibility
@@ -80,6 +84,7 @@ pub(super) struct LayoutTemps<'a> {
     pub(super) level_vdummy_counts: &'a mut [Idx],
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> Graph<'a> {
     /// Compute layout using arena allocation for temporaries.
     ///

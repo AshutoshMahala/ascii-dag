@@ -4,21 +4,27 @@
 //! level calculation, virtual level construction, coordinate assignment,
 //! dummy position building, and crossing reduction.
 
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
+
+#[cfg(feature = "alloc")]
 use crate::algorithms::sugiyama::crossing::CrossingReducer;
+#[cfg(feature = "alloc")]
 use crate::graph::Graph;
 
 // Import configurable index types
-#[cfg(feature = "arena")]
+#[cfg(all(feature = "alloc", feature = "arena"))]
 use super::idx::{Coord, Idx, MAX_LEVELS};
 
 // Fallback types when arena feature not enabled (for compilation)
-#[cfg(not(feature = "arena"))]
+#[cfg(all(feature = "alloc", not(feature = "arena")))]
 type Idx = u32;
-#[cfg(not(feature = "arena"))]
+#[cfg(all(feature = "alloc", not(feature = "arena")))]
 type Coord = u16;
-#[cfg(not(feature = "arena"))]
+#[cfg(all(feature = "alloc", not(feature = "arena")))]
 const MAX_LEVELS: usize = usize::MAX;
 
+#[cfg(feature = "alloc")]
 impl<'a> Graph<'a> {
     /// Calculate levels using arena-allocated buffer.
     #[allow(dead_code)]

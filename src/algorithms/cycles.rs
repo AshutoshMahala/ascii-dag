@@ -33,14 +33,20 @@
 #[cfg(feature = "generic")]
 pub mod generic;
 
+#[cfg(feature = "alloc")]
 use crate::graph::Graph;
+#[cfg(feature = "alloc")]
 use alloc::{vec, vec::Vec};
 
 /// Three-color DFS states for back-edge detection.
+#[cfg(feature = "alloc")]
 const WHITE: u8 = 0; // Not yet visited
+#[cfg(feature = "alloc")]
 const GRAY: u8 = 1;  // On the current DFS stack (ancestor)
+#[cfg(feature = "alloc")]
 const BLACK: u8 = 2; // Fully processed
 
+#[cfg(feature = "alloc")]
 impl<'a> Graph<'a> {
     /// Detect back edges using three-color DFS (zigraph parity).
     ///

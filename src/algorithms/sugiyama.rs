@@ -9,21 +9,31 @@
 //! - [`heap`] - Heap-based layout computation (produces `LayoutIR`)
 //! - `idx` - Configurable index types for memory optimization (requires `arena` feature)
 
+#[cfg(feature = "alloc")]
 pub mod arena;
+#[cfg(not(feature = "alloc"))]
+pub(crate) mod arena;
 pub(crate) mod arena_csr;
+#[cfg(feature = "alloc")]
 pub(crate) mod arena_phases;
 pub mod config;
 pub mod crossing;
+#[cfg(feature = "alloc")]
 pub(crate) mod heap;
+#[cfg(feature = "alloc")]
 pub(crate) mod subgraph;
 
 #[cfg(feature = "arena")]
 pub mod idx;
 
+#[cfg(feature = "alloc")]
 use crate::algorithms::sugiyama::crossing::{count_crossings_pair, CrossingReducer};
+#[cfg(feature = "alloc")]
 use crate::graph::Graph;
+#[cfg(feature = "alloc")]
 use alloc::{vec, vec::Vec};
 
+#[cfg(feature = "alloc")]
 impl<'a> Graph<'a> {
     /// Calculate hierarchical levels for all nodes in the graph.
     ///

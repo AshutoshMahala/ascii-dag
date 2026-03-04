@@ -27,10 +27,29 @@
 pub mod arena;
 pub mod csr;
 
+/// Rendering mode for the DAG visualization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// Render chains vertically (takes more vertical space)
+    Vertical,
+
+    /// Render chains horizontally when possible (compact, one-line for simple chains)
+    Horizontal,
+
+    /// Auto-detect: horizontal for simple chains, vertical for complex graphs
+    #[default]
+    Auto,
+}
+
+// Everything below requires the `alloc` feature (Vec, String, HashMap).
+#[cfg(feature = "alloc")]
 use alloc::{vec, string::String, vec::Vec};
 
+#[cfg(feature = "alloc")]
 use crate::algorithms::sugiyama::config::SugiyamaConfig;
+#[cfg(feature = "alloc")]
 use crate::algorithms::sugiyama::crossing::CrossingReducer;
+#[cfg(feature = "alloc")]
 use crate::errors::GraphError;
 
 /// A named subgraph (cluster) for visual grouping.
@@ -56,6 +75,7 @@ use crate::errors::GraphError;
 /// let backend = g.add_subgraph("Backend");
 /// g.put_nodes(&[1, 2]).inside(backend).unwrap();
 /// ```
+#[cfg(feature = "alloc")]
 #[derive(Clone, Debug)]
 pub struct Subgraph<'a> {
     /// Unique identifier (assigned by [`Graph::add_subgraph`]).
@@ -66,25 +86,11 @@ pub struct Subgraph<'a> {
     pub parent_id: Option<usize>,
 }
 
-#[cfg(feature = "std")]
+#[cfg(all(feature = "alloc", feature = "std"))]
 use std::collections::{HashMap, HashSet};
 
-#[cfg(not(feature = "std"))]
+#[cfg(all(feature = "alloc", not(feature = "std")))]
 use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
-
-/// Rendering mode for the DAG visualization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RenderMode {
-    /// Render chains vertically (takes more vertical space)
-    Vertical,
-
-    /// Render chains horizontally when possible (compact, one-line for simple chains)
-    Horizontal,
-
-    /// Auto-detect: horizontal for simple chains, vertical for complex graphs
-    #[default]
-    Auto,
-}
 
 /// A directed graph with ASCII rendering capabilities.
 ///
@@ -108,6 +114,7 @@ pub enum RenderMode {
 /// assert!(output.contains("Start"));
 /// assert!(output.contains("End"));
 /// ```
+#[cfg(feature = "alloc")]
 #[derive(Clone, Default)]
 pub struct Graph<'a> {
     pub(crate) nodes: Vec<(usize, &'a str)>,
@@ -124,6 +131,7 @@ pub struct Graph<'a> {
     pub(crate) next_subgraph_id: usize,                  // Monotonic ID counter
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> Graph<'a> {
     /// Create a new empty DAG.
     ///
@@ -901,11 +909,13 @@ impl<'a> Graph<'a> {
 /// Fluent builder returned by [`Graph::put_nodes`].
 ///
 /// Call [`.inside(subgraph_id)`](NodePlacer::inside) to assign nodes to a cluster.
+#[cfg(feature = "alloc")]
 pub struct NodePlacer<'g, 'a> {
     graph: &'g mut Graph<'a>,
     node_ids: &'g [usize],
 }
 
+#[cfg(feature = "alloc")]
 impl<'g, 'a> NodePlacer<'g, 'a> {
     /// Assign every node in the list to the given subgraph.
     ///
@@ -929,6 +939,7 @@ impl<'g, 'a> NodePlacer<'g, 'a> {
     }
 }
 
+#[cfg(feature = "alloc")]
 /// Fluent builder returned by [`Graph::put_subgraphs`].
 ///
 /// Call [`.inside(parent_id)`](SubgraphPlacer::inside) to nest subgraphs.
@@ -937,6 +948,7 @@ pub struct SubgraphPlacer<'g, 'a> {
     sg_ids: &'g [usize],
 }
 
+#[cfg(feature = "alloc")]
 impl<'g, 'a> SubgraphPlacer<'g, 'a> {
     /// Nest every subgraph in the list inside the given parent.
     ///
@@ -970,6 +982,7 @@ impl<'g, 'a> SubgraphPlacer<'g, 'a> {
 }
 
 #[cfg(test)]
+#[cfg(feature = "alloc")]
 mod tests {
     use super::*;
 

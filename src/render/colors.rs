@@ -151,6 +151,7 @@ pub mod escape {
     }
 
     /// Format a foreground color and write to a string
+    #[cfg(feature = "alloc")]
     #[inline]
     pub fn write_fg256(output: &mut alloc::string::String, color: u8) {
         use core::fmt::Write;

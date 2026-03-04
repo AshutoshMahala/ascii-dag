@@ -20,8 +20,11 @@
 //! );
 //! ```
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+#[cfg(feature = "alloc")]
 use super::crossing::{CrossingReducer, FAST, STANDARD, QUALITY};
+#[cfg(feature = "alloc")]
 use crate::graph::RenderMode;
 
 // ── Pipeline stage enums ─────────────────────────────────────────────────
@@ -108,6 +111,7 @@ pub enum Positioning {
 ///     render_mode: ascii_dag::RenderMode::Auto,
 /// };
 /// ```
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct SugiyamaConfig {
     /// Cycle-breaking strategy.
@@ -126,6 +130,7 @@ pub struct SugiyamaConfig {
     pub render_mode: RenderMode,
 }
 
+#[cfg(feature = "alloc")]
 impl SugiyamaConfig {
     /// Fast preset — minimal crossing reduction, maximum speed.
     pub fn fast() -> Self {
@@ -174,6 +179,7 @@ impl SugiyamaConfig {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl Default for SugiyamaConfig {
     fn default() -> Self {
         Self::standard()
@@ -186,10 +192,12 @@ impl Default for SugiyamaConfig {
 ///
 /// This type alias preserves backward compatibility for code using the
 /// old `LayoutConfig` name.
+#[cfg(feature = "alloc")]
 #[deprecated(since = "0.9.0", note = "renamed to SugiyamaConfig")]
 pub type LayoutConfig = SugiyamaConfig;
 
 #[cfg(test)]
+#[cfg(feature = "alloc")]
 mod tests {
     use super::*;
 

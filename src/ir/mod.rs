@@ -42,17 +42,21 @@ pub(crate) mod arena_builder;
 pub(crate) mod arena_colored;
 pub(crate) mod arena_render;
 
+#[cfg(feature = "alloc")]
 use alloc::vec;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+#[cfg(feature = "alloc")]
 use core::cell::OnceCell;
 
-#[cfg(not(feature = "std"))]
+#[cfg(all(feature = "alloc", not(feature = "std")))]
 use alloc::collections::BTreeMap as HashMap;
-#[cfg(feature = "std")]
+#[cfg(all(feature = "alloc", feature = "std"))]
 use std::collections::HashMap;
 
 /// Spatial index for fast scanline rendering.
 /// Maps a Y coordinate to the nodes and edges that occupy that line.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct LineOccupancy {
     /// Indices of nodes that appear on this line
@@ -61,6 +65,7 @@ pub struct LineOccupancy {
     pub edge_indices: Vec<usize>,
 }
 
+#[cfg(feature = "alloc")]
 impl LineOccupancy {
     fn new() -> Self {
         Self {
@@ -84,6 +89,7 @@ pub enum NodeKind {
 }
 
 /// A node in the laid-out graph with computed position and dimensions.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct LayoutNode<'a> {
     /// Original node ID from the DAG
@@ -107,6 +113,7 @@ pub struct LayoutNode<'a> {
 }
 
 /// How an edge is routed between nodes.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EdgePath {
     /// Direct vertical connection (nodes are horizontally aligned or adjacent levels)
@@ -135,6 +142,7 @@ pub enum EdgePath {
 }
 
 /// A routed edge in the layout with path information.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct LayoutEdge<'a> {
     /// Source node ID
@@ -172,6 +180,7 @@ pub struct LayoutEdge<'a> {
 ///
 /// Produced by the layout algorithm after coordinate assignment.
 /// Renderers use this to draw box-drawing borders with a label.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct SubgraphInfo<'a> {
     /// Subgraph ID (matches [`Subgraph::id`](crate::graph::Subgraph::id)).
@@ -194,6 +203,7 @@ pub struct SubgraphInfo<'a> {
 ///
 /// This is the output of the layout algorithm and input to renderers.
 /// It contains all the information needed to draw the graph in any format.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct LayoutIR<'a> {
     /// All nodes with their computed positions
@@ -216,6 +226,7 @@ pub struct LayoutIR<'a> {
     y_index: OnceCell<Vec<LineOccupancy>>,
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> LayoutIR<'a> {
     /// Get the total width of the layout in character cells.
     #[inline]
@@ -435,6 +446,7 @@ impl<'a> LayoutIR<'a> {
 
 /// Builder for constructing LayoutIR.
 /// Used internally by the layout algorithm.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Default)]
 pub struct LayoutIRBuilder<'a> {
     nodes: Vec<LayoutNode<'a>>,
@@ -446,6 +458,7 @@ pub struct LayoutIRBuilder<'a> {
     levels: Vec<Vec<usize>>,
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> LayoutIRBuilder<'a> {
     /// Create a new builder.
     pub fn new() -> Self {
