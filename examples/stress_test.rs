@@ -31,6 +31,7 @@ impl SimpleRng {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let use_arena = args.iter().any(|a| a == "--arena");
+    let use_csr = args.iter().any(|a| a == "--csr");
     let low_mem = args.iter().any(|a| a == "--low-mem");
     let preset_name = args
         .iter()
@@ -38,8 +39,10 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .map(|s| s.as_str());
 
-    if use_arena {
-        println!("=== ASCII DAG Stress Test Suite (ARENA MODE) ===\n");
+    if use_csr {
+        println!("=== ASCII DAG Stress Test Suite (CSR MODE — true no-alloc pipeline) ===\n");
+    } else if use_arena {
+        println!("=== ASCII DAG Stress Test Suite (ARENA MODE — Graph→arena hybrid) ===\n");
     } else {
         println!("=== ASCII DAG Stress Test Suite (HEAP MODE) ===\n");
     }
@@ -76,7 +79,15 @@ fn main() {
         println!("\n>>> RUNNING: {} <<<\n", name);
         let dag = test_fn();
 
-        if use_arena {
+        if use_csr {
+            #[cfg(feature = "arena")]
+            run_csr_test(name, &dag);
+            #[cfg(not(feature = "arena"))]
+            {
+                let _ = (name, &dag);
+                println!("(arena feature not enabled — skipping)");
+            }
+        } else if use_arena {
             #[cfg(feature = "arena")]
             run_arena_test(name, &dag, low_mem);
             #[cfg(not(feature = "arena"))]
@@ -91,9 +102,11 @@ fn main() {
         println!("------------------------------------------------------------");
     }
 
-    if !use_arena {
-        println!("\nTip: Run with --arena flag to test arena mode:");
+    if !use_arena && !use_csr {
+        println!("\nTip: Run with --arena flag to test arena mode (Graph→arena hybrid):");
         println!("  cargo run --example stress_test --release --features arena -- --arena");
+        println!("\nTip: Run with --csr flag for the true no-alloc CSR pipeline:");
+        println!("  cargo run --example stress_test --release --features arena -- --csr");
         println!("\nTip: Run with presets:");
         println!("  cargo run --example stress_test --release -- --preset fast");
         println!("  cargo run --example stress_test --release -- --preset quality");
@@ -260,6 +273,84 @@ fn run_arena_test(name: &str, dag: &Graph, low_mem: bool) {
         );
     }
     println!(">>> [ARENA] Layout+Rendered in {:?} <<<\n", duration);
+}
+
+/// True no-alloc CSR pipeline: Graph → to_csr → compute_layout_arena_csr → render_to_buffer.
+/// The only heap allocations are the pre-sized Vec<u8> buffers (which on embedded would be static).
+#[cfg(feature = "arena")]
+fn run_csr_test(name: &str, dag: &Graph) {
+    if dag.has_cycle() {
+        println!("(Graph has cycles - CSR layout does not yet support cycle breaking, skipping)");
+        return;
+    }
+
+    // Step 1: Convert Graph → CsrGraph (via arena).
+    // On embedded, you'd build CsrGraph directly via CsrGraphBuilder — no Graph involved.
+    let csr_arena_size = dag.estimate_csr_arena_size() * 2; // 2x margin for alignment
+    let mut csr_buffer = vec![0u8; csr_arena_size];
+    let mut csr_arena = Arena::new(&mut csr_buffer);
+
+    let csr_graph = match dag.to_csr(&mut csr_arena) {
+        Some(g) => g,
+        None => {
+            println!("(Failed to convert Graph → CsrGraph, arena too small: {} KB)", csr_arena_size / 1024);
+            return;
+        }
+    };
+
+    // Step 2: Layout config
+    let config = LayoutConfig::standard();
+
+    // Step 3: Layout arenas
+    let layout_estimate = dag.estimate_layout_arena_size();
+    let arena_size = ((layout_estimate * 6) / 5).max(128 * 1024);
+    let mut temp_buffer = vec![0u8; arena_size];
+    let mut output_buffer = vec![0u8; arena_size];
+
+    let start = Instant::now();
+
+    let mut temp_arena = Arena::new(&mut temp_buffer);
+    let mut output_arena = Arena::new(&mut output_buffer);
+
+    // Step 4: CsrGraph → compute_layout_arena (the real no-alloc layout)
+    let output_len = match csr_graph.compute_layout_arena(&config, &mut temp_arena, &mut output_arena) {
+        Ok(layout) => {
+            if layout.is_empty() {
+                println!("(Layout returned empty)");
+                0
+            } else {
+                // Step 5: Render to buffer (no-alloc rendering)
+                let (render_est, scratch_len) = layout.estimate_render_size();
+                let render_size = render_est + 65536;
+                let line_buffer_size = ((render_est as f64).sqrt() as usize + 1024).max(1024);
+                let mut render_buffer = vec![0u8; render_size];
+                let mut line_buffer = vec![' '; line_buffer_size];
+                let mut scratch_buffer = vec![0usize; scratch_len + 1024];
+
+                let bytes_written = layout
+                    .render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
+                    .unwrap_or(0);
+
+                if !name.contains("Massive") {
+                    if let Ok(s) = std::str::from_utf8(&render_buffer[..bytes_written]) {
+                        println!("{}", s);
+                    }
+                } else {
+                    println!("(Output suppressed. Length: {} bytes)", bytes_written);
+                }
+                bytes_written
+            }
+        }
+        Err(e) => {
+            println!("(CSR layout failed: {:?}, arena size: {} KB)", e, arena_size / 1024);
+            0
+        }
+    };
+
+    let duration = start.elapsed();
+    let total_kb = (csr_arena_size + arena_size * 2) as f64 / 1024.0;
+    println!(">>> [CSR] Layout+Rendered in {:?} (total buffers: {:.1} KB, output: {} bytes) <<<\n",
+        duration, total_kb, output_len);
 }
 
 fn test_double_helix() -> Graph<'static> {

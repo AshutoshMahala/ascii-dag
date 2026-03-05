@@ -306,8 +306,13 @@ impl<'a> Graph<'a> {
         for (idx, &(id, label)) in self.nodes.iter().enumerate() {
             let (level, pos, x, width) = temps.real_coords[idx];
             let y = level_y_offsets[level];
+            let kind = if self.is_auto_created(id) {
+                crate::ir::NodeKind::Implicit
+            } else {
+                crate::ir::NodeKind::Explicit
+            };
 
-            builder.add_node(id, label, x, y, width, self.get_node_height(idx), level, pos)
+            builder.add_node(id, label, x, y, width, self.get_node_height(idx), level, pos, kind)
                 .ok_or(GraphError::ArenaOom)?;
             builder.add_node_to_level(level, idx)
                 .ok_or(GraphError::ArenaOom)?;

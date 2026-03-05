@@ -33,10 +33,12 @@ const NODE_WIDTH: usize = 3;
 const NODE_HEIGHT: usize = 4;
 
 /// Edge data stride: fields per edge
-const EDGE_STRIDE: usize = 2;
+const EDGE_STRIDE: usize = 4;
 /// Edge field offsets
 const EDGE_FROM: usize = 0;
 const EDGE_TO: usize = 1;
+const EDGE_LABEL_PTR: usize = 2;
+const EDGE_LABEL_LEN: usize = 3;
 
 /// CSR (Compressed Sparse Row) graph representation.
 ///
@@ -160,6 +162,26 @@ impl<'a> CsrGraph<'a> {
         let from = self.edges[index * EDGE_STRIDE + EDGE_FROM] as usize;
         let to = self.edges[index * EDGE_STRIDE + EDGE_TO] as usize;
         (from, to)
+    }
+
+    /// Get edge label by index. Returns empty string if no label.
+    #[inline]
+    pub fn edge_label(&self, index: usize) -> &str {
+        let ptr = self.edges[index * EDGE_STRIDE + EDGE_LABEL_PTR] as usize;
+        let len = self.edges[index * EDGE_STRIDE + EDGE_LABEL_LEN] as usize;
+        if len == 0 {
+            return "";
+        }
+        let bytes = &self.labels[ptr..ptr + len];
+        core::str::from_utf8(bytes).unwrap_or("")
+    }
+
+    /// Check if any edge has a label.
+    #[inline]
+    pub fn has_edge_labels(&self) -> bool {
+        (0..self.edge_count).any(|i| {
+            self.edges[i * EDGE_STRIDE + EDGE_LABEL_LEN] != 0
+        })
     }
 
     /// Iterate over all edges as (from_index, to_index) pairs.
@@ -401,6 +423,11 @@ impl<'a> CsrGraphBuilder<'a> {
     /// To get the index, use the return value of add_node.
     /// This is safer and faster than looking up IDs.
     pub fn add_edge(&mut self, from_idx: usize, to_idx: usize) -> Option<()> {
+        self.add_edge_with_label(from_idx, to_idx, "")
+    }
+
+    /// Add a labeled edge between two node INDICES.
+    pub fn add_edge_with_label(&mut self, from_idx: usize, to_idx: usize, label: &str) -> Option<()> {
         if self.current_edge_count >= self.max_edges {
             return None;
         }
@@ -411,10 +438,25 @@ impl<'a> CsrGraphBuilder<'a> {
 
         let idx = self.current_edge_count;
 
-        // Store edge data temporarily in the edges array
-        // We cast to u32 here - this panics if user has > 4 billion nodes, which is acceptable
+        // Store edge data
         self.edges[idx * EDGE_STRIDE + EDGE_FROM] = from_idx as u32;
         self.edges[idx * EDGE_STRIDE + EDGE_TO] = to_idx as u32;
+
+        // Store edge label (shares node label storage)
+        if !label.is_empty() {
+            let label_len = label.len();
+            if self.current_label_offset + label_len > self.labels.len() {
+                return None;
+            }
+            self.labels[self.current_label_offset..self.current_label_offset + label_len]
+                .copy_from_slice(label.as_bytes());
+            self.edges[idx * EDGE_STRIDE + EDGE_LABEL_PTR] = self.current_label_offset as u32;
+            self.edges[idx * EDGE_STRIDE + EDGE_LABEL_LEN] = label_len as u32;
+            self.current_label_offset += label_len;
+        } else {
+            self.edges[idx * EDGE_STRIDE + EDGE_LABEL_PTR] = 0;
+            self.edges[idx * EDGE_STRIDE + EDGE_LABEL_LEN] = 0;
+        }
 
         self.current_edge_count += 1;
         Some(())
@@ -569,8 +611,12 @@ impl<'a> super::Graph<'a> {
         let node_count = self.nodes.len();
         let edge_count = self.edges.len();
 
-        // Calculate total label bytes needed
-        let total_label_bytes: usize = self.nodes.iter().map(|(_, label)| label.len()).sum();
+        // Calculate total label bytes needed (node + edge labels share storage)
+        let node_label_bytes: usize = self.nodes.iter().map(|(_, label)| label.len()).sum();
+        let edge_label_bytes: usize = self.edges.iter()
+            .filter_map(|(_, _, label)| label.map(|l| l.len()))
+            .sum();
+        let total_label_bytes: usize = node_label_bytes + edge_label_bytes;
 
         // Allocate all memory from arena using raw pointers
         // This avoids the borrow checker issue with multiple mutable borrows
@@ -635,7 +681,7 @@ impl<'a> super::Graph<'a> {
         // Zero parents_offsets to use as counters
         parents_offsets.fill(0);
 
-        for (edge_idx, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
+        for (edge_idx, &(from_id, to_id, edge_label)) in self.edges.iter().enumerate() {
             if let (Some(from_idx), Some(to_idx)) =
                 (self.node_index(from_id), self.node_index(to_id))
             {
@@ -649,6 +695,19 @@ impl<'a> super::Graph<'a> {
                 // Also copy edge data
                 edges[edge_idx * EDGE_STRIDE + EDGE_FROM] = from_idx as u32;
                 edges[edge_idx * EDGE_STRIDE + EDGE_TO] = to_idx as u32;
+
+                // Copy edge label if present
+                if let Some(lbl) = edge_label {
+                    let lbl_bytes = lbl.as_bytes();
+                    labels[label_offset..label_offset + lbl_bytes.len()]
+                        .copy_from_slice(lbl_bytes);
+                    edges[edge_idx * EDGE_STRIDE + EDGE_LABEL_PTR] = label_offset as u32;
+                    edges[edge_idx * EDGE_STRIDE + EDGE_LABEL_LEN] = lbl_bytes.len() as u32;
+                    label_offset += lbl_bytes.len();
+                } else {
+                    edges[edge_idx * EDGE_STRIDE + EDGE_LABEL_PTR] = 0;
+                    edges[edge_idx * EDGE_STRIDE + EDGE_LABEL_LEN] = 0;
+                }
             }
         }
 
@@ -710,7 +769,10 @@ impl<'a> super::Graph<'a> {
 
     /// Estimate the arena size needed for CSR conversion.
     pub fn estimate_csr_arena_size(&self) -> usize {
-        let label_bytes: usize = self.nodes.iter().map(|(_, label)| label.len()).sum();
-        CsrGraph::required_arena_size(self.nodes.len(), self.edges.len(), label_bytes)
+        let node_label_bytes: usize = self.nodes.iter().map(|(_, label)| label.len()).sum();
+        let edge_label_bytes: usize = self.edges.iter()
+            .filter_map(|(_, _, label)| label.map(|l| l.len()))
+            .sum();
+        CsrGraph::required_arena_size(self.nodes.len(), self.edges.len(), node_label_bytes + edge_label_bytes)
     }
 }

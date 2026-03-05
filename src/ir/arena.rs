@@ -26,6 +26,7 @@
 
 // Re-export builder and estimate function for backwards compatibility
 pub use super::arena_builder::LayoutIRArenaBuilder;
+use crate::ir::NodeKind;
 
 /// Node data stored as flat struct (no references to heap).
 #[derive(Debug, Clone, Copy)]
@@ -50,6 +51,8 @@ pub struct LayoutNodeArena {
     pub level: usize,
     /// Position within the level (0-indexed from left)
     pub level_position: usize,
+    /// Classification: explicit, implicit, or dummy
+    pub kind: NodeKind,
 }
 
 /// Edge routing type (no heap allocation version).

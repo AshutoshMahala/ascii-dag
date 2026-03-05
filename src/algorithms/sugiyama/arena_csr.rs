@@ -8,6 +8,7 @@ use crate::graph::csr::CsrGraph;
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
 use super::arena::LayoutTemps;
 use super::config::LayoutConfig;
+use super::crossing::CrossingReducer;
 use crate::errors::GraphError;
 
 // Import configurable index types
@@ -30,7 +31,7 @@ const MAX_LEVELS: usize = usize::MAX;
 /// The `config` parameter controls the layout pipeline (crossing reduction, spacing, etc.).
 pub fn compute_layout_arena_csr<'b>(
     graph: &CsrGraph<'_>,
-    _config: &LayoutConfig<'_>,
+    config: &LayoutConfig<'_>,
     temp_arena: &mut Arena<'_>,
     output_arena: &'b mut Arena<'b>,
 ) -> Result<LayoutIRArena<'b>, GraphError> {
@@ -43,10 +44,16 @@ pub fn compute_layout_arena_csr<'b>(
         return Err(GraphError::ExceedsMaxNodes { count: max_count, max: MAX_NODES });
     }
 
-    // Calculate total label bytes (iterating CSR is cheap)
+    // Calculate total label bytes (node + edge labels, iterating CSR is cheap)
     let mut total_label_bytes = 0;
     for i in 0..node_count {
         total_label_bytes += graph.node_label(i).len();
+    }
+    let has_labeled_edges = graph.has_edge_labels();
+    if has_labeled_edges {
+        for i in 0..edge_count {
+            total_label_bytes += graph.edge_label(i).len();
+        }
     }
 
     // Estimate max waypoints: for skip-level edges only
@@ -71,6 +78,41 @@ pub fn compute_layout_arena_csr<'b>(
         temps.level_counts,
         temps.vnode_data,
         max_level,
+    );
+
+    // Populate edge_indices for crossing reduction
+    for (i, (from, to)) in graph.edges_iter().enumerate() {
+        if i < temps.edge_indices.len() {
+            temps.edge_indices[i] = (from as Idx, to as Idx);
+        }
+    }
+
+    // Populate level_vdummy_counts for crossing reduction
+    temps.level_vdummy_counts.fill(0);
+    for level in 0..=(max_level as usize) {
+        if level + 1 >= temps.vlevel_offsets.len() { break; }
+        let start = temps.vlevel_offsets[level] as usize;
+        let end = temps.vlevel_offsets[level + 1] as usize;
+        for pos in start..end {
+            if pos * 2 + 1 < temps.vnode_data.len() && temps.vnode_data[pos * 2] == 1 {
+                if level < temps.level_vdummy_counts.len() {
+                    temps.level_vdummy_counts[level] += 1;
+                }
+            }
+        }
+    }
+
+    // Step 4: Crossing reduction
+    reduce_crossings_csr(
+        graph,
+        config.crossing_pipeline(),
+        temps.vlevel_offsets,
+        temps.vnode_data,
+        max_level as usize,
+        temps.medians,
+        temps.positions,
+        temps.edge_indices,
+        temps.level_vdummy_counts,
     );
 
     // Step 5: Assign x-coordinates
@@ -170,7 +212,7 @@ pub fn compute_layout_arena_csr<'b>(
     }
 
     temps.level_y_offsets.fill(0);
-    let routing_overhead: usize = 2;
+    let routing_overhead: usize = if has_labeled_edges { 4 } else { 2 };
     let mut current_offset = 0;
 
     for level in 0..=max_level as usize {
@@ -193,8 +235,9 @@ pub fn compute_layout_arena_csr<'b>(
         max_level as usize + 1,
     ).ok_or(GraphError::BuilderFailed)?;
 
-    // Add buffer for edge routing (+4)
-    builder.set_dimensions(max_width as usize + 4, total_height);
+    // Add buffer for edge routing (+4) plus label margin
+    let label_margin = if has_labeled_edges { 8 } else { 0 };
+    builder.set_dimensions(max_width as usize + 4 + label_margin, total_height);
     builder.set_level_count(max_level as usize + 1);
 
     // Add nodes
@@ -213,6 +256,7 @@ pub fn compute_layout_arena_csr<'b>(
             graph.node_height(idx),
             level as usize,
             pos as usize,
+            crate::ir::NodeKind::Explicit,
         ).ok_or(GraphError::ArenaOom)?;
         builder.add_node_to_level(level as usize, idx)
             .ok_or(GraphError::ArenaOom)?;
@@ -268,8 +312,6 @@ pub fn compute_layout_arena_csr<'b>(
             0
         };
 
-        // CsR graphs don't support edge labels currently
-        let has_labeled_edges = false;
         let edge_start_row = 1 + if has_labeled_edges { 1 } else { 0 };
 
         let path = if to_level == from_level + 1 {
@@ -333,6 +375,29 @@ pub fn compute_layout_arena_csr<'b>(
             EdgePathArena::Direct
         };
 
+        // Store edge label if present
+        let edge_label_text = graph.edge_label(edge_idx);
+        let (e_label_offset, e_label_len, e_label_x, e_label_y) =
+            if !edge_label_text.is_empty() {
+                if let Some((offset, len)) = builder.add_edge_label(edge_label_text) {
+                    let l_y = from_y + 2;
+                    let edge_x_at_label = match &path {
+                        EdgePathArena::Direct => from_x,
+                        EdgePathArena::Corner { horizontal_y } => {
+                            if l_y <= *horizontal_y { from_x } else { to_x }
+                        }
+                        EdgePathArena::MultiSegment { .. } => from_x,
+                    };
+                    let label_len_with_quotes = len + 2;
+                    let l_x = edge_x_at_label.saturating_sub(label_len_with_quotes / 2);
+                    (offset, len, l_x, l_y)
+                } else {
+                    (0, 0, 0, 0)
+                }
+            } else {
+                (0, 0, 0, 0)
+            };
+
         builder.add_edge(LayoutEdgeArena {
             from_id,
             to_id,
@@ -343,10 +408,10 @@ pub fn compute_layout_arena_csr<'b>(
 
             path,
             edge_index: edge_idx,
-            label_offset: 0,
-            label_len: 0,
-            label_x: 0,
-            label_y: 0,
+            label_offset: e_label_offset,
+            label_len: e_label_len,
+            label_x: e_label_x,
+            label_y: e_label_y,
             // Edge draws between from_y+1 and to_y-1 (below source, above target)
             min_y: from_y + 1,
             max_y: to_y.saturating_sub(1),
@@ -373,7 +438,7 @@ fn alloc_layout_temps_csr<'b>(
     let max_dummy_waypoints = (edge_count * 4).min(500000);
 
     let (node_levels_ptr, _) = arena.alloc_raw_uninit::<Idx>(node_count)?;
-    let (edge_indices_ptr, _) = arena.alloc_raw_uninit::<(Idx, Idx)>(0)?; // Optimization for CSR
+    let (edge_indices_ptr, _) = arena.alloc_raw_uninit::<(Idx, Idx)>(edge_count)?;
     let (vlevel_offsets_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (level_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels)?;
     let (vnode_data_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_vnodes * 2)?;
@@ -403,7 +468,7 @@ fn alloc_layout_temps_csr<'b>(
     unsafe {
         Some(LayoutTemps {
             node_levels: core::slice::from_raw_parts_mut(node_levels_ptr, node_count),
-            edge_indices: core::slice::from_raw_parts_mut(edge_indices_ptr, 0),
+            edge_indices: core::slice::from_raw_parts_mut(edge_indices_ptr, edge_count),
             vlevel_offsets: core::slice::from_raw_parts_mut(vlevel_offsets_ptr, max_levels + 1),
             level_counts: core::slice::from_raw_parts_mut(level_counts_ptr, max_levels),
             vnode_data: core::slice::from_raw_parts_mut(vnode_data_ptr, max_vnodes * 2),
@@ -729,6 +794,406 @@ fn build_dummy_positions_csr(
                         dummy_data[write_idx] = (level as Idx, x as Coord);
                         edge_dummy_counts[edge_idx] += 1;
                     }
+                }
+            }
+        }
+    }
+}
+
+// ---------- Crossing reduction for CSR path ----------
+
+/// Crossing reduction operating on flat virtual-level arrays, specialized for CsrGraph.
+///
+/// Mirrors `Graph::reduce_crossings_arena` but uses CsrGraph adjacency (`children`/`parents`
+/// returning `&[u32]`) instead of heap `Vec<Vec<usize>>`.
+#[allow(clippy::too_many_arguments)]
+fn reduce_crossings_csr(
+    graph: &CsrGraph<'_>,
+    crossing_pipeline: &[CrossingReducer],
+    vlevel_offsets: &[Idx],
+    vnode_data: &mut [Idx],
+    max_level: usize,
+    medians: &mut [(Idx, u32)],
+    positions: &mut [Idx],
+    edge_indices: &[(Idx, Idx)],
+    level_vdummy_counts: &[Idx],
+) {
+    // One-time init: positions is alloc_raw_uninit, fill with sentinel
+    for p in positions.iter_mut() { *p = Idx::MAX; }
+
+    for reducer in crossing_pipeline {
+        match reducer {
+            CrossingReducer::Median(passes) => {
+                for _ in 0..*passes {
+                    // Top-down pass
+                    for level in 1..=max_level {
+                        median_reorder_csr_level(
+                            graph, vlevel_offsets, vnode_data, edge_indices,
+                            level, level - 1, true, medians, positions,
+                            level_vdummy_counts,
+                        );
+                    }
+                    // Bottom-up pass
+                    for level in (0..max_level).rev() {
+                        median_reorder_csr_level(
+                            graph, vlevel_offsets, vnode_data, edge_indices,
+                            level, level + 1, false, medians, positions,
+                            level_vdummy_counts,
+                        );
+                    }
+                }
+            }
+            CrossingReducer::AdjacentExchange(passes) => {
+                for _ in 0..*passes {
+                    for level in 1..=max_level {
+                        adjacent_exchange_csr_level(
+                            graph, vlevel_offsets, vnode_data, edge_indices,
+                            level, level - 1, true, positions,
+                            level_vdummy_counts,
+                        );
+                    }
+                    for level in (0..max_level).rev() {
+                        adjacent_exchange_csr_level(
+                            graph, vlevel_offsets, vnode_data, edge_indices,
+                            level, level + 1, false, positions,
+                            level_vdummy_counts,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Median-heuristic reorder of one level (CSR version).
+#[allow(clippy::too_many_arguments)]
+fn median_reorder_csr_level(
+    graph: &CsrGraph<'_>,
+    vlevel_offsets: &[Idx],
+    vnode_data: &mut [Idx],
+    edge_indices: &[(Idx, Idx)],
+    level: usize,
+    adj_level: usize,
+    use_parents: bool,
+    medians: &mut [(Idx, u32)],
+    positions: &mut [Idx],
+    level_vdummy_counts: &[Idx],
+) {
+    let cur_start = vlevel_offsets[level] as usize;
+    let cur_end = vlevel_offsets[level + 1] as usize;
+    let count = cur_end - cur_start;
+    if count < 2 { return; }
+
+    let adj_start = vlevel_offsets[adj_level] as usize;
+    let adj_end = vlevel_offsets[adj_level + 1] as usize;
+
+    let adj_has_dummies = adj_level < level_vdummy_counts.len()
+        && level_vdummy_counts[adj_level] > 0;
+
+    // Build position map for real nodes in adjacent level (sparse-clear optimized)
+    let adj_size = adj_end - adj_start;
+    let mut written_buf: [usize; 512] = [0; 512];
+    let mut written_count: usize = 0;
+    let use_sparse_clear = adj_size <= 512;
+
+    if !use_sparse_clear {
+        for p in positions.iter_mut() { *p = Idx::MAX; }
+    }
+    for adj_pos in adj_start..adj_end {
+        if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+        if vnode_data[adj_pos * 2] == 0 {
+            let node_idx = vnode_data[adj_pos * 2 + 1] as usize;
+            if node_idx < positions.len() {
+                positions[node_idx] = (adj_pos - adj_start) as Idx;
+                if use_sparse_clear && written_count < 512 {
+                    written_buf[written_count] = node_idx;
+                    written_count += 1;
+                }
+            }
+        }
+    }
+
+    // Compute median for each node on this level
+    for i in 0..count {
+        let pos = cur_start + i;
+        if pos * 2 + 1 >= vnode_data.len() {
+            medians[i] = (i as Idx, (i as u32) << 10);
+            continue;
+        }
+        let vtype = vnode_data[pos * 2];
+        let vidx = vnode_data[pos * 2 + 1] as usize;
+
+        let mut neigh: [usize; 16] = [0; 16];
+        let mut neigh_count: usize = 0;
+
+        if vtype == 0 {
+            // Real node — CsrGraph adjacency
+            let neighbours = if use_parents {
+                graph.parents(vidx)
+            } else {
+                graph.children(vidx)
+            };
+            for &n_idx in neighbours {
+                let n = n_idx as usize;
+                if n < positions.len() && positions[n] != Idx::MAX && neigh_count < 16 {
+                    neigh[neigh_count] = positions[n] as usize;
+                    neigh_count += 1;
+                }
+            }
+            if adj_has_dummies {
+                for adj_pos in adj_start..adj_end {
+                    if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+                    if vnode_data[adj_pos * 2] == 1 {
+                        let eidx = vnode_data[adj_pos * 2 + 1] as usize;
+                        if eidx < edge_indices.len() {
+                            let (from_idx, to_idx) = edge_indices[eidx];
+                            if (from_idx as usize == vidx || to_idx as usize == vidx)
+                                && neigh_count < 16
+                            {
+                                neigh[neigh_count] = adj_pos - adj_start;
+                                neigh_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        } else if vidx < edge_indices.len() {
+            // Dummy node
+            let (from_idx, to_idx) = edge_indices[vidx];
+            for &endpoint in &[from_idx as usize, to_idx as usize] {
+                if endpoint < positions.len() && positions[endpoint] != Idx::MAX
+                    && neigh_count < 16
+                {
+                    neigh[neigh_count] = positions[endpoint] as usize;
+                    neigh_count += 1;
+                }
+            }
+            if adj_has_dummies {
+                for adj_pos in adj_start..adj_end {
+                    if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+                    if vnode_data[adj_pos * 2] == 1
+                        && vnode_data[adj_pos * 2 + 1] as usize == vidx
+                        && neigh_count < 16
+                    {
+                        neigh[neigh_count] = adj_pos - adj_start;
+                        neigh_count += 1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let median_fixed = if neigh_count == 0 {
+            (i as u32) << 10
+        } else {
+            neigh[..neigh_count].sort_unstable();
+            if neigh_count % 2 == 1 {
+                (neigh[neigh_count / 2] as u32) << 10
+            } else {
+                let mid = neigh_count / 2;
+                let sum = neigh[mid - 1] + neigh[mid];
+                (sum as u32) * 512
+            }
+        };
+        medians[i] = (i as Idx, median_fixed);
+    }
+
+    // Sort by median
+    medians[..count].sort_by_key(|m| m.1);
+
+    // Gather sorted vnode_data into medians buffer
+    for j in 0..count {
+        let orig_pos = medians[j].0 as usize;
+        let src = cur_start + orig_pos;
+        let vtype = vnode_data[src * 2];
+        let vidx = vnode_data[src * 2 + 1] as u32;
+        medians[j] = (vtype, vidx);
+    }
+
+    // Write sorted data back
+    for j in 0..count {
+        let dst = cur_start + j;
+        vnode_data[dst * 2] = medians[j].0;
+        vnode_data[dst * 2 + 1] = medians[j].1 as Idx;
+    }
+
+    // Sparse-clear
+    if use_sparse_clear {
+        for i in 0..written_count {
+            positions[written_buf[i]] = Idx::MAX;
+        }
+    }
+}
+
+/// Adjacent exchange on one level (CSR version).
+#[allow(clippy::too_many_arguments)]
+fn adjacent_exchange_csr_level(
+    graph: &CsrGraph<'_>,
+    vlevel_offsets: &[Idx],
+    vnode_data: &mut [Idx],
+    edge_indices: &[(Idx, Idx)],
+    level: usize,
+    adj_level: usize,
+    use_parents: bool,
+    positions: &mut [Idx],
+    level_vdummy_counts: &[Idx],
+) {
+    let cur_start = vlevel_offsets[level] as usize;
+    let cur_end = vlevel_offsets[level + 1] as usize;
+    let count = cur_end - cur_start;
+    if count < 2 { return; }
+
+    let adj_has_dummies = adj_level < level_vdummy_counts.len()
+        && level_vdummy_counts[adj_level] > 0;
+
+    let adj_start = vlevel_offsets[adj_level] as usize;
+    let adj_end = vlevel_offsets[adj_level + 1] as usize;
+
+    // Build position map (sparse-clear optimized)
+    let adj_size = adj_end - adj_start;
+    let mut written_buf: [usize; 512] = [0; 512];
+    let mut written_count: usize = 0;
+    let use_sparse_clear = adj_size <= 512;
+
+    if !use_sparse_clear {
+        for p in positions.iter_mut() { *p = Idx::MAX; }
+    }
+    for adj_pos in adj_start..adj_end {
+        if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+        if vnode_data[adj_pos * 2] == 0 {
+            let node_idx = vnode_data[adj_pos * 2 + 1] as usize;
+            if node_idx < positions.len() {
+                positions[node_idx] = (adj_pos - adj_start) as Idx;
+                if use_sparse_clear && written_count < 512 {
+                    written_buf[written_count] = node_idx;
+                    written_count += 1;
+                }
+            }
+        }
+    }
+
+    let mut u_neigh: [usize; 16] = [0; 16];
+    let mut v_neigh: [usize; 16] = [0; 16];
+
+    for i in 0..count - 1 {
+        let u_pos = cur_start + i;
+        let v_pos = cur_start + i + 1;
+        if u_pos * 2 + 1 >= vnode_data.len() || v_pos * 2 + 1 >= vnode_data.len() {
+            break;
+        }
+
+        let mut u_count = 0;
+        let mut v_count = 0;
+
+        gather_csr_neighbours(
+            graph, vnode_data, edge_indices, positions,
+            u_pos, adj_start, adj_end, use_parents, adj_has_dummies,
+            &mut u_neigh, &mut u_count,
+        );
+        gather_csr_neighbours(
+            graph, vnode_data, edge_indices, positions,
+            v_pos, adj_start, adj_end, use_parents, adj_has_dummies,
+            &mut v_neigh, &mut v_count,
+        );
+
+        let mut cross_uv: usize = 0;
+        let mut cross_vu: usize = 0;
+        for &a in &u_neigh[..u_count] {
+            for &b in &v_neigh[..v_count] {
+                if a > b { cross_uv += 1; }
+                else if a < b { cross_vu += 1; }
+            }
+        }
+
+        if cross_vu < cross_uv {
+            let u_type = vnode_data[u_pos * 2];
+            let u_idx = vnode_data[u_pos * 2 + 1];
+            vnode_data[u_pos * 2] = vnode_data[v_pos * 2];
+            vnode_data[u_pos * 2 + 1] = vnode_data[v_pos * 2 + 1];
+            vnode_data[v_pos * 2] = u_type;
+            vnode_data[v_pos * 2 + 1] = u_idx;
+        }
+    }
+
+    if use_sparse_clear {
+        for i in 0..written_count {
+            positions[written_buf[i]] = Idx::MAX;
+        }
+    }
+}
+
+/// Gather neighbour positions for a single vnode (CSR version).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn gather_csr_neighbours(
+    graph: &CsrGraph<'_>,
+    vnode_data: &[Idx],
+    edge_indices: &[(Idx, Idx)],
+    positions: &[Idx],
+    pos: usize,
+    adj_start: usize,
+    adj_end: usize,
+    use_parents: bool,
+    adj_has_dummies: bool,
+    out: &mut [usize; 16],
+    out_count: &mut usize,
+) {
+    *out_count = 0;
+    let vtype = vnode_data[pos * 2];
+    let vidx = vnode_data[pos * 2 + 1] as usize;
+
+    if vtype == 0 {
+        // Real node — CsrGraph adjacency (returns &[u32])
+        let neighbours = if use_parents {
+            graph.parents(vidx)
+        } else {
+            graph.children(vidx)
+        };
+        for &n_idx in neighbours {
+            let n = n_idx as usize;
+            if n < positions.len() && positions[n] != Idx::MAX && *out_count < 16 {
+                out[*out_count] = positions[n] as usize;
+                *out_count += 1;
+            }
+        }
+        if adj_has_dummies {
+            for adj_pos in adj_start..adj_end {
+                if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+                if vnode_data[adj_pos * 2] == 1 {
+                    let eidx = vnode_data[adj_pos * 2 + 1] as usize;
+                    if eidx < edge_indices.len() {
+                        let (from_idx, to_idx) = edge_indices[eidx];
+                        if (from_idx as usize == vidx || to_idx as usize == vidx)
+                            && *out_count < 16
+                        {
+                            out[*out_count] = (adj_pos - adj_start) as usize;
+                            *out_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    } else if vidx < edge_indices.len() {
+        // Dummy node
+        let (from_idx, to_idx) = edge_indices[vidx];
+        for &endpoint in &[from_idx as usize, to_idx as usize] {
+            if endpoint < positions.len() && positions[endpoint] != Idx::MAX
+                && *out_count < 16
+            {
+                out[*out_count] = positions[endpoint] as usize;
+                *out_count += 1;
+            }
+        }
+        if adj_has_dummies {
+            for adj_pos in adj_start..adj_end {
+                if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+                if vnode_data[adj_pos * 2] == 1
+                    && vnode_data[adj_pos * 2 + 1] as usize == vidx
+                    && *out_count < 16
+                {
+                    out[*out_count] = (adj_pos - adj_start) as usize;
+                    *out_count += 1;
+                    break;
                 }
             }
         }

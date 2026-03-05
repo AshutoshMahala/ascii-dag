@@ -97,6 +97,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         height: usize,
         level: usize,
         level_position: usize,
+        kind: crate::ir::NodeKind,
     ) -> Option<usize> {
         if self.node_count >= self.nodes.len() {
             return None;
@@ -122,6 +123,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             center_x: x + width / 2,
             level,
             level_position,
+            kind,
         };
 
         self.label_offset += label_bytes.len();
