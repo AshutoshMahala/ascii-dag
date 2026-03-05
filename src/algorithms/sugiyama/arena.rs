@@ -255,18 +255,33 @@ impl<'a> Graph<'a> {
         }
 
         // Step 9: Build per-level Y offsets (Variable Row Heights)
+        // Compute per-level max node height
+        // Repurpose level_vdummy_counts for max_node_heights (no longer needed)
+        let max_node_heights = &mut temps.level_vdummy_counts[..max_level + 1];
+        for h in max_node_heights.iter_mut() {
+            *h = 1 as Idx;
+        }
+        for (idx, _) in self.nodes.iter().enumerate() {
+            let level = temps.real_coords[idx].0;
+            let h = self.get_node_height(idx) as Idx;
+            if level < max_node_heights.len() && h > max_node_heights[level] {
+                max_node_heights[level] = h;
+            }
+        }
+
         temps.level_y_offsets.fill(0);
         let level_y_offsets = &mut temps.level_y_offsets;
 
         let mut current_offset = 0;
-        let base_lines = if has_labeled_edges { 5 } else { 3 };
+        let routing_overhead: usize = if has_labeled_edges { 4 } else { 2 };
 
         for level in 0..=max_level {
             level_y_offsets[level] = current_offset;
+            let node_height = max_node_heights[level] as usize;
 
             let slots = source_counts[level].max(dummy_counts[level]);
-            let height = base_lines + slots.saturating_sub(1);
-            current_offset += height as usize;
+            let height = node_height + routing_overhead + (slots as usize).saturating_sub(1);
+            current_offset += height;
         }
         level_y_offsets[max_level + 1] = current_offset; // Total height
         let total_height = current_offset;
@@ -292,7 +307,7 @@ impl<'a> Graph<'a> {
             let (level, pos, x, width) = temps.real_coords[idx];
             let y = level_y_offsets[level];
 
-            builder.add_node(id, label, x, y, width, level, pos)
+            builder.add_node(id, label, x, y, width, self.get_node_height(idx), level, pos)
                 .ok_or(GraphError::ArenaOom)?;
             builder.add_node_to_level(level, idx)
                 .ok_or(GraphError::ArenaOom)?;
@@ -308,6 +323,7 @@ impl<'a> Graph<'a> {
 
         temps.level_dummy_next.fill(0);
         let level_dummy_next = &mut temps.level_dummy_next;
+        let max_node_heights = &temps.level_vdummy_counts;
 
         // Add edges
         for (edge_idx, &(from_id, to_id, _label)) in self.edges.iter().enumerate() {
@@ -323,7 +339,9 @@ impl<'a> Graph<'a> {
 
                 let from_x = from_x_base + from_width / 2;
                 let to_x = to_x_base + to_width / 2;
-                let from_y = level_y_offsets[from_level];
+                // from_y = bottom of source node (top + max_node_height - 1)
+                let from_y = level_y_offsets[from_level]
+                    + max_node_heights[from_level] as usize - 1;
                 let to_y = level_y_offsets[to_level];
 
                 // Assign a horizontal slot for this source node
@@ -379,7 +397,11 @@ impl<'a> Graph<'a> {
 
                             waypoint_buf[i] = (
                                 x as usize,
-                                level_y_offsets[lvl_idx] + edge_start_row + dummy_slot as usize,
+                                level_y_offsets[lvl_idx]
+                                    + max_node_heights.get(lvl_idx).copied().unwrap_or(1) as usize
+                                    - 1
+                                    + edge_start_row
+                                    + dummy_slot as usize,
                             );
                         }
 

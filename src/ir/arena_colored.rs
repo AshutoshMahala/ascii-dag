@@ -121,8 +121,8 @@ impl<'a> LayoutIRArena<'a> {
 
             // 3. Paint nodes (no color - clears color at node positions)
             for (node_idx, node) in self.nodes().iter().enumerate() {
-                if node.y == y {
-                    self.paint_node_colored(line_buffer, color_buffer, node_idx, node);
+                if y >= node.y && y < node.y + node.height {
+                    self.paint_node_colored(line_buffer, color_buffer, node_idx, node, y);
                 }
             }
 
@@ -232,8 +232,8 @@ impl<'a> LayoutIRArena<'a> {
 
             // 3. Paint nodes (no color)
             for (node_idx, node) in self.nodes().iter().enumerate() {
-                if node.y == y {
-                    self.paint_node_colored(line_buffer, color_buffer, node_idx, node);
+                if y >= node.y && y < node.y + node.height {
+                    self.paint_node_colored(line_buffer, color_buffer, node_idx, node, y);
                 }
             }
 
@@ -402,31 +402,57 @@ impl<'a> LayoutIRArena<'a> {
         color_buffer: &mut [u8],
         node_idx: usize,
         node: &LayoutNodeArena,
+        y: usize,
     ) {
-        let label = self.node_label(node_idx);
         let x = node.x;
+        let row = y - node.y;
 
-        // Opening bracket (no color)
-        if x < line_buffer.len() {
-            line_buffer[x] = '[';
-            color_buffer[x] = 0;
-        }
+        if row == 0 {
+            // First row: draw [Label]
+            let label = self.node_label(node_idx);
 
-        // Label characters (no color)
-        for (i, c) in label.chars().enumerate() {
-            let px = x + 1 + i;
-            if px < line_buffer.len() {
-                line_buffer[px] = c;
-                color_buffer[px] = 0;
+            // Opening bracket (no color)
+            if x < line_buffer.len() {
+                line_buffer[x] = '[';
+                color_buffer[x] = 0;
             }
-        }
 
-        // Closing bracket (no color)
-        if node.width > 0 {
-            let close_x = x + node.width - 1;
-            if close_x < line_buffer.len() {
-                line_buffer[close_x] = ']';
-                color_buffer[close_x] = 0;
+            // Label characters (no color)
+            for (i, c) in label.chars().enumerate() {
+                let px = x + 1 + i;
+                if px < line_buffer.len() {
+                    line_buffer[px] = c;
+                    color_buffer[px] = 0;
+                }
+            }
+
+            // Closing bracket (no color)
+            if node.width > 0 {
+                let close_x = x + node.width - 1;
+                if close_x < line_buffer.len() {
+                    line_buffer[close_x] = ']';
+                    color_buffer[close_x] = 0;
+                }
+            }
+        } else {
+            // Subsequent rows: blank body (no color)
+            if x < line_buffer.len() {
+                line_buffer[x] = '[';
+                color_buffer[x] = 0;
+            }
+            for i in 1..node.width.saturating_sub(1) {
+                let px = x + i;
+                if px < line_buffer.len() {
+                    line_buffer[px] = ' ';
+                    color_buffer[px] = 0;
+                }
+            }
+            if node.width > 0 {
+                let close_x = x + node.width - 1;
+                if close_x < line_buffer.len() {
+                    line_buffer[close_x] = ']';
+                    color_buffer[close_x] = 0;
+                }
             }
         }
     }

@@ -94,6 +94,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         x: usize,
         y: usize,
         width: usize,
+        height: usize,
         level: usize,
         level_position: usize,
     ) -> Option<usize> {
@@ -117,7 +118,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             x,
             y,
             width,
-            height: 1,
+            height,
             center_x: x + width / 2,
             level,
             level_position,

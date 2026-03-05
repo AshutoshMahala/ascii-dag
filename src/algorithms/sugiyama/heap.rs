@@ -341,8 +341,20 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         }
     }
 
-    // Calculate per-level heights: base + extra rows for slot separation
-    let base_lines = if has_labeled_edges { 5 } else { 3 };
+    // Calculate per-level heights: node height + routing overhead + extra rows for slot separation
+    let routing_overhead = if has_labeled_edges { 4 } else { 2 };
+    // Compute max node height per level from actual node heights
+    let mut max_node_height: Vec<usize> = vec![1; max_level + 1];
+    for (level, level_vnodes) in virtual_levels.iter().enumerate() {
+        for vnode in level_vnodes {
+            if let VNode::Real(idx) = vnode {
+                let node_height = dag.get_node_height(*idx);
+                if node_height > max_node_height[level] {
+                    max_node_height[level] = node_height;
+                }
+            }
+        }
+    }
     let mut level_y_offsets = Vec::with_capacity(max_level + 1);
 
     // When subgraphs exist, compute per-boundary extra rows for opening/closing borders
@@ -378,7 +390,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         let slots_needed = adjacent_slots.max(skip_slots);
         let extra_lines = slots_needed.saturating_sub(1);
 
-        let height = base_lines + extra_lines + sg_boundary_extras[level];
+        let height = max_node_height[level] + routing_overhead + extra_lines + sg_boundary_extras[level];
         current_offset += height;
     }
 
@@ -405,7 +417,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                     y,
                     x,
                     width,
-                    height: 1,
+                    height: dag.get_node_height(*idx),
                     center_x: x + width / 2,
                     level: level_idx,
                     level_position: pos,
@@ -472,11 +484,13 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
 
             let from_x = src_x_base + src_width / 2;
             let to_x = dst_x_base + dst_width / 2;
-            let from_y = level_y_offsets[layout_from_level];
+            // from_y = bottom row of source node (so edges start below it)
+            let from_y = level_y_offsets[layout_from_level] + max_node_height[layout_from_level] - 1;
             let to_y = level_y_offsets[layout_to_level];
 
-            // Horizontal edges start at row 1 below the node
-            let edge_start_row = 1;
+            // Edge routing starts 1 row below the bottom of the source node
+            // (from_y already accounts for node height)
+            let edge_start_row: usize = 1;
 
             let path = if layout_to_level == layout_from_level + 1 {
                 // Adjacent levels - direct or corner connection
@@ -515,8 +529,8 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                         let slot = level_edge_next[level];
                         level_edge_next[level] += 1;
 
-                        let edge_start_row = if has_labeled_edges { 2 } else { 1 };
-                        waypoints.push((x, level_y_offsets[level] + edge_start_row + slot));
+                        let wp_edge_start_row = max_node_height[level] + if has_labeled_edges { 1 } else { 0 };
+                        waypoints.push((x, level_y_offsets[level] + wp_edge_start_row + slot));
                     }
 
                     let slot = if node_slots[layout_src_idx] != usize::MAX {
@@ -535,8 +549,8 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                 }
             };
 
-            // Label placement row layout:
-            //   from_y+0: [Source Node]
+            // Label placement row layout (from_y = bottom row of source node):
+            //   from_y:   [Source Node bottom]
             //   from_y+1: horizontal edge routing
             //   from_y+2: vertical connector
             //   from_y+3: label text row
@@ -544,7 +558,6 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             let label_position = label.map(|lbl| {
                 let label_len = lbl.chars().count() + 2; // +2 for quotes
 
-                // Label Y at from_y + 3 (dedicated label row with base_lines=5)
                 let label_y = from_y + 3;
 
                 // Find the edge's X position at the label row
@@ -575,6 +588,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                         start_y_offset,
                     } => {
                         // Find which segment the label row falls into
+                        // from_y is bottom of source node, +1 goes to routing area
                         let horizontal_y = from_y + 1 + start_y_offset;
 
                         if label_y <= horizontal_y || waypoints.is_empty() {

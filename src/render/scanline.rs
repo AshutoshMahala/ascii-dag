@@ -119,7 +119,7 @@ impl<'a> LayoutIR<'a> {
                 // 3. Paint nodes (no color - uses default terminal color)
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
-                    self.paint_node_colored(&mut line_buffer, &mut color_buffer, node);
+                    self.paint_node_colored(&mut line_buffer, &mut color_buffer, node, y);
                 }
             }
 
@@ -285,7 +285,7 @@ impl<'a> LayoutIR<'a> {
                 // 3. Paint nodes (no color - uses default terminal color)
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
-                    self.paint_node_colored(&mut line_buffer, &mut color_buffer, node);
+                    self.paint_node_colored(&mut line_buffer, &mut color_buffer, node, y);
                 }
             }
 
@@ -403,7 +403,7 @@ impl<'a> LayoutIR<'a> {
                 // 3. Paint nodes on this line (highest priority)
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
-                    self.paint_node(&mut line_buffer, node);
+                    self.paint_node(&mut line_buffer, node, y);
                 }
             }
 
@@ -488,7 +488,7 @@ impl<'a> LayoutIR<'a> {
                 // 3. Paint nodes (overwrites any edge/border characters)
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
-                    self.paint_node(&mut line_buffer[..width], node);
+                    self.paint_node(&mut line_buffer[..width], node, y);
                 }
             }
 
@@ -578,7 +578,7 @@ impl<'a> LayoutIR<'a> {
                 // 3. Paint nodes (overwrites any edge/border characters)
                 for &node_idx in &occupancy.node_indices {
                     let node = &self.nodes()[node_idx];
-                    self.paint_node(&mut line_buffer[..width], node);
+                    self.paint_node(&mut line_buffer[..width], node, y);
                 }
             }
 
@@ -738,33 +738,34 @@ impl<'a> LayoutIR<'a> {
         }
     }
 
-    /// Paint a node onto the line buffer.
+    /// Paint a node onto the line buffer at the given Y coordinate.
+    /// For height=1 nodes, draws `[Label]`.
+    /// For multi-row nodes: first row = `[Label]`, middle/last rows = empty
+    /// (content rendering is the renderer's responsibility).
     #[inline]
-    fn paint_node(&self, buffer: &mut [char], node: &crate::ir::LayoutNode) {
-        let label = node.label;
+    fn paint_node(&self, buffer: &mut [char], node: &crate::ir::LayoutNode, y: usize) {
         let x = node.x;
 
-        // Bounds check
         if x >= buffer.len() {
             return;
         }
 
-        // Draw [Label]
-        if x < buffer.len() {
+        let row = y.saturating_sub(node.y);
+        if row == 0 {
+            // Top row: draw [Label]
             buffer[x] = '[';
-        }
-
-        for (i, c) in label.chars().enumerate() {
-            let pos = x + 1 + i;
-            if pos < buffer.len() {
-                buffer[pos] = c;
+            for (i, c) in node.label.chars().enumerate() {
+                let pos = x + 1 + i;
+                if pos < buffer.len() {
+                    buffer[pos] = c;
+                }
+            }
+            let close_pos = x + 1 + node.label.chars().count();
+            if close_pos < buffer.len() {
+                buffer[close_pos] = ']';
             }
         }
-
-        let close_pos = x + 1 + label.chars().count();
-        if close_pos < buffer.len() {
-            buffer[close_pos] = ']';
-        }
+        // Middle/last rows: leave blank for now (future: side borders, content)
     }
 
     /// Paint the portion of an edge that crosses line Y.
@@ -1094,33 +1095,33 @@ impl<'a> LayoutIR<'a> {
         buffer: &mut [char],
         colors: &mut [u8],
         node: &crate::ir::LayoutNode,
+        y: usize,
     ) {
-        let label = node.label;
         let x = node.x;
 
         if x >= buffer.len() {
             return;
         }
 
-        // Draw [Label] with no color (0 = default)
-        if x < buffer.len() {
+        let row = y.saturating_sub(node.y);
+        if row == 0 {
+            // Top row: draw [Label] with no color (0 = default)
             buffer[x] = '[';
             colors[x] = 0;
-        }
-
-        for (i, c) in label.chars().enumerate() {
-            let pos = x + 1 + i;
-            if pos < buffer.len() {
-                buffer[pos] = c;
-                colors[pos] = 0;
+            for (i, c) in node.label.chars().enumerate() {
+                let pos = x + 1 + i;
+                if pos < buffer.len() {
+                    buffer[pos] = c;
+                    colors[pos] = 0;
+                }
+            }
+            let close_pos = x + 1 + node.label.chars().count();
+            if close_pos < buffer.len() {
+                buffer[close_pos] = ']';
+                colors[close_pos] = 0;
             }
         }
-
-        let close_pos = x + 1 + label.chars().count();
-        if close_pos < buffer.len() {
-            buffer[close_pos] = ']';
-            colors[close_pos] = 0;
-        }
+        // Middle/last rows: leave blank for now (future: side borders, content)
     }
 
     /// Compute the edge's center X position at a given Y for label placement.

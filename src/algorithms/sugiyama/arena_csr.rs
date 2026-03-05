@@ -155,15 +155,29 @@ pub fn compute_layout_arena_csr<'b>(
         }
     }
 
-    // 4. Compute Y offsets
+    // 4. Compute per-level max node height and Y offsets
+    // Repurpose level_vdummy_counts for max_node_heights (no longer needed after crossing reduction)
+    let max_node_heights = &mut temps.level_vdummy_counts[..alloc_size];
+    for h in max_node_heights.iter_mut() {
+        *h = 1 as Idx; // default height 1
+    }
+    for idx in 0..node_count {
+        let level = temps.real_coords[idx].0;
+        let h = graph.node_height(idx) as Idx;
+        if level < alloc_size && h > max_node_heights[level] {
+            max_node_heights[level] = h;
+        }
+    }
+
     temps.level_y_offsets.fill(0);
-    let base_lines = 3;
+    let routing_overhead: usize = 2;
     let mut current_offset = 0;
 
     for level in 0..=max_level as usize {
         temps.level_y_offsets[level] = current_offset;
-        let diff = temps.source_counts[level].max(temps.dummy_counts[level]);
-        let height = base_lines + diff.saturating_sub(1);
+        let node_height = max_node_heights[level] as usize;
+        let diff = temps.source_counts[level].max(temps.dummy_counts[level]) as usize;
+        let height = node_height + routing_overhead + diff.saturating_sub(1);
         current_offset += height as usize;
     }
     temps.level_y_offsets[max_level as usize + 1] = current_offset;
@@ -196,6 +210,7 @@ pub fn compute_layout_arena_csr<'b>(
             x as usize,
             y,
             width as usize,
+            graph.node_height(idx),
             level as usize,
             pos as usize,
         ).ok_or(GraphError::ArenaOom)?;
@@ -217,6 +232,7 @@ pub fn compute_layout_arena_csr<'b>(
     let level_dummy_next = &mut temps.level_dummy_next;
     let waypoint_scratch = &mut temps.waypoint_scratch;
     let level_y_offsets = &temps.level_y_offsets;
+    let max_node_heights = &temps.level_vdummy_counts;
 
     // Add edges
     for (edge_idx, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
@@ -225,7 +241,9 @@ pub fn compute_layout_arena_csr<'b>(
 
         let from_x = (from_x_base + from_width / 2) as usize;
         let to_x = (to_x_base + to_width / 2) as usize;
-        let from_y = level_y_offsets[from_level as usize];
+        // from_y = bottom of source node (top + max_node_height - 1)
+        let from_y = level_y_offsets[from_level as usize]
+            + max_node_heights[from_level as usize] as usize - 1;
         let to_y = level_y_offsets[to_level as usize];
 
         let from_id = graph.node_id(from_idx);
@@ -252,7 +270,7 @@ pub fn compute_layout_arena_csr<'b>(
 
         // CsR graphs don't support edge labels currently
         let has_labeled_edges = false;
-        let edge_start_row = if has_labeled_edges { 2 } else { 1 };
+        let edge_start_row = 1 + if has_labeled_edges { 1 } else { 0 };
 
         let path = if to_level == from_level + 1 {
             if from_x == to_x {
@@ -285,8 +303,9 @@ pub fn compute_layout_arena_csr<'b>(
                         0
                     };
 
-                    // Calculate Y using level_y_offsets
-                    let y_base = level_y_offsets[lvl_idx];
+                    // Calculate Y using level_y_offsets + max_node_height at intermediate level
+                    let y_base = level_y_offsets[lvl_idx]
+                        + max_node_heights.get(lvl_idx).copied().unwrap_or(1) as usize - 1;
                     waypoint_scratch[i] =
                         (x as usize, y_base + edge_start_row + dummy_slot as usize);
                 }
@@ -545,8 +564,8 @@ fn assign_x_coords_csr(
             let vnode_idx = vnode_data[pos * 2 + 1] as usize;
 
             let width: Coord = if vnode_type == 0 {
-                // Real node: use graph.node_label(idx).len() + padding
-                (graph.node_label(vnode_idx).len() + 2) as Coord // +2 for brackets []
+                // Real node: use stored width from CsrGraph
+                graph.node_width(vnode_idx) as Coord
             } else {
                 // Dummy node - use width 3 for visual separation (matches heap mode)
                 3

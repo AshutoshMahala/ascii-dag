@@ -127,6 +127,7 @@ pub struct Graph<'a> {
     pub(crate) auto_created: HashSet<usize>, // Track auto-created nodes for visual distinction (O(1) lookups)
     pub(crate) id_to_index: HashMap<usize, usize>, // Cache id→index mapping (O(1) lookups)
     pub(crate) node_widths: Vec<usize>,      // Cached formatted widths
+    pub(crate) node_heights: Vec<usize>,     // Cached node heights (1 = single-line)
     pub(crate) children: Vec<Vec<usize>>,    // Adjacency list: children[idx] = child indices
     pub(crate) parents: Vec<Vec<usize>>,     // Adjacency list: parents[idx] = parent indices
     pub(crate) sugiyama_config: SugiyamaConfig,          // Full Sugiyama pipeline configuration
@@ -146,6 +147,7 @@ impl<'a> Default for Graph<'a> {
             auto_created: HashSet::new(),
             id_to_index: HashMap::new(),
             node_widths: Vec::new(),
+            node_heights: Vec::new(),
             children: Vec::new(),
             parents: Vec::new(),
             sugiyama_config: SugiyamaConfig::default(),
@@ -194,6 +196,7 @@ impl<'a> Graph<'a> {
             auto_created: HashSet::new(),
             id_to_index: HashMap::new(),
             node_widths: Vec::new(),
+            node_heights: Vec::new(),
             children: Vec::new(),
             parents: Vec::new(),
             sugiyama_config: SugiyamaConfig::default(),
@@ -202,11 +205,12 @@ impl<'a> Graph<'a> {
             next_subgraph_id: 0,
         };
 
-        // Build id_to_index map and widths cache
+        // Build id_to_index map, widths cache, and heights cache
         for (idx, &(id, label)) in dag.nodes.iter().enumerate() {
             dag.id_to_index.insert(id, idx);
             let width = dag.compute_node_width(id, label);
             dag.node_widths.push(width);
+            dag.node_heights.push(1);
         }
 
         // Initialize adjacency lists
@@ -244,6 +248,7 @@ impl<'a> Graph<'a> {
             auto_created: HashSet::new(),
             id_to_index: HashMap::new(),
             node_widths: Vec::new(),
+            node_heights: Vec::new(),
             children: Vec::new(),
             parents: Vec::new(),
             sugiyama_config: SugiyamaConfig::default(),
@@ -252,11 +257,12 @@ impl<'a> Graph<'a> {
             next_subgraph_id: 0,
         };
 
-        // Build id_to_index map and widths cache
+        // Build id_to_index map, widths cache, and heights cache
         for (idx, &(id, label)) in dag.nodes.iter().enumerate() {
             dag.id_to_index.insert(id, idx);
             let width = dag.compute_node_width(id, label);
             dag.node_widths.push(width);
+            dag.node_heights.push(1);
         }
 
         // Initialize adjacency lists
@@ -465,9 +471,10 @@ impl<'a> Graph<'a> {
             self.nodes[idx] = (id, label);
             // Remove from auto_created set - O(1)
             self.auto_created.remove(&id);
-            // Update cached width
+            // Update cached width, keep height=1
             let width = self.compute_node_width(id, label);
             self.node_widths[idx] = width;
+            self.node_heights[idx] = 1;
         } else {
             // Brand new node
             let idx = self.nodes.len();
@@ -475,23 +482,25 @@ impl<'a> Graph<'a> {
             self.id_to_index.insert(id, idx);
             let width = self.compute_node_width(id, label);
             self.node_widths.push(width);
+            self.node_heights.push(1);
             // Extend adjacency lists
             self.children.push(Vec::new());
             self.parents.push(Vec::new());
         }
     }
 
-    /// Add a node with an explicit width override.
+    /// Add a node with explicit width and height overrides.
     ///
-    /// This is useful for pixel-based renderers where node width is determined
-    /// by rendered content (HTML elements, custom graphics) rather than label length.
+    /// This is useful for pixel-based renderers or complex nodes where size
+    /// is determined by rendered content (HTML elements, custom graphics,
+    /// multi-line content) rather than label length.
     ///
     /// # Arguments
     ///
     /// * `id` - Unique node identifier
-    /// * `label` - Node label text (used for display, not for width calculation)
-    /// * `width` - Explicit width in layout units (character cells for ASCII,
-    ///   or arbitrary units that will be scaled by the renderer)
+    /// * `label` - Node label text (used for display, not for size calculation)
+    /// * `width` - Explicit width in layout units
+    /// * `height` - Explicit height in layout rows (1 = single-line node)
     ///
     /// # Examples
     ///
@@ -499,29 +508,33 @@ impl<'a> Graph<'a> {
     /// use ascii_dag::graph::Graph;
     ///
     /// let mut dag = Graph::new();
-    /// // Node with explicit width of 20 units (ignores label length)
-    /// dag.add_node_with_width(1, "Short", 20);
+    /// // Single-line node with explicit width
+    /// dag.add_node_with_size(1, "Short", 20, 1);
+    /// // Multi-row node for complex content
+    /// dag.add_node_with_size(2, "Pipeline", 12, 3);
     /// ```
-    pub fn add_node_with_width(&mut self, id: usize, label: &'a str, width: usize) {
-        // Check if node already exists (could be auto-created) - O(1) with HashMap
+    pub fn add_node_with_size(&mut self, id: usize, label: &'a str, width: usize, height: usize) {
+        let height = height.max(1);
         if let Some(&idx) = self.id_to_index.get(&id) {
-            // Promote auto-created node to explicit node
             self.nodes[idx] = (id, label);
-            // Remove from auto_created set - O(1)
             self.auto_created.remove(&id);
-            // Use explicit width instead of computed
             self.node_widths[idx] = width;
+            self.node_heights[idx] = height;
         } else {
-            // Brand new node
             let idx = self.nodes.len();
             self.nodes.push((id, label));
             self.id_to_index.insert(id, idx);
-            // Use explicit width instead of computed
             self.node_widths.push(width);
-            // Extend adjacency lists
+            self.node_heights.push(height);
             self.children.push(Vec::new());
             self.parents.push(Vec::new());
         }
+    }
+
+    /// Add a node with an explicit width override (height defaults to 1).
+    #[deprecated(since = "0.9.0", note = "Use `add_node_with_size` instead")]
+    pub fn add_node_with_width(&mut self, id: usize, label: &'a str, width: usize) {
+        self.add_node_with_size(id, label, width, 1);
     }
 
     /// Add an edge from one node to another with an optional label.
@@ -583,6 +596,7 @@ impl<'a> Graph<'a> {
             self.id_to_index.insert(id, idx); // O(1) insert
             let width = self.compute_node_width(id, "");
             self.node_widths.push(width);
+            self.node_heights.push(1);
             // Extend adjacency lists
             self.children.push(Vec::new());
             self.parents.push(Vec::new());
@@ -721,6 +735,12 @@ impl<'a> Graph<'a> {
     #[inline]
     pub(crate) fn get_node_width(&self, idx: usize) -> usize {
         self.node_widths.get(idx).copied().unwrap_or(0)
+    }
+
+    /// Get cached height for a node index
+    #[inline]
+    pub(crate) fn get_node_height(&self, idx: usize) -> usize {
+        self.node_heights.get(idx).copied().unwrap_or(1)
     }
 
     /// Estimate the buffer size needed for rendering.
