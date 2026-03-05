@@ -152,15 +152,17 @@ pub use validation::Requirements;
 #[cfg(feature = "alloc")]
 pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};
 pub use ir::NodeKind;
-#[cfg(feature = "alloc")]
-pub use algorithms::sugiyama::config::SugiyamaConfig;
-pub use algorithms::sugiyama::config::{CycleBreaking, Layering, Positioning};
+// Primary config types (always available, no alloc needed)
+pub use algorithms::sugiyama::config::{
+    LayoutConfig, AlgorithmConfig, Routing,
+    CycleBreaking, Layering, Positioning,
+};
 pub use algorithms::sugiyama::crossing::{CrossingReducer, FAST, STANDARD, QUALITY};
 
+// Legacy type (alloc-dependent, deprecated)
 #[cfg(feature = "alloc")]
-/// **Deprecated**: Use [`SugiyamaConfig`] instead.
-#[deprecated(since = "0.9.0", note = "renamed to SugiyamaConfig")]
-pub type LayoutConfig = SugiyamaConfig;
+#[allow(deprecated)]
+pub use algorithms::sugiyama::config::SugiyamaConfig;
 
 #[cfg(test)]
 mod tests {

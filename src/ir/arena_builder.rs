@@ -117,6 +117,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             x,
             y,
             width,
+            height: 1,
             center_x: x + width / 2,
             level,
             level_position,

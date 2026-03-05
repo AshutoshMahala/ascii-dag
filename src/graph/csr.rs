@@ -212,10 +212,11 @@ impl<'a> CsrGraph<'a> {
     /// and populates `output_arena` with the final `LayoutIRArena`.
     pub fn compute_layout_arena<'b>(
         &self,
+        config: &crate::algorithms::sugiyama::config::LayoutConfig<'_>,
         temp_arena: &mut Arena<'_>,
         output_arena: &'b mut Arena<'b>,
     ) -> Result<crate::ir::arena::LayoutIRArena<'b>, crate::errors::GraphError> {
-        crate::algorithms::sugiyama::arena::compute_layout_arena_csr(self, temp_arena, output_arena)
+        crate::algorithms::sugiyama::arena::compute_layout_arena_csr(self, config, temp_arena, output_arena)
     }
 }
 

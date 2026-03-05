@@ -91,12 +91,9 @@ pub(crate) fn count_crossings_pair(u_positions: &[usize], v_positions: &[usize])
     (cross_uv, cross_vu)
 }
 
-// ── LayoutConfig (backward compatibility) ────────────────────────────────
+// ── Backward compatibility ───────────────────────────────────────────────
 
-/// **Deprecated**: Use [`SugiyamaConfig`](super::config::SugiyamaConfig) instead.
-///
-/// This re-export preserves backward compatibility for code using the
-/// old `LayoutConfig` name.
+/// **Deprecated**: Use [`LayoutConfig`](super::config::LayoutConfig) instead.
 #[cfg(feature = "alloc")]
 #[allow(deprecated)]
-pub use super::config::LayoutConfig;
+pub use super::config::SugiyamaConfig;

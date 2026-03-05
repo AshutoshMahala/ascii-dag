@@ -102,6 +102,8 @@ pub struct LayoutNode<'a> {
     pub y: usize,
     /// Width in character cells (including brackets)
     pub width: usize,
+    /// Height in lines (1 for single-line nodes, >1 for multi-line)
+    pub height: usize,
     /// Center X coordinate (for edge routing)
     pub center_x: usize,
     /// The level (depth) this node is at
@@ -304,11 +306,12 @@ impl<'a> LayoutIR<'a> {
     fn build_y_index(&self) -> Vec<LineOccupancy> {
         let mut index = vec![LineOccupancy::new(); self.height];
 
-        // Index nodes: each node occupies exactly one line (its Y coordinate)
-        // TODO: Support multi-line nodes in the future
+        // Index nodes: each node occupies `height` lines starting at its Y coordinate
         for (node_idx, node) in self.nodes.iter().enumerate() {
-            if node.y < self.height {
-                index[node.y].node_indices.push(node_idx);
+            for y in node.y..node.y + node.height {
+                if y < self.height {
+                    index[y].node_indices.push(node_idx);
+                }
             }
         }
 
@@ -394,7 +397,7 @@ impl<'a> LayoutIR<'a> {
     /// Get bounding box for a node (x, y, width, height).
     /// Useful for hit testing in interactive renderers.
     pub fn node_bounds(&self, node: &LayoutNode) -> (usize, usize, usize, usize) {
-        (node.x, node.y, node.width, 1) // Nodes are always 1 line tall in ASCII
+        (node.x, node.y, node.width, node.height)
     }
 
     /// Find the node at a given coordinate (for mouse interaction).
@@ -402,7 +405,7 @@ impl<'a> LayoutIR<'a> {
     pub fn node_at(&self, x: usize, y: usize) -> Option<&LayoutNode<'a>> {
         self.nodes
             .iter()
-            .find(|node| x >= node.x && x < node.x + node.width && y == node.y)
+            .find(|node| x >= node.x && x < node.x + node.width && y >= node.y && y < node.y + node.height)
     }
 
     /// Get edges that connect nodes at a specific level to the next level.

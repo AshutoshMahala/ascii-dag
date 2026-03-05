@@ -46,7 +46,10 @@ pub enum RenderMode {
 use alloc::{vec, string::String, vec::Vec};
 
 #[cfg(feature = "alloc")]
+#[allow(deprecated)]
 use crate::algorithms::sugiyama::config::SugiyamaConfig;
+#[cfg(feature = "alloc")]
+use crate::algorithms::sugiyama::config::LayoutConfig;
 #[cfg(feature = "alloc")]
 use crate::algorithms::sugiyama::crossing::CrossingReducer;
 #[cfg(feature = "alloc")]
@@ -115,7 +118,8 @@ use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
 /// assert!(output.contains("End"));
 /// ```
 #[cfg(feature = "alloc")]
-#[derive(Clone, Default)]
+#[allow(deprecated)]
+#[derive(Clone)]
 pub struct Graph<'a> {
     pub(crate) nodes: Vec<(usize, &'a str)>,
     pub(crate) edges: Vec<(usize, usize, Option<&'a str>)>,
@@ -132,6 +136,28 @@ pub struct Graph<'a> {
 }
 
 #[cfg(feature = "alloc")]
+#[allow(deprecated)]
+impl<'a> Default for Graph<'a> {
+    fn default() -> Self {
+        Self {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            render_mode: RenderMode::default(),
+            auto_created: HashSet::new(),
+            id_to_index: HashMap::new(),
+            node_widths: Vec::new(),
+            children: Vec::new(),
+            parents: Vec::new(),
+            sugiyama_config: SugiyamaConfig::default(),
+            subgraphs: Vec::new(),
+            node_subgraph: HashMap::new(),
+            next_subgraph_id: 0,
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+#[allow(deprecated)]
 impl<'a> Graph<'a> {
     /// Create a new empty DAG.
     ///
@@ -757,7 +783,35 @@ impl<'a> Graph<'a> {
     /// }
     /// ```
     pub fn compute_layout(&self) -> crate::ir::LayoutIR<'a> {
-        crate::algorithms::sugiyama::heap::compute_layout(self)
+        let config: LayoutConfig<'_> = LayoutConfig::from(&self.sugiyama_config);
+        crate::algorithms::sugiyama::heap::compute_layout_cfg(self, &config)
+    }
+
+    /// Compute the layout using a custom [`LayoutConfig`].
+    ///
+    /// This is the preferred API for controlling layout behaviour.
+    /// The config borrows its crossing pipeline, so it can be constructed
+    /// from static presets or from a `SugiyamaConfig`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ascii_dag::{Graph, LayoutConfig};
+    ///
+    /// let dag = Graph::from_edges(
+    ///     &[(1, "A"), (2, "B"), (3, "C")],
+    ///     &[(1, 2), (2, 3)]
+    /// );
+    ///
+    /// let ir = dag.compute_layout_with_config(&LayoutConfig::quality());
+    /// ```
+    pub fn compute_layout_with_config(
+        &self,
+        config: &LayoutConfig<'_>,
+    ) -> crate::ir::LayoutIR<'a> {
+        let mut dag = self.clone();
+        dag.render_mode = config.render_mode;
+        crate::algorithms::sugiyama::heap::compute_layout_cfg(&dag, config)
     }
 
     /// Compute the layout using a custom [`SugiyamaConfig`].
@@ -777,15 +831,13 @@ impl<'a> Graph<'a> {
     ///
     /// let ir = dag.compute_layout_with(&SugiyamaConfig::quality());
     /// ```
+    #[deprecated(since = "0.9.0", note = "use compute_layout_with_config(&LayoutConfig) instead")]
     pub fn compute_layout_with(
         &self,
         config: &crate::algorithms::sugiyama::config::SugiyamaConfig,
     ) -> crate::ir::LayoutIR<'a> {
-        // Clone self, apply config, compute.
-        let mut dag = self.clone();
-        dag.sugiyama_config = config.clone();
-        dag.render_mode = config.render_mode;
-        crate::algorithms::sugiyama::heap::compute_layout(&dag)
+        let lc = LayoutConfig::from(config);
+        self.compute_layout_with_config(&lc)
     }
 
     // ── Subgraph / Cluster API ───────────────────────────────────────────

@@ -19,7 +19,7 @@
 //! visually compatible output but operate on different type systems.
 
 use crate::algorithms::sugiyama::crossing::{count_crossings_pair, CrossingReducer};
-use crate::algorithms::sugiyama::config::CycleBreaking;
+use crate::algorithms::sugiyama::config::{CycleBreaking, LayoutConfig};
 use crate::graph::Graph;
 use crate::ir::{EdgePath, LayoutEdge, LayoutIRBuilder, LayoutIR, LayoutNode, NodeKind};
 use alloc::vec;
@@ -64,20 +64,20 @@ impl VNode {
 
 // ── Main layout entry point ──────────────────────────────────────────────
 
-/// Compute the heap-based layout IR for a DAG.
+/// Compute the heap-based layout IR for a DAG using a [`LayoutConfig`].
 ///
 /// This is the implementation behind `Graph::compute_layout()`. Returns a
 /// renderer-agnostic `LayoutIR` containing node positions, edge routes,
 /// and dimensional information.
-pub(crate) fn compute_layout<'a>(dag: &Graph<'a>) -> LayoutIR<'a> {
+pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>) -> LayoutIR<'a> {
     if dag.nodes.is_empty() {
         return LayoutIRBuilder::new().build();
     }
 
-    // Cycle breaking: dispatch based on SugiyamaConfig.
+    // Cycle breaking: dispatch based on LayoutConfig.
     // DepthFirst detects back edges via three-color DFS.
     // None treats every edge as forward (caller asserts acyclicity).
-    let back_edges = match dag.sugiyama_config.cycle_breaking {
+    let back_edges = match config.cycle_breaking() {
         CycleBreaking::DepthFirst => dag.detect_back_edges(),
         CycleBreaking::None => vec![false; dag.edges.len()],
     };
@@ -124,7 +124,7 @@ pub(crate) fn compute_layout<'a>(dag: &Graph<'a>) -> LayoutIR<'a> {
     }
 
     // Step 3: Apply crossing reduction WITH dummy nodes included
-    reduce_crossings_virtual(dag, &mut virtual_levels, &node_levels, max_level);
+    reduce_crossings_virtual(dag, &mut virtual_levels, &node_levels, max_level, config.crossing_pipeline());
 
     // Step 3b: Block-partitioned level ordering for subgraph adjacency
     if dag.has_subgraphs() {
@@ -405,6 +405,7 @@ pub(crate) fn compute_layout<'a>(dag: &Graph<'a>) -> LayoutIR<'a> {
                     y,
                     x,
                     width,
+                    height: 1,
                     center_x: x + width / 2,
                     level: level_idx,
                     level_position: pos,
@@ -654,7 +655,7 @@ fn build_node_edge_indices(dag: &Graph<'_>) -> Vec<Vec<usize>> {
 
 /// Crossing reduction for virtual levels (includes dummy nodes).
 ///
-/// Dispatches through the DAG's [`CrossingReducer`] pipeline.  Each reducer
+/// Dispatches through the provided [`CrossingReducer`] pipeline.  Each reducer
 /// (Median / AdjacentExchange) runs its configured number of passes, each
 /// consisting of a top-down sweep followed by a bottom-up sweep.  The
 /// pipeline runs uniformly regardless of graph size — behaviour is controlled
@@ -664,6 +665,7 @@ fn reduce_crossings_virtual(
     levels: &mut [Vec<VNode>],
     _node_levels: &[usize],
     max_level: usize,
+    crossing_pipeline: &[CrossingReducer],
 ) {
     // Build edge lookup for complete neighbor gathering (real + dummy).
     // This lets real nodes discover skip-level edge dummies on the adjacent
@@ -684,7 +686,7 @@ fn reduce_crossings_virtual(
     let mut u_positions: Vec<usize> = Vec::with_capacity(8);
     let mut v_positions: Vec<usize> = Vec::with_capacity(8);
 
-    for reducer in &dag.sugiyama_config.crossing_pipeline {
+    for reducer in crossing_pipeline {
         match reducer {
             CrossingReducer::Median(passes) => {
                 for _pass in 0..*passes {

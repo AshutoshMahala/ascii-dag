@@ -427,7 +427,7 @@ fn run_arena_benchmark(
         let mut layout_temp_arena = Arena::new(layout_temp_mem);
         let mut final_output_arena = Arena::new(output_mem);
         
-        let layout = match graph.compute_layout_arena(&mut layout_temp_arena, &mut final_output_arena) {
+        let layout = match graph.compute_layout_arena(&ascii_dag::algorithms::sugiyama::config::LayoutConfig::standard(), &mut layout_temp_arena, &mut final_output_arena) {
             Some(l) => l,
             None => {
                 write_serial(serial, usb_dev, "  [Arena FAIL: compute_layout]\r\n");

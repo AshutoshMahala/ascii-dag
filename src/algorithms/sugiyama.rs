@@ -34,6 +34,7 @@ use crate::graph::Graph;
 use alloc::{vec, vec::Vec};
 
 #[cfg(feature = "alloc")]
+#[allow(deprecated)]
 impl<'a> Graph<'a> {
     /// Calculate hierarchical levels for all nodes in the graph.
     ///

@@ -7,6 +7,7 @@ use crate::graph::arena::Arena;
 use crate::graph::csr::CsrGraph;
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
 use super::arena::LayoutTemps;
+use super::config::LayoutConfig;
 use crate::errors::GraphError;
 
 // Import configurable index types
@@ -26,8 +27,10 @@ const MAX_LEVELS: usize = usize::MAX;
 /// Compute layout using arena allocation for temporaries, specialized for CsrGraph.
 ///
 /// This avoids all heap allocations and HashMap lookups by using the CSR indices directly.
+/// The `config` parameter controls the layout pipeline (crossing reduction, spacing, etc.).
 pub fn compute_layout_arena_csr<'b>(
     graph: &CsrGraph<'_>,
+    _config: &LayoutConfig<'_>,
     temp_arena: &mut Arena<'_>,
     output_arena: &'b mut Arena<'b>,
 ) -> Result<LayoutIRArena<'b>, GraphError> {

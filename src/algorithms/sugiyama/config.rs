@@ -1,33 +1,33 @@
-//! Sugiyama layout configuration.
+//! Layout configuration types.
 //!
-//! [`SugiyamaConfig`] bundles all algorithm choices for the hierarchical
-//! (Sugiyama) layout pipeline.  Use the [`fast()`], [`standard()`], or
-//! [`quality()`] presets for common scenarios, or build a custom config
-//! for full control.
+//! [`LayoutConfig`] is the primary, no-alloc-compatible way to control
+//! the layout pipeline.  It uses an enum-of-structs pattern: shared
+//! settings (spacing, render mode) live on the outer struct, while
+//! algorithm-specific fields are scoped inside [`AlgorithmConfig`]
+//! variants.
+//!
+//! [`SugiyamaConfig`] is the legacy alloc-dependent type, deprecated
+//! in favour of `LayoutConfig`.
 //!
 //! # Examples
 //!
 //! ```
-//! use ascii_dag::SugiyamaConfig;
-//! use ascii_dag::algorithms::sugiyama::crossing::CrossingReducer;
+//! use ascii_dag::algorithms::sugiyama::config::LayoutConfig;
 //!
-//! // Use a preset
-//! let cfg = SugiyamaConfig::quality();
+//! // Use a preset (const fn, zero allocation)
+//! let cfg = LayoutConfig::standard();
 //!
-//! // Or build a custom crossing pipeline
-//! let cfg = SugiyamaConfig::with_crossing(
-//!     &[CrossingReducer::Median(6), CrossingReducer::AdjacentExchange(2)],
-//! );
+//! // Or the quality preset
+//! let cfg = LayoutConfig::quality();
 //! ```
+
+use super::crossing::{CrossingReducer, FAST, STANDARD, QUALITY};
+use crate::graph::RenderMode;
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-#[cfg(feature = "alloc")]
-use super::crossing::{CrossingReducer, FAST, STANDARD, QUALITY};
-#[cfg(feature = "alloc")]
-use crate::graph::RenderMode;
 
-// ── Pipeline stage enums ─────────────────────────────────────────────────
+// ── Pipeline stage enums (unconditional — no alloc needed) ───────────────
 
 /// Cycle-breaking strategy.
 ///
@@ -78,12 +78,173 @@ pub enum Positioning {
     // Future: BrandesKopf — multi-pass iterative centering
 }
 
-// ── SugiyamaConfig ───────────────────────────────────────────────────────
+/// Edge routing algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Routing {
+    /// Direct Manhattan routing (straight lines with corners).
+    Direct,
+    // Future: Spline, ...
+}
 
-/// Configuration for the Sugiyama hierarchical layout algorithm.
+// ── AlgorithmConfig (enum-of-structs) ────────────────────────────────────
+
+/// Algorithm-specific configuration.
 ///
-/// Bundles all pipeline-stage selections into a single value that can
-/// be passed to [`Graph::compute_layout_with`](crate::Graph::compute_layout_with).
+/// Each variant carries only the fields relevant to that algorithm.
+/// Shared settings (spacing, render mode, etc.) live on [`LayoutConfig`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlgorithmConfig<'a> {
+    /// Sugiyama hierarchical layout.
+    Sugiyama {
+        /// Cycle-breaking strategy.
+        cycle_breaking: CycleBreaking,
+        /// Layering algorithm.
+        layering: Layering,
+        /// Crossing reduction pipeline — applied in order.
+        crossing_pipeline: &'a [CrossingReducer],
+        /// Positioning algorithm.
+        positioning: Positioning,
+    },
+    // Future:
+    // ForceDirected {
+    //     iterations: usize,
+    //     spring_constant: f32,
+    //     repulsion: f32,
+    //     damping: f32,
+    // },
+}
+
+// ── LayoutConfig ─────────────────────────────────────────────────────────
+
+/// Layout configuration — the primary way to control the layout pipeline.
+///
+/// Uses borrowed slices and plain `Copy` types, enabling compile-time
+/// construction from static presets.  Compatible with no-alloc / `no_std`.
+///
+/// # Presets
+///
+/// | Preset | Algorithm | Crossing | Spacing |
+/// |--------|-----------|----------|---------|
+/// | [`fast()`](Self::fast) | Sugiyama | Median(2) | 3×2 |
+/// | [`standard()`](Self::standard) | Sugiyama | Median(4)→AdjExch(2) | 3×2 |
+/// | [`quality()`](Self::quality) | Sugiyama | Median(8)→AdjExch(4)→Median(2) | 3×2 |
+///
+/// # Examples
+///
+/// ```
+/// use ascii_dag::algorithms::sugiyama::config::LayoutConfig;
+///
+/// // Static preset (const, zero allocation)
+/// let cfg = LayoutConfig::standard();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct LayoutConfig<'a> {
+    /// Algorithm-specific settings (Sugiyama, future FDG, etc.).
+    pub algorithm: AlgorithmConfig<'a>,
+
+    /// Edge routing algorithm.
+    pub routing: Routing,
+
+    /// Horizontal spacing between nodes (default: 3).
+    pub node_spacing: usize,
+
+    /// Vertical spacing between levels (default: 2).
+    pub level_spacing: usize,
+
+    /// Rendering mode (Auto, Vertical, Horizontal).
+    pub render_mode: RenderMode,
+
+    /// Include dummy (virtual) nodes in the output IR.
+    pub include_dummy_nodes: bool,
+
+    /// Skip graph validation for performance.
+    pub skip_validation: bool,
+}
+
+impl<'a> LayoutConfig<'a> {
+    /// Fast preset — minimal crossing reduction, maximum speed.
+    pub const fn fast() -> Self {
+        Self {
+            algorithm: AlgorithmConfig::Sugiyama {
+                cycle_breaking: CycleBreaking::DepthFirst,
+                layering: Layering::LongestPath,
+                crossing_pipeline: FAST,
+                positioning: Positioning::Compact,
+            },
+            routing: Routing::Direct,
+            node_spacing: 3,
+            level_spacing: 2,
+            render_mode: RenderMode::Auto,
+            include_dummy_nodes: false,
+            skip_validation: false,
+        }
+    }
+
+    /// Standard preset — good balance of quality and speed.
+    pub const fn standard() -> Self {
+        Self {
+            algorithm: AlgorithmConfig::Sugiyama {
+                cycle_breaking: CycleBreaking::DepthFirst,
+                layering: Layering::LongestPath,
+                crossing_pipeline: STANDARD,
+                positioning: Positioning::Compact,
+            },
+            routing: Routing::Direct,
+            node_spacing: 3,
+            level_spacing: 2,
+            render_mode: RenderMode::Auto,
+            include_dummy_nodes: false,
+            skip_validation: false,
+        }
+    }
+
+    /// Quality preset — thorough reduction for complex graphs.
+    pub const fn quality() -> Self {
+        Self {
+            algorithm: AlgorithmConfig::Sugiyama {
+                cycle_breaking: CycleBreaking::DepthFirst,
+                layering: Layering::LongestPath,
+                crossing_pipeline: QUALITY,
+                positioning: Positioning::Compact,
+            },
+            routing: Routing::Direct,
+            node_spacing: 3,
+            level_spacing: 2,
+            render_mode: RenderMode::Auto,
+            include_dummy_nodes: false,
+            skip_validation: false,
+        }
+    }
+
+    /// Extract the crossing pipeline (returns empty slice for non-Sugiyama).
+    pub const fn crossing_pipeline(&self) -> &'a [CrossingReducer] {
+        match &self.algorithm {
+            AlgorithmConfig::Sugiyama { crossing_pipeline, .. } => crossing_pipeline,
+        }
+    }
+
+    /// Extract the cycle-breaking strategy.
+    pub const fn cycle_breaking(&self) -> CycleBreaking {
+        match &self.algorithm {
+            AlgorithmConfig::Sugiyama { cycle_breaking, .. } => *cycle_breaking,
+        }
+    }
+}
+
+impl Default for LayoutConfig<'static> {
+    fn default() -> Self {
+        Self::standard()
+    }
+}
+
+// ── SugiyamaConfig (legacy, alloc-dependent) ─────────────────────────────
+
+/// **Deprecated**: Use [`LayoutConfig`] instead.
+///
+/// Configuration for the Sugiyama hierarchical layout algorithm.
+/// This type requires alloc (`Vec<CrossingReducer>`).  The new
+/// [`LayoutConfig`] is no-alloc and supports enum-of-structs for
+/// future algorithm variants.
 ///
 /// # Presets
 ///
@@ -92,26 +253,8 @@ pub enum Positioning {
 /// | [`fast()`](Self::fast) | DepthFirst | LongestPath | Median(2) | Compact |
 /// | [`standard()`](Self::standard) | DepthFirst | LongestPath | Median(4)→AdjExch(2) | Compact |
 /// | [`quality()`](Self::quality) | DepthFirst | LongestPath | Median(8)→AdjExch(4)→Median(2) | Compact |
-///
-/// # Custom Configuration
-///
-/// ```
-/// use ascii_dag::SugiyamaConfig;
-/// use ascii_dag::algorithms::sugiyama::config::{CycleBreaking, Layering, Positioning};
-/// use ascii_dag::algorithms::sugiyama::crossing::CrossingReducer;
-///
-/// let cfg = SugiyamaConfig {
-///     cycle_breaking: CycleBreaking::DepthFirst,
-///     layering: Layering::LongestPath,
-///     crossing_pipeline: vec![
-///         CrossingReducer::Median(6),
-///         CrossingReducer::AdjacentExchange(2),
-///     ],
-///     positioning: Positioning::Compact,
-///     render_mode: ascii_dag::RenderMode::Auto,
-/// };
-/// ```
 #[cfg(feature = "alloc")]
+#[deprecated(since = "0.9.0", note = "use LayoutConfig instead")]
 #[derive(Debug, Clone)]
 pub struct SugiyamaConfig {
     /// Cycle-breaking strategy.
@@ -131,6 +274,7 @@ pub struct SugiyamaConfig {
 }
 
 #[cfg(feature = "alloc")]
+#[allow(deprecated)]
 impl SugiyamaConfig {
     /// Fast preset — minimal crossing reduction, maximum speed.
     pub fn fast() -> Self {
@@ -180,29 +324,78 @@ impl SugiyamaConfig {
 }
 
 #[cfg(feature = "alloc")]
+#[allow(deprecated)]
 impl Default for SugiyamaConfig {
     fn default() -> Self {
         Self::standard()
     }
 }
 
-// ── Backward compatibility: LayoutConfig → SugiyamaConfig ────────────────
+// ── Conversions: SugiyamaConfig ↔ LayoutConfig ──────────────────────────
 
-/// **Deprecated**: Use [`SugiyamaConfig`] instead.
+/// Convert a borrowed `SugiyamaConfig` into a `LayoutConfig`.
 ///
-/// This type alias preserves backward compatibility for code using the
-/// old `LayoutConfig` name.
+/// The crossing pipeline borrows from the `SugiyamaConfig`'s `Vec`,
+/// so the returned `LayoutConfig` has lifetime tied to the source.
 #[cfg(feature = "alloc")]
-#[deprecated(since = "0.9.0", note = "renamed to SugiyamaConfig")]
-pub type LayoutConfig = SugiyamaConfig;
+#[allow(deprecated)]
+impl<'a> From<&'a SugiyamaConfig> for LayoutConfig<'a> {
+    fn from(sc: &'a SugiyamaConfig) -> Self {
+        LayoutConfig {
+            algorithm: AlgorithmConfig::Sugiyama {
+                cycle_breaking: sc.cycle_breaking,
+                layering: sc.layering,
+                crossing_pipeline: &sc.crossing_pipeline,
+                positioning: sc.positioning,
+            },
+            routing: Routing::Direct,
+            node_spacing: 3,
+            level_spacing: 2,
+            render_mode: sc.render_mode,
+            include_dummy_nodes: false,
+            skip_validation: false,
+        }
+    }
+}
 
 #[cfg(test)]
-#[cfg(feature = "alloc")]
 mod tests {
     use super::*;
 
     #[test]
-    fn preset_defaults_are_consistent() {
+    fn layout_config_presets_are_const() {
+        // These are const fn — should compile at const time
+        const _FAST: LayoutConfig<'static> = LayoutConfig::fast();
+        const _STD: LayoutConfig<'static> = LayoutConfig::standard();
+        const _QUAL: LayoutConfig<'static> = LayoutConfig::quality();
+    }
+
+    #[test]
+    fn layout_config_default_is_standard() {
+        let def = LayoutConfig::default();
+        let std = LayoutConfig::standard();
+        assert_eq!(def.crossing_pipeline(), std.crossing_pipeline());
+        assert_eq!(def.node_spacing, std.node_spacing);
+    }
+
+    #[test]
+    fn layout_config_accessors_work() {
+        let cfg = LayoutConfig::quality();
+        assert_eq!(cfg.cycle_breaking(), CycleBreaking::DepthFirst);
+        assert_eq!(cfg.crossing_pipeline().len(), 3);
+        assert_eq!(cfg.node_spacing, 3);
+        assert_eq!(cfg.level_spacing, 2);
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "alloc")]
+mod alloc_tests {
+    use super::*;
+
+    #[allow(deprecated)]
+    #[test]
+    fn sugiyama_config_preset_defaults_are_consistent() {
         let std = SugiyamaConfig::standard();
         let def = SugiyamaConfig::default();
         assert_eq!(std.cycle_breaking, def.cycle_breaking);
@@ -211,27 +404,20 @@ mod tests {
         assert_eq!(std.crossing_pipeline, def.crossing_pipeline);
     }
 
+    #[allow(deprecated)]
     #[test]
-    fn fast_has_fewer_passes_than_quality() {
-        let fast = SugiyamaConfig::fast();
-        let quality = SugiyamaConfig::quality();
-
-        let fast_total: usize = fast.crossing_pipeline.iter().map(|r| match r {
-            CrossingReducer::Median(n) | CrossingReducer::AdjacentExchange(n) => *n,
-        }).sum();
-        let quality_total: usize = quality.crossing_pipeline.iter().map(|r| match r {
-            CrossingReducer::Median(n) | CrossingReducer::AdjacentExchange(n) => *n,
-        }).sum();
-
-        assert!(fast_total < quality_total);
+    fn sugiyama_config_converts_to_layout_config() {
+        let sc = SugiyamaConfig::quality();
+        let lc = LayoutConfig::from(&sc);
+        assert_eq!(lc.crossing_pipeline().len(), 3);
+        assert_eq!(lc.cycle_breaking(), CycleBreaking::DepthFirst);
+        assert_eq!(lc.render_mode, sc.render_mode);
     }
 
+    #[allow(deprecated)]
     #[test]
-    fn with_crossing_uses_standard_defaults() {
+    fn sugiyama_config_with_crossing_works() {
         let cfg = SugiyamaConfig::with_crossing(&[CrossingReducer::Median(10)]);
-        assert_eq!(cfg.cycle_breaking, CycleBreaking::DepthFirst);
-        assert_eq!(cfg.layering, Layering::LongestPath);
-        assert_eq!(cfg.positioning, Positioning::Compact);
         assert_eq!(cfg.crossing_pipeline.len(), 1);
     }
 }

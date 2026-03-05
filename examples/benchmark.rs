@@ -1,5 +1,6 @@
 use ascii_dag::graph::arena::Arena;
 use ascii_dag::graph::csr::CsrGraphBuilder;
+use ascii_dag::algorithms::sugiyama::config::LayoutConfig;
 use ascii_dag::graph::Graph;
 use std::io::{self, Write};
 use std::time::Instant;
@@ -152,7 +153,7 @@ fn run_comparison(topology: Topology, count: usize) {
         let mut final_arena = Arena::new(&mut output_mem);
 
         let layout = graph
-            .compute_layout_arena(&mut temp_arena, &mut final_arena)
+            .compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut final_arena)
             .expect("Layout computation failed (None returned). Use --features arena, not --all-features.");
         arena_compute_us = compute_start.elapsed().as_micros();
 

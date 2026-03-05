@@ -1,6 +1,6 @@
 use ascii_dag::graph::Graph;
 use ascii_dag::render::colors::Palette;
-use ascii_dag::SugiyamaConfig;
+use ascii_dag::LayoutConfig;
 use std::time::Instant;
 
 #[cfg(feature = "arena")]
@@ -105,9 +105,9 @@ fn run_heap_test(name: &str, dag: &Graph, preset_name: Option<&str>) {
 
     // Build layout config from preset
     let config = match preset_name {
-        Some("fast") => SugiyamaConfig::fast(),
-        Some("quality") => SugiyamaConfig::quality(),
-        _ => SugiyamaConfig::standard(), // default
+        Some("fast") => LayoutConfig::fast(),
+        Some("quality") => LayoutConfig::quality(),
+        _ => LayoutConfig::standard(), // default
     };
 
     // Use colored rendering for Helix, Hairball, and cycle-related tests
@@ -117,8 +117,8 @@ fn run_heap_test(name: &str, dag: &Graph, preset_name: Option<&str>) {
         || name.contains("Cycle")
         || name.contains("Ouroboros");
 
-    // Use the new preset API: compute_layout_with()
-    let ir = dag.compute_layout_with(&config);
+    // Use the new preset API: compute_layout_with_config()
+    let ir = dag.compute_layout_with_config(&config);
 
     let output = if use_color {
         ir.render_scanline_colored_with_legend(Palette::Ansi)

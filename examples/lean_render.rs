@@ -12,6 +12,7 @@
 
 use ascii_dag::graph::arena::Arena;
 use ascii_dag::graph::csr::CsrGraphBuilder;
+use ascii_dag::algorithms::sugiyama::config::LayoutConfig;
 
 fn main() {
     // 1. Single Block Allocation (e.g. 16KB on stack)
@@ -54,7 +55,7 @@ fn main() {
     // Scope block to ensure temp_arena is dropped before we reuse temp_mem
     let layout = {
         let mut temp_arena = Arena::new(temp_mem);
-        graph.compute_layout_arena(&mut temp_arena, &mut output_arena)
+        graph.compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut output_arena)
     };
 
     if let Ok(layout) = layout {

@@ -25,6 +25,7 @@ type Coord = u16;
 const MAX_LEVELS: usize = usize::MAX;
 
 #[cfg(feature = "alloc")]
+#[allow(deprecated)]
 impl<'a> Graph<'a> {
     /// Calculate levels using arena-allocated buffer.
     #[allow(dead_code)]

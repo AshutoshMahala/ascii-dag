@@ -42,6 +42,8 @@ pub struct LayoutNodeArena {
     pub y: usize,
     /// Width in character cells (including brackets)
     pub width: usize,
+    /// Height in lines (1 for single-line nodes, >1 for multi-line)
+    pub height: usize,
     /// Center X coordinate (for edge routing)
     pub center_x: usize,
     /// The level (depth) this node is at
