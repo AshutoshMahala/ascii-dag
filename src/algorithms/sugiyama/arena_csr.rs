@@ -1034,8 +1034,8 @@ fn median_reorder_csr_level(
         medians[i] = (i as Idx, median_fixed);
     }
 
-    // Sort by median
-    medians[..count].sort_by_key(|m| m.1);
+    // Sort by median (unstable: no alloc needed, fine for layout positions)
+    medians[..count].sort_unstable_by_key(|m| m.1);
 
     // Gather sorted vnode_data into medians buffer
     for j in 0..count {
@@ -1239,7 +1239,7 @@ fn gather_csr_neighbours(
 // ── Graph::estimate_layout_arena_size ─────────────────────────────────────────
 #[cfg(feature = "alloc")]
 use crate::graph::Graph;
-#[cfg(feature = "alloc")]
+#[cfg(feature = "std")]
 use alloc::vec;
 
 #[cfg(feature = "alloc")]
@@ -1255,7 +1255,7 @@ impl<'a> Graph<'a> {
         let max_levels = node_count.min(MAX_LEVELS);
 
         // ── Cheap level computation to count actual dummies ────────────
-        let mut actual_dummies: usize = 0;
+        let actual_dummies: usize;
         {
             #[cfg(feature = "std")]
             {
@@ -1278,15 +1278,17 @@ impl<'a> Graph<'a> {
                         }
                     }
                 }
+                let mut dummies = 0usize;
                 for &(fi, ti) in &edge_idx {
                     if fi != usize::MAX && ti != usize::MAX {
                         let fl = levels[fi] as usize;
                         let tl = levels[ti] as usize;
                         if tl > fl + 1 {
-                            actual_dummies += tl - fl - 1;
+                            dummies += tl - fl - 1;
                         }
                     }
                 }
+                actual_dummies = dummies;
             }
             #[cfg(not(feature = "std"))]
             {

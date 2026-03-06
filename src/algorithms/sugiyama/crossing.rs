@@ -72,6 +72,7 @@ pub const QUALITY: &[CrossingReducer] = &[
 /// - `crossings_vu` — crossings when **v** is before **u** (swapped order)
 ///
 /// The caller should swap if `crossings_vu < crossings_uv`.
+#[cfg(feature = "alloc")]
 #[inline]
 pub(crate) fn count_crossings_pair(u_positions: &[usize], v_positions: &[usize]) -> (usize, usize) {
     let mut cross_uv: usize = 0; // u before v
