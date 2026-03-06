@@ -713,18 +713,6 @@ impl<'a> Graph<'a> {
         self.parents.get(node_idx).map_or(0, |p| p.len())
     }
 
-    /// Get children indices directly (no ID conversion) - faster for internal use.
-    #[inline]
-    pub(crate) fn get_children_indices(&self, node_idx: usize) -> &[usize] {
-        &self.children[node_idx]
-    }
-
-    /// Get parent indices directly (no ID conversion) - faster for internal use.
-    #[inline]
-    pub(crate) fn get_parents_indices(&self, node_idx: usize) -> &[usize] {
-        &self.parents[node_idx]
-    }
-
     /// Get node index from ID using O(1) HashMap lookup
     #[inline]
     pub(crate) fn node_index(&self, id: usize) -> Option<usize> {

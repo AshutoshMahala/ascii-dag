@@ -9,13 +9,7 @@
 //! - [`heap`] - Heap-based layout computation (produces `LayoutIR`)
 //! - `idx` - Configurable index types for memory optimization (requires `arena` feature)
 
-#[cfg(feature = "alloc")]
-pub mod arena;
-#[cfg(not(feature = "alloc"))]
-pub(crate) mod arena;
 pub(crate) mod arena_csr;
-#[cfg(feature = "alloc")]
-pub(crate) mod arena_phases;
 pub mod config;
 pub mod crossing;
 #[cfg(feature = "alloc")]
@@ -26,8 +20,6 @@ pub(crate) mod subgraph;
 #[cfg(feature = "arena")]
 pub mod idx;
 
-#[cfg(feature = "alloc")]
-use crate::algorithms::sugiyama::crossing::{count_crossings_pair, CrossingReducer};
 #[cfg(feature = "alloc")]
 use crate::graph::Graph;
 #[cfg(feature = "alloc")]
@@ -40,6 +32,7 @@ impl<'a> Graph<'a> {
     ///
     /// Uses a fixed-point algorithm to assign each node to a level,
     /// where a node's level is one more than the maximum level of its parents.
+    #[cfg(test)]
     pub(crate) fn calculate_levels(&self) -> Vec<(usize, usize)> {
         self.calculate_levels_with_back_edges(&[])
     }
@@ -81,215 +74,6 @@ impl<'a> Graph<'a> {
         }
 
         levels.into_iter().enumerate().collect()
-    }
-
-    /// Calculate levels for a specific subgraph.
-    pub(crate) fn calculate_levels_for_subgraph(
-        &self,
-        subgraph_indices: &[usize],
-    ) -> Vec<(usize, usize)> {
-        let subgraph_node_ids: Vec<usize> = subgraph_indices
-            .iter()
-            .map(|&idx| self.nodes[idx].0)
-            .collect();
-
-        let mut levels = vec![0usize; self.nodes.len()];
-        let mut changed = true;
-
-        while changed {
-            changed = false;
-            for &(from, to, _) in &self.edges {
-                // Only process edges within this subgraph
-                if !subgraph_node_ids.contains(&from) || !subgraph_node_ids.contains(&to) {
-                    continue;
-                }
-
-                // Guard against missing nodes - O(1) HashMap lookups
-                if let Some(from_idx) = self.node_index(from)
-                    && let Some(to_idx) = self.node_index(to)
-                {
-                    let new_level = levels[from_idx] + 1;
-                    if new_level > levels[to_idx] {
-                        levels[to_idx] = new_level;
-                        changed = true;
-                    }
-                }
-            }
-        }
-
-        subgraph_indices
-            .iter()
-            .map(|&idx| (idx, levels[idx]))
-            .collect()
-    }
-
-    /// PASS 1: Reduce edge crossings using a composable pipeline.
-    ///
-    /// Iterates through the configured [`CrossingReducer`] pipeline,
-    /// applying each strategy in sequence to refine the node ordering.
-    pub(crate) fn reduce_crossings(&self, levels: &mut [Vec<usize>], max_level: usize) {
-        for reducer in &self.sugiyama_config.crossing_pipeline {
-            match reducer {
-                CrossingReducer::Median(passes) => {
-                    for _ in 0..*passes {
-                        // Top-down pass: order nodes by median of parents
-                        for level_idx in 1..=max_level {
-                            let (prev_levels, rest) = levels.split_at_mut(level_idx);
-                            let parent_level = &prev_levels[level_idx - 1];
-                            self.order_by_median_parents(&mut rest[0], parent_level);
-                        }
-
-                        // Bottom-up pass: order nodes by median of children
-                        for level_idx in (0..max_level).rev() {
-                            let (left, right) = levels.split_at_mut(level_idx + 1);
-                            let child_level = &right[0];
-                            self.order_by_median_children(&mut left[level_idx], child_level);
-                        }
-                    }
-                }
-                CrossingReducer::AdjacentExchange(passes) => {
-                    for _ in 0..*passes {
-                        // Top-down pass
-                        for level_idx in 1..=max_level {
-                            let (prev_levels, rest) = levels.split_at_mut(level_idx);
-                            let adj = &prev_levels[level_idx - 1];
-                            self.adjacent_exchange_real(&mut rest[0], adj, true);
-                        }
-
-                        // Bottom-up pass
-                        for level_idx in (0..max_level).rev() {
-                            let (left, right) = levels.split_at_mut(level_idx + 1);
-                            let adj = &right[0];
-                            self.adjacent_exchange_real(&mut left[level_idx], adj, false);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Adjacent exchange on real-node levels: swap adjacent pairs if it reduces crossings.
-    fn adjacent_exchange_real(
-        &self,
-        level_nodes: &mut [usize],
-        adj_level: &[usize],
-        use_parents: bool,
-    ) {
-        if level_nodes.len() < 2 {
-            return;
-        }
-
-        let mut u_positions: Vec<usize> = Vec::with_capacity(4);
-        let mut v_positions: Vec<usize> = Vec::with_capacity(4);
-
-        for i in 0..level_nodes.len() - 1 {
-            let u_idx = level_nodes[i];
-            let v_idx = level_nodes[i + 1];
-
-            // Gather neighbour positions for u and v in the adjacent level
-            u_positions.clear();
-            v_positions.clear();
-
-            let u_neighbours = if use_parents {
-                self.get_parents_indices(u_idx)
-            } else {
-                self.get_children_indices(u_idx)
-            };
-            let v_neighbours = if use_parents {
-                self.get_parents_indices(v_idx)
-            } else {
-                self.get_children_indices(v_idx)
-            };
-
-            for &n in u_neighbours {
-                if let Some(pos) = adj_level.iter().position(|&x| x == n) {
-                    u_positions.push(pos);
-                }
-            }
-            for &n in v_neighbours {
-                if let Some(pos) = adj_level.iter().position(|&x| x == n) {
-                    v_positions.push(pos);
-                }
-            }
-
-            let (cross_uv, cross_vu) = count_crossings_pair(&u_positions, &v_positions);
-            if cross_vu < cross_uv {
-                level_nodes.swap(i, i + 1);
-            }
-        }
-    }
-
-    /// Order nodes by median position of their parents.
-    /// Optimized: uses index-based lookups to avoid allocations.
-    #[inline]
-    fn order_by_median_parents(&self, level_nodes: &mut Vec<usize>, parent_level: &[usize]) {
-        let mut node_medians: Vec<(usize, f32)> = Vec::with_capacity(level_nodes.len());
-
-        for (pos, &idx) in level_nodes.iter().enumerate() {
-            let parent_indices = self.get_parents_indices(idx);
-
-            if parent_indices.is_empty() {
-                node_medians.push((idx, pos as f32));
-            } else {
-                // Find positions of parents in the parent level
-                let mut parent_positions: Vec<usize> = parent_indices
-                    .iter()
-                    .filter_map(|&p_idx| parent_level.iter().position(|&i| i == p_idx))
-                    .collect();
-                parent_positions.sort_unstable();
-
-                let median = if parent_positions.is_empty() {
-                    pos as f32
-                } else if parent_positions.len() % 2 == 1 {
-                    parent_positions[parent_positions.len() / 2] as f32
-                } else {
-                    let mid = parent_positions.len() / 2;
-                    (parent_positions[mid - 1] + parent_positions[mid]) as f32 / 2.0
-                };
-
-                node_medians.push((idx, median));
-            }
-        }
-
-        // Sort by median
-        node_medians.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        *level_nodes = node_medians.iter().map(|(idx, _)| *idx).collect();
-    }
-
-    /// Order nodes by median position of their children.
-    /// Optimized: uses index-based lookups to avoid allocations.
-    #[inline]
-    fn order_by_median_children(&self, level_nodes: &mut Vec<usize>, child_level: &[usize]) {
-        let mut node_medians: Vec<(usize, f32)> = Vec::with_capacity(level_nodes.len());
-
-        for (pos, &idx) in level_nodes.iter().enumerate() {
-            let child_indices = self.get_children_indices(idx);
-
-            if child_indices.is_empty() {
-                node_medians.push((idx, pos as f32));
-            } else {
-                // Find positions of children in the child level
-                let mut child_positions: Vec<usize> = child_indices
-                    .iter()
-                    .filter_map(|&c_idx| child_level.iter().position(|&i| i == c_idx))
-                    .collect();
-                child_positions.sort_unstable();
-
-                let median = if child_positions.is_empty() {
-                    pos as f32
-                } else if child_positions.len() % 2 == 1 {
-                    child_positions[child_positions.len() / 2] as f32
-                } else {
-                    let mid = child_positions.len() / 2;
-                    (child_positions[mid - 1] + child_positions[mid]) as f32 / 2.0
-                };
-
-                node_medians.push((idx, median));
-            }
-        }
-
-        node_medians.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        *level_nodes = node_medians.iter().map(|(idx, _)| *idx).collect();
     }
 
     /// Find disconnected components in the DAG.
@@ -341,16 +125,6 @@ impl<'a> Graph<'a> {
         }
     }
 
-    /// Check if a subgraph is a simple chain (no branching).
-    /// Optimized to avoid allocations.
-    pub(crate) fn is_subgraph_simple_chain(&self, subgraph_indices: &[usize]) -> bool {
-        for &idx in subgraph_indices {
-            if self.parents_count(idx) > 1 || self.children_count(idx) > 1 {
-                return false;
-            }
-        }
-        true
-    }
 }
 
 #[cfg(test)]

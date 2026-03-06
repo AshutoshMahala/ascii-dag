@@ -6,7 +6,6 @@
 use crate::graph::arena::Arena;
 use crate::graph::csr::CsrGraph;
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
-use super::arena::LayoutTemps;
 use super::config::LayoutConfig;
 use super::crossing::CrossingReducer;
 use crate::errors::GraphError;
@@ -24,6 +23,34 @@ type Coord = u16;
 const MAX_NODES: usize = u32::MAX as usize;
 #[cfg(not(feature = "arena"))]
 const MAX_LEVELS: usize = usize::MAX;
+
+/// Temporary buffers for arena-based layout computation.
+///
+/// All slices are allocated from a single arena. This struct is used by both
+/// the CsrGraph layout path and the Graph→CsrGraph path.
+pub(crate) struct LayoutTemps<'a> {
+    pub(crate) node_levels: &'a mut [Idx],
+    pub(crate) edge_indices: &'a mut [(Idx, Idx)],
+    pub(crate) vlevel_offsets: &'a mut [Idx],
+    pub(crate) level_counts: &'a mut [Idx],
+    pub(crate) vnode_data: &'a mut [Idx],
+    pub(crate) x_coords: &'a mut [Coord],
+    pub(crate) widths: &'a mut [Coord],
+    pub(crate) real_coords: &'a mut [(usize, usize, usize, usize)],
+    pub(crate) dummy_offsets: &'a mut [Idx],
+    pub(crate) dummy_data: &'a mut [(Idx, Coord)],
+    pub(crate) medians: &'a mut [(Idx, u32)],
+    pub(crate) positions: &'a mut [Idx],
+    pub(crate) node_is_source: &'a mut [bool],
+    pub(crate) source_counts: &'a mut [Idx],
+    pub(crate) dummy_counts: &'a mut [Idx],
+    pub(crate) level_y_offsets: &'a mut [usize],
+    pub(crate) node_slots: &'a mut [usize],
+    pub(crate) level_slot_next: &'a mut [Idx],
+    pub(crate) level_dummy_next: &'a mut [Idx],
+    pub(crate) waypoint_scratch: &'a mut [(usize, usize)],
+    pub(crate) level_vdummy_counts: &'a mut [Idx],
+}
 
 /// Compute layout using arena allocation for temporaries, specialized for CsrGraph.
 ///
@@ -150,39 +177,48 @@ pub fn compute_layout_arena_csr<'b>(
     );
 
     // Step 8: Compute horizontal slots for edge separation
-    // Count unique sources per level to determine extra rows needed.
-    // Use pre-allocated dynamic buffers from temps to avoid borrow errors and stack overflows.
+    // Count non-vertical source nodes per level to determine extra routing rows.
+    // Vertical edges (same x-center, adjacent level) route straight down and need no slot.
+    // Matches heap path behavior including MAX_SLOTS_PER_LEVEL cap.
+    const MAX_SLOTS_PER_LEVEL: usize = 8;
 
-    // 1. Mark nodes that are sources
+    // 1. Mark nodes that need routing slots (have at least one non-vertical outgoing edge)
     temps.node_is_source.fill(false);
     let node_is_source = &mut temps.node_is_source;
     let alloc_size = max_level as usize + 1;
 
-    for (from_id, to_id) in graph.edges_iter() {
-        // CsrGraph yields indices directly
-        let from_idx = from_id;
-        let to_idx = to_id;
-
-        // Safe indexing
+    for (from_idx, to_idx) in graph.edges_iter() {
         if from_idx < temps.real_coords.len() && to_idx < temps.real_coords.len() {
             let from_level = temps.real_coords[from_idx].0;
             let to_level = temps.real_coords[to_idx].0;
 
             if to_level > from_level {
-                node_is_source[from_idx] = true;
+                // Check if this is a vertical edge (same x-center, adjacent level)
+                let from_x_center = temps.real_coords[from_idx].2 + temps.real_coords[from_idx].3 / 2;
+                let to_x_center = temps.real_coords[to_idx].2 + temps.real_coords[to_idx].3 / 2;
+                let is_vertical = from_x_center == to_x_center && to_level == from_level + 1;
+
+                if !is_vertical {
+                    node_is_source[from_idx] = true;
+                }
             }
         }
     }
 
-    // 2. Count sources per level
+    // 2. Count sources per level (capped)
     temps.source_counts.fill(0);
-    // Use iterator to count (safer than slice indexing manually)
     for (idx, &is_source) in node_is_source.iter().enumerate() {
         if is_source {
-            let level = temps.real_coords[idx].0; // Access level from coords
+            let level = temps.real_coords[idx].0;
             if level <= max_level as usize {
                 temps.source_counts[level] += 1;
             }
+        }
+    }
+    // Cap slots per level to prevent height explosion on extreme fan-out
+    for sc in temps.source_counts.iter_mut() {
+        if (*sc as usize) > MAX_SLOTS_PER_LEVEL {
+            *sc = MAX_SLOTS_PER_LEVEL as Idx;
         }
     }
 
@@ -1197,5 +1233,102 @@ fn gather_csr_neighbours(
                 }
             }
         }
+    }
+}
+
+// ── Graph::estimate_layout_arena_size ─────────────────────────────────────────
+#[cfg(feature = "alloc")]
+use crate::graph::Graph;
+#[cfg(feature = "alloc")]
+use alloc::vec;
+
+#[cfg(feature = "alloc")]
+impl<'a> Graph<'a> {
+    /// Estimate the arena buffer size needed for `compute_layout_arena()`.
+    ///
+    /// Performs a cheap O(N+E) level computation to measure the actual dummy
+    /// count, then sums all temporary and IR buffer requirements.
+    pub fn estimate_layout_arena_size(&self) -> usize {
+        let node_count = self.nodes.len();
+        let edge_count = self.edges.len();
+        let label_bytes: usize = self.nodes.iter().map(|(_, l)| l.len()).sum();
+        let max_levels = node_count.min(MAX_LEVELS);
+
+        // ── Cheap level computation to count actual dummies ────────────
+        let mut actual_dummies: usize = 0;
+        {
+            #[cfg(feature = "std")]
+            {
+                let mut levels = vec![0u32; node_count];
+                let edge_idx: alloc::vec::Vec<(usize, usize)> = self.edges.iter().map(|&(from_id, to_id, _)| {
+                    let fi = self.node_index(from_id).unwrap_or(usize::MAX);
+                    let ti = self.node_index(to_id).unwrap_or(usize::MAX);
+                    (fi, ti)
+                }).collect();
+                let mut changed = true;
+                while changed {
+                    changed = false;
+                    for &(fi, ti) in &edge_idx {
+                        if fi != usize::MAX && ti != usize::MAX {
+                            let nl = levels[fi] + 1;
+                            if nl > levels[ti] {
+                                levels[ti] = nl;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                for &(fi, ti) in &edge_idx {
+                    if fi != usize::MAX && ti != usize::MAX {
+                        let fl = levels[fi] as usize;
+                        let tl = levels[ti] as usize;
+                        if tl > fl + 1 {
+                            actual_dummies += tl - fl - 1;
+                        }
+                    }
+                }
+            }
+            #[cfg(not(feature = "std"))]
+            {
+                actual_dummies = edge_count.saturating_mul(4);
+            }
+        }
+
+        let max_vnodes = (node_count + actual_dummies).min(MAX_NODES);
+        let max_level_size = node_count.min(MAX_NODES);
+        let max_dummy_waypoints = (actual_dummies + 16).min(MAX_NODES);
+
+        let temps_size = node_count * core::mem::size_of::<Idx>()                      // node_levels
+            + edge_count * core::mem::size_of::<(Idx, Idx)>()                          // edge_indices
+            + (max_levels + 2) * core::mem::size_of::<Idx>()              // vlevel_offsets
+            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_counts
+            + max_vnodes * 2 * core::mem::size_of::<Idx>()                // vnode_data
+            + max_vnodes * core::mem::size_of::<Coord>()                  // x_coords
+            + max_vnodes * core::mem::size_of::<Coord>()                  // widths
+            + node_count * core::mem::size_of::<(usize, usize, usize, usize)>() // real_coords
+            + (edge_count + 1) * core::mem::size_of::<Idx>()              // dummy_offsets
+            + max_dummy_waypoints * core::mem::size_of::<(Idx, Coord)>()  // dummy_data
+            + max_level_size * core::mem::size_of::<(Idx, u32)>()         // medians
+            + max_level_size * core::mem::size_of::<Idx>()                // positions
+            + node_count * core::mem::size_of::<bool>()                   // node_is_source
+            + (max_levels + 1) * core::mem::size_of::<Idx>()              // source_counts
+            + (max_levels + 1) * core::mem::size_of::<Idx>()              // dummy_counts
+            + (max_levels + 2) * core::mem::size_of::<usize>()            // level_y_offsets
+            + node_count * core::mem::size_of::<usize>()                  // node_slots
+            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_slot_next
+            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_dummy_next
+            + (max_levels + 1) * core::mem::size_of::<(usize, usize)>()   // waypoint_scratch
+            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_vdummy_counts
+            + 4096; // alignment padding buffer
+
+        let max_ir_waypoints = max_dummy_waypoints;
+        let ir_size = crate::ir::arena::estimate_layout_arena_size(
+            node_count,
+            edge_count,
+            label_bytes,
+            max_ir_waypoints,
+        );
+
+        temps_size + ir_size
     }
 }

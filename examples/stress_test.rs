@@ -30,9 +30,7 @@ impl SimpleRng {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let use_arena = args.iter().any(|a| a == "--arena");
     let use_csr = args.iter().any(|a| a == "--csr");
-    let low_mem = args.iter().any(|a| a == "--low-mem");
     let preset_name = args
         .iter()
         .position(|a| a == "--preset")
@@ -41,18 +39,12 @@ fn main() {
 
     if use_csr {
         println!("=== ASCII DAG Stress Test Suite (CSR MODE — true no-alloc pipeline) ===\n");
-    } else if use_arena {
-        println!("=== ASCII DAG Stress Test Suite (ARENA MODE — Graph→arena hybrid) ===\n");
     } else {
         println!("=== ASCII DAG Stress Test Suite (HEAP MODE) ===\n");
     }
 
     if let Some(p) = preset_name {
         println!(">>> PRESET: {} <<<\n", p.to_uppercase());
-    }
-
-    if low_mem {
-        println!(">>> LOW MEMORY MODE ENABLED (Fixed 10MB Budget) <<<\n");
     }
 
     let tests = [
@@ -87,14 +79,6 @@ fn main() {
                 let _ = (name, &dag);
                 println!("(arena feature not enabled — skipping)");
             }
-        } else if use_arena {
-            #[cfg(feature = "arena")]
-            run_arena_test(name, &dag, low_mem);
-            #[cfg(not(feature = "arena"))]
-            {
-                let _ = (name, &dag, low_mem);
-                println!("(arena feature not enabled — skipping)");
-            }
         } else {
             run_heap_test(name, &dag, preset_name);
         }
@@ -102,9 +86,7 @@ fn main() {
         println!("------------------------------------------------------------");
     }
 
-    if !use_arena && !use_csr {
-        println!("\nTip: Run with --arena flag to test arena mode (Graph→arena hybrid):");
-        println!("  cargo run --example stress_test --release --features arena -- --arena");
+    if !use_csr {
         println!("\nTip: Run with --csr flag for the true no-alloc CSR pipeline:");
         println!("  cargo run --example stress_test --release --features arena -- --csr");
         println!("\nTip: Run with presets:");
@@ -156,125 +138,6 @@ fn run_heap_test(name: &str, dag: &Graph, preset_name: Option<&str>) {
     println!(">>> [HEAP] Rendered in {:?} <<<\n", duration);
 }
 
-#[cfg(feature = "arena")]
-fn run_arena_test(name: &str, dag: &Graph, low_mem: bool) {
-    // Check for cycles first
-    if dag.has_cycle() {
-        println!("(Graph has cycles - arena layout does not yet support cycle breaking, skipping)");
-        return;
-    }
-
-    // Use the proper layout arena size estimator
-    let layout_estimate = dag.estimate_layout_arena_size();
-
-    // Determine memory budget
-    let (temp_arena_size, output_arena_size) = if low_mem && name.contains("Massive") {
-        if name.contains("100k") {
-            // 100MB + 100MB = 200MB for 100k nodes
-            (100 * 1024 * 1024, 100 * 1024 * 1024)
-        } else {
-            // 25MB + 25MB = 50MB for 50k nodes
-            (25 * 1024 * 1024, 25 * 1024 * 1024)
-        }
-    } else {
-        // Normal mode: use proper estimate with safety margin
-        let min_arena_size = 128 * 1024; // 128 KB minimum
-        // Add 20% safety margin
-        let size = ((layout_estimate * 6) / 5).max(min_arena_size);
-        (size, size)
-    };
-
-    let mut temp_buffer = vec![0u8; temp_arena_size];
-    let mut output_buffer = vec![0u8; output_arena_size];
-
-    // Render buffer - estimate based on output size
-    let estimated_render = dag.estimate_size();
-    let render_size = estimated_render + 65536;
-    let mut render_buffer = vec![0u8; render_size];
-
-    // Line buffer for scanline rendering (max width from estimate)
-    // Width is roughly sqrt(estimated_size) for typical graphs
-    let line_buffer_size = (estimated_render as f64).sqrt() as usize + 1024;
-    let mut line_buffer = vec![' '; line_buffer_size.max(1024)];
-
-    let start = Instant::now();
-
-    // Compute layout using arena
-    let mut temp_arena = Arena::new(&mut temp_buffer);
-    let mut output_arena = Arena::new(&mut output_buffer);
-
-    let output_len = if let Ok(layout) =
-        dag.compute_layout_arena(&mut temp_arena, &mut output_arena)
-    {
-        if layout.is_empty() {
-            println!("(Layout returned empty)");
-            0
-        } else {
-            // Use colored rendering for Helix and Hairball
-            let use_color =
-                name.contains("Helix") || name.contains("Hairball") || name.contains("Nightmare");
-
-            let bytes_written = if use_color {
-                // Allocate buffers for colored rendering
-                let edge_count = layout.edge_count();
-                let mut edge_colors = vec![0usize; edge_count];
-                let mut color_buffer = vec![0u8; line_buffer_size];
-                let mut skipped_buffer = vec![false; edge_count];
-                let palette = Palette::Ansi;
-                layout.compute_edge_colors(&mut edge_colors, palette.colors().len());
-
-                layout
-                    .render_to_buffer_colored_with_legend(
-                        &mut render_buffer,
-                        &mut line_buffer,
-                        &mut color_buffer,
-                        &edge_colors,
-                        palette.colors(),
-                        &mut skipped_buffer,
-                    )
-                    .unwrap_or(0)
-            } else {
-                let (_, scratch_len) = layout.estimate_render_size();
-                let mut scratch_buffer = vec![0usize; scratch_len + 1024];
-                layout
-                    .render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
-                    .unwrap_or(0)
-            };
-
-            if !name.contains("Massive") {
-                // Print output for non-massive tests
-                if let Ok(s) = std::str::from_utf8(&render_buffer[..bytes_written]) {
-                    println!("{}", s);
-                }
-            }
-            bytes_written
-        }
-    } else {
-        println!("(Failed to compute layout - arena may be too small)");
-        println!(
-            "  Temp arena: {} KB, Output arena: {} KB",
-            temp_arena_size / 1024,
-            output_arena_size / 1024
-        );
-        0
-    };
-
-    let duration = start.elapsed();
-
-    if name.contains("Massive") {
-        println!("(Output suppressed. Length: {} bytes)", output_len);
-        // Show allocated sizes
-        let allocated_kb = (temp_arena_size + output_arena_size) as f64 / 1024.0;
-        println!(
-            ">>> Allocated: {:.1} KB (temp: {:.1} KB, output: {:.1} KB) <<<",
-            allocated_kb,
-            temp_arena_size as f64 / 1024.0,
-            output_arena_size as f64 / 1024.0
-        );
-    }
-    println!(">>> [ARENA] Layout+Rendered in {:?} <<<\n", duration);
-}
-
 /// True no-alloc CSR pipeline: Graph → to_csr → compute_layout_arena_csr → render_to_buffer.
 /// The only heap allocations are the pre-sized Vec<u8> buffers (which on embedded would be static).
 #[cfg(feature = "arena")]
@@ -322,7 +185,7 @@ fn run_csr_test(name: &str, dag: &Graph) {
                 // Step 5: Render to buffer (no-alloc rendering)
                 let (render_est, scratch_len) = layout.estimate_render_size();
                 let render_size = render_est + 65536;
-                let line_buffer_size = ((render_est as f64).sqrt() as usize + 1024).max(1024);
+                let line_buffer_size = (layout.width() + 1024).max(1024);
                 let mut render_buffer = vec![0u8; render_size];
                 let mut line_buffer = vec![' '; line_buffer_size];
                 let mut scratch_buffer = vec![0usize; scratch_len + 1024];

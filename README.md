@@ -458,7 +458,7 @@ use ascii_dag::Graph;
 ```rust
 #![no_std]
 use ascii_dag::graph::csr::CsrGraphBuilder;
-use ascii_dag::algorithms::sugiyama::arena::compute_layout_arena_csr;
+use ascii_dag::algorithms::sugiyama::arena_csr::compute_layout_arena_csr;
 use ascii_dag::graph::arena::Arena;
 // Build, layout, render — all on caller-provided buffers.
 ```
@@ -783,20 +783,35 @@ if let Some(node) = ir.node_at(5, 2) {       // Hit testing for mouse interactio
 
 ### Arena Mode (no-alloc, Embedded)
 
-For embedded / no_std environments, use `compute_layout_arena()`:
+For embedded / no_std environments, use `CsrGraph::compute_layout_arena()`:
 
 ```rust
 use ascii_dag::graph::arena::Arena;
+use ascii_dag::graph::csr::CsrGraphBuilder;
+use ascii_dag::LayoutConfig;
 
+// Build graph in arena (no heap)
+let mut graph_buffer = [0u8; 4096];
+let mut graph_arena = Arena::new(&mut graph_buffer);
+let mut builder = CsrGraphBuilder::new(&mut graph_arena, 3, 2, 64).unwrap();
+builder.add_node(1, "A");
+builder.add_node(2, "B");
+builder.add_node(3, "C");
+builder.add_edge(1, 2);
+builder.add_edge(2, 3);
+let graph = builder.build().unwrap();
+
+// Layout + render in arena (no heap)
 let mut temp_buffer = [0u8; 16384];
 let mut output_buffer = [0u8; 16384];
 let mut temp_arena = Arena::new(&mut temp_buffer);
 let mut output_arena = Arena::new(&mut output_buffer);
 
-if let Ok(ir) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
+if let Ok(ir) = graph.compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut output_arena) {
     let mut render_buffer = [0u8; 4096];
     let mut line_buffer = [' '; 256];
-    ir.render_to_buffer(&mut render_buffer, &mut line_buffer);
+    let mut scratch_buffer = [0usize; 256];
+    ir.render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer);
 }
 ```
 

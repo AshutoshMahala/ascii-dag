@@ -75,7 +75,7 @@ graph TD
 
 | Module | Purpose | Key Functions |
 |--------|---------|---------------|
-| `render/ascii.rs` | Full ASCII renderer | `render()`, `render_to()`, `VirtualLayout` |
+| `render/ascii.rs` | ASCII renderer entry point | `render()`, `render_to()` |
 | `render/scanline.rs` | Scanline renderer | `render_scanline()`, `render_scanline_with_buffer()` |
 
 ### Utilities
@@ -130,7 +130,7 @@ The library implements a **pragmatic Sugiyama** algorithm:
 ### 3. Dummy Node Insertion
 - Skip-level edges (A → C where C is level 2+) get dummy nodes
 - Dummy nodes are inserted at each intermediate level
-- Stored in `VirtualLayout` as packed tagged pointers (8 bytes each)
+- Stored in the layout IR as node/edge records
 
 ### 4. Crossing Reduction
 - **Algorithm**: Median heuristic

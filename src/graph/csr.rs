@@ -252,7 +252,7 @@ impl<'a> CsrGraph<'a> {
         temp_arena: &mut Arena<'_>,
         output_arena: &'b mut Arena<'b>,
     ) -> Result<crate::ir::arena::LayoutIRArena<'b>, crate::errors::GraphError> {
-        crate::algorithms::sugiyama::arena::compute_layout_arena_csr(self, config, temp_arena, output_arena)
+        crate::algorithms::sugiyama::arena_csr::compute_layout_arena_csr(self, config, temp_arena, output_arena)
     }
 }
 

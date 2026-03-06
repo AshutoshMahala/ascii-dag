@@ -31,32 +31,38 @@ fn main() {
     println!("With ANSI colors and edge labels:");
 
     let args: Vec<String> = std::env::args().collect();
-    let use_arena = args.iter().any(|a| a == "--arena");
+    let use_csr = args.iter().any(|a| a == "--csr");
 
-    if use_arena {
+    if use_csr {
         use ascii_dag::graph::arena::Arena;
-        println!("(Arena Mode)");
-        // Estimate size and allocate buffers
-        let arena_size = dag.estimate_layout_arena_size();
-        let mut temp_buffer = vec![0u8; arena_size];
-        let mut output_buffer = vec![0u8; arena_size];
-        let mut temp_arena = Arena::new(&mut temp_buffer);
-        let mut output_arena = Arena::new(&mut output_buffer); // Restored
+        use ascii_dag::LayoutConfig;
+        println!("(Arena/CSR Mode)");
 
-        if let Ok(ir) = dag.compute_layout_arena(&mut temp_arena, &mut output_arena) {
-            // Calculate colors manually (Arena API requires provided buffer)
+        // Convert Graph → CsrGraph → arena layout
+        let csr_arena_size = dag.estimate_csr_arena_size() * 2;
+        let mut csr_buffer = vec![0u8; csr_arena_size];
+        let mut csr_arena = Arena::new(&mut csr_buffer);
+        let csr_graph = dag.to_csr(&mut csr_arena).expect("CSR conversion failed");
+
+        let config = LayoutConfig::standard();
+        let arena_size = dag.estimate_layout_arena_size();
+        let size = ((arena_size * 6) / 5).max(128 * 1024);
+        let mut temp_buffer = vec![0u8; size];
+        let mut output_buffer = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buffer);
+        let mut output_arena = Arena::new(&mut output_buffer);
+
+        if let Ok(ir) = csr_graph.compute_layout_arena(&config, &mut temp_arena, &mut output_arena) {
             let mut edge_colors = vec![0usize; ir.edge_count()];
             let palette_colors = Palette::Ansi.colors();
             ir.compute_edge_colors(&mut edge_colors, palette_colors.len());
 
-            // Allocate render buffers
-            // Estimate size: width * height * (~10 chars for color codes + char) + legend
             let (render_bytes, _) = ir.estimate_render_size();
             let render_size = render_bytes * 10 + 4096;
             let mut render_buffer = vec![0u8; render_size];
             let mut line_buffer = vec![' '; ir.width().max(1) + 16];
             let mut color_buffer = vec![0u8; ir.width().max(1) + 16];
-            let mut skipped_buffer = vec![false; ir.edge_count().max(1)]; // For legend
+            let mut skipped_buffer = vec![false; ir.edge_count().max(1)];
 
             if let Some(len) = ir.render_to_buffer_colored_with_legend(
                 &mut render_buffer,
@@ -64,7 +70,7 @@ fn main() {
                 &mut color_buffer,
                 &edge_colors,
                 palette_colors,
-                &mut skipped_buffer, // Needs a buffer to track skipped edges for legend
+                &mut skipped_buffer,
             ) {
                 println!("{}", std::str::from_utf8(&render_buffer[..len]).unwrap());
             }
