@@ -1,7 +1,7 @@
 //! Builder for constructing [`LayoutIRArena`] from arena memory.
 
 use crate::graph::arena::Arena;
-use super::arena::{LayoutEdgeArena, LayoutIRArena, LayoutNodeArena};
+use super::arena::{LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena};
 
 /// Builder for constructing LayoutIRArena from arena memory.
 pub struct LayoutIRArenaBuilder<'a> {
@@ -19,6 +19,8 @@ pub struct LayoutIRArenaBuilder<'a> {
     level_offsets: &'a mut [usize],
     level_data: &'a mut [usize],
     level_data_offset: usize,
+    subgraphs: &'a mut [SubgraphInfoArena],
+    subgraph_count: usize,
     width: usize,
     height: usize,
     level_count: usize,
@@ -34,6 +36,19 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         max_label_bytes: usize,
         max_levels: usize,
     ) -> Option<Self> {
+        Self::new_with_subgraphs(arena, max_nodes, max_edges, max_waypoints, max_label_bytes, max_levels, 0)
+    }
+
+    /// Create a new builder with subgraph support.
+    pub fn new_with_subgraphs(
+        arena: &'a mut Arena<'a>,
+        max_nodes: usize,
+        max_edges: usize,
+        max_waypoints: usize,
+        max_label_bytes: usize,
+        max_levels: usize,
+        max_subgraphs: usize,
+    ) -> Option<Self> {
         // Allocate all buffers upfront
         let (nodes_ptr, _) = arena.alloc_raw::<LayoutNodeArena>(max_nodes)?;
         let (edges_ptr, _) = arena.alloc_raw::<LayoutEdgeArena>(max_edges)?;
@@ -41,6 +56,11 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         let (labels_ptr, _) = arena.alloc_raw::<u8>(max_label_bytes)?;
         let (level_offsets_ptr, _) = arena.alloc_raw::<usize>(max_levels + 1)?;
         let (level_data_ptr, _) = arena.alloc_raw::<usize>(max_nodes)?;
+        let sg_ptr = if max_subgraphs > 0 {
+            Some(arena.alloc_raw::<SubgraphInfoArena>(max_subgraphs)?.0)
+        } else {
+            None
+        };
 
         unsafe {
             let nodes = core::slice::from_raw_parts_mut(nodes_ptr, max_nodes);
@@ -49,6 +69,11 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             let labels = core::slice::from_raw_parts_mut(labels_ptr, max_label_bytes);
             let level_offsets = core::slice::from_raw_parts_mut(level_offsets_ptr, max_levels + 1);
             let level_data = core::slice::from_raw_parts_mut(level_data_ptr, max_nodes);
+            let subgraphs = if let Some(ptr) = sg_ptr {
+                core::slice::from_raw_parts_mut(ptr, max_subgraphs)
+            } else {
+                &mut []
+            };
 
             // Initialize level_offsets to zero
             for offset in level_offsets.iter_mut() {
@@ -68,6 +93,8 @@ impl<'a> LayoutIRArenaBuilder<'a> {
                 level_offsets,
                 level_data,
                 level_data_offset: 0,
+                subgraphs,
+                subgraph_count: 0,
                 width: 0,
                 height: 0,
                 level_count: 0,
@@ -213,6 +240,51 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         }
     }
 
+    /// Add a subgraph bounding box. Label text is stored in shared label storage.
+    pub fn add_subgraph(
+        &mut self,
+        id: usize,
+        parent_idx: Option<usize>,
+        label: &str,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+    ) -> Option<usize> {
+        if self.subgraph_count >= self.subgraphs.len() {
+            return None;
+        }
+
+        // Store label in shared label storage
+        let label_bytes = label.as_bytes();
+        let (label_offset, label_len) = if !label_bytes.is_empty() {
+            if self.label_offset + label_bytes.len() > self.labels.len() {
+                return None;
+            }
+            let offset = self.label_offset;
+            self.labels[offset..offset + label_bytes.len()]
+                .copy_from_slice(label_bytes);
+            self.label_offset += label_bytes.len();
+            (offset, label_bytes.len())
+        } else {
+            (0, 0)
+        };
+
+        let idx = self.subgraph_count;
+        self.subgraphs[idx] = SubgraphInfoArena {
+            id,
+            parent_idx: parent_idx.unwrap_or(usize::MAX),
+            label_offset,
+            label_len,
+            x,
+            y,
+            width,
+            height,
+        };
+        self.subgraph_count += 1;
+        Some(idx)
+    }
+
     /// Build the final LayoutIRArena.
     /// Note: The returned IR borrows from the arena, so it must outlive this builder.
     pub fn build(self) -> LayoutIRArena<'a> {
@@ -221,6 +293,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             &self.edges[..self.edge_count],
             &self.waypoints[..self.waypoint_count],
             &self.labels[..self.label_offset],
+            &self.subgraphs[..self.subgraph_count],
             self.width,
             self.height,
             self.level_count,

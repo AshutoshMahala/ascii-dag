@@ -110,6 +110,30 @@ pub struct LayoutEdgeArena {
     pub max_y: usize,
 }
 
+/// Subgraph bounding box for arena-backed layout.
+///
+/// Equivalent to [`SubgraphInfo`](crate::ir::SubgraphInfo) but avoids
+/// `&str` lifetime by storing label offset/length into shared label storage.
+#[derive(Debug, Clone, Copy)]
+pub struct SubgraphInfoArena {
+    /// Subgraph ID (matches CsrGraph subgraph index)
+    pub id: usize,
+    /// Parent subgraph index (`usize::MAX` = top-level)
+    pub parent_idx: usize,
+    /// Label offset into labels array
+    pub label_offset: usize,
+    /// Label length in bytes
+    pub label_len: usize,
+    /// Left edge of the bounding box (character column)
+    pub x: usize,
+    /// Top edge of the bounding box (line number)
+    pub y: usize,
+    /// Width in character cells (including borders)
+    pub width: usize,
+    /// Height in lines (including borders)
+    pub height: usize,
+}
+
 /// Arena-backed intermediate representation of a laid-out graph.
 ///
 /// This is the arena-based equivalent of LayoutIR. All data is stored in
@@ -124,6 +148,8 @@ pub struct LayoutIRArena<'a> {
     waypoints: &'a [(usize, usize)],
     /// Label storage (raw bytes, UTF-8)
     labels: &'a [u8],
+    /// Subgraph bounding boxes
+    subgraphs: &'a [SubgraphInfoArena],
     /// Total width in character cells
     width: usize,
     /// Total height in lines
@@ -144,6 +170,7 @@ impl<'a> LayoutIRArena<'a> {
         edges: &'a [LayoutEdgeArena],
         waypoints: &'a [(usize, usize)],
         labels: &'a [u8],
+        subgraphs: &'a [SubgraphInfoArena],
         width: usize,
         height: usize,
         level_count: usize,
@@ -155,6 +182,7 @@ impl<'a> LayoutIRArena<'a> {
             edges,
             waypoints,
             labels,
+            subgraphs,
             width,
             height,
             level_count,
@@ -191,6 +219,35 @@ impl<'a> LayoutIRArena<'a> {
     #[inline]
     pub fn edge_count(&self) -> usize {
         self.edges.len()
+    }
+
+    /// Get the number of subgraphs.
+    #[inline]
+    pub fn subgraph_count(&self) -> usize {
+        self.subgraphs.len()
+    }
+
+    /// Check if this layout has subgraphs.
+    #[inline]
+    pub fn has_subgraphs(&self) -> bool {
+        !self.subgraphs.is_empty()
+    }
+
+    /// Get all subgraph bounding boxes.
+    #[inline]
+    pub fn subgraphs(&self) -> &[SubgraphInfoArena] {
+        self.subgraphs
+    }
+
+    /// Get subgraph label by subgraph index.
+    #[inline]
+    pub fn subgraph_label(&self, index: usize) -> &str {
+        let sg = &self.subgraphs[index];
+        if sg.label_len == 0 {
+            return "";
+        }
+        let bytes = &self.labels[sg.label_offset..sg.label_offset + sg.label_len];
+        core::str::from_utf8(bytes).unwrap_or("")
     }
 
     /// Get a node by index.
@@ -320,6 +377,17 @@ pub fn estimate_layout_arena_size(
     label_bytes: usize,
     max_waypoints: usize,
 ) -> usize {
+    estimate_layout_arena_size_with_subgraphs(node_count, edge_count, label_bytes, max_waypoints, 0)
+}
+
+/// Calculate required arena size for layout IR with subgraphs.
+pub fn estimate_layout_arena_size_with_subgraphs(
+    node_count: usize,
+    edge_count: usize,
+    label_bytes: usize,
+    max_waypoints: usize,
+    subgraph_count: usize,
+) -> usize {
     use core::mem::size_of;
 
     let nodes_size = node_count * size_of::<LayoutNodeArena>();
@@ -327,15 +395,18 @@ pub fn estimate_layout_arena_size(
     let waypoints_size = max_waypoints * size_of::<(usize, usize)>();
     let level_offsets_size = (node_count + 2) * size_of::<usize>(); // Generous estimate
     let level_data_size = node_count * size_of::<usize>();
+    let subgraphs_size = subgraph_count * size_of::<SubgraphInfoArena>();
 
     // Add alignment padding and extra buffer
-    let padding = 8 * 8;
+    let num_allocs = 8 + if subgraph_count > 0 { 1 } else { 0 };
+    let padding = num_allocs * 8;
 
     nodes_size
         + edges_size
         + waypoints_size
         + level_offsets_size
         + level_data_size
+        + subgraphs_size
         + label_bytes
         + padding
         + 512

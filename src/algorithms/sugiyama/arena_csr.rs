@@ -55,7 +55,25 @@ pub(crate) struct LayoutTemps<'a> {
     pub(crate) level_dummy_next: &'a mut [Idx],
     pub(crate) waypoint_scratch: &'a mut [(usize, usize)],
     pub(crate) level_vdummy_counts: &'a mut [Idx],
+
+    // ── Subgraph temporaries ─────────────────────────────────────────
+    /// Per-subgraph (first_level, last_level) range; usize::MAX = unset
+    pub(crate) sg_ranges: &'a mut [(usize, usize)],
+    /// Per-subgraph nesting depth
+    pub(crate) sg_depths: &'a mut [usize],
+    /// Per-subgraph bounding box: (min_x, min_y, max_x, max_y)
+    pub(crate) sg_envelopes: &'a mut [(usize, usize, usize, usize)],
+    /// Per-level boundary extras for subgraph borders
+    pub(crate) sg_y_extras: &'a mut [usize],
 }
+
+// ── Subgraph layout constants ────────────────────────────────────────────
+/// Per-subgraph horizontal padding (chars on each side of border).
+const SUBGRAPH_H_PAD: usize = 2;
+/// Vertical padding above first node: border + label + blank.
+const SUBGRAPH_V_PAD_TOP: usize = 3;
+/// Vertical padding below last node: blank + border.
+const SUBGRAPH_V_PAD_BOTTOM: usize = 2;
 
 /// Compute layout using arena allocation for temporaries, specialized for CsrGraph.
 ///
@@ -111,7 +129,8 @@ pub fn compute_layout_arena_csr<'b>(
     }
 
     // Step 2: Allocate layout temporaries
-    let mut temps = alloc_layout_temps_csr(temp_arena, node_count, edge_count)
+    let sg_count = graph.subgraph_count();
+    let mut temps = alloc_layout_temps_csr(temp_arena, node_count, edge_count, sg_count)
         .ok_or(GraphError::ArenaOom)?;
 
     // Step 3: Calculate levels (back edges have direction flipped)
@@ -164,7 +183,7 @@ pub fn compute_layout_arena_csr<'b>(
     );
 
     // Step 5: Assign x-coordinates
-    let max_width = assign_x_coords_csr(
+    let mut max_width = assign_x_coords_csr(
         graph,
         temps.vlevel_offsets,
         temps.vnode_data,
@@ -172,6 +191,28 @@ pub fn compute_layout_arena_csr<'b>(
         temps.widths,
         max_level,
     );
+
+    // Step 5b: Subgraph horizontal padding
+    if graph.has_subgraphs() {
+        let padded = subgraph_padding_csr(
+            graph,
+            temps.vlevel_offsets,
+            temps.vnode_data,
+            temps.x_coords,
+            temps.widths,
+            max_level,
+        );
+        // Extra margin for outermost border
+        let max_depth = {
+            let mut d = 0usize;
+            for i in 0..graph.subgraph_count() {
+                let cd = graph.sg_chain_depth(Some(i));
+                if cd > d { d = cd; }
+            }
+            d
+        };
+        max_width = (padded + max_depth * SUBGRAPH_H_PAD) as Coord;
+    }
 
     // Step 6: Build real node coordinates
     build_real_coords_csr(
@@ -314,7 +355,22 @@ pub fn compute_layout_arena_csr<'b>(
 
     temps.level_y_offsets.fill(0);
     let routing_overhead: usize = if has_labeled_edges { 4 } else { 2 };
-    let mut current_offset = 0;
+
+    // Compute subgraph Y extras (vertical border space)
+    let (sg_initial_offset, sg_trailing_extra) = if graph.has_subgraphs() {
+        compute_sg_y_extras(
+            graph,
+            temps.node_levels,
+            max_level as usize,
+            temps.sg_ranges,
+            temps.sg_depths,
+            temps.sg_y_extras,
+        )
+    } else {
+        (0, 0)
+    };
+
+    let mut current_offset = sg_initial_offset;
 
     for level in 0..=max_level as usize {
         temps.level_y_offsets[level] = current_offset;
@@ -324,18 +380,34 @@ pub fn compute_layout_arena_csr<'b>(
         let diff = slot_count.max(temps.dummy_counts[level] as usize);
         let height = node_height + routing_overhead + diff.saturating_sub(1);
         current_offset += height;
+        // Add subgraph border space after this level
+        if graph.has_subgraphs() && level < temps.sg_y_extras.len() {
+            current_offset += temps.sg_y_extras[level];
+        }
     }
+    current_offset += sg_trailing_extra;
     temps.level_y_offsets[max_level as usize + 1] = current_offset;
     let total_height = current_offset;
 
     // Step 9: Build LayoutIRArena
-    let mut builder = LayoutIRArenaBuilder::new(
+    // Include subgraph label bytes in total label allocation
+    let sg_label_bytes = if graph.has_subgraphs() {
+        let mut bytes = 0;
+        for i in 0..graph.subgraph_count() {
+            bytes += graph.subgraph_label(i).len();
+        }
+        bytes
+    } else {
+        0
+    };
+    let mut builder = LayoutIRArenaBuilder::new_with_subgraphs(
         output_arena,
         node_count,
         edge_count,
         max_waypoints,
-        total_label_bytes,
+        total_label_bytes + sg_label_bytes,
         max_level as usize + 1,
+        sg_count,
     ).ok_or(GraphError::BuilderFailed)?;
 
     // Add buffer for edge routing (+4) plus label margin
@@ -544,6 +616,19 @@ pub fn compute_layout_arena_csr<'b>(
         });
     }
 
+    // Step 10: Compute subgraph bounding boxes and add to builder
+    if graph.has_subgraphs() {
+        compute_sg_bounding_boxes(
+            graph,
+            temps.real_coords,
+            temps.level_y_offsets,
+            total_height,
+            temps.sg_depths,
+            temps.sg_envelopes,
+            &mut builder,
+        );
+    }
+
     Ok(builder.build())
 }
 
@@ -553,6 +638,7 @@ fn alloc_layout_temps_csr<'b>(
     arena: &'b mut Arena<'_>,
     node_count: usize,
     edge_count: usize,
+    sg_count: usize,
 ) -> Option<LayoutTemps<'b>> {
     // Same allocation logic as DAG
     let max_levels = node_count.min(256);
@@ -594,6 +680,29 @@ fn alloc_layout_temps_csr<'b>(
     let (waypoint_scratch_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(max_levels + 1)?;
     let (level_vdummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
 
+    // Subgraph temporaries (0-length if no subgraphs)
+    let sg_alloc = sg_count.max(1); // avoid 0-length allocations
+    let (sg_ranges_ptr, _) = if sg_count > 0 {
+        arena.alloc_raw_uninit::<(usize, usize)>(sg_alloc)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (sg_depths_ptr, _) = if sg_count > 0 {
+        arena.alloc_raw_uninit::<usize>(sg_alloc)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (sg_envelopes_ptr, _) = if sg_count > 0 {
+        arena.alloc_raw_uninit::<(usize, usize, usize, usize)>(sg_alloc)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (sg_y_extras_ptr, _) = if sg_count > 0 {
+        arena.alloc_raw_uninit::<usize>(max_levels + 1)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+
     unsafe {
         Some(LayoutTemps {
             node_levels: core::slice::from_raw_parts_mut(node_levels_ptr, node_count),
@@ -619,6 +728,18 @@ fn alloc_layout_temps_csr<'b>(
             dummy_data: core::slice::from_raw_parts_mut(dummy_data_ptr, max_dummy_waypoints),
             medians: core::slice::from_raw_parts_mut(medians_ptr, max_level_size),
             positions: core::slice::from_raw_parts_mut(positions_ptr, max_level_size),
+            sg_ranges: if sg_count > 0 {
+                core::slice::from_raw_parts_mut(sg_ranges_ptr, sg_count)
+            } else { &mut [] },
+            sg_depths: if sg_count > 0 {
+                core::slice::from_raw_parts_mut(sg_depths_ptr, sg_count)
+            } else { &mut [] },
+            sg_envelopes: if sg_count > 0 {
+                core::slice::from_raw_parts_mut(sg_envelopes_ptr, sg_count)
+            } else { &mut [] },
+            sg_y_extras: if sg_count > 0 {
+                core::slice::from_raw_parts_mut(sg_y_extras_ptr, max_levels + 1)
+            } else { &mut [] },
         })
     }
 }
@@ -738,6 +859,401 @@ fn detect_back_edges_csr(
                 stack_len -= 1;
             }
         }
+    }
+}
+
+// ── Subgraph layout helpers (CSR) ────────────────────────────────────────
+
+/// Resolve subgraph index for a virtual node in the CSR representation.
+/// Real nodes use `graph.node_subgraph()`; dummy nodes return the subgraph
+/// only if both edge endpoints share the same subgraph.
+fn vnode_subgraph_csr(graph: &CsrGraph<'_>, vnode_type: Idx, vnode_idx: Idx) -> Option<usize> {
+    if vnode_type == 0 {
+        // Real node
+        graph.node_subgraph(vnode_idx as usize)
+    } else {
+        // Dummy node — vnode_idx is edge index
+        let (from, to) = graph.edge(vnode_idx as usize);
+        let fsg = graph.node_subgraph(from);
+        let tsg = graph.node_subgraph(to);
+        match (fsg, tsg) {
+            (Some(a), Some(b)) if a == b => Some(a),
+            _ => None,
+        }
+    }
+}
+
+/// Count subgraph boundary transitions between two subgraph chains.
+/// Returns (exits_from_prev + entries_into_curr).
+fn sg_boundary_transitions(graph: &CsrGraph<'_>, prev: Option<usize>, curr: Option<usize>) -> usize {
+    // Walk both chains to find common ancestor
+    let _prev_depth = graph.sg_chain_depth(prev);
+    let _curr_depth = graph.sg_chain_depth(curr);
+
+    // Build chains (root first) using simple iteration — max depth is small
+    let mut prev_chain = [0usize; 16];
+    let mut prev_len = 0usize;
+    {
+        let mut c = prev;
+        while let Some(idx) = c {
+            if idx >= graph.subgraph_count() || prev_len >= 16 { break; }
+            prev_chain[prev_len] = idx;
+            prev_len += 1;
+            c = graph.subgraph_parent(idx);
+        }
+        // Reverse to get root first
+        prev_chain[..prev_len].reverse();
+    }
+
+    let mut curr_chain = [0usize; 16];
+    let mut curr_len = 0usize;
+    {
+        let mut c = curr;
+        while let Some(idx) = c {
+            if idx >= graph.subgraph_count() || curr_len >= 16 { break; }
+            curr_chain[curr_len] = idx;
+            curr_len += 1;
+            c = graph.subgraph_parent(idx);
+        }
+        curr_chain[..curr_len].reverse();
+    }
+
+    // Common prefix length
+    let common = prev_chain[..prev_len].iter()
+        .zip(curr_chain[..curr_len].iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    (prev_len - common) + (curr_len - common)
+}
+
+/// Insert horizontal subgraph padding into x_coords.
+/// Returns the updated max_width.
+fn subgraph_padding_csr(
+    graph: &CsrGraph<'_>,
+    vlevel_offsets: &[Idx],
+    vnode_data: &[Idx],
+    x_coords: &mut [Coord],
+    widths: &[Coord],
+    max_level: Idx,
+) -> usize {
+    let mut global_max_width = 0usize;
+
+    for level in 0..=max_level as usize {
+        if level + 1 >= vlevel_offsets.len() { break; }
+        let start = vlevel_offsets[level] as usize;
+        let end = vlevel_offsets[level + 1] as usize;
+        if start >= end { continue; }
+
+        let mut x = 0usize;
+
+        // Left padding: depth of first node's subgraph chain
+        let first_type = vnode_data.get(start * 2).copied().unwrap_or(0);
+        let first_idx = vnode_data.get(start * 2 + 1).copied().unwrap_or(0);
+        let first_depth = graph.sg_chain_depth(
+            vnode_subgraph_csr(graph, first_type, first_idx),
+        );
+        x += first_depth * SUBGRAPH_H_PAD;
+
+        for pos in start..end {
+            if pos > start {
+                let prev_type = vnode_data[( pos - 1) * 2];
+                let prev_idx = vnode_data[(pos - 1) * 2 + 1];
+                let curr_type = vnode_data[pos * 2];
+                let curr_idx = vnode_data[pos * 2 + 1];
+                let prev_sg = vnode_subgraph_csr(graph, prev_type, prev_idx);
+                let curr_sg = vnode_subgraph_csr(graph, curr_type, curr_idx);
+                if prev_sg != curr_sg {
+                    let transitions = sg_boundary_transitions(graph, prev_sg, curr_sg);
+                    x += transitions * SUBGRAPH_H_PAD;
+                }
+            }
+            if pos < x_coords.len() {
+                x_coords[pos] = x as Coord;
+            }
+            let w = widths.get(pos).copied().unwrap_or(3) as usize;
+            x += w + 3; // standard spacing
+        }
+
+        // Right padding: depth of last node's subgraph chain
+        let last_pos = end - 1;
+        let last_type = vnode_data[last_pos * 2];
+        let last_idx = vnode_data[last_pos * 2 + 1];
+        let last_depth = graph.sg_chain_depth(
+            vnode_subgraph_csr(graph, last_type, last_idx),
+        );
+        let right_extra = last_depth * SUBGRAPH_H_PAD;
+
+        // Compute level width
+        let mut level_max = 0usize;
+        for pos in start..end {
+            let px = x_coords.get(pos).copied().unwrap_or(0) as usize;
+            let pw = widths.get(pos).copied().unwrap_or(3) as usize;
+            let r = px + pw;
+            if r > level_max { level_max = r; }
+        }
+        level_max += right_extra;
+        if level_max > global_max_width {
+            global_max_width = level_max;
+        }
+    }
+
+    global_max_width
+}
+
+/// Compute per-level Y extras for subgraph borders.
+/// Populates `sg_ranges`, `sg_depths`, `sg_y_extras` in temps and returns
+/// (initial_offset, trailing_extra).
+fn compute_sg_y_extras(
+    graph: &CsrGraph<'_>,
+    node_levels: &[Idx],
+    max_level: usize,
+    sg_ranges: &mut [(usize, usize)],
+    sg_depths: &mut [usize],
+    sg_y_extras: &mut [usize],
+) -> (usize, usize) {
+    let sg_count = graph.subgraph_count();
+    if sg_count == 0 {
+        sg_y_extras.fill(0);
+        return (0, 0);
+    }
+
+    // 1. For each subgraph, find (first_level, last_level) from member nodes
+    for r in sg_ranges.iter_mut() {
+        *r = (usize::MAX, 0);
+    }
+    for node_idx in 0..graph.node_count() {
+        if let Some(sg_idx) = graph.node_subgraph(node_idx) {
+            if sg_idx < sg_count {
+                let lvl = node_levels[node_idx] as usize;
+                let (ref mut first, ref mut last) = sg_ranges[sg_idx];
+                if lvl < *first { *first = lvl; }
+                if lvl > *last { *last = lvl; }
+            }
+        }
+    }
+
+    // 2. Propagate child ranges to parents (bottom-up)
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in 0..sg_count {
+            let (cf, cl) = sg_ranges[i];
+            if cf == usize::MAX { continue; } // no nodes
+            if let Some(pi) = graph.subgraph_parent(i) {
+                if pi < sg_count {
+                    let (ref mut pf, ref mut pl) = sg_ranges[pi];
+                    if *pf == usize::MAX {
+                        *pf = cf; *pl = cl; changed = true;
+                    } else {
+                        if cf < *pf { *pf = cf; changed = true; }
+                        if cl > *pl { *pl = cl; changed = true; }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Compute nesting depths
+    for i in 0..sg_count {
+        let mut depth = 0;
+        let mut cur = graph.subgraph_parent(i);
+        while let Some(pid) = cur {
+            depth += 1;
+            if pid >= sg_count { break; }
+            cur = graph.subgraph_parent(pid);
+        }
+        sg_depths[i] = depth;
+    }
+
+    // Helper: count stacked closing borders at a boundary
+    let stacked_closing = |sg_idx: usize, boundary_level: usize| -> usize {
+        let mut count = 1;
+        let mut cur = graph.subgraph_parent(sg_idx);
+        while let Some(pid) = cur {
+            if pid >= sg_count { break; }
+            let (f, l) = sg_ranges[pid];
+            if f != usize::MAX && l == boundary_level {
+                count += 1;
+                cur = graph.subgraph_parent(pid);
+                continue;
+            }
+            break;
+        }
+        count
+    };
+    let stacked_opening = |sg_idx: usize, boundary_level: usize| -> usize {
+        let mut count = 1;
+        let mut cur = graph.subgraph_parent(sg_idx);
+        while let Some(pid) = cur {
+            if pid >= sg_count { break; }
+            let (f, _l) = sg_ranges[pid];
+            if f == boundary_level {
+                count += 1;
+                cur = graph.subgraph_parent(pid);
+                continue;
+            }
+            break;
+        }
+        count
+    };
+
+    // 4. Initial offset: max stacked opening borders at level 0
+    let mut max_open_at_0 = 0usize;
+    for i in 0..sg_count {
+        let (f, _) = sg_ranges[i];
+        if f == 0 {
+            let d = stacked_opening(i, 0);
+            if d > max_open_at_0 { max_open_at_0 = d; }
+        }
+    }
+    let initial_offset = max_open_at_0 * SUBGRAPH_V_PAD_TOP;
+
+    // 5. Per-boundary extras
+    sg_y_extras.fill(0);
+    for boundary_after in 0..max_level {
+        let next_level = boundary_after + 1;
+
+        let mut max_close = 0usize;
+        let mut max_open = 0usize;
+
+        for i in 0..sg_count {
+            let (f, l) = sg_ranges[i];
+            if f == usize::MAX { continue; }
+            if l == boundary_after {
+                let d = stacked_closing(i, boundary_after);
+                if d > max_close { max_close = d; }
+            }
+            if f == next_level {
+                let d = stacked_opening(i, next_level);
+                if d > max_open { max_open = d; }
+            }
+        }
+
+        if boundary_after < sg_y_extras.len() {
+            sg_y_extras[boundary_after] = max_close * SUBGRAPH_V_PAD_BOTTOM
+                + max_open * SUBGRAPH_V_PAD_TOP;
+        }
+    }
+
+    // 6. Trailing extra
+    let mut max_close_at_end = 0usize;
+    for i in 0..sg_count {
+        let (f, l) = sg_ranges[i];
+        if f == usize::MAX { continue; }
+        if l == max_level {
+            let d = stacked_closing(i, max_level);
+            if d > max_close_at_end { max_close_at_end = d; }
+        }
+    }
+    let trailing_extra = max_close_at_end * SUBGRAPH_V_PAD_BOTTOM;
+
+    (initial_offset, trailing_extra)
+}
+
+/// Compute subgraph bounding boxes and add them to the builder.
+/// Uses sg_envelopes as scratch space.
+fn compute_sg_bounding_boxes(
+    graph: &CsrGraph<'_>,
+    real_coords: &[(usize, usize, usize, usize)], // (level, pos, x, width)
+    level_y_offsets: &[usize],
+    total_height: usize,
+    sg_depths: &[usize],
+    sg_envelopes: &mut [(usize, usize, usize, usize)],
+    builder: &mut LayoutIRArenaBuilder<'_>,
+) {
+    let sg_count = graph.subgraph_count();
+    if sg_count == 0 { return; }
+
+    // Pass 1: compute node envelope per subgraph
+    for e in sg_envelopes.iter_mut() {
+        *e = (usize::MAX, usize::MAX, 0, 0); // (min_x, min_y, max_x, max_y)
+    }
+
+    for node_idx in 0..graph.node_count() {
+        if let Some(sg_idx) = graph.node_subgraph(node_idx) {
+            if sg_idx >= sg_count { continue; }
+            if node_idx >= real_coords.len() { continue; }
+            let (level, _, x, width) = real_coords[node_idx];
+            let y = level_y_offsets.get(level).copied().unwrap_or(0);
+            let node_max_y = y + 1;
+            let node_max_x = x + width;
+
+            let (ref mut min_x, ref mut min_y, ref mut max_x, ref mut max_y) = sg_envelopes[sg_idx];
+            if x < *min_x { *min_x = x; }
+            if y < *min_y { *min_y = y; }
+            if node_max_x > *max_x { *max_x = node_max_x; }
+            if node_max_y > *max_y { *max_y = node_max_y; }
+        }
+    }
+
+    // Pass 1.5: Convert envelopes to padded bboxes
+    for sg_idx in 0..sg_count {
+        let (min_x, min_y, max_x, max_y) = sg_envelopes[sg_idx];
+        if min_x == usize::MAX { continue; } // no nodes
+
+        let x = min_x.saturating_sub(SUBGRAPH_H_PAD);
+        let y = min_y.saturating_sub(SUBGRAPH_V_PAD_TOP);
+        let right = max_x + SUBGRAPH_H_PAD;
+        let bottom = (max_y + SUBGRAPH_V_PAD_BOTTOM).min(total_height);
+
+        // Ensure width fits label
+        let label = graph.subgraph_label(sg_idx);
+        let min_label_width = label.len() + 4;
+        let width = right.saturating_sub(x);
+        let right = if width < min_label_width { x + min_label_width } else { right };
+
+        sg_envelopes[sg_idx] = (x, y, right, bottom);
+    }
+
+    // Pass 2: propagate children to parents (bottom-up by depth)
+    // Process deepest first. Since depth array is already computed, sort by depth desc.
+    // Use simple bubble iteration (sg_count is small)
+    let mut order = [0usize; 64];
+    let effective_sg = sg_count.min(64);
+    for i in 0..effective_sg { order[i] = i; }
+    // Sort by depth descending (simple insertion sort for small N)
+    for i in 1..effective_sg {
+        let mut j = i;
+        while j > 0 && sg_depths[order[j]] > sg_depths[order[j - 1]] {
+            order.swap(j, j - 1);
+            j -= 1;
+        }
+    }
+
+    for oi in 0..effective_sg {
+        let sg_idx = order[oi];
+        if let Some(parent_idx) = graph.subgraph_parent(sg_idx) {
+            if parent_idx >= sg_count { continue; }
+            let (cx, cy, cr, cb) = sg_envelopes[sg_idx];
+            if cx == usize::MAX { continue; }
+            let expanded = (
+                cx.saturating_sub(SUBGRAPH_H_PAD),
+                cy.saturating_sub(SUBGRAPH_V_PAD_TOP),
+                cr + SUBGRAPH_H_PAD,
+                cb + SUBGRAPH_V_PAD_BOTTOM,
+            );
+            let (ref mut px, ref mut py, ref mut pr, ref mut pb) = sg_envelopes[parent_idx];
+            if *px == usize::MAX {
+                *px = expanded.0; *py = expanded.1; *pr = expanded.2; *pb = expanded.3;
+            } else {
+                if expanded.0 < *px { *px = expanded.0; }
+                if expanded.1 < *py { *py = expanded.1; }
+                if expanded.2 > *pr { *pr = expanded.2; }
+                if expanded.3 > *pb { *pb = expanded.3; }
+            }
+        }
+    }
+
+    // Add subgraph bounding boxes to builder
+    for sg_idx in 0..effective_sg {
+        let (x, y, right, bottom) = sg_envelopes[sg_idx];
+        if x == usize::MAX { continue; }
+        let width = right.saturating_sub(x);
+        let height = bottom.saturating_sub(y);
+        let parent = graph.subgraph_parent(sg_idx);
+        let label = graph.subgraph_label(sg_idx);
+        builder.add_subgraph(sg_idx, parent, label, x, y, width, height);
     }
 }
 
@@ -1915,5 +2431,132 @@ mod tests {
         let line_count = output.lines().count();
         // Diamond with 4 nodes should be at most ~10 lines with compressed slots
         assert!(line_count <= 12, "layout should be compact: got {} lines", line_count);
+    }
+
+    #[test]
+    fn test_csr_single_subgraph_produces_border() {
+        // Build: A→B, both in subgraph "cluster"
+        let mut buf = [0u8; 32768];
+        let mut arena = Arena::new(&mut buf);
+        let sg_label_bytes = 7; // "cluster"
+        let label_bytes = 4 + sg_label_bytes; // A+B node labels + sg label
+        let mut builder = CsrGraphBuilder::new_with_subgraphs(
+            &mut arena, 2, 1, label_bytes, 1,
+        ).expect("builder");
+        builder.add_node(0, "A");
+        builder.add_node(1, "B");
+        builder.add_edge(0, 1);
+        let sg = builder.add_subgraph(0, "cluster").expect("sg");
+        builder.set_node_subgraph(0, sg);
+        builder.set_node_subgraph(1, sg);
+        let graph = builder.build().expect("build");
+
+        assert_eq!(graph.subgraph_count(), 1);
+        assert_eq!(graph.subgraph_label(0), "cluster");
+
+        // Layout + render
+        let config = LayoutConfig::default();
+        let mut temp_buf = [0u8; 65536];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_buf = [0u8; 65536];
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let ir = compute_layout_arena_csr(&graph, &config, &mut temp_arena, &mut out_arena)
+            .expect("layout");
+
+        assert_eq!(ir.subgraph_count(), 1);
+        let sg_info = &ir.subgraphs()[0];
+        assert!(sg_info.width > 0, "subgraph should have width");
+        assert!(sg_info.height > 0, "subgraph should have height");
+
+        // Render to text
+        let (out_size, scratch_size) = ir.estimate_render_size();
+        let mut render_buf = vec![0u8; out_size];
+        let mut line_buf = vec![' '; ir.width()];
+        let mut scratch = vec![0usize; scratch_size];
+        let bytes = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
+            .expect("render");
+        let output = core::str::from_utf8(&render_buf[..bytes]).expect("utf8");
+
+        // Should contain border characters
+        assert!(output.contains('╔'), "top-left border missing");
+        assert!(output.contains('╗'), "top-right border missing");
+        assert!(output.contains('╚'), "bottom-left border missing");
+        assert!(output.contains('╝'), "bottom-right border missing");
+        assert!(output.contains('║'), "side border missing");
+        assert!(output.contains('═'), "horizontal border missing");
+        // Label should appear
+        assert!(output.contains("cluster"), "subgraph label missing");
+        // Nodes should still be present
+        assert!(output.contains("[A]"), "node A missing");
+        assert!(output.contains("[B]"), "node B missing");
+    }
+
+    #[test]
+    fn test_csr_subgraph_via_to_csr() {
+        // Use the Graph→to_csr path which copies subgraph data
+        use crate::graph::Graph;
+
+        let mut g = Graph::new();
+        g.add_node(1, "X");
+        g.add_node(2, "Y");
+        g.add_edge(1, 2, None);
+        let sg = g.add_subgraph("box");
+        g.put_nodes(&[1, 2]).inside(sg).unwrap();
+
+        let mut csr_buf = [0u8; 32768];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("to_csr");
+
+        assert_eq!(csr.subgraph_count(), 1);
+        assert_eq!(csr.subgraph_label(0), "box");
+
+        let config = LayoutConfig::default();
+        let mut temp_buf = [0u8; 65536];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_buf = [0u8; 65536];
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let ir = compute_layout_arena_csr(&csr, &config, &mut temp_arena, &mut out_arena)
+            .expect("layout");
+
+        assert!(ir.subgraph_count() >= 1, "IR should have subgraph");
+        assert!(ir.subgraphs()[0].width > 0);
+        assert!(ir.subgraphs()[0].height > 0);
+    }
+
+    #[test]
+    fn test_csr_no_subgraphs_unchanged() {
+        // Verify that the subgraph code path doesn't affect graphs without subgraphs
+        let mut buf = [0u8; 16384];
+        let mut arena = Arena::new(&mut buf);
+        let graph = build_csr_graph(&mut arena, 3, &[(0, 1), (1, 2)]);
+
+        assert_eq!(graph.subgraph_count(), 0);
+        assert!(!graph.has_subgraphs());
+
+        let config = LayoutConfig::default();
+        let mut temp_buf = [0u8; 65536];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_buf = [0u8; 65536];
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let ir = compute_layout_arena_csr(&graph, &config, &mut temp_arena, &mut out_arena)
+            .expect("layout");
+
+        assert_eq!(ir.subgraph_count(), 0);
+        assert!(!ir.has_subgraphs());
+
+        // Render should work fine
+        let (out_size, scratch_size) = ir.estimate_render_size();
+        let mut render_buf = vec![0u8; out_size];
+        let mut line_buf = vec![' '; ir.width()];
+        let mut scratch = vec![0usize; scratch_size];
+        let bytes = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
+            .expect("render");
+        let output = core::str::from_utf8(&render_buf[..bytes]).expect("utf8");
+        assert!(output.contains("[A]"));
+        assert!(output.contains("[B]"));
+        assert!(output.contains("[C]"));
     }
 }

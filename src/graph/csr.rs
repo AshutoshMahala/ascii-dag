@@ -40,6 +40,14 @@ const EDGE_TO: usize = 1;
 const EDGE_LABEL_PTR: usize = 2;
 const EDGE_LABEL_LEN: usize = 3;
 
+/// Subgraph data stride: fields per subgraph
+const SUBGRAPH_STRIDE: usize = 4;
+/// Subgraph field offsets
+const SG_ID: usize = 0;
+const SG_PARENT_PLUS1: usize = 1; // 0 = no parent, N = parent index N-1
+const SG_LABEL_PTR: usize = 2;
+const SG_LABEL_LEN: usize = 3;
+
 /// CSR (Compressed Sparse Row) graph representation.
 ///
 /// This is an arena-friendly alternative to the heap-based DAG.
@@ -70,6 +78,13 @@ pub struct CsrGraph<'a> {
 
     /// Label storage (raw bytes)
     labels: &'a [u8],
+
+    /// Subgraph metadata: [id, parent+1, label_ptr, label_len] × subgraph_count
+    subgraph_data: &'a [usize],
+    /// Number of subgraphs
+    subgraph_count: usize,
+    /// Per-node subgraph index (u32::MAX = not in any subgraph)
+    node_subgraph: &'a [u32],
 }
 
 impl<'a> CsrGraph<'a> {
@@ -78,6 +93,17 @@ impl<'a> CsrGraph<'a> {
     /// This helps users pre-allocate the right arena size.
     #[inline]
     pub fn required_arena_size(node_count: usize, edge_count: usize, label_bytes: usize) -> usize {
+        Self::required_arena_size_with_subgraphs(node_count, edge_count, label_bytes, 0)
+    }
+
+    /// Calculate required arena size including subgraph storage.
+    #[inline]
+    pub fn required_arena_size_with_subgraphs(
+        node_count: usize,
+        edge_count: usize,
+        label_bytes: usize,
+        subgraph_count: usize,
+    ) -> usize {
         let nodes_size = node_count * NODE_STRIDE * core::mem::size_of::<usize>();
         let edges_size = edge_count * EDGE_STRIDE * core::mem::size_of::<u32>();
         let children_offsets_size = (node_count + 1) * core::mem::size_of::<u32>();
@@ -85,8 +111,17 @@ impl<'a> CsrGraph<'a> {
         let parents_offsets_size = (node_count + 1) * core::mem::size_of::<u32>();
         let parents_data_size = edge_count * core::mem::size_of::<u32>();
 
+        // Subgraph storage
+        let sg_data_size = subgraph_count * SUBGRAPH_STRIDE * core::mem::size_of::<usize>();
+        let node_sg_size = if subgraph_count > 0 {
+            node_count * core::mem::size_of::<u32>()
+        } else {
+            0
+        };
+
         // Add alignment padding (estimate 8 bytes per allocation)
-        let padding = 6 * 8;
+        let num_allocs = 6 + if subgraph_count > 0 { 2 } else { 0 };
+        let padding = num_allocs * 8;
 
         nodes_size
             + edges_size
@@ -94,6 +129,8 @@ impl<'a> CsrGraph<'a> {
             + children_data_size
             + parents_offsets_size
             + parents_data_size
+            + sg_data_size
+            + node_sg_size
             + label_bytes
             + padding
             + 256 // Extra buffer
@@ -187,6 +224,69 @@ impl<'a> CsrGraph<'a> {
     /// Iterate over all edges as (from_index, to_index) pairs.
     pub fn edges_iter(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
         (0..self.edge_count).map(move |i| self.edge(i))
+    }
+
+    // ── Subgraph accessors ───────────────────────────────────────────────
+
+    /// Get the number of subgraphs.
+    #[inline]
+    pub fn subgraph_count(&self) -> usize {
+        self.subgraph_count
+    }
+
+    /// Check if this graph has any subgraphs.
+    #[inline]
+    pub fn has_subgraphs(&self) -> bool {
+        self.subgraph_count > 0
+    }
+
+    /// Get subgraph ID by subgraph index.
+    #[inline]
+    pub fn subgraph_id(&self, sg_idx: usize) -> usize {
+        self.subgraph_data[sg_idx * SUBGRAPH_STRIDE + SG_ID]
+    }
+
+    /// Get subgraph parent index, or `None` for top-level subgraphs.
+    #[inline]
+    pub fn subgraph_parent(&self, sg_idx: usize) -> Option<usize> {
+        let v = self.subgraph_data[sg_idx * SUBGRAPH_STRIDE + SG_PARENT_PLUS1];
+        if v == 0 { None } else { Some(v - 1) }
+    }
+
+    /// Get subgraph label by subgraph index.
+    #[inline]
+    pub fn subgraph_label(&self, sg_idx: usize) -> &str {
+        let ptr = self.subgraph_data[sg_idx * SUBGRAPH_STRIDE + SG_LABEL_PTR];
+        let len = self.subgraph_data[sg_idx * SUBGRAPH_STRIDE + SG_LABEL_LEN];
+        if len == 0 {
+            return "";
+        }
+        let bytes = &self.labels[ptr..ptr + len];
+        core::str::from_utf8(bytes).unwrap_or("")
+    }
+
+    /// Get the subgraph index a node belongs to, or `None`.
+    #[inline]
+    pub fn node_subgraph(&self, node_idx: usize) -> Option<usize> {
+        if node_idx < self.node_subgraph.len() {
+            let v = self.node_subgraph[node_idx];
+            if v == u32::MAX { None } else { Some(v as usize) }
+        } else {
+            None
+        }
+    }
+
+    /// Walk the ancestry chain for a subgraph and return nesting depth
+    /// (0 = no subgraph, 1 = top-level, 2 = child of top-level, …).
+    pub fn sg_chain_depth(&self, sg_idx: Option<usize>) -> usize {
+        let mut depth = 0usize;
+        let mut cur = sg_idx;
+        while let Some(idx) = cur {
+            if idx >= self.subgraph_count { break; }
+            depth += 1;
+            cur = self.subgraph_parent(idx);
+        }
+        depth
     }
 
     /// Render graph summary to a pre-allocated buffer.
@@ -314,14 +414,20 @@ pub struct CsrGraphBuilder<'a> {
     parents_data: &'a mut [u32],
     labels: &'a mut [u8],
 
+    // Subgraph data (empty slices if no subgraphs)
+    subgraph_data: &'a mut [usize],
+    node_subgraph: &'a mut [u32],
+
     // Tracking current progress
     current_node_count: usize,
     current_edge_count: usize,
     current_label_offset: usize,
+    current_subgraph_count: usize,
 
     // Limits
     max_nodes: usize,
     max_edges: usize,
+    max_subgraphs: usize,
 }
 
 impl<'a> CsrGraphBuilder<'a> {
@@ -358,6 +464,11 @@ impl<'a> CsrGraphBuilder<'a> {
         children_offsets.fill(0);
         parents_offsets.fill(0);
 
+        // No subgraph storage in basic constructor — use empty mutable refs
+        // (safe: zero-length slices from a valid, non-null, aligned pointer)
+        let subgraph_data: &'a mut [usize] = &mut [];
+        let node_subgraph: &'a mut [u32] = &mut [];
+
         Some(Self {
             arena,
             nodes,
@@ -367,11 +478,74 @@ impl<'a> CsrGraphBuilder<'a> {
             parents_offsets,
             parents_data,
             labels,
+            subgraph_data,
+            node_subgraph,
             current_node_count: 0,
             current_edge_count: 0,
             current_label_offset: 0,
+            current_subgraph_count: 0,
             max_nodes,
             max_edges,
+            max_subgraphs: 0,
+        })
+    }
+
+    /// Create a new builder with subgraph support.
+    ///
+    /// `max_label_bytes` must cover both node/edge labels AND subgraph labels.
+    pub fn new_with_subgraphs(
+        arena: &'a mut Arena<'a>,
+        max_nodes: usize,
+        max_edges: usize,
+        max_label_bytes: usize,
+        max_subgraphs: usize,
+    ) -> Option<Self> {
+        let (nodes_ptr, _) = arena.alloc_raw::<usize>(max_nodes * NODE_STRIDE)?;
+        let (edges_ptr, _) = arena.alloc_raw::<u32>(max_edges * EDGE_STRIDE)?;
+        let (children_offsets_ptr, _) = arena.alloc_raw::<u32>(max_nodes + 1)?;
+        let (children_data_ptr, _) = arena.alloc_raw::<u32>(max_edges)?;
+        let (parents_offsets_ptr, _) = arena.alloc_raw::<u32>(max_nodes + 1)?;
+        let (parents_data_ptr, _) = arena.alloc_raw::<u32>(max_edges)?;
+        let (labels_ptr, _) = arena.alloc_raw::<u8>(max_label_bytes)?;
+        let (sg_data_ptr, _) = arena.alloc_raw::<usize>(max_subgraphs * SUBGRAPH_STRIDE)?;
+        let (node_sg_ptr, _) = arena.alloc_raw::<u32>(max_nodes)?;
+
+        let (nodes, edges, children_offsets, children_data, parents_offsets, parents_data, labels, subgraph_data, node_subgraph) = unsafe {
+            (
+                core::slice::from_raw_parts_mut(nodes_ptr, max_nodes * NODE_STRIDE),
+                core::slice::from_raw_parts_mut(edges_ptr, max_edges * EDGE_STRIDE),
+                core::slice::from_raw_parts_mut(children_offsets_ptr, max_nodes + 1),
+                core::slice::from_raw_parts_mut(children_data_ptr, max_edges),
+                core::slice::from_raw_parts_mut(parents_offsets_ptr, max_nodes + 1),
+                core::slice::from_raw_parts_mut(parents_data_ptr, max_edges),
+                core::slice::from_raw_parts_mut(labels_ptr, max_label_bytes),
+                core::slice::from_raw_parts_mut(sg_data_ptr, max_subgraphs * SUBGRAPH_STRIDE),
+                core::slice::from_raw_parts_mut(node_sg_ptr, max_nodes),
+            )
+        };
+
+        children_offsets.fill(0);
+        parents_offsets.fill(0);
+        node_subgraph.fill(u32::MAX); // no subgraph
+
+        Some(Self {
+            arena,
+            nodes,
+            edges,
+            children_offsets,
+            children_data,
+            parents_offsets,
+            parents_data,
+            labels,
+            subgraph_data,
+            node_subgraph,
+            current_node_count: 0,
+            current_edge_count: 0,
+            current_label_offset: 0,
+            current_subgraph_count: 0,
+            max_nodes,
+            max_edges,
+            max_subgraphs,
         })
     }
 
@@ -462,8 +636,54 @@ impl<'a> CsrGraphBuilder<'a> {
         Some(())
     }
 
-    /// Finalize the graph construction.
-    /// This sorts edges and builds the adjacency lists (children/parents).
+    /// Add a subgraph. Returns the subgraph index (0 to S-1).
+    /// Label bytes are shared with node/edge labels.
+    pub fn add_subgraph(&mut self, id: usize, label: &str) -> Option<usize> {
+        if self.current_subgraph_count >= self.max_subgraphs {
+            return None;
+        }
+
+        let label_len = label.len();
+        if self.current_label_offset + label_len > self.labels.len() {
+            return None;
+        }
+
+        let sg_idx = self.current_subgraph_count;
+        self.subgraph_data[sg_idx * SUBGRAPH_STRIDE + SG_ID] = id;
+        self.subgraph_data[sg_idx * SUBGRAPH_STRIDE + SG_PARENT_PLUS1] = 0; // no parent
+        self.subgraph_data[sg_idx * SUBGRAPH_STRIDE + SG_LABEL_PTR] = self.current_label_offset;
+        self.subgraph_data[sg_idx * SUBGRAPH_STRIDE + SG_LABEL_LEN] = label_len;
+
+        if label_len > 0 {
+            self.labels[self.current_label_offset..self.current_label_offset + label_len]
+                .copy_from_slice(label.as_bytes());
+            self.current_label_offset += label_len;
+        }
+
+        self.current_subgraph_count += 1;
+        Some(sg_idx)
+    }
+
+    /// Set a subgraph's parent (for nesting).
+    pub fn set_subgraph_parent(&mut self, sg_idx: usize, parent_sg_idx: usize) -> Option<()> {
+        if sg_idx >= self.current_subgraph_count || parent_sg_idx >= self.current_subgraph_count {
+            return None;
+        }
+        self.subgraph_data[sg_idx * SUBGRAPH_STRIDE + SG_PARENT_PLUS1] = parent_sg_idx + 1;
+        Some(())
+    }
+
+    /// Assign a node to a subgraph.
+    pub fn set_node_subgraph(&mut self, node_idx: usize, sg_idx: usize) -> Option<()> {
+        if node_idx >= self.current_node_count || sg_idx >= self.current_subgraph_count {
+            return None;
+        }
+        if node_idx >= self.node_subgraph.len() {
+            return None;
+        }
+        self.node_subgraph[node_idx] = sg_idx as u32;
+        Some(())
+    }
     pub fn build(self) -> Option<CsrGraph<'a>> {
         let CsrGraphBuilder {
             arena,
@@ -474,9 +694,12 @@ impl<'a> CsrGraphBuilder<'a> {
             parents_offsets,
             parents_data,
             labels,
+            subgraph_data,
+            node_subgraph,
             current_node_count,
             current_edge_count,
             current_label_offset,
+            current_subgraph_count,
             ..
         } = self;
 
@@ -557,6 +780,13 @@ impl<'a> CsrGraphBuilder<'a> {
             parents_offsets: &parents_offsets[..node_count + 1],
             parents_data: &parents_data[..edge_count],
             labels: &labels[..current_label_offset],
+            subgraph_data: &subgraph_data[..current_subgraph_count * SUBGRAPH_STRIDE],
+            subgraph_count: current_subgraph_count,
+            node_subgraph: if current_subgraph_count > 0 {
+                &node_subgraph[..node_count]
+            } else {
+                &[]
+            },
         })
     }
 }
@@ -610,13 +840,15 @@ impl<'a> super::Graph<'a> {
     pub fn to_csr<'b>(&self, arena: &'b mut Arena<'b>) -> Option<CsrGraph<'b>> {
         let node_count = self.nodes.len();
         let edge_count = self.edges.len();
+        let sg_count = self.subgraphs.len();
 
-        // Calculate total label bytes needed (node + edge labels share storage)
+        // Calculate total label bytes needed (node + edge + subgraph labels share storage)
         let node_label_bytes: usize = self.nodes.iter().map(|(_, label)| label.len()).sum();
         let edge_label_bytes: usize = self.edges.iter()
             .filter_map(|(_, _, label)| label.map(|l| l.len()))
             .sum();
-        let total_label_bytes: usize = node_label_bytes + edge_label_bytes;
+        let sg_label_bytes: usize = self.subgraphs.iter().map(|sg| sg.label.len()).sum();
+        let total_label_bytes: usize = node_label_bytes + edge_label_bytes + sg_label_bytes;
 
         // Allocate all memory from arena using raw pointers
         // This avoids the borrow checker issue with multiple mutable borrows
@@ -627,6 +859,18 @@ impl<'a> super::Graph<'a> {
         let (parents_offsets_ptr, _) = arena.alloc_raw::<u32>(node_count + 1)?;
         let (parents_data_ptr, _) = arena.alloc_raw::<u32>(edge_count)?;
         let (labels_ptr, _) = arena.alloc_raw::<u8>(total_label_bytes)?;
+
+        // Subgraph allocations (only if subgraphs present)
+        let sg_data_ptr = if sg_count > 0 {
+            Some(arena.alloc_raw::<usize>(sg_count * SUBGRAPH_STRIDE)?.0)
+        } else {
+            None
+        };
+        let node_sg_ptr = if sg_count > 0 {
+            Some(arena.alloc_raw::<u32>(node_count)?.0)
+        } else {
+            None
+        };
 
         // Convert raw pointers to slices
         // Safety: alloc_raw has validated the allocations and zeroed the memory
@@ -752,6 +996,60 @@ impl<'a> super::Graph<'a> {
         let children_data: &[u32] = children_data;
         let parents_offsets: &[u32] = parents_offsets;
         let parents_data: &[u32] = parents_data;
+
+        // Copy subgraph data (labels still mutable for subgraph label copying)
+        let (subgraph_data, node_subgraph_slice): (&[usize], &[u32]) = if sg_count > 0 {
+            let sg_data = unsafe {
+                core::slice::from_raw_parts_mut(sg_data_ptr.unwrap(), sg_count * SUBGRAPH_STRIDE)
+            };
+            let node_sg = unsafe {
+                core::slice::from_raw_parts_mut(node_sg_ptr.unwrap(), node_count)
+            };
+            node_sg.fill(u32::MAX);
+
+            // Build heap-subgraph-ID → CSR-index mapping
+            // Since we're in the alloc feature, we can use Vec
+            use alloc::vec::Vec;
+            let id_to_idx: Vec<(usize, usize)> = self.subgraphs.iter()
+                .enumerate()
+                .map(|(i, sg)| (sg.id, i))
+                .collect();
+
+            for (sg_idx, sg) in self.subgraphs.iter().enumerate() {
+                sg_data[sg_idx * SUBGRAPH_STRIDE + SG_ID] = sg.id;
+                sg_data[sg_idx * SUBGRAPH_STRIDE + SG_PARENT_PLUS1] = match sg.parent_id {
+                    None => 0,
+                    Some(pid) => {
+                        // Find parent's CSR index
+                        id_to_idx.iter()
+                            .find(|&&(id, _)| id == pid)
+                            .map(|&(_, idx)| idx + 1)
+                            .unwrap_or(0)
+                    }
+                };
+                sg_data[sg_idx * SUBGRAPH_STRIDE + SG_LABEL_PTR] = label_offset;
+                sg_data[sg_idx * SUBGRAPH_STRIDE + SG_LABEL_LEN] = sg.label.len();
+                if !sg.label.is_empty() {
+                    labels[label_offset..label_offset + sg.label.len()]
+                        .copy_from_slice(sg.label.as_bytes());
+                    label_offset += sg.label.len();
+                }
+            }
+
+            // Copy node → subgraph mapping
+            for (node_idx, &(id, _)) in self.nodes.iter().enumerate() {
+                if let Some(&sg_id) = self.node_subgraph.get(&id) {
+                    if let Some(&(_, sg_idx)) = id_to_idx.iter().find(|&&(sid, _)| sid == sg_id) {
+                        node_sg[node_idx] = sg_idx as u32;
+                    }
+                }
+            }
+
+            (sg_data as &[usize], node_sg as &[u32])
+        } else {
+            (&[], &[])
+        };
+
         let labels: &[u8] = labels;
 
         Some(CsrGraph {
@@ -764,6 +1062,9 @@ impl<'a> super::Graph<'a> {
             parents_offsets,
             parents_data,
             labels,
+            subgraph_data,
+            subgraph_count: sg_count,
+            node_subgraph: node_subgraph_slice,
         })
     }
 
@@ -773,6 +1074,12 @@ impl<'a> super::Graph<'a> {
         let edge_label_bytes: usize = self.edges.iter()
             .filter_map(|(_, _, label)| label.map(|l| l.len()))
             .sum();
-        CsrGraph::required_arena_size(self.nodes.len(), self.edges.len(), node_label_bytes + edge_label_bytes)
+        let sg_label_bytes: usize = self.subgraphs.iter().map(|sg| sg.label.len()).sum();
+        CsrGraph::required_arena_size_with_subgraphs(
+            self.nodes.len(),
+            self.edges.len(),
+            node_label_bytes + edge_label_bytes + sg_label_bytes,
+            self.subgraphs.len(),
+        )
     }
 }

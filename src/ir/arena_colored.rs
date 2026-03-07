@@ -1,6 +1,6 @@
 //! ANSI-colored rendering for arena-backed layout IR.
 
-use super::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena};
+use super::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena};
 use crate::render::chars::{
     ARROW_DOWN, ARROW_DOWN_DASHED, ARROW_UP_DASHED,
     CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR, CROSS,
@@ -129,6 +129,13 @@ impl<'a> LayoutIRArena<'a> {
                 );
             }
 
+            // 2b. Paint subgraph borders (no color)
+            if self.has_subgraphs() {
+                for sg in self.subgraphs() {
+                    Self::paint_subgraph_border_colored(line_buffer, color_buffer, sg, y);
+                }
+            }
+
             // 3. Paint nodes (no color - clears color at node positions)
             for (node_idx, node) in self.nodes().iter().enumerate() {
                 if y >= node.y && y < node.y + node.height {
@@ -141,6 +148,13 @@ impl<'a> LayoutIRArena<'a> {
                             color_buffer[loop_x] = 0; // no color for self-loop indicator
                         }
                     }
+                }
+            }
+
+            // 4. Paint subgraph labels (last, always readable, no color)
+            if self.has_subgraphs() {
+                for (sg_idx, sg) in self.subgraphs().iter().enumerate() {
+                    self.paint_subgraph_label_colored(line_buffer, color_buffer, sg_idx, sg, y);
                 }
             }
 
@@ -248,6 +262,13 @@ impl<'a> LayoutIRArena<'a> {
                 }
             }
 
+            // 2b. Paint subgraph borders (no color)
+            if self.has_subgraphs() {
+                for sg in self.subgraphs() {
+                    Self::paint_subgraph_border_colored(line_buffer, color_buffer, sg, y);
+                }
+            }
+
             // 3. Paint nodes (no color)
             for (node_idx, node) in self.nodes().iter().enumerate() {
                 if y >= node.y && y < node.y + node.height {
@@ -260,6 +281,13 @@ impl<'a> LayoutIRArena<'a> {
                             color_buffer[loop_x] = 0;
                         }
                     }
+                }
+            }
+
+            // 4. Paint subgraph labels (last, always readable, no color)
+            if self.has_subgraphs() {
+                for (sg_idx, sg) in self.subgraphs().iter().enumerate() {
+                    self.paint_subgraph_label_colored(line_buffer, color_buffer, sg_idx, sg, y);
                 }
             }
 
@@ -818,5 +846,94 @@ impl<'a> LayoutIRArena<'a> {
         }
         buffer[pos..pos + RESET.len()].copy_from_slice(RESET);
         Some(pos + RESET.len())
+    }
+
+    // ── Subgraph border rendering (colored) ──────────────────────────────
+
+    /// Paint a subgraph border on the given line buffer row (no color).
+    fn paint_subgraph_border_colored(
+        line_buffer: &mut [char],
+        color_buffer: &mut [u8],
+        sg: &SubgraphInfoArena,
+        y: usize,
+    ) {
+        if y < sg.y || y >= sg.y + sg.height { return; }
+        let left = sg.x;
+        let right = sg.x + sg.width.saturating_sub(1);
+        if left >= line_buffer.len() { return; }
+        let right = right.min(line_buffer.len() - 1);
+
+        if y == sg.y {
+            line_buffer[left] = '╔'; color_buffer[left] = 0;
+            if right > left { line_buffer[right] = '╗'; color_buffer[right] = 0; }
+            for col in (left + 1)..right {
+                line_buffer[col] = Self::merge_h_border_c(line_buffer[col]);
+                color_buffer[col] = 0;
+            }
+        } else if y == sg.y + sg.height - 1 {
+            line_buffer[left] = '╚'; color_buffer[left] = 0;
+            if right > left { line_buffer[right] = '╝'; color_buffer[right] = 0; }
+            for col in (left + 1)..right {
+                line_buffer[col] = Self::merge_h_border_c(line_buffer[col]);
+                color_buffer[col] = 0;
+            }
+        } else {
+            line_buffer[left] = Self::merge_v_border_c(line_buffer[left]);
+            color_buffer[left] = 0;
+            if right > left {
+                line_buffer[right] = Self::merge_v_border_c(line_buffer[right]);
+                color_buffer[right] = 0;
+            }
+        }
+    }
+
+    #[inline]
+    fn merge_h_border_c(existing: char) -> char {
+        match existing {
+            '│' | '┊' | '┼' | '├' | '┤' => '╪',
+            '↓' | '⇣' | '┌' | '┐' | '┬' => '╤',
+            '↑' | '⇡' | '└' | '┘' | '┴' => '╧',
+            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => existing,
+            _ => '═',
+        }
+    }
+
+    #[inline]
+    fn merge_v_border_c(existing: char) -> char {
+        match existing {
+            '─' | '┈' | '┼' | '┬' | '┴' => '╫',
+            '→' | '┌' | '└' | '├' => '╞',
+            '←' | '┐' | '┘' | '┤' => '╡',
+            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => existing,
+            _ => '║',
+        }
+    }
+
+    /// Paint a subgraph label inside the box (no color).
+    fn paint_subgraph_label_colored(
+        &self,
+        line_buffer: &mut [char],
+        color_buffer: &mut [u8],
+        sg_idx: usize,
+        sg: &SubgraphInfoArena,
+        y: usize,
+    ) {
+        let label_y = sg.y + 1;
+        if y != label_y { return; }
+        if sg.width < 4 || sg.height < 3 { return; }
+        let label = self.subgraph_label(sg_idx);
+        if label.is_empty() { return; }
+
+        let label_start = sg.x + 2;
+        let max_len = sg.width.saturating_sub(4);
+
+        let mut col = label_start;
+        for ch in label.chars().take(max_len) {
+            if col < line_buffer.len() {
+                line_buffer[col] = ch;
+                color_buffer[col] = 0;
+                col += 1;
+            }
+        }
     }
 }

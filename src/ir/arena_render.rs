@@ -1,6 +1,6 @@
 //! Plain (non-colored) rendering for arena-backed layout IR.
 
-use super::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena};
+use super::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena};
 use crate::render::chars::{
     ARROW_DOWN, ARROW_DOWN_DASHED, ARROW_UP_DASHED,
     CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR, CROSS,
@@ -155,6 +155,13 @@ impl<'a> LayoutIRArena<'a> {
                 curr = next_active[curr];
             }
 
+            // 3b. Paint subgraph borders (after edges → merge produces junctions)
+            if self.has_subgraphs() {
+                for sg in self.subgraphs() {
+                    Self::paint_subgraph_border(line_buffer, sg, y);
+                }
+            }
+
             // 4. Paint nodes (brute-force O(N) per row; could bucket-sort like edges)
             for (node_idx, node) in self.nodes().iter().enumerate() {
                 if y >= node.y && y < node.y + node.height {
@@ -166,6 +173,13 @@ impl<'a> LayoutIRArena<'a> {
                             line_buffer[loop_x] = SELF_LOOP;
                         }
                     }
+                }
+            }
+
+            // 5. Paint subgraph labels (last, so always readable)
+            if self.has_subgraphs() {
+                for (sg_idx, sg) in self.subgraphs().iter().enumerate() {
+                    self.paint_subgraph_label(line_buffer, sg_idx, sg, y);
                 }
             }
 
@@ -511,5 +525,94 @@ impl<'a> LayoutIRArena<'a> {
         // Scratch buffer needs: height + edge_count * 2
         let scratch_len = self.height() + self.edge_count() * 2;
         (output_size, scratch_len)
+    }
+
+    // ── Subgraph border rendering ────────────────────────────────────────
+
+    /// Paint a subgraph border on the given line buffer row.
+    /// Uses double-line box-drawing chars (╔═╗║╚═╝) with merge functions
+    /// for edge-border junctions.
+    fn paint_subgraph_border(
+        line_buffer: &mut [char],
+        sg: &SubgraphInfoArena,
+        y: usize,
+    ) {
+        if y < sg.y || y >= sg.y + sg.height { return; }
+        let left = sg.x;
+        let right = sg.x + sg.width.saturating_sub(1);
+        if left >= line_buffer.len() { return; }
+        let right = right.min(line_buffer.len() - 1);
+
+        if y == sg.y {
+            // Top border: ╔═══╗
+            line_buffer[left] = '╔';
+            if right > left { line_buffer[right] = '╗'; }
+            for col in (left + 1)..right {
+                line_buffer[col] = Self::merge_h_border(line_buffer[col]);
+            }
+        } else if y == sg.y + sg.height - 1 {
+            // Bottom border: ╚═══╝
+            line_buffer[left] = '╚';
+            if right > left { line_buffer[right] = '╝'; }
+            for col in (left + 1)..right {
+                line_buffer[col] = Self::merge_h_border(line_buffer[col]);
+            }
+        } else {
+            // Side borders: ║ ... ║
+            line_buffer[left] = Self::merge_v_border(line_buffer[left]);
+            if right > left {
+                line_buffer[right] = Self::merge_v_border(line_buffer[right]);
+            }
+        }
+    }
+
+    /// Merge horizontal double-line border with existing edge characters.
+    #[inline]
+    fn merge_h_border(existing: char) -> char {
+        match existing {
+            '│' | '┊' | '┼' | '├' | '┤' => '╪',
+            '↓' | '⇣' | '┌' | '┐' | '┬' => '╤',
+            '↑' | '⇡' | '└' | '┘' | '┴' => '╧',
+            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => existing,
+            _ => '═',
+        }
+    }
+
+    /// Merge vertical double-line border with existing edge characters.
+    #[inline]
+    fn merge_v_border(existing: char) -> char {
+        match existing {
+            '─' | '┈' | '┼' | '┬' | '┴' => '╫',
+            '→' | '┌' | '└' | '├' => '╞',
+            '←' | '┐' | '┘' | '┤' => '╡',
+            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => existing,
+            _ => '║',
+        }
+    }
+
+    /// Paint a subgraph label inside the box, one row below the top border.
+    fn paint_subgraph_label(
+        &self,
+        line_buffer: &mut [char],
+        sg_idx: usize,
+        sg: &SubgraphInfoArena,
+        y: usize,
+    ) {
+        let label_y = sg.y + 1;
+        if y != label_y { return; }
+        if sg.width < 4 || sg.height < 3 { return; }
+        let label = self.subgraph_label(sg_idx);
+        if label.is_empty() { return; }
+
+        let label_start = sg.x + 2;
+        let max_len = sg.width.saturating_sub(4);
+
+        let mut col = label_start;
+        for ch in label.chars().take(max_len) {
+            if col < line_buffer.len() {
+                line_buffer[col] = ch;
+                col += 1;
+            }
+        }
     }
 }
