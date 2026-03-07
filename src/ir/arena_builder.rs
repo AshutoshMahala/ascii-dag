@@ -124,6 +124,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             level,
             level_position,
             kind,
+            has_self_loop: false,
         };
 
         self.label_offset += label_bytes.len();
@@ -143,6 +144,13 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         self.edge_count += 1;
 
         Some(edge_idx)
+    }
+
+    /// Mark a node as having a self-loop edge.
+    pub fn set_self_loop(&mut self, node_idx: usize) {
+        if node_idx < self.node_count {
+            self.nodes[node_idx].has_self_loop = true;
+        }
     }
 
     /// Add waypoints for a multi-segment edge, returns (start, len).

@@ -53,6 +53,8 @@ pub struct LayoutNodeArena {
     pub level_position: usize,
     /// Classification: explicit, implicit, or dummy
     pub kind: NodeKind,
+    /// Whether this node has a self-loop edge (A → A)
+    pub has_self_loop: bool,
 }
 
 /// Edge routing type (no heap allocation version).
@@ -88,6 +90,8 @@ pub struct LayoutEdgeArena {
     pub to_x: usize,
     /// Target node's top Y coordinate
     pub to_y: usize,
+    /// Whether this edge was reversed during cycle breaking (back-edge).
+    pub reversed: bool,
     /// How the edge is routed
     pub path: EdgePathArena,
     /// Edge index (for consistent coloring)

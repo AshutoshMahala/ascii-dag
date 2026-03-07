@@ -6,7 +6,7 @@
 use crate::graph::arena::Arena;
 use crate::graph::csr::CsrGraph;
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
-use super::config::LayoutConfig;
+use super::config::{CycleBreaking, LayoutConfig};
 use super::crossing::CrossingReducer;
 use crate::errors::GraphError;
 
@@ -90,14 +90,29 @@ pub fn compute_layout_arena_csr<'b>(
     // Use a conservative estimate: avg 2 waypoints per edge (covers most skip edges)
     let max_waypoints = (edge_count * 4).min(1000);
 
-    // Step 1: Allocate temporaries
+    // Step 1: Cycle breaking — allocate back_edges and run DFS before other temps
+    let back_edges = {
+        let be_size = edge_count.max(1);
+        let (be_ptr, _) = temp_arena.alloc_raw::<bool>(be_size)
+            .ok_or(GraphError::ArenaOom)?;
+        // Safety: alloc_raw zeroes memory, so all false
+        unsafe { core::slice::from_raw_parts_mut(be_ptr, be_size) }
+    };
+    match config.cycle_breaking() {
+        CycleBreaking::DepthFirst => {
+            detect_back_edges_csr(graph, back_edges, temp_arena);
+        }
+        CycleBreaking::None => {} // already all-false from alloc_raw
+    }
+
+    // Step 2: Allocate layout temporaries
     let mut temps = alloc_layout_temps_csr(temp_arena, node_count, edge_count)
         .ok_or(GraphError::ArenaOom)?;
 
-    // Step 2: Calculate levels
-    let max_level = calculate_levels_csr(graph, temps.node_levels);
+    // Step 3: Calculate levels (back edges have direction flipped)
+    let max_level = calculate_levels_csr(graph, temps.node_levels, back_edges);
 
-    // Step 3: Build virtual levels
+    // Step 4: Build virtual levels (back edges have direction flipped)
     let (_vnode_count, _max_level_size) = build_virtual_levels_csr(
         graph,
         temps.node_levels,
@@ -105,6 +120,7 @@ pub fn compute_layout_arena_csr<'b>(
         temps.level_counts,
         temps.vnode_data,
         max_level,
+        back_edges,
     );
 
     // Populate edge_indices for crossing reduction
@@ -187,19 +203,23 @@ pub fn compute_layout_arena_csr<'b>(
     let node_is_source = &mut temps.node_is_source;
     let alloc_size = max_level as usize + 1;
 
-    for (from_idx, to_idx) in graph.edges_iter() {
-        if from_idx < temps.real_coords.len() && to_idx < temps.real_coords.len() {
-            let from_level = temps.real_coords[from_idx].0;
-            let to_level = temps.real_coords[to_idx].0;
+    for (ei, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
+        if from_idx == to_idx { continue; }
+        // Use layout-direction indices for slot computation
+        let is_back = back_edges.get(ei).copied().unwrap_or(false);
+        let (src_idx, dst_idx) = if is_back { (to_idx, from_idx) } else { (from_idx, to_idx) };
+        if src_idx < temps.real_coords.len() && dst_idx < temps.real_coords.len() {
+            let src_level = temps.real_coords[src_idx].0;
+            let dst_level = temps.real_coords[dst_idx].0;
 
-            if to_level > from_level {
+            if dst_level > src_level {
                 // Check if this is a vertical edge (same x-center, adjacent level)
-                let from_x_center = temps.real_coords[from_idx].2 + temps.real_coords[from_idx].3 / 2;
-                let to_x_center = temps.real_coords[to_idx].2 + temps.real_coords[to_idx].3 / 2;
-                let is_vertical = from_x_center == to_x_center && to_level == from_level + 1;
+                let src_x_center = temps.real_coords[src_idx].2 + temps.real_coords[src_idx].3 / 2;
+                let dst_x_center = temps.real_coords[dst_idx].2 + temps.real_coords[dst_idx].3 / 2;
+                let is_vertical = src_x_center == dst_x_center && dst_level == src_level + 1;
 
                 if !is_vertical {
-                    node_is_source[from_idx] = true;
+                    node_is_source[src_idx] = true;
                 }
             }
         }
@@ -316,29 +336,45 @@ pub fn compute_layout_arena_csr<'b>(
 
     // Add edges
     for (edge_idx, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
-        let (from_level, _, from_x_base, from_width) = temps.real_coords[from_idx];
-        let (to_level, _, to_x_base, to_width) = temps.real_coords[to_idx];
+        // Self-loops: mark the node and skip edge routing
+        if from_idx == to_idx {
+            builder.set_self_loop(from_idx);
+            continue;
+        }
 
-        let from_x = (from_x_base + from_width / 2) as usize;
-        let to_x = (to_x_base + to_width / 2) as usize;
+        // For back edges, layout direction is reversed (to→from in level space).
+        // We compute coordinates in layout order, then store semantic IDs in the IR.
+        let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
+        let (layout_src_idx, layout_dst_idx) = if is_back {
+            (to_idx, from_idx)
+        } else {
+            (from_idx, to_idx)
+        };
+
+        let (src_level, _, src_x_base, src_width) = temps.real_coords[layout_src_idx];
+        let (dst_level, _, dst_x_base, dst_width) = temps.real_coords[layout_dst_idx];
+
+        let from_x = (src_x_base + src_width / 2) as usize;
+        let to_x = (dst_x_base + dst_width / 2) as usize;
         // from_y = bottom of source node (top + max_node_height - 1)
-        let from_y = level_y_offsets[from_level as usize]
-            + max_node_heights[from_level as usize] as usize - 1;
-        let to_y = level_y_offsets[to_level as usize];
+        let from_y = level_y_offsets[src_level as usize]
+            + max_node_heights[src_level as usize] as usize - 1;
+        let to_y = level_y_offsets[dst_level as usize];
 
+        // Store original semantic IDs (not layout-direction IDs)
         let from_id = graph.node_id(from_idx);
         let to_id = graph.node_id(to_idx);
 
         // Get or assign slot for this source at this level
-        let slot = if to_level > from_level && (from_level as usize) < max_level as usize + 1 {
+        let slot = if dst_level > src_level && (src_level as usize) < max_level as usize + 1 {
             // Check if already assigned
-            if node_slots[from_idx] != 0 {
-                node_slots[from_idx]
+            if node_slots[layout_src_idx] != 0 {
+                node_slots[layout_src_idx]
             } else {
-                if (from_level as usize) < level_slot_next.len() {
-                    let s = level_slot_next[from_level as usize];
-                    node_slots[from_idx] = s as usize;
-                    level_slot_next[from_level as usize] += 1;
+                if (src_level as usize) < level_slot_next.len() {
+                    let s = level_slot_next[src_level as usize];
+                    node_slots[layout_src_idx] = s as usize;
+                    level_slot_next[src_level as usize] += 1;
                     s as usize
                 } else {
                     0
@@ -350,15 +386,37 @@ pub fn compute_layout_arena_csr<'b>(
 
         let edge_start_row = 1 + if has_labeled_edges { 1 } else { 0 };
 
-        let path = if to_level == from_level + 1 {
-            if from_x == to_x {
+        // Detect 2-node cycle: A→B (forward) + B→A (reversed) sharing the same column.
+        // Offset forward edge left by 1 and back-edge right by 1 from center.
+        let in_two_node_cycle = from_x == to_x && from_idx != to_idx && {
+            let edge_count = graph.edge_count();
+            (0..edge_count).any(|ej| {
+                if ej == edge_idx { return false; }
+                let (f, t) = graph.edge(ej);
+                f == to_idx && t == from_idx
+                    && back_edges.get(ej).copied().unwrap_or(false) != is_back
+            })
+        };
+
+        let (eff_from_x, eff_to_x) = if in_two_node_cycle {
+            if is_back {
+                (from_x + 1, to_x + 1)
+            } else {
+                (from_x.saturating_sub(1), to_x.saturating_sub(1))
+            }
+        } else {
+            (from_x, to_x)
+        };
+
+        let path = if dst_level == src_level + 1 {
+            if eff_from_x == eff_to_x {
                 EdgePathArena::Direct
             } else {
                 EdgePathArena::Corner {
                     horizontal_y: from_y + edge_start_row + slot,
                 }
             }
-        } else if to_level > from_level + 1 {
+        } else if dst_level > src_level + 1 {
             let dummy_start = temps.dummy_offsets[edge_idx] as usize;
             let dummy_end = temps.dummy_offsets[edge_idx + 1] as usize;
             let dummy_count = dummy_end - dummy_start;
@@ -418,11 +476,11 @@ pub fn compute_layout_arena_csr<'b>(
                 if let Some((offset, len)) = builder.add_edge_label(edge_label_text) {
                     let l_y = from_y + 2;
                     let edge_x_at_label = match &path {
-                        EdgePathArena::Direct => from_x,
+                        EdgePathArena::Direct => eff_from_x,
                         EdgePathArena::Corner { horizontal_y } => {
-                            if l_y <= *horizontal_y { from_x } else { to_x }
+                            if l_y <= *horizontal_y { eff_from_x } else { eff_to_x }
                         }
-                        EdgePathArena::MultiSegment { .. } => from_x,
+                        EdgePathArena::MultiSegment { .. } => eff_from_x,
                     };
                     let label_len_with_quotes = len + 2;
                     let l_x = edge_x_at_label.saturating_sub(label_len_with_quotes / 2);
@@ -437,11 +495,11 @@ pub fn compute_layout_arena_csr<'b>(
         builder.add_edge(LayoutEdgeArena {
             from_id,
             to_id,
-            from_x,
+            from_x: eff_from_x,
             from_y,
-            to_x,
+            to_x: eff_to_x,
             to_y,
-
+            reversed: is_back,
             path,
             edge_index: edge_idx,
             label_offset: e_label_offset,
@@ -529,7 +587,125 @@ fn alloc_layout_temps_csr<'b>(
     }
 }
 
-fn calculate_levels_csr(graph: &CsrGraph<'_>, levels: &mut [Idx]) -> Idx {
+/// Three-color DFS back-edge detection for CsrGraph.
+///
+/// Identifies back edges (edges pointing to an ancestor on the DFS stack)
+/// using a classic three-color algorithm: WHITE → GRAY (on stack) → BLACK (done).
+/// All temporaries are allocated from `arena` — no heap allocation.
+///
+/// Self-loops (from == to) are unconditionally marked as back edges.
+fn detect_back_edges_csr(
+    graph: &CsrGraph<'_>,
+    back_edges: &mut [bool],
+    arena: &mut Arena<'_>,
+) {
+    let node_count = graph.node_count();
+    let edge_count = graph.edge_count();
+
+    for b in back_edges.iter_mut() {
+        *b = false;
+    }
+
+    if node_count == 0 || edge_count == 0 {
+        return;
+    }
+
+    // Mark self-loops immediately
+    for ei in 0..edge_count {
+        let (from, to) = graph.edge(ei);
+        if from == to {
+            back_edges[ei] = true;
+        }
+    }
+
+    // Build edge-from CSR: for each source node, the list of outgoing edge indices.
+    // Allocate from arena: offsets[node_count+1] + data[edge_count] + color[node_count] + stack[node_count]
+    let Some((offsets_ptr, _)) = arena.alloc_raw::<u32>(node_count + 1) else { return };
+    let Some((edata_ptr, _)) = arena.alloc_raw::<u32>(edge_count) else { return };
+    let Some((color_ptr, _)) = arena.alloc_raw::<u8>(node_count) else { return };
+    // Stack entries: (node_index as u32, edge_iterator_position as u32)
+    let Some((stack_ptr, _)) = arena.alloc_raw_uninit::<(u32, u32)>(node_count) else { return };
+
+    let offsets = unsafe { core::slice::from_raw_parts_mut(offsets_ptr, node_count + 1) };
+    let edata = unsafe { core::slice::from_raw_parts_mut(edata_ptr, edge_count) };
+    let color = unsafe { core::slice::from_raw_parts_mut(color_ptr, node_count) };
+    let stack = unsafe { core::slice::from_raw_parts_mut(stack_ptr, node_count) };
+
+    // Build edge-from CSR — count then fill
+    // offsets already zeroed by alloc_raw
+    for ei in 0..edge_count {
+        let (from, _) = graph.edge(ei);
+        if from < node_count {
+            offsets[from + 1] += 1;
+        }
+    }
+    for i in 1..=node_count {
+        offsets[i] += offsets[i - 1];
+    }
+    // fill_counts: reuse color array temporarily (it's zeroed)
+    for ei in 0..edge_count {
+        let (from, _) = graph.edge(ei);
+        if from < node_count {
+            let pos = (offsets[from] + color[from] as u32) as usize;
+            edata[pos] = ei as u32;
+            color[from] += 1;
+        }
+    }
+    // Reset color to WHITE (0) for DFS
+    for c in color.iter_mut() {
+        *c = 0; // WHITE
+    }
+
+    const WHITE: u8 = 0;
+    const GRAY: u8 = 1;
+    // const BLACK: u8 = 2;
+
+    // Explicit-stack DFS for each unvisited root
+    for start in 0..node_count {
+        if color[start] != WHITE {
+            continue;
+        }
+        color[start] = GRAY;
+        let mut stack_len: usize = 1;
+        stack[0] = (start as u32, 0);
+
+        while stack_len > 0 {
+            let (node, ref mut ei_pos) = stack[stack_len - 1];
+            let node_idx = node as usize;
+            let edge_start = offsets[node_idx] as usize;
+            let edge_end = offsets[node_idx + 1] as usize;
+            let local_pos = *ei_pos as usize;
+
+            if edge_start + local_pos < edge_end {
+                let edge_idx = edata[edge_start + local_pos] as usize;
+                stack[stack_len - 1].1 += 1; // advance iterator
+
+                let (_, to) = graph.edge(edge_idx);
+                if to < node_count {
+                    match color[to] {
+                        GRAY => {
+                            back_edges[edge_idx] = true;
+                        }
+                        WHITE => {
+                            color[to] = GRAY;
+                            if stack_len < stack.len() {
+                                stack[stack_len] = (to as u32, 0);
+                                stack_len += 1;
+                            }
+                        }
+                        _ => {} // BLACK — fully processed
+                    }
+                }
+            } else {
+                // All edges from this node exhausted
+                color[node_idx] = 2; // BLACK
+                stack_len -= 1;
+            }
+        }
+    }
+}
+
+fn calculate_levels_csr(graph: &CsrGraph<'_>, levels: &mut [Idx], back_edges: &[bool]) -> Idx {
     for l in levels.iter_mut() {
         *l = 0;
     }
@@ -537,14 +713,18 @@ fn calculate_levels_csr(graph: &CsrGraph<'_>, levels: &mut [Idx]) -> Idx {
     let mut changed = true;
     let mut passes = 0;
     while changed && passes < levels.len() {
-        // Simple cycle protection
         changed = false;
         passes += 1;
 
-        for (from, to) in graph.edges_iter() {
-            let new_level = levels[from] + 1;
-            if new_level > levels[to] {
-                levels[to] = new_level;
+        for (ei, (from, to)) in graph.edges_iter().enumerate() {
+            // Skip self-loops
+            if from == to { continue; }
+            // For back edges, flip direction so cycles don't prevent convergence
+            let is_back = back_edges.get(ei).copied().unwrap_or(false);
+            let (src, dst) = if is_back { (to, from) } else { (from, to) };
+            let new_level = levels[src] + 1;
+            if new_level > levels[dst] {
+                levels[dst] = new_level;
                 changed = true;
             }
         }
@@ -564,6 +744,7 @@ fn build_virtual_levels_csr(
     level_counts: &mut [Idx],
     vnode_data: &mut [Idx],
     max_level: Idx,
+    back_edges: &[bool],
 ) -> (Idx, Idx) {
     // Logic identical to DAG version but iterating graph.edges_iter()
     for c in level_counts.iter_mut() {
@@ -577,9 +758,12 @@ fn build_virtual_levels_csr(
         }
     }
 
-    for (from, to) in graph.edges_iter() {
-        let from_level = node_levels[from] as usize;
-        let to_level = node_levels[to] as usize;
+    for (ei, (from, to)) in graph.edges_iter().enumerate() {
+        // For back edges, layout direction is reversed
+        let is_back = back_edges.get(ei).copied().unwrap_or(false);
+        let (layout_from, layout_to) = if is_back { (to, from) } else { (from, to) };
+        let from_level = node_levels[layout_from] as usize;
+        let to_level = node_levels[layout_to] as usize;
         if to_level > from_level + 1 {
             for level in (from_level + 1)..to_level {
                 if level < level_counts.len() {
@@ -614,8 +798,11 @@ fn build_virtual_levels_csr(
     }
 
     for (edge_idx, (from, to)) in graph.edges_iter().enumerate() {
-        let from_level = node_levels[from] as usize;
-        let to_level = node_levels[to] as usize;
+        // For back edges, layout direction is reversed
+        let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
+        let (layout_from, layout_to) = if is_back { (to, from) } else { (from, to) };
+        let from_level = node_levels[layout_from] as usize;
+        let to_level = node_levels[layout_to] as usize;
         if to_level > from_level + 1 {
             for level in (from_level + 1)..to_level {
                 if level <= effective_max_level {
@@ -1266,8 +1453,10 @@ impl<'a> Graph<'a> {
                     (fi, ti)
                 }).collect();
                 let mut changed = true;
-                while changed {
+                let mut passes = 0;
+                while changed && passes < node_count {
                     changed = false;
+                    passes += 1;
                     for &(fi, ti) in &edge_idx {
                         if fi != usize::MAX && ti != usize::MAX {
                             let nl = levels[fi] + 1;
@@ -1332,5 +1521,304 @@ impl<'a> Graph<'a> {
         );
 
         temps_size + ir_size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::arena::Arena;
+    use crate::graph::csr::CsrGraphBuilder;
+
+    /// Helper: build a CsrGraph from edges (node labels auto-generated A, B, C, ...)
+    fn build_csr_graph<'a>(
+        arena: &'a mut Arena<'a>,
+        node_count: usize,
+        edges: &[(usize, usize)],
+    ) -> CsrGraph<'a> {
+        let label_bytes = node_count * 2; // single-char labels
+        let mut builder = CsrGraphBuilder::new(arena, node_count, edges.len(), label_bytes)
+            .expect("builder alloc");
+        for i in 0..node_count {
+            let label = &[b'A' + i as u8];
+            let label_str = core::str::from_utf8(label).unwrap();
+            builder.add_node(i, label_str);
+        }
+        for &(from, to) in edges {
+            builder.add_edge(from, to);
+        }
+        builder.build().expect("csr build")
+    }
+
+    #[test]
+    fn test_detect_back_edges_acyclic() {
+        let mut buf = [0u8; 8192];
+        let mut arena = Arena::new(&mut buf);
+        let graph = build_csr_graph(&mut arena, 3, &[(0, 1), (1, 2)]);
+
+        let mut back_edges = [false; 2];
+        let mut dfs_buf = [0u8; 4096];
+        let mut dfs_arena = Arena::new(&mut dfs_buf);
+        detect_back_edges_csr(&graph, &mut back_edges, &mut dfs_arena);
+
+        assert!(!back_edges[0], "0→1 should not be a back edge");
+        assert!(!back_edges[1], "1→2 should not be a back edge");
+    }
+
+    #[test]
+    fn test_detect_back_edges_simple_cycle() {
+        let mut buf = [0u8; 8192];
+        let mut arena = Arena::new(&mut buf);
+        // A→B→C→A (edge 2 is the back edge)
+        let graph = build_csr_graph(&mut arena, 3, &[(0, 1), (1, 2), (2, 0)]);
+
+        let mut back_edges = [false; 3];
+        let mut dfs_buf = [0u8; 4096];
+        let mut dfs_arena = Arena::new(&mut dfs_buf);
+        detect_back_edges_csr(&graph, &mut back_edges, &mut dfs_arena);
+
+        // Exactly one edge should be marked as back edge (the cycle-closing one)
+        let back_count: usize = back_edges.iter().filter(|&&b| b).count();
+        assert_eq!(back_count, 1, "exactly 1 back edge in A→B→C→A");
+        // The DFS from 0: visits 0→1→2, then 2→0 targets GRAY node → back edge
+        assert!(back_edges[2], "edge 2→0 should be the back edge");
+    }
+
+    #[test]
+    fn test_detect_back_edges_self_loop() {
+        let mut buf = [0u8; 8192];
+        let mut arena = Arena::new(&mut buf);
+        let graph = build_csr_graph(&mut arena, 2, &[(0, 0), (0, 1)]);
+
+        let mut back_edges = [false; 2];
+        let mut dfs_buf = [0u8; 4096];
+        let mut dfs_arena = Arena::new(&mut dfs_buf);
+        detect_back_edges_csr(&graph, &mut back_edges, &mut dfs_arena);
+
+        assert!(back_edges[0], "self-loop should be a back edge");
+        assert!(!back_edges[1], "0→1 should not be a back edge");
+    }
+
+    #[test]
+    fn test_cyclic_graph_levels_converge() {
+        let mut buf = [0u8; 8192];
+        let mut arena = Arena::new(&mut buf);
+        // A→B→C→A
+        let graph = build_csr_graph(&mut arena, 3, &[(0, 1), (1, 2), (2, 0)]);
+
+        let mut back_edges = [false; 3];
+        let mut dfs_buf = [0u8; 4096];
+        let mut dfs_arena = Arena::new(&mut dfs_buf);
+        detect_back_edges_csr(&graph, &mut back_edges, &mut dfs_arena);
+
+        let mut levels = [0 as Idx; 3];
+        let max_level = calculate_levels_csr(&graph, &mut levels, &back_edges);
+
+        // With back edge 2→0 reversed, effective DAG is A→B→C
+        // Levels: A=0, B=1, C=2
+        assert_eq!(max_level, 2);
+        assert_eq!(levels[0], 0, "A should be level 0");
+        assert_eq!(levels[1], 1, "B should be level 1");
+        assert_eq!(levels[2], 2, "C should be level 2");
+    }
+
+    #[test]
+    fn test_cyclic_csr_layout_no_panic() {
+        // A→B→C→A: full layout pipeline should complete without panic
+        let mut graph_buf = [0u8; 8192];
+        let mut graph_arena = Arena::new(&mut graph_buf);
+        let graph = build_csr_graph(&mut graph_arena, 3, &[(0, 1), (1, 2), (2, 0)]);
+
+        let config = LayoutConfig::standard();
+        let mut temp_buf = [0u8; 65536];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_buf = [0u8; 65536];
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let ir = compute_layout_arena_csr(&graph, &config, &mut temp_arena, &mut out_arena);
+        assert!(ir.is_ok(), "layout of cyclic graph should succeed");
+
+        let ir = ir.unwrap();
+        assert_eq!(ir.node_count(), 3);
+        assert!(ir.edge_count() >= 2, "should have at least 2 edges (self-loops skipped)");
+
+        // Check that the reversed edge is marked
+        let mut found_reversed = false;
+        for i in 0..ir.edge_count() {
+            if ir.edge(i).reversed {
+                found_reversed = true;
+            }
+        }
+        assert!(found_reversed, "cyclic graph should have at least one reversed edge");
+    }
+
+    #[test]
+    fn test_cyclic_csr_renders_without_panic() {
+        // A→B→C→A: full pipeline through to rendering
+        let mut graph_buf = [0u8; 8192];
+        let mut graph_arena = Arena::new(&mut graph_buf);
+        let graph = build_csr_graph(&mut graph_arena, 3, &[(0, 1), (1, 2), (2, 0)]);
+
+        let config = LayoutConfig::standard();
+        let mut temp_buf = [0u8; 65536];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_buf = [0u8; 65536];
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let ir = compute_layout_arena_csr(&graph, &config, &mut temp_arena, &mut out_arena)
+            .expect("layout should succeed");
+
+        let mut render_buf = [0u8; 4096];
+        let mut line_buf = [' '; 256];
+        let mut scratch_buf = [0usize; 256];
+        let rendered = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf);
+        assert!(rendered.is_some(), "rendering should succeed");
+        let len = rendered.unwrap();
+        assert!(len > 0, "should produce non-empty output");
+    }
+
+    #[test]
+    fn test_diamond_with_back_edge() {
+        // Diamond: A→B, A→C, B→D, C→D, plus back edge D→A
+        let mut graph_buf = [0u8; 16384];
+        let mut graph_arena = Arena::new(&mut graph_buf);
+        let graph = build_csr_graph(&mut graph_arena, 4, &[
+            (0, 1), (0, 2), (1, 3), (2, 3), (3, 0),
+        ]);
+
+        let config = LayoutConfig::standard();
+        let mut temp_buf = [0u8; 65536];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_buf = [0u8; 65536];
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let ir = compute_layout_arena_csr(&graph, &config, &mut temp_arena, &mut out_arena)
+            .expect("diamond+backedge layout should succeed");
+
+        assert_eq!(ir.node_count(), 4);
+
+        // Verify levels make sense: A at top, D at bottom (back edge D→A reversed)
+        let node_a = ir.node(0);
+        let node_d = ir.node(3);
+        assert!(node_a.y < node_d.y, "A should be above D");
+    }
+
+    /// Regression test: cyclic graph via Graph::to_csr() path
+    /// (existing tests use CsrGraphBuilder directly)
+    #[test]
+    fn test_cyclic_via_to_csr_layout_and_render() {
+        use crate::graph::Graph;
+
+        let mut dag = Graph::new();
+        dag.add_node(1, "A");
+        dag.add_node(2, "B");
+        dag.add_node(3, "C");
+        dag.add_edge(1, 2, None);
+        dag.add_edge(2, 3, None);
+        dag.add_edge(3, 1, None); // cycle
+
+        let csr_size = dag.estimate_csr_arena_size() * 2;
+        let mut csr_buf = vec![0u8; csr_size];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = dag.to_csr(&mut csr_arena).expect("to_csr");
+
+        assert_eq!(csr.node_count(), 3);
+        assert_eq!(csr.edge_count(), 3);
+
+        let config = LayoutConfig::standard();
+        let mut temp_buf = vec![0u8; 128 * 1024];
+        let mut out_buf = vec![0u8; 128 * 1024];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let ir = compute_layout_arena_csr(&csr, &config, &mut temp_arena, &mut out_arena)
+            .expect("layout should succeed");
+
+        assert_eq!(ir.node_count(), 3);
+
+        let mut render_buf = vec![0u8; 4096];
+        let mut line_buf = vec![' '; 256];
+        let mut scratch_buf = vec![0usize; 256];
+        let rendered = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf);
+        assert!(rendered.is_some(), "render should succeed");
+    }
+
+    #[test]
+    fn test_two_node_cycle_layout() {
+        use crate::graph::Graph;
+
+        let mut dag = Graph::new();
+        dag.add_node(1, "Ping");
+        dag.add_node(2, "Pong");
+        dag.add_edge(1, 2, None);
+        dag.add_edge(2, 1, None);
+
+        let csr_size = dag.estimate_csr_arena_size() * 2;
+        let mut csr_buf = vec![0u8; csr_size];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = dag.to_csr(&mut csr_arena).expect("to_csr");
+
+        let config = LayoutConfig::standard();
+        let mut temp_buf = vec![0u8; 128 * 1024];
+        let mut out_buf = vec![0u8; 128 * 1024];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let ir = compute_layout_arena_csr(&csr, &config, &mut temp_arena, &mut out_arena)
+            .expect("layout should succeed");
+
+        assert_eq!(ir.node_count(), 2);
+        assert_eq!(ir.edge_count(), 2);
+
+        // The two edges should be offset from each other (not overlapping)
+        let e0 = ir.edge(0);
+        let e1 = ir.edge(1);
+        assert_ne!(e0.from_x, e1.from_x, "2-node cycle edges must not share the same column");
+
+        // The forward edge should be left of the back-edge
+        let (fwd, bck) = if e0.reversed { (e1, e0) } else { (e0, e1) };
+        assert!(fwd.from_x < bck.from_x, "forward edge should be left of back-edge");
+
+        // Rendering should succeed
+        let mut render_buf = vec![0u8; 4096];
+        let mut line_buf = vec![' '; 256];
+        let mut scratch_buf = vec![0usize; 256];
+        let rendered = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf);
+        assert!(rendered.is_some(), "render should succeed");
+    }
+
+    #[test]
+    fn test_self_loop_renders_indicator() {
+        use crate::graph::Graph;
+
+        let mut dag = Graph::new();
+        dag.add_node(1, "Loop");
+        dag.add_edge(1, 1, None);
+
+        let csr_size = dag.estimate_csr_arena_size() * 2;
+        let mut csr_buf = vec![0u8; csr_size];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = dag.to_csr(&mut csr_arena).expect("to_csr");
+
+        let config = LayoutConfig::standard();
+        let mut temp_buf = vec![0u8; 128 * 1024];
+        let mut out_buf = vec![0u8; 128 * 1024];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let ir = compute_layout_arena_csr(&csr, &config, &mut temp_arena, &mut out_arena)
+            .expect("layout should succeed");
+
+        assert_eq!(ir.node_count(), 1);
+        assert!(ir.node(0).has_self_loop, "self-loop node should be marked");
+
+        // Rendered output should contain ↺
+        let mut render_buf = vec![0u8; 4096];
+        let mut line_buf = vec![' '; 256];
+        let mut scratch_buf = vec![0usize; 256];
+        let len = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf).unwrap();
+        let output = core::str::from_utf8(&render_buf[..len]).unwrap();
+        assert!(output.contains('↺'), "rendered output should contain self-loop indicator ↺");
+        assert!(output.contains("[Loop]↺"), "↺ should appear right after the node bracket");
     }
 }

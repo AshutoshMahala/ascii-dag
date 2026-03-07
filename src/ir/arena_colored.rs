@@ -1,7 +1,17 @@
 //! ANSI-colored rendering for arena-backed layout IR.
 
 use super::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena};
-use crate::render::chars::{ARROW_DOWN, CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR, CROSS, H_LINE, V_LINE};
+use crate::render::chars::{
+    ARROW_DOWN, ARROW_DOWN_DASHED, ARROW_UP_DASHED,
+    CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR, CROSS,
+    H_LINE, H_LINE_DASHED, SELF_LOOP, V_LINE, V_LINE_DASHED,
+};
+
+/// Arrows take precedence — non-arrow chars must not overwrite them.
+#[inline]
+fn is_arrow(ch: char) -> bool {
+    matches!(ch, ARROW_DOWN | ARROW_DOWN_DASHED | ARROW_UP_DASHED)
+}
 
 impl<'a> LayoutIRArena<'a> {
     // =========================================================================
@@ -123,6 +133,14 @@ impl<'a> LayoutIRArena<'a> {
             for (node_idx, node) in self.nodes().iter().enumerate() {
                 if y >= node.y && y < node.y + node.height {
                     self.paint_node_colored(line_buffer, color_buffer, node_idx, node, y);
+                    // Paint self-loop indicator right after node bracket
+                    if node.has_self_loop && y == node.y {
+                        let loop_x = node.x + node.width;
+                        if loop_x < line_buffer.len() {
+                            line_buffer[loop_x] = SELF_LOOP;
+                            color_buffer[loop_x] = 0; // no color for self-loop indicator
+                        }
+                    }
                 }
             }
 
@@ -234,6 +252,14 @@ impl<'a> LayoutIRArena<'a> {
             for (node_idx, node) in self.nodes().iter().enumerate() {
                 if y >= node.y && y < node.y + node.height {
                     self.paint_node_colored(line_buffer, color_buffer, node_idx, node, y);
+                    // Paint self-loop indicator right after node bracket
+                    if node.has_self_loop && y == node.y {
+                        let loop_x = node.x + node.width;
+                        if loop_x < line_buffer.len() {
+                            line_buffer[loop_x] = SELF_LOOP;
+                            color_buffer[loop_x] = 0;
+                        }
+                    }
                 }
             }
 
@@ -458,6 +484,7 @@ impl<'a> LayoutIRArena<'a> {
     }
 
     /// Paint an edge at Y with color.
+    /// Reversed edges use dashed chars (┊ ┈ ⇣) for visual distinction.
     fn paint_edge_at_y_colored(
         &self,
         line_buffer: &mut [char],
@@ -471,6 +498,10 @@ impl<'a> LayoutIRArena<'a> {
         let from_x = edge.from_x;
         let to_x = edge.to_x;
 
+        // Select solid or dashed chars based on reversed flag
+        let vline = if edge.reversed { V_LINE_DASHED } else { V_LINE };
+        let hline = if edge.reversed { H_LINE_DASHED } else { H_LINE };
+
         if y <= from_y || y >= to_y {
             return;
         }
@@ -478,16 +509,18 @@ impl<'a> LayoutIRArena<'a> {
         match edge.path {
             EdgePathArena::Direct => {
                 if from_x < line_buffer.len() {
-                    if y == to_y - 1 {
+                    if y == from_y + 1 && edge.reversed {
+                        line_buffer[from_x] = ARROW_UP_DASHED;
+                        color_buffer[from_x] = color;
+                    } else if y == to_y - 1 && !edge.reversed {
                         line_buffer[from_x] = ARROW_DOWN;
                         color_buffer[from_x] = color;
                     } else {
-                        if line_buffer[from_x] == H_LINE {
+                        if line_buffer[from_x] == H_LINE || line_buffer[from_x] == H_LINE_DASHED {
                             line_buffer[from_x] = CROSS;
-                            // Vertical color takes priority
                             color_buffer[from_x] = color;
-                        } else {
-                            line_buffer[from_x] = V_LINE;
+                        } else if !is_arrow(line_buffer[from_x]) {
+                            line_buffer[from_x] = vline;
                             color_buffer[from_x] = color;
                         }
                     }
@@ -501,51 +534,51 @@ impl<'a> LayoutIRArena<'a> {
                 if y == horizontal_y {
                     // Horizontal segment
                     for x in min_x..=max_x {
-                        if x < line_buffer.len() {
+                        if x < line_buffer.len() && !is_arrow(line_buffer[x]) {
                             if line_buffer[x] == ' ' {
-                                line_buffer[x] = H_LINE;
+                                line_buffer[x] = hline;
                                 color_buffer[x] = color;
-                            } else if line_buffer[x] == V_LINE {
-                                // Crossing: Vertical was here first. Upgrade to CROSS.
+                            } else if line_buffer[x] == V_LINE || line_buffer[x] == V_LINE_DASHED {
                                 line_buffer[x] = CROSS;
-                                // Keep existing Vertical color (priority)
+                                // Keep existing vertical color
                             }
                         }
                     }
-                    // Corners
-                    if x1 < line_buffer.len() {
+                    // Corners (no dashed variant — keep solid)
+                    if x1 < line_buffer.len() && !is_arrow(line_buffer[x1]) {
                         line_buffer[x1] = if x1 < x2 { CORNER_DR } else { CORNER_DL };
                         color_buffer[x1] = color;
                     }
-                    if x2 < line_buffer.len() {
+                    if x2 < line_buffer.len() && !is_arrow(line_buffer[x2]) {
                         line_buffer[x2] = if x1 < x2 { CORNER_UL } else { CORNER_UR };
                         color_buffer[x2] = color;
                     }
                 } else if y > from_y && y < horizontal_y {
                     // Vertical from source to horizontal
                     if x1 < line_buffer.len() {
-                        if line_buffer[x1] == H_LINE {
+                        if y == from_y + 1 && edge.reversed {
+                            line_buffer[x1] = ARROW_UP_DASHED;
+                            color_buffer[x1] = color;
+                        } else if line_buffer[x1] == H_LINE || line_buffer[x1] == H_LINE_DASHED {
                             line_buffer[x1] = CROSS;
                             color_buffer[x1] = color;
-                        } else {
-                            line_buffer[x1] = V_LINE;
+                        } else if !is_arrow(line_buffer[x1]) {
+                            line_buffer[x1] = vline;
                             color_buffer[x1] = color;
                         }
                     }
                 } else if y > horizontal_y && y < to_y {
                     // Vertical from horizontal to target
                     if x2 < line_buffer.len() {
-                        if y == to_y - 1 {
+                        if y == to_y - 1 && !edge.reversed {
                             line_buffer[x2] = ARROW_DOWN;
                             color_buffer[x2] = color;
-                        } else {
-                            if line_buffer[x2] == H_LINE {
-                                line_buffer[x2] = CROSS;
-                                color_buffer[x2] = color;
-                            } else {
-                                line_buffer[x2] = V_LINE;
-                                color_buffer[x2] = color;
-                            }
+                        } else if line_buffer[x2] == H_LINE || line_buffer[x2] == H_LINE_DASHED {
+                            line_buffer[x2] = CROSS;
+                            color_buffer[x2] = color;
+                        } else if !is_arrow(line_buffer[x2]) {
+                            line_buffer[x2] = vline;
+                            color_buffer[x2] = color;
                         }
                     }
                 }
@@ -577,15 +610,18 @@ impl<'a> LayoutIRArena<'a> {
                         // Pure vertical segment
                         let start_y = if is_first_segment { y1 + 1 } else { y1 };
                         if y >= start_y && y < y2 && x1 < line_buffer.len() {
-                            if is_last_segment && y == y2 - 1 {
+                            if is_first_segment && y == y1 + 1 && edge.reversed {
+                                line_buffer[x1] = ARROW_UP_DASHED;
+                                color_buffer[x1] = color;
+                            } else if is_last_segment && y == y2 - 1 && !edge.reversed {
                                 line_buffer[x1] = ARROW_DOWN;
                                 color_buffer[x1] = color;
                             } else {
-                                if line_buffer[x1] == H_LINE {
+                                if line_buffer[x1] == H_LINE || line_buffer[x1] == H_LINE_DASHED {
                                     line_buffer[x1] = CROSS;
                                     color_buffer[x1] = color;
-                                } else if line_buffer[x1] == ' ' {
-                                    line_buffer[x1] = V_LINE;
+                                } else if !is_arrow(line_buffer[x1]) {
+                                    line_buffer[x1] = vline;
                                     color_buffer[x1] = color;
                                 }
                             }
@@ -595,11 +631,11 @@ impl<'a> LayoutIRArena<'a> {
                         if y == y1 {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
                             for x in min_x..=max_x {
-                                if x < line_buffer.len() {
+                                if x < line_buffer.len() && !is_arrow(line_buffer[x]) {
                                     if line_buffer[x] == ' ' {
-                                        line_buffer[x] = H_LINE;
+                                        line_buffer[x] = hline;
                                         color_buffer[x] = color;
-                                    } else if line_buffer[x] == V_LINE {
+                                    } else if line_buffer[x] == V_LINE || line_buffer[x] == V_LINE_DASHED {
                                         line_buffer[x] = CROSS;
                                         // Keep vertical color
                                     }
@@ -617,11 +653,14 @@ impl<'a> LayoutIRArena<'a> {
                         if is_first_segment && start_y_offset > 0 {
                             let start_drop = y1 + 1;
                             if y >= start_drop && y < corner_y && x1 < line_buffer.len() {
-                                if line_buffer[x1] == H_LINE {
+                                if y == y1 + 1 && edge.reversed {
+                                    line_buffer[x1] = ARROW_UP_DASHED;
+                                    color_buffer[x1] = color;
+                                } else if line_buffer[x1] == H_LINE || line_buffer[x1] == H_LINE_DASHED {
                                     line_buffer[x1] = CROSS;
                                     color_buffer[x1] = color;
-                                } else if line_buffer[x1] == ' ' {
-                                    line_buffer[x1] = V_LINE;
+                                } else if !is_arrow(line_buffer[x1]) {
+                                    line_buffer[x1] = vline;
                                     color_buffer[x1] = color;
                                 }
                             }
@@ -630,7 +669,7 @@ impl<'a> LayoutIRArena<'a> {
                         if y == corner_y {
                             let (min_x, max_x) = if x1 < x2 { (x1, x2) } else { (x2, x1) };
                             for x in min_x..=max_x {
-                                if x < line_buffer.len() {
+                                if x < line_buffer.len() && !is_arrow(line_buffer[x]) {
                                     if x == x1 {
                                         line_buffer[x] =
                                             if x1 < x2 { CORNER_DR } else { CORNER_DL };
@@ -640,9 +679,9 @@ impl<'a> LayoutIRArena<'a> {
                                             if x1 < x2 { CORNER_UL } else { CORNER_UR };
                                         color_buffer[x] = color;
                                     } else if line_buffer[x] == ' ' {
-                                        line_buffer[x] = H_LINE;
+                                        line_buffer[x] = hline;
                                         color_buffer[x] = color;
-                                    } else if line_buffer[x] == V_LINE {
+                                    } else if line_buffer[x] == V_LINE || line_buffer[x] == V_LINE_DASHED {
                                         line_buffer[x] = CROSS;
                                         // Keep vertical color
                                     }
@@ -651,26 +690,26 @@ impl<'a> LayoutIRArena<'a> {
                         }
 
                         if y > corner_y && y < y2 && x2 < line_buffer.len() {
-                            if is_last_segment && y == y2 - 1 {
+                            if is_last_segment && y == y2 - 1 && !edge.reversed {
                                 line_buffer[x2] = ARROW_DOWN;
                                 color_buffer[x2] = color;
                             } else {
-                                if line_buffer[x2] == H_LINE {
+                                if line_buffer[x2] == H_LINE || line_buffer[x2] == H_LINE_DASHED {
                                     line_buffer[x2] = CROSS;
                                     color_buffer[x2] = color;
-                                } else {
-                                    line_buffer[x2] = V_LINE;
+                                } else if !is_arrow(line_buffer[x2]) {
+                                    line_buffer[x2] = vline;
                                     color_buffer[x2] = color;
                                 }
                             }
                         }
 
                         if !is_first_segment && y == y1 && x1 < line_buffer.len() {
-                            if line_buffer[x1] == H_LINE {
+                            if line_buffer[x1] == H_LINE || line_buffer[x1] == H_LINE_DASHED {
                                 line_buffer[x1] = CROSS;
                                 color_buffer[x1] = color;
-                            } else if line_buffer[x1] == ' ' {
-                                line_buffer[x1] = V_LINE;
+                            } else if !is_arrow(line_buffer[x1]) {
+                                line_buffer[x1] = vline;
                                 color_buffer[x1] = color;
                             }
                         }
