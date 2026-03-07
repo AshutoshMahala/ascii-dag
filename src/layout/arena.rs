@@ -69,6 +69,7 @@ pub(super) struct LayoutTemps<'a> {
     pub(super) level_y_offsets: &'a mut [usize], // Must be usize for coordinates
     pub(super) node_slots: &'a mut [usize],
     pub(super) level_slot_next: &'a mut [Idx],
+    pub(super) slot_bounds: &'a mut [(usize, usize)],
     pub(super) level_dummy_next: &'a mut [Idx],
     pub(super) waypoint_scratch: &'a mut [(usize, usize)],
     /// Repurposed for per-level max node heights after crossing reduction
@@ -530,6 +531,8 @@ impl<'a> Graph<'a> {
         let (node_slots_ptr, _) = arena.alloc_raw_uninit::<usize>(node_count)?;
         // Next slot counters
         let (level_slot_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+        let slot_bounds_size = (max_levels + 1) * 8; // MAX_SLOTS_PER_LEVEL = 8
+        let (slot_bounds_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(slot_bounds_size)?;
         let (level_dummy_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
         // Waypoint scratch
         let (waypoint_scratch_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(max_levels + 1)?;
@@ -565,6 +568,7 @@ impl<'a> Graph<'a> {
                     level_slot_next_ptr,
                     max_levels + 1,
                 ),
+                slot_bounds: core::slice::from_raw_parts_mut(slot_bounds_ptr, slot_bounds_size),
                 level_dummy_next: core::slice::from_raw_parts_mut(
                     level_dummy_next_ptr,
                     max_levels + 1,

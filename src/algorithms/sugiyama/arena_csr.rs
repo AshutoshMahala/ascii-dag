@@ -24,10 +24,14 @@ const MAX_NODES: usize = u32::MAX as usize;
 #[cfg(not(feature = "arena"))]
 const MAX_LEVELS: usize = usize::MAX;
 
+/// Maximum horizontal routing slots per level (caps height on extreme fan-out).
+const MAX_SLOTS_PER_LEVEL: usize = 8;
+
 /// Temporary buffers for arena-based layout computation.
 ///
 /// All slices are allocated from a single arena. This struct is used by both
 /// the CsrGraph layout path and the Graph→CsrGraph path.
+#[allow(dead_code)] // Some fields only used by Graph→CsrGraph path in layout/arena.rs
 pub(crate) struct LayoutTemps<'a> {
     pub(crate) node_levels: &'a mut [Idx],
     pub(crate) edge_indices: &'a mut [(Idx, Idx)],
@@ -47,6 +51,7 @@ pub(crate) struct LayoutTemps<'a> {
     pub(crate) level_y_offsets: &'a mut [usize],
     pub(crate) node_slots: &'a mut [usize],
     pub(crate) level_slot_next: &'a mut [Idx],
+    pub(crate) slot_bounds: &'a mut [(usize, usize)],
     pub(crate) level_dummy_next: &'a mut [Idx],
     pub(crate) waypoint_scratch: &'a mut [(usize, usize)],
     pub(crate) level_vdummy_counts: &'a mut [Idx],
@@ -192,63 +197,103 @@ pub fn compute_layout_arena_csr<'b>(
         max_width,
     );
 
-    // Step 8: Compute horizontal slots for edge separation
-    // Count non-vertical source nodes per level to determine extra routing rows.
-    // Vertical edges (same x-center, adjacent level) route straight down and need no slot.
-    // Matches heap path behavior including MAX_SLOTS_PER_LEVEL cap.
-    const MAX_SLOTS_PER_LEVEL: usize = 8;
-
-    // 1. Mark nodes that need routing slots (have at least one non-vertical outgoing edge)
-    temps.node_is_source.fill(false);
-    let node_is_source = &mut temps.node_is_source;
+    // Step 8: Geometry-aware horizontal slot allocation for edge separation
+    // Assigns horizontal routing slots to non-vertical source nodes so that
+    // edges whose horizontal spans don't overlap can share the same slot row.
+    // This matches the heap path's interval-based slot allocator.
     let alloc_size = max_level as usize + 1;
 
+    // 1. Initialize geometry-aware slot tracking
+    temps.node_slots.fill(usize::MAX); // usize::MAX = unassigned sentinel
+    temps.level_slot_next.fill(0);
+    // Initialize slot bounding boxes to empty: (usize::MAX, 0) means no intervals
+    for sb in temps.slot_bounds.iter_mut() {
+        *sb = (usize::MAX, 0);
+    }
+
+    // 2. Assign slots by scanning edges (same iteration order as Step 9)
     for (ei, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
         if from_idx == to_idx { continue; }
-        // Use layout-direction indices for slot computation
         let is_back = back_edges.get(ei).copied().unwrap_or(false);
         let (src_idx, dst_idx) = if is_back { (to_idx, from_idx) } else { (from_idx, to_idx) };
-        if src_idx < temps.real_coords.len() && dst_idx < temps.real_coords.len() {
-            let src_level = temps.real_coords[src_idx].0;
-            let dst_level = temps.real_coords[dst_idx].0;
+        if src_idx >= temps.real_coords.len() || dst_idx >= temps.real_coords.len() {
+            continue;
+        }
+        let (src_level, _, src_x_base, src_width) = temps.real_coords[src_idx];
+        let (dst_level, _, dst_x_base, dst_width) = temps.real_coords[dst_idx];
 
-            if dst_level > src_level {
-                // Check if this is a vertical edge (same x-center, adjacent level)
-                let src_x_center = temps.real_coords[src_idx].2 + temps.real_coords[src_idx].3 / 2;
-                let dst_x_center = temps.real_coords[dst_idx].2 + temps.real_coords[dst_idx].3 / 2;
-                let is_vertical = src_x_center == dst_x_center && dst_level == src_level + 1;
+        if dst_level <= src_level { continue; }
 
-                if !is_vertical {
-                    node_is_source[src_idx] = true;
+        let src_x_center = src_x_base + src_width / 2;
+        let dst_x_center = dst_x_base + dst_width / 2;
+        let is_vertical = src_x_center == dst_x_center && dst_level == src_level + 1;
+        if is_vertical { continue; }
+
+        let (min_x, max_x) = if src_x_center < dst_x_center {
+            (src_x_center, dst_x_center + 1)
+        } else {
+            (dst_x_center, src_x_center + 1)
+        };
+
+        let lvl = src_level;
+        if lvl >= alloc_size { continue; }
+
+        if temps.node_slots[src_idx] != usize::MAX {
+            // Source already has a slot — merge interval into its bounding box
+            let slot = temps.node_slots[src_idx];
+            let base = lvl * MAX_SLOTS_PER_LEVEL + slot;
+            if base < temps.slot_bounds.len() {
+                let (ref mut bmin, ref mut bmax) = temps.slot_bounds[base];
+                if min_x < *bmin { *bmin = min_x; }
+                if max_x > *bmax { *bmax = max_x; }
+            }
+        } else {
+            // New source — find a conflict-free slot via greedy first-fit scan
+            let slots_used = temps.level_slot_next[lvl] as usize;
+            let mut chosen = None;
+
+            for s in 0..slots_used {
+                let base = lvl * MAX_SLOTS_PER_LEVEL + s;
+                if base < temps.slot_bounds.len() {
+                    let (bmin, bmax) = temps.slot_bounds[base];
+                    // No overlap: new range is entirely before or after existing bounding box
+                    if max_x <= bmin || min_x >= bmax {
+                        // Share this slot — merge bounding box
+                        let (ref mut sbmin, ref mut sbmax) = temps.slot_bounds[base];
+                        if min_x < *sbmin { *sbmin = min_x; }
+                        if max_x > *sbmax { *sbmax = max_x; }
+                        chosen = Some(s);
+                        break;
+                    }
                 }
             }
+
+            let slot = if let Some(s) = chosen {
+                s
+            } else if slots_used < MAX_SLOTS_PER_LEVEL {
+                // Allocate new slot
+                let s = slots_used;
+                let base = lvl * MAX_SLOTS_PER_LEVEL + s;
+                if base < temps.slot_bounds.len() {
+                    temps.slot_bounds[base] = (min_x, max_x);
+                }
+                temps.level_slot_next[lvl] += 1;
+                s
+            } else {
+                // Cap reached — degrade to slot 0
+                0
+            };
+
+            temps.node_slots[src_idx] = slot;
         }
     }
 
-    // 2. Count sources per level (capped)
-    temps.source_counts.fill(0);
-    for (idx, &is_source) in node_is_source.iter().enumerate() {
-        if is_source {
-            let level = temps.real_coords[idx].0;
-            if level <= max_level as usize {
-                temps.source_counts[level] += 1;
-            }
-        }
-    }
-    // Cap slots per level to prevent height explosion on extreme fan-out
-    for sc in temps.source_counts.iter_mut() {
-        if (*sc as usize) > MAX_SLOTS_PER_LEVEL {
-            *sc = MAX_SLOTS_PER_LEVEL as Idx;
-        }
-    }
-
-    // 3. Count dummy nodes
+    // 3. Count dummy nodes per level
     temps.dummy_counts.fill(0);
-    // Limit loop to actual dummy data used
     let total_dummy_waypoints = temps.dummy_offsets[edge_count] as usize;
     for &(level, _) in &temps.dummy_data[..total_dummy_waypoints] {
         let lvl = level as usize;
-        if lvl <= max_level as usize {
+        if lvl < alloc_size {
             temps.dummy_counts[lvl] += 1;
         }
     }
@@ -274,9 +319,11 @@ pub fn compute_layout_arena_csr<'b>(
     for level in 0..=max_level as usize {
         temps.level_y_offsets[level] = current_offset;
         let node_height = max_node_heights[level] as usize;
-        let diff = temps.source_counts[level].max(temps.dummy_counts[level]) as usize;
+        // Use actual geometry-aware slot count (not naive source count)
+        let slot_count = temps.level_slot_next[level] as usize;
+        let diff = slot_count.max(temps.dummy_counts[level] as usize);
         let height = node_height + routing_overhead + diff.saturating_sub(1);
-        current_offset += height as usize;
+        current_offset += height;
     }
     temps.level_y_offsets[max_level as usize + 1] = current_offset;
     let total_height = current_offset;
@@ -320,15 +367,12 @@ pub fn compute_layout_arena_csr<'b>(
 
     builder.finalize_levels();
 
-    // Track source slots for horizontal separation during edge iteration
-    // Use optimized node_slots (O(1) lookup) instead of inefficient linear scan
-    temps.node_slots.fill(0);
-    temps.level_slot_next.fill(0);
+    // Slots are pre-assigned by geometry-aware allocation in Step 8.
+    // Only level_dummy_next needs reset for skip-level waypoint slot tracking.
     temps.level_dummy_next.fill(0);
 
     // Access mutable buffers via temps
-    let node_slots = &mut temps.node_slots;
-    let level_slot_next = &mut temps.level_slot_next;
+    let node_slots = &temps.node_slots;
     let level_dummy_next = &mut temps.level_dummy_next;
     let waypoint_scratch = &mut temps.waypoint_scratch;
     let level_y_offsets = &temps.level_y_offsets;
@@ -365,21 +409,9 @@ pub fn compute_layout_arena_csr<'b>(
         let from_id = graph.node_id(from_idx);
         let to_id = graph.node_id(to_idx);
 
-        // Get or assign slot for this source at this level
-        let slot = if dst_level > src_level && (src_level as usize) < max_level as usize + 1 {
-            // Check if already assigned
-            if node_slots[layout_src_idx] != 0 {
-                node_slots[layout_src_idx]
-            } else {
-                if (src_level as usize) < level_slot_next.len() {
-                    let s = level_slot_next[src_level as usize];
-                    node_slots[layout_src_idx] = s as usize;
-                    level_slot_next[src_level as usize] += 1;
-                    s as usize
-                } else {
-                    0
-                }
-            }
+        // Get pre-assigned slot from geometry-aware allocation (Step 8)
+        let slot = if dst_level > src_level && node_slots[layout_src_idx] != usize::MAX {
+            node_slots[layout_src_idx]
         } else {
             0
         };
@@ -555,6 +587,9 @@ fn alloc_layout_temps_csr<'b>(
     let (node_slots_ptr, _) = arena.alloc_raw_uninit::<usize>(node_count)?;
     // Next slot counters
     let (level_slot_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+    // Slot bounding boxes: (min_x, max_x) per (level, slot) for geometry-aware allocation
+    let slot_bounds_size = (max_levels + 1) * MAX_SLOTS_PER_LEVEL;
+    let (slot_bounds_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(slot_bounds_size)?;
     let (level_dummy_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (waypoint_scratch_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(max_levels + 1)?;
     let (level_vdummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
@@ -577,6 +612,7 @@ fn alloc_layout_temps_csr<'b>(
             level_y_offsets: core::slice::from_raw_parts_mut(level_y_offsets_ptr, max_levels + 2),
             node_slots: core::slice::from_raw_parts_mut(node_slots_ptr, node_count),
             level_slot_next: core::slice::from_raw_parts_mut(level_slot_next_ptr, max_levels + 1),
+            slot_bounds: core::slice::from_raw_parts_mut(slot_bounds_ptr, slot_bounds_size),
             level_dummy_next: core::slice::from_raw_parts_mut(level_dummy_next_ptr, max_levels + 1),
             waypoint_scratch: core::slice::from_raw_parts_mut(waypoint_scratch_ptr, max_levels + 1),
             level_vdummy_counts: core::slice::from_raw_parts_mut(level_vdummy_counts_ptr, max_levels + 1),
@@ -1507,6 +1543,7 @@ impl<'a> Graph<'a> {
             + (max_levels + 2) * core::mem::size_of::<usize>()            // level_y_offsets
             + node_count * core::mem::size_of::<usize>()                  // node_slots
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_slot_next
+            + (max_levels + 1) * MAX_SLOTS_PER_LEVEL * core::mem::size_of::<(usize, usize)>() // slot_bounds
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_dummy_next
             + (max_levels + 1) * core::mem::size_of::<(usize, usize)>()   // waypoint_scratch
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_vdummy_counts
@@ -1820,5 +1857,63 @@ mod tests {
         let output = core::str::from_utf8(&render_buf[..len]).unwrap();
         assert!(output.contains('↺'), "rendered output should contain self-loop indicator ↺");
         assert!(output.contains("[Loop]↺"), "↺ should appear right after the node bracket");
+    }
+
+    #[test]
+    fn test_geometry_aware_slot_sharing() {
+        // Fan-out: Root splits to Left and Right, then they merge.
+        // The Root→Left corner and Root→Right corner come from the same
+        // source (Root) and share a slot via source-bus rule.
+        // Additionally: Left→Merge and Right→Merge come from different
+        // sources at level 1. Their horizontal spans point inward (toward
+        // Merge). With geometry-aware allocation, if the spans don't overlap,
+        // they share a slot — resulting in a more compact layout.
+        use crate::graph::Graph;
+
+        let mut dag = Graph::new();
+        dag.add_node(1, "Root");
+        dag.add_node(2, "Left");
+        dag.add_node(3, "Right");
+        dag.add_node(4, "Merge");
+        dag.add_edge(1, 2, None);
+        dag.add_edge(1, 3, None);
+        dag.add_edge(2, 4, None);
+        dag.add_edge(3, 4, None);
+
+        let csr_size = dag.estimate_csr_arena_size() * 2;
+        let mut csr_buf = vec![0u8; csr_size];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = dag.to_csr(&mut csr_arena).expect("to_csr");
+
+        let config = LayoutConfig::standard();
+        let mut temp_buf = vec![0u8; 128 * 1024];
+        let mut out_buf = vec![0u8; 128 * 1024];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let ir = compute_layout_arena_csr(&csr, &config, &mut temp_arena, &mut out_arena)
+            .expect("layout should succeed");
+
+        // Verify rendering works and produces expected characters
+        let mut render_buf = vec![0u8; 8192];
+        let mut line_buf = vec![' '; 256];
+        let mut scratch_buf = vec![0usize; 256];
+        let len = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf).unwrap();
+        let output = core::str::from_utf8(&render_buf[..len]).unwrap();
+
+        // Should contain all node labels
+        assert!(output.contains("[Root]"));
+        assert!(output.contains("[Left]"));
+        assert!(output.contains("[Right]"));
+        assert!(output.contains("[Merge]"));
+        // Should contain arrow indicators and edge corners
+        assert!(output.contains('↓'), "should contain down arrows");
+        assert!(output.contains('┌') || output.contains('└'),
+            "should contain corner characters for non-vertical edges");
+
+        // Count the total height: geometry-aware should produce compact output
+        let line_count = output.lines().count();
+        // Diamond with 4 nodes should be at most ~10 lines with compressed slots
+        assert!(line_count <= 12, "layout should be compact: got {} lines", line_count);
     }
 }

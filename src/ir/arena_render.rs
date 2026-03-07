@@ -331,7 +331,12 @@ impl<'a> LayoutIRArena<'a> {
                     }
                     // Corners (no dashed variant — keep solid)
                     if x1 < line_buffer.len() && !is_arrow(line_buffer[x1]) {
-                        line_buffer[x1] = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                        if edge.reversed && horizontal_y <= from_y + 1 {
+                            // No room for ⇡ in vertical above horizontal; put it at corner
+                            line_buffer[x1] = ARROW_UP_DASHED;
+                        } else {
+                            line_buffer[x1] = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                        }
                     }
                     if x2 < line_buffer.len() && !is_arrow(line_buffer[x2]) {
                         line_buffer[x2] = if x1 < x2 { CORNER_UL } else { CORNER_UR };
@@ -445,8 +450,13 @@ impl<'a> LayoutIRArena<'a> {
                             for x in min_x..=max_x {
                                 if x < line_buffer.len() && !is_arrow(line_buffer[x]) {
                                     if x == x1 {
-                                        line_buffer[x] =
-                                            if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                                        if edge.reversed && is_first_segment && corner_y <= y1 + 1 {
+                                            // No room for ⇡ in vertical drop; put it at corner
+                                            line_buffer[x] = ARROW_UP_DASHED;
+                                        } else {
+                                            line_buffer[x] =
+                                                if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                                        }
                                     } else if x == x2 {
                                         line_buffer[x] =
                                             if x1 < x2 { CORNER_UL } else { CORNER_UR };
