@@ -201,7 +201,7 @@ fn main() {
     println!(
         "|----------|-------|-------|------------|------------|------------|--------------|--------"
     );
-    io::stdout().flush().unwrap();
+    let _ = io::stdout().flush();
 
     // Note: Chain depth = N-1, Diamond depth ≈ N-1, and arena layout caps at MAX_LEVELS=255.
     // Chain/Diamond 250 is the safe max (249 levels). WideFan has only 3 levels regardless.

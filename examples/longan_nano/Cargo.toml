@@ -5,11 +5,11 @@ edition = "2021"
 
 [dependencies]
 # Using arena-idx-u8 for minimal memory footprint on microcontroller (only 20KB RAM!)
+# No heap allocator needed — pure arena mode on the stack.
 ascii-dag = { path = "../../", default-features = false, features = ["arena-idx-u8"] }
 longan-nano = { git = "https://github.com/riscv-rust/longan-nano", features = ["lcd"] }
 riscv-rt = "0.11"
 riscv = { version = "0.10", features = ["critical-section-single-hart"] }
-embedded-alloc = "0.5"
 panic-halt = "0.2"
 embedded-graphics = "0.7"
 

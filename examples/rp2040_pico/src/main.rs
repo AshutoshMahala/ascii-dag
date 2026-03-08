@@ -428,8 +428,8 @@ fn run_arena_benchmark(
         let mut final_output_arena = Arena::new(output_mem);
         
         let layout = match graph.compute_layout_arena(&ascii_dag::algorithms::sugiyama::config::LayoutConfig::standard(), &mut layout_temp_arena, &mut final_output_arena) {
-            Some(l) => l,
-            None => {
+            Ok(l) => l,
+            Err(_) => {
                 write_serial(serial, usb_dev, "  [Arena FAIL: compute_layout]\r\n");
                 return None;
             }
@@ -443,7 +443,8 @@ fn run_arena_benchmark(
         let render_start = timer.get_counter();
         let mut render_buf = [0u8; 8192]; // Larger buffer for 100 nodes
         let mut line_buf = [' '; 512];
-        let _rendered_len = layout.render_to_buffer(&mut render_buf, &mut line_buf).unwrap_or(0);
+        let mut scratch = [0usize; 512];
+        let _rendered_len = layout.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch).unwrap_or(0);
         let render_time = timer.get_counter() - render_start;
         
         Some(BenchResult {

@@ -51,16 +51,16 @@ fn main() {
     // ── Subgraphs ────────────────────────────────────────────────
     // Services cluster
     let svc = g.add_subgraph("Services");
-    g.put_nodes(&[3, 4]).inside(svc).unwrap();
+    g.put_nodes(&[3, 4]).inside(svc).expect("place nodes in Services");
 
     // Data cluster
     let data = g.add_subgraph("Data");
-    g.put_nodes(&[5, 6]).inside(data).unwrap();
+    g.put_nodes(&[5, 6]).inside(data).expect("place nodes in Data");
 
     // Nested: Async inside Data
     let async_sg = g.add_subgraph("Async");
-    g.put_nodes(&[6]).inside(async_sg).unwrap();
-    g.put_subgraphs(&[async_sg]).inside(data).unwrap();
+    g.put_nodes(&[6]).inside(async_sg).expect("place Queue in Async");
+    g.put_subgraphs(&[async_sg]).inside(data).expect("nest Async in Data");
 
     // ── Render ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().collect();

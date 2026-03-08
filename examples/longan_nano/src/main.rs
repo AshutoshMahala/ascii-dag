@@ -1,88 +1,134 @@
 #![no_std]
 #![no_main]
 
-use panic_halt as _; 
-extern crate alloc;
-use embedded_alloc::Heap;
-use longan_nano::hal::{prelude::*, pac};
-use longan_nano::{lcd, lcd_pins};
-use riscv_rt::entry;
-use ascii_dag::Graph;
+use panic_halt as _;
 
 use embedded_graphics::mono_font::{ascii::FONT_4X6, MonoTextStyleBuilder};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_graphics::prelude::*;
-use embedded_graphics::primitives::{Rectangle, PrimitiveStyle};
+use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
 use embedded_graphics::text::Text;
+use longan_nano::hal::{pac, prelude::*};
+use longan_nano::{lcd, lcd_pins};
+use riscv_rt::entry;
 
-#[global_allocator]
-static HEAP: Heap = Heap::empty();
+use ascii_dag::algorithms::sugiyama::config::LayoutConfig;
+use ascii_dag::graph::arena::Arena;
+use ascii_dag::graph::csr::CsrGraphBuilder;
 
+/// Render a DAG on the Longan Nano's 160×80 LCD.
+///
+/// Pure arena mode — no heap allocator.
+/// Total stack usage: ~6 KB (fits easily in 20 KB RAM).
+/// LCD: 160×80 px, FONT_4X6 → 40 chars × 13 lines.
 #[entry]
 fn main() -> ! {
-    // Init Heap
-    {
-        use core::mem::MaybeUninit;
-        const HEAP_SIZE: usize = 8192; // 8KB
-        static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
-        unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
-    }
-
     let dp = pac::Peripherals::take().unwrap();
-    
+
     // Configure clocks
-    let mut rcu = dp.RCU.configure().ext_hf_clock(8.mhz()).sysclk(108.mhz()).freeze();
-    
-    // Setup AFIO
+    let mut rcu = dp
+        .RCU
+        .configure()
+        .ext_hf_clock(8.mhz())
+        .sysclk(108.mhz())
+        .freeze();
     let mut afio = dp.AFIO.constrain(&mut rcu);
-    
-    // Setup GPIO for LCD
+
+    // Setup LCD
     let gpioa = dp.GPIOA.split(&mut rcu);
     let gpiob = dp.GPIOB.split(&mut rcu);
-    
-    // Initialize LCD (160x80 pixels)
     let lcd_pins = lcd_pins!(gpioa, gpiob);
     let mut lcd = lcd::configure(dp.SPI0, lcd_pins, &mut afio, &mut rcu);
-    let (width, height) = (lcd.size().width as i32, lcd.size().height as i32);
-    
+    let (width, height) = (lcd.size().width as u32, lcd.size().height as u32);
+
     // Clear screen to black
-    Rectangle::new(Point::new(0, 0), Size::new(width as u32, height as u32))
+    Rectangle::new(Point::new(0, 0), Size::new(width, height))
         .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
         .draw(&mut lcd)
         .unwrap();
 
-    // Build and render DAG
-    let mut dag = Graph::new();
-    dag.add_node(1, "Init");
-    dag.add_node(2, "Build");
-    dag.add_node(3, "Test");
-    dag.add_node(4, "Deploy");
-    dag.add_edge(1, 2, None);
-    dag.add_edge(2, 3, None);
-    dag.add_edge(3, 4, None);
-
-    let output = dag.render();
-    
-    // Text style - tiny font for 160x80 LCD
-    let style = MonoTextStyleBuilder::new()
+    // Text styles
+    let title_style = MonoTextStyleBuilder::new()
+        .font(&FONT_4X6)
+        .text_color(Rgb565::new(0, 50, 31)) // cyan-ish
+        .background_color(Rgb565::BLACK)
+        .build();
+    let dag_style = MonoTextStyleBuilder::new()
         .font(&FONT_4X6)
         .text_color(Rgb565::GREEN)
         .background_color(Rgb565::BLACK)
         .build();
-    
-    // Draw title
-    Text::new("ascii-dag on Longan!", Point::new(2, 8), style)
+
+    // Title
+    Text::new("ascii-dag (no_alloc)", Point::new(2, 6), title_style)
         .draw(&mut lcd)
         .unwrap();
-    
-    // Draw DAG output line by line
-    let mut y = 18;
-    for line in output.lines().take(10) { // LCD is small, limit lines
-        Text::new(line, Point::new(2, y), style)
-            .draw(&mut lcd)
-            .unwrap();
-        y += 7;
+
+    // ── Arena memory on stack ──────────────────────────────
+    let mut graph_buf = [0u8; 1024];
+    let mut output_buf = [0u8; 2048];
+    let mut temp_buf = [0u8; 2048];
+
+    // ── Build graph ────────────────────────────────────────
+    let mut graph_arena = Arena::new(&mut graph_buf);
+    let mut builder = CsrGraphBuilder::new(&mut graph_arena, 5, 5, 64).unwrap();
+
+    let n0 = builder.add_node(0, "Init").unwrap();
+    let n1 = builder.add_node(1, "Build").unwrap();
+    let n2 = builder.add_node(2, "Test").unwrap();
+    let n3 = builder.add_node(3, "Deploy").unwrap();
+
+    builder.add_edge(n0, n1).unwrap();
+    builder.add_edge(n1, n2).unwrap();
+    builder.add_edge(n2, n3).unwrap();
+    builder.add_edge(n0, n2).unwrap(); // skip-level edgeascii-da
+
+    let graph = builder.build().unwrap();
+
+    // ── Compute layout ─────────────────────────────────────
+    let mut output_arena = Arena::new(&mut output_buf);
+    let layout = {
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        graph.compute_layout_arena(
+            &LayoutConfig::standard(),
+            &mut temp_arena,
+            &mut output_arena,
+        )
+    };
+
+    match layout {
+        Ok(ir) => {
+            // Reuse temp_buf for rendered text (temp_arena was dropped)
+            let render_buf = &mut temp_buf;
+            let mut line_chars = [' '; 80];
+            let mut scratch = [0usize; 80];
+
+            if let Some(bytes) = ir.render_to_buffer(render_buf, &mut line_chars, &mut scratch) {
+                if let Ok(text) = core::str::from_utf8(&render_buf[..bytes]) {
+                    // Draw DAG output line by line
+                    // Title at y=6, leave gap, start DAG at y=14
+                    let mut y = 14;
+                    for line in text.lines().take(11) {
+                        Text::new(line, Point::new(2, y), dag_style)
+                            .draw(&mut lcd)
+                            .unwrap();
+                        y += 6;
+                    }
+                }
+            } else {
+                Text::new("Render OOM", Point::new(2, 20), dag_style)
+                    .draw(&mut lcd)
+                    .unwrap();
+            }
+        }
+        Err(_) => {
+            Text::new("Layout OOM", Point::new(2, 20), dag_style)
+                .draw(&mut lcd)
+                .unwrap();
+        }
     }
 
-    loop {}
+    loop {
+        unsafe { riscv::asm::wfi() };
+    }
 }

@@ -56,7 +56,7 @@
 //! dag.add_edge(1, 2, None);
 //! ```
 //!
-//! ### [`cycles`] - Cycle Detection
+//! ### Cycle Detection
 //! ```rust
 //! use ascii_dag::graph::Graph;
 //!
@@ -66,7 +66,7 @@
 //! assert!(dag.has_cycle());
 //! ```
 //!
-//! ### [`cycles::generic`] - Generic Cycle Detection
+//! ### Generic Cycle Detection
 //! Works with any data structure via higher-order functions:
 //! ```rust
 //! # #[cfg(feature = "generic")]
@@ -84,7 +84,7 @@
 //! # }
 //! ```
 //!
-//! ### [`layout::generic`] - Generic Topological Sorting
+//! ### Generic Topological Sorting
 //! Sort any dependency graph into execution order:
 //! ```rust
 //! # #[cfg(feature = "generic")]
@@ -104,14 +104,15 @@
 //! # }
 //! ```
 //!
-//! ### [`layout`] - Graph Layout Algorithms
+//! ### Graph Layout
 //! Sugiyama hierarchical layout for positioning nodes.
 //!
-//! ### [`render`] - ASCII Rendering
+//! ### ASCII Rendering
 //! Vertical, horizontal, and cycle visualization modes.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![warn(missing_docs)]
 // Allow certain clippy warnings that are cosmetic or intentional:
 // - too_many_arguments: Some internal functions have many params for performance
 // - unnecessary_cast: Casts like `x as usize` are kept for clarity when index types vary

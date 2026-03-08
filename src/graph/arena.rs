@@ -219,7 +219,7 @@ impl<'a> Arena<'a> {
 
     /// Save the current allocation position (watermark).
     ///
-    /// Use with [`restore_position`] to implement arena "bands" — allocate
+    /// Use with [`Self::restore_position`] to implement arena "bands" — allocate
     /// scratch buffers, do work, then rewind the arena pointer so the
     /// scratch region can be reused by the next phase.
     ///

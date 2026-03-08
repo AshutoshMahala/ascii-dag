@@ -773,6 +773,7 @@ impl<'a> CsrGraphBuilder<'a> {
         self.node_subgraph[node_idx] = sg_idx as u32;
         Some(())
     }
+    /// Consume the builder and produce a finished [`CsrGraph`], or `None` if the arena is exhausted.
     pub fn build(self) -> Option<CsrGraph<'a>> {
         let CsrGraphBuilder {
             arena,

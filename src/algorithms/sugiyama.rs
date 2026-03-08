@@ -5,8 +5,8 @@
 //!
 //! ## Submodules
 //!
-//! - [`arena`] - Arena-based layout computation for `no_std`/embedded
-//! - [`heap`] - Heap-based layout computation (produces `LayoutIR`)
+//! - `arena` - Arena-based layout computation for `no_std`/embedded
+//! - `heap` - Heap-based layout computation (produces `LayoutIR`)
 //! - `idx` - Configurable index types for memory optimization (requires `arena` feature)
 
 pub(crate) mod arena_csr;

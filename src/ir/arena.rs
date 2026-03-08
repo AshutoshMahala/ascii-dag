@@ -4,9 +4,9 @@
 //! layout data in arena-allocated slices instead of heap Vecs.
 //!
 //! Data types and accessors live here. Rendering is split into:
-//! - [`super::arena_render`] — plain ASCII rendering
-//! - [`super::arena_colored`] — ANSI-colored rendering
-//! - [`super::arena_builder`] — builder for constructing from arena memory
+//! - `arena_render` — plain ASCII rendering
+//! - `arena_colored` — ANSI-colored rendering
+//! - `arena_builder` — builder for constructing from arena memory
 //!
 //! # Memory Layout
 //!
@@ -66,7 +66,10 @@ pub enum EdgePathArena {
     /// Direct vertical connection
     Direct,
     /// L-shaped connection with a horizontal segment
-    Corner { horizontal_y: usize },
+    Corner {
+        /// Y coordinate of the horizontal bend.
+        horizontal_y: usize,
+    },
     /// Routed through a side channel (for skip-level edges).
     /// Mirrors heap `EdgePath::SideChannel`.
     SideChannel {

@@ -125,7 +125,9 @@ fn run_csr() {
             palette_colors,
             &mut skipped_buffer,
         ) {
-            println!("{}", std::str::from_utf8(&render_buffer[..len]).unwrap());
+            if let Ok(s) = std::str::from_utf8(&render_buffer[..len]) {
+                println!("{}", s);
+            }
         }
     }
 

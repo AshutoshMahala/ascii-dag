@@ -16,10 +16,10 @@ Graph layout engine. Zero dependencies. `no_std` ready.
 ## Why?
 - **Zero Dependencies**: Drop it into any `no_std`, WASM, or embedded project.
 - **Visual Error Chains**: Show users *why* their build failed (Cycle detected? Dependency missing?).
-- **Fast**: ~5ms for 1000 nodes with Arena layout.
+- **Fast**: ~4ms for 200-node diamond, ~9ms for 500-node fan (heap)
 
 ## Features
-- **Tiny**: ~47KB WASM (arena), ~77KB (full)
+- **Tiny**: ~39KB WASM (arena), ~93KB (full) — after `wasm-opt -Oz`
 - **Fast**: Sugiyama layout with configurable crossing reduction
 - **Headless**: Layout IR for custom renderers (Canvas, SVG, TUI)
 - **Robust**: Handles diamonds, cycles, skip-level edges
@@ -625,26 +625,26 @@ cargo run --example git_log          # Git-log style visualization
 | **`no_std` with alloc** | `default-features = false, features = ["alloc"]` | `Graph` API works via `alloc` crate. Needs `#[global_allocator]`. No `std`. |
 | **Small index arena** | `default-features = false, features = ["arena-idx-u16"]` | No-alloc arena with `u16` indices (~50% memory savings vs u32) |
 
-**Bundle Size (WASM, `wasm-opt -Oz`):**
-- **Heap Mode** (`std` + `generic`): **~77 KB**
-- **Arena Mode** (`alloc` + `arena`): **~47 KB**
+**Bundle Size (WASM, `opt-level = "z"` + LTO + `wasm-opt -Oz`):**
+- **Arena Mode** (no-alloc): **~39 KB** (17 KB gzipped)
+- **Full Mode** (`std` + `generic`): **~93 KB** (39 KB gzipped)
 
 ### Benchmark Results (Apple M2 Ultra, ARM64, Release Build)
 
 | Topology | Nodes | Mode | Build | Compute | Render | **Total** | Speedup |
 | :--- | ---: | :--- | ---: | ---: | ---: | ---: | ---: |
-| **Chain** | 100 | Heap | 20µs | 202µs | 25µs | **248µs** | |
-| | | Arena | 2µs | 12µs | 28µs | **43µs** | **5.8x** |
-| **Chain** | 250 | Heap | 52µs | 473µs | 62µs | **588µs** | |
-| | | Arena | 3µs | 22µs | 108µs | **134µs** | **4.4x** |
-| **Diamond** | 100 | Heap | 25µs | 698µs | 76µs | **800µs** | |
-| | | Arena | 2µs | 11µs | 49µs | **63µs** | **12.7x** |
-| **Diamond** | 200 | Heap | 53µs | 2067µs | 302µs | **2422µs** | |
-| | | Arena | 7µs | 50µs | 247µs | **305µs** | **7.9x** |
-| **WideFan** | 100 | Heap | 115µs | 763µs | 253µs | **1133µs** | |
-| | | Arena | 5µs | 31µs | 730µs | **767µs** | **1.5x** |
-| **WideFan** | 500 | Heap | 258µs | 3502µs | 4180µs | **7942µs** | |
-| | | Arena | 20µs | 103µs | 6µs | **131µs** | **60.6x** |
+| **Chain** | 100 | Heap | 59µs | 526µs | 58µs | **645µs** | |
+| | | Arena | 6µs | 79µs | 63µs | **148µs** | **4.4x** |
+| **Chain** | 250 | Heap | 123µs | 1294µs | 205µs | **1623µs** | |
+| | | Arena | 13µs | 389µs | 362µs | **765µs** | **2.1x** |
+| **Diamond** | 100 | Heap | 78µs | 2267µs | 225µs | **2572µs** | |
+| | | Arena | 6µs | 296µs | 127µs | **430µs** | **6.0x** |
+| **Diamond** | 200 | Heap | 133µs | 3516µs | 378µs | **4027µs** | |
+| | | Arena | 10µs | 679µs | 308µs | **998µs** | **4.0x** |
+| **WideFan** | 100 | Heap | 55µs | 755µs | 263µs | **1075µs** | |
+| | | Arena | 5µs | 55µs | 265µs | **326µs** | **3.3x** |
+| **WideFan** | 500 | Heap | 276µs | 4166µs | 4639µs | **9082µs** | |
+| | | Arena | 23µs | 241µs | 4µs | **268µs** | **33.9x** |
 
 *Chain = linear (best case), Diamond = skip-level edges (stress), WideFan = fan-out/fan-in (crossing worst case)*
 
@@ -652,25 +652,29 @@ cargo run --example git_log          # Git-log style visualization
 
 | Graph | Nodes | Mode | Build | Compute | Render | **Total** | RAM | Speedup |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Chain 10** | 10 | **Heap** | 0.4 ms | 1.8 ms | 0.6 ms | **2.8 ms** | 4.2 KB | |
-| | | **Arena** | 0.3 ms | 0.5 ms | 0.4 ms | **1.2 ms** | **0.7 KB** | **2.3x** |
-| **Chain 50** | 50 | **Heap** | 1.4 ms | 7.4 ms | 2.2 ms | **11.0 ms** | 20.4 KB | |
-| | | **Arena** | 0.6 ms | 0.9 ms | 3.6 ms | **5.1 ms** | **3.7 KB** | **2.2x** |
-| **Chain 100** | 100 | **Heap** | 2.9 ms | 15.3 ms | 4.3 ms | **22.6 ms** | 40.7 KB | |
-| | | **Arena** | 1.3 ms | 1.6 ms | 12.1 ms | **15.0 ms** | **7.5 KB** | **1.5x** |
+| **Chain 10** | 10 | **Heap** | 0.6 ms | 3.1 ms | 0.6 ms | **4.3 ms** | 5.0 KB | |
+| | | **Arena** | 0.3 ms | 1.1 ms | 0.5 ms | **1.9 ms** | **1.9 KB** | **2.3x** |
+| **Chain 50** | 50 | **Heap** | 2.5 ms | 13.2 ms | 2.4 ms | **18.2 ms** | 23.6 KB | |
+| | | **Arena** | 0.6 ms | 2.9 ms | 2.7 ms | **6.2 ms** | **9.1 KB** | **3.0x** |
+| **Chain 100** | 100 | **Heap** | 5.1 ms | 28.0 ms | 4.9 ms | **38.0 ms** | 47.1 KB | |
+| | | **Arena** | 1.4 ms | 6.2 ms | 7.5 ms | **15.0 ms** | **18.2 KB** | **2.5x** |
 
 *Measured on physical hardware (Raspberry Pi Pico) using `examples/rp2040_pico`.*
+
+**Longan Nano (RISC-V, GD32VF103, 20KB RAM) — no_alloc arena mode on LCD:**
+
+<img src="assets/longan-nano.png" alt="ascii-dag running on Longan Nano — 4-node pipeline rendered on 160×80 LCD, no heap allocator" width="300"/>
 
 ### Embedded Performance (ESP32-S3 / Xtensa LX7 @ 240MHz)
 
 | Graph | Nodes | Edges | Build | Render | RAM |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| **Diamond** | 4 | 4 | 0.5ms | 2.5ms | 1.5 KB |
-| **Build Pipeline** | 10 | 12 | 0.4ms | 4.2ms | 3.4 KB |
-| **Fan-Out/Fan-In** | 12 | 16 | 0.5ms | 3.8ms | 4.6 KB |
-| **Binary Tree** | 31 | 30 | 0.9ms | 7ms | 11.5 KB |
-| **Deep Chain** | 50 | 49 | 1.8ms | 3.5ms | 19.5 KB |
-| **Diamond Lattice** | 64 | 112 | 2.7ms | 18.8ms | 25.5 KB |
+| **Diamond** | 4 | 4 | 0.5ms | 3.7ms | 1.5 KB |
+| **Build Pipeline** | 10 | 12 | 0.5ms | 7.7ms | 3.6 KB |
+| **Fan-Out/Fan-In** | 12 | 16 | 0.6ms | 6.3ms | 4.8 KB |
+| **Binary Tree** | 31 | 30 | 1.1ms | 13.1ms | 11.9 KB |
+| **Deep Chain** | 50 | 49 | 1.9ms | 3.2ms | 20.2 KB |
+| **Diamond Lattice** | 64 | 112 | 2.8ms | 45.3ms | 26.8 KB |
 
 *Measured on physical hardware (Seeed XIAO ESP32-S3) using `examples/esp32s3`.*
 
@@ -678,12 +682,12 @@ cargo run --example git_log          # Git-log style visualization
 
 | Topology | Nodes | Mode | Time | Output Size | Speedup |
 | :--- | ---: | :--- | ---: | ---: | ---: |
-| **Diamond** | 20,164 | Heap | 139ms | 0.61 MB | |
-| | | Arena | 119ms | | **1.2x** |
-| **Diamond** | 50,176 | Heap | 357ms | 1.52 MB | |
-| | | Arena | 348ms | | **1.0x** |
-| **Wide Fan** | 50,000 | Heap | 15.9s | 5.82 MB | |
-| | | Arena | 13ms | | **1,223x** |
+| **Diamond** | 20,164 | Heap | 450ms | 0.61 MB | |
+| | | Arena | 994ms | | 0.5x |
+| **Diamond** | 50,176 | Heap | 2.4s | 1.52 MB | |
+| | | Arena | 6.1s | | 0.4x |
+| **Wide Fan** | 50,000 | Heap | 18.0s | 5.82 MB | |
+| | | Arena | 4.6s | | **3.9x** |
 
 *Tested on Apple M2 Ultra (ARM64), release build. Wide Fan is worst-case for crossing reduction.*
 
@@ -767,13 +771,13 @@ use ascii_dag::LayoutConfig;
 // Build graph in arena (no heap)
 let mut graph_buffer = [0u8; 4096];
 let mut graph_arena = Arena::new(&mut graph_buffer);
-let mut builder = CsrGraphBuilder::new(&mut graph_arena, 3, 2, 64).unwrap();
-builder.add_node(1, "A");
-builder.add_node(2, "B");
-builder.add_node(3, "C");
-builder.add_edge(1, 2);
-builder.add_edge(2, 3);
-let graph = builder.build().unwrap();
+let mut builder = CsrGraphBuilder::new(&mut graph_arena, 3, 2, 64).expect("arena too small");
+let n0 = builder.add_node(0, "A").expect("add A");
+let n1 = builder.add_node(1, "B").expect("add B");
+let n2 = builder.add_node(2, "C").expect("add C");
+builder.add_edge(n0, n1).expect("edge A→B");
+builder.add_edge(n1, n2).expect("edge B→C");
+let graph = builder.build().expect("build graph");
 
 // Layout + render in arena (no heap)
 let mut temp_buffer = [0u8; 16384];
@@ -785,7 +789,9 @@ if let Ok(ir) = graph.compute_layout_arena(&LayoutConfig::standard(), &mut temp_
     let mut render_buffer = [0u8; 4096];
     let mut line_buffer = [' '; 256];
     let mut scratch_buffer = [0usize; 256];
-    ir.render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer);
+    if let Some(bytes) = ir.render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer) {
+        // render_buffer[..bytes] contains the UTF-8 output
+    }
 }
 ```
 

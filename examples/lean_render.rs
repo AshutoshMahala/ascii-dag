@@ -27,13 +27,13 @@ fn main() {
 
     // Build Graph (Same as simulate_pure)
     println!("> Building Graph...");
-    let mut builder = CsrGraphBuilder::new(&mut graph_arena, 10, 10, 64).unwrap();
-    let n0 = builder.add_node(0, "Source").unwrap();
-    let n1 = builder.add_node(1, "Middle").unwrap();
-    let n2 = builder.add_node(2, "Sink").unwrap();
-    builder.add_edge(n0, n1).unwrap();
-    builder.add_edge(n1, n2).unwrap();
-    let graph = builder.build().unwrap();
+    let mut builder = CsrGraphBuilder::new(&mut graph_arena, 10, 10, 64).expect("arena too small");
+    let n0 = builder.add_node(0, "Source").expect("add Source");
+    let n1 = builder.add_node(1, "Middle").expect("add Middle");
+    let n2 = builder.add_node(2, "Sink").expect("add Sink");
+    builder.add_edge(n0, n1).expect("edge Source→Middle");
+    builder.add_edge(n1, n2).expect("edge Middle→Sink");
+    let graph = builder.build().expect("build graph");
 
     // 3. Partition: Processing Memory
     // We have 12KB left.
@@ -81,14 +81,15 @@ fn main() {
             if let Some(bytes) =
                 layout.render_to_buffer(render_buffer, &mut line_chars, &mut scratch_buffer)
             {
-                let s = unsafe { core::str::from_utf8_unchecked(&render_buffer[..bytes]) };
-                println!("\n{}", s);
+                if let Ok(s) = core::str::from_utf8(&render_buffer[..bytes]) {
+                    println!("\n{}", s);
+                }
                 println!("> Rendered {} bytes into reused memory.", bytes);
             } else {
                 println!("> Render failed: Output buffer too small!");
             }
         }
-    } else {
-        println!("> Layout failed (OOM)");
+    } else if let Err(e) = layout {
+        println!("> Layout failed: {}", e);
     }
 }

@@ -27,6 +27,7 @@ pub type Idx = u16;
     not(feature = "arena-idx-u8"),
     not(feature = "arena-idx-u16")
 ))]
+/// Default 32-bit index type when no specific size is selected.
 pub type Idx = u32;
 
 // Fallback for when arena feature is enabled but no specific idx feature
@@ -35,6 +36,7 @@ pub type Idx = u32;
     not(feature = "arena-idx-u8"),
     not(feature = "arena-idx-u16")
 ))]
+/// Fallback 32-bit index type.
 pub type Idx = u32;
 
 /// Maximum number of nodes/edges supported by the current index type.
@@ -52,7 +54,9 @@ pub const MAX_COORD: usize = Coord::MAX as usize;
 
 /// Trait for converting between index types and usize.
 pub trait IdxConv: Copy + Default {
+    /// Convert a `usize` to this index type, returning `None` on overflow.
     fn from_usize(v: usize) -> Option<Self>;
+    /// Convert this index type to `usize`.
     fn to_usize(self) -> usize;
 }
 

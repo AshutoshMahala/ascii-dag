@@ -242,7 +242,9 @@ fn run_csr() {
     let mut scratch_buffer = vec![0usize; scratch_len + 256];
 
     if let Some(len) = ir.render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer) {
-        println!("{}", std::str::from_utf8(&render_buffer[..len]).unwrap());
+        if let Ok(s) = std::str::from_utf8(&render_buffer[..len]) {
+            println!("{}", s);
+        }
     }
 
     // SUMMARY
