@@ -1,8 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.0] - 2026-03-07
 
 ### Added
+- **`LayoutConfig<'a>` — primary no-alloc config type**: New enum-of-structs design with `AlgorithmConfig<'a>` enum, lifetime parameter, `const fn` presets (`fast`, `standard`, `quality`), and zero heap allocation. Works in `no_std` without alloc.
+- **Crossing reduction in CSR/Arena path**: The arena layout pipeline now accepts `&LayoutConfig` and applies crossing reduction + configurable spacing. Previously hardcoded.
+- **`Graph::compute_layout_with_config(&LayoutConfig)`**: New primary method for heap path, accepting the no-alloc config type directly.
 - **JSON serialization (zigraph v1.2)**: Both IR surfaces can serialize to zigraph-compatible JSON.
   - Heap: `LayoutIR::to_json() -> String` (requires `alloc`)
   - Arena: `LayoutIRArena::serialize_json(&mut [u8]) -> Option<usize>` (no_std, no alloc)
