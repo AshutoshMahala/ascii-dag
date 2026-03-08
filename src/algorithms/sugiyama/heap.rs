@@ -440,6 +440,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                     level: level_idx,
                     level_position: pos,
                     kind,
+                    has_self_loop: dag.edges.iter().any(|&(f, t, _)| f == id && t == id),
                 });
             }
         }

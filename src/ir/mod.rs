@@ -116,6 +116,9 @@ pub struct LayoutNode<'a> {
     pub level_position: usize,
     /// Classification: explicit, implicit, or dummy
     pub kind: NodeKind,
+    /// Whether this node has a self-loop edge (A → A).
+    /// When true, renderers paint a `↺` indicator after the node bracket.
+    pub has_self_loop: bool,
 }
 
 /// How an edge is routed between nodes.
@@ -129,7 +132,11 @@ pub enum EdgePath {
         /// Y coordinate of the horizontal segment
         horizontal_y: usize,
     },
-    /// Routed through a side channel (for skip-level edges)
+    /// Routed through a side channel (for skip-level edges).
+    ///
+    /// **Note:** The layout engine produces this variant for edges that skip multiple
+    /// levels. ASCII renderers render the full L-shaped channel routing. SVG/canvas
+    /// renderers may use the coordinates directly.
     SideChannel {
         /// X coordinate of the vertical channel
         channel_x: usize,
@@ -146,6 +153,10 @@ pub enum EdgePath {
         start_y_offset: usize,
     },
     /// Bézier spline hint (for SVG/canvas renderers; ASCII renderers fall back to Direct).
+    ///
+    /// **Status: forward-compatible stub.** The layout engine does not currently produce
+    /// this variant. It exists so that custom IR builders and zigraph imports can
+    /// round-trip spline data without breaking changes when native spline routing is added.
     /// Mirrors zigraph's `EdgePath.spline`.
     Spline {
         /// First control point X

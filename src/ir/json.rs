@@ -18,7 +18,7 @@
 //! - **Always available**: `serialize_json_to_buffer()` for `LayoutIRArena`
 
 /// JSON schema version (matches zigraph).
-pub const VERSION: &str = "1.2";
+pub(crate) const VERSION: &str = "1.2";
 
 // ── Minimal no-alloc JSON writer ─────────────────────────────────────────
 
@@ -132,12 +132,15 @@ impl<'a> LayoutIRArena<'a> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```rust,no_run
+    /// # #[cfg(feature = "arena")]
+    /// # fn example(ir: &ascii_dag::ir::arena::LayoutIRArena<'_>) {
     /// let mut buf = [0u8; 4096];
     /// if let Some(len) = ir.serialize_json(&mut buf) {
     ///     let json = core::str::from_utf8(&buf[..len]).unwrap();
     ///     // json is zigraph-compatible JSON
     /// }
+    /// # }
     /// ```
     pub fn serialize_json(&self, buffer: &mut [u8]) -> Option<usize> {
         let mut w = JsonWriter::new(buffer);

@@ -7,6 +7,8 @@
 //! - Edge labels (inline + legend fallback)
 //! - Colored edges (greedy graph coloring)
 //! - Junction characters where edges cross subgraph borders
+//! - Self-cycle (node loops back to itself)
+//! - Reversed edge (back-edge, renders with dashed lines)
 //!
 //! Run:
 //!   cargo run --example hero           # plain
@@ -40,12 +42,18 @@ fn main() {
     g.add_edge(7, 8, None);                 // Mailer → Dash
     g.add_edge(1, 8, Some("trace"));        // Client → Dash (deep skip-level!)
 
+    // Self-cycle: Gateway retries on failure
+    g.add_edge(2, 2, Some("retry"));
+
+    // Reversed edge: Dash feeds back to Gateway (back-edge / cycle)
+    g.add_edge(8, 2, Some("feedback"));
+
     // ── Subgraphs ────────────────────────────────────────────────
     // Services cluster
     let svc = g.add_subgraph("Services");
     g.put_nodes(&[3, 4]).inside(svc).unwrap();
 
-    // Data cluster  
+    // Data cluster
     let data = g.add_subgraph("Data");
     g.put_nodes(&[5, 6]).inside(data).unwrap();
 

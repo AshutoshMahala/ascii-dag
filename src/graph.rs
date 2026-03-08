@@ -119,7 +119,7 @@ use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
 /// ```
 #[cfg(feature = "alloc")]
 #[allow(deprecated)]
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Graph<'a> {
     pub(crate) nodes: Vec<(usize, &'a str)>,
     pub(crate) edges: Vec<(usize, usize, Option<&'a str>)>,
@@ -134,28 +134,6 @@ pub struct Graph<'a> {
     pub(crate) subgraphs: Vec<Subgraph<'a>>,             // Named clusters
     pub(crate) node_subgraph: HashMap<usize, usize>,     // node_id → subgraph_id
     pub(crate) next_subgraph_id: usize,                  // Monotonic ID counter
-}
-
-#[cfg(feature = "alloc")]
-#[allow(deprecated)]
-impl<'a> Default for Graph<'a> {
-    fn default() -> Self {
-        Self {
-            nodes: Vec::new(),
-            edges: Vec::new(),
-            render_mode: RenderMode::default(),
-            auto_created: HashSet::new(),
-            id_to_index: HashMap::new(),
-            node_widths: Vec::new(),
-            node_heights: Vec::new(),
-            children: Vec::new(),
-            parents: Vec::new(),
-            sugiyama_config: SugiyamaConfig::default(),
-            subgraphs: Vec::new(),
-            node_subgraph: HashMap::new(),
-            next_subgraph_id: 0,
-        }
-    }
 }
 
 #[cfg(feature = "alloc")]

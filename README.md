@@ -6,39 +6,10 @@
 
 Graph layout engine. Zero dependencies. `no_std` ready.
 
-```
-                   [Client]
-                   ┌───└────┐
-                   │        │
-                "http"   "trace"
-                   ↓        │
-               [Gateway]    │
-              ┌────└─────┐  │
-              │          │  └──────┐
-         ╔════╪══════════╪════╗    │
-         ║ Services      │    ║    │
-         ║    ↓          ↓    ║    │
-         ║ [Users]   [Orders] ║    │
-         ║   ┌┘          │    ║    │
-         ╚═══╤═════════╤═╧════╝    │
-          "read"    "emit"         │
-         ╔═══╪═════════╪══════╗    │
-         ║ Data   ╔════╪════╗ ║    │
-         ║   ↓    ║ Async   ║ ║    │
-         ║ [DB]   ║    ↓    ║ ║    │
-         ║   └──┐ ║ [Queue] ║ ║    │
-         ║      │ ╚════╪════╝ ║    │
-         ║   "sync""notify"   ║┌───┘
-         ╚══════╪══════╪══════╝│
-                │      ↓       │
-                │  [Mailer]    │
-                └──────┤───────┘
-                       ↓
-                    [Dash]
-```
+<img src="assets/hero_colored_heap.png" alt="ascii-dag hero — colored output" width="300"/>
 
-> *Subgraphs, edge labels, skip-level routing, nested clusters — all from ~30 lines of Rust.*
-> Run it: `cargo run --example hero` (plain) or `cargo run --example hero -- --color` (ANSI colors)
+> *Nested subgraphs, edge labels, reversed edges (┊ dashed), self-cycle, skip-level routing, colored edges — all from ~35 lines of Rust.*
+> Run it: `cargo run --example hero` (plain) or `cargo run --example hero -- --color` (ANSI colors + legend)
 
 **ascii-dag** is a high-performance **layout engine** for placing nodes and routing edges in a fixed-width grid.
 

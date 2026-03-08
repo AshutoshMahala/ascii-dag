@@ -416,7 +416,7 @@ pub(crate) fn fix_subgraph_overlaps(
 
         let mut any_shifted = false;
 
-        for (_parent, siblings) in &mut parent_groups {
+        for siblings in parent_groups.values_mut() {
             if siblings.len() < 2 { continue; }
             siblings.sort_by_key(|&idx| bbox_x[idx].map(|(l, _)| l).unwrap_or(0));
 
