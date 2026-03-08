@@ -82,16 +82,16 @@ fn sg_chain(dag: &Graph<'_>, sg_id: Option<usize>) -> Vec<usize> {
     chain
 }
 
-/// Count the number of subgraph boundary transitions between two nodes
-/// (exits from `prev_sg` chain + entries into `curr_sg` chain).
+/// Count the number of subgraph boundary exits and entries between two nodes.
 ///
 /// For example, moving from a node in `[Root → A → X]` to a node in
 /// `[Root → B → Y]` crosses:
 ///
 ///   - 2 exits (leave X, leave A)
 ///   - 2 entries (enter B, enter Y)
-///   - → 4 transitions
-fn count_boundary_transitions(dag: &Graph<'_>, prev_sg: Option<usize>, curr_sg: Option<usize>) -> usize {
+///
+/// Returns `(exits, entries)`.
+fn count_boundary_exits_entries(dag: &Graph<'_>, prev_sg: Option<usize>, curr_sg: Option<usize>) -> (usize, usize) {
     let prev_chain = sg_chain(dag, prev_sg);
     let curr_chain = sg_chain(dag, curr_sg);
 
@@ -102,10 +102,9 @@ fn count_boundary_transitions(dag: &Graph<'_>, prev_sg: Option<usize>, curr_sg: 
         .take_while(|(a, b)| a == b)
         .count();
 
-    // Transitions = exits (prev depth - common) + entries (curr depth - common)
     let exits = prev_chain.len() - common;
     let entries = curr_chain.len() - common;
-    exits + entries
+    (exits, entries)
 }
 
 // ── Block-partitioned crossing reduction ─────────────────────────────────
@@ -170,8 +169,9 @@ pub(crate) const SUBGRAPH_V_PAD_BOTTOM: usize = 2; // ║     ║ + ╚═══
 /// transitions.
 ///
 /// For each pair of adjacent vnodes on a level, if they belong to
-/// different subgraphs (or one is inside and the other is not), an extra
-/// `2 * SUBGRAPH_H_PAD` chars of space is inserted.
+/// different subgraphs (or one is inside and the other is not), extra
+/// horizontal space is inserted using CSS-style **margin collapsing**:
+/// `max(exit_margin, entry_margin)` rather than summing both margins.
 ///
 /// This function modifies `x_coords` and `widths` in place and returns
 /// the updated per-level total widths.
@@ -205,9 +205,14 @@ pub(crate) fn subgraph_padding(
                 let prev_sg = vnode_subgraph(dag, &vnodes[i - 1]);
                 let curr_sg = vnode_subgraph(dag, vnode);
                 if prev_sg != curr_sg {
-                    // Count boundary transitions: exits from prev + entries into curr
-                    let transitions = count_boundary_transitions(dag, prev_sg, curr_sg);
-                    x += transitions * SUBGRAPH_H_PAD;
+                    // CSS-style margin collapsing: each side contributes a margin
+                    // proportional to its nesting depth, and we take the larger one
+                    // rather than summing both. This prevents quadratic blowup when
+                    // many deeply-nested subgraphs sit side by side.
+                    let (exits, entries) = count_boundary_exits_entries(dag, prev_sg, curr_sg);
+                    let exit_margin = exits * SUBGRAPH_H_PAD;
+                    let entry_margin = entries * SUBGRAPH_H_PAD;
+                    x += core::cmp::max(exit_margin, entry_margin);
                 }
             }
             new_x.push(x);
@@ -232,6 +237,266 @@ pub(crate) fn subgraph_padding(
     }
 
     level_widths
+}
+
+// ── Sibling subgraph overlap repair ──────────────────────────────────────
+
+/// Minimum gap (in characters) between the bounding boxes of sibling subgraphs.
+const SIBLING_GAP: usize = 1;
+
+/// Collect all node indices belonging to a subgraph or any of its descendants.
+fn collect_sg_node_indices(
+    dag: &Graph<'_>,
+    sg_idx: usize,
+    _sg_id_to_idx: &HashMap<usize, usize>,
+) -> Vec<usize> {
+    let sg_id = dag.subgraphs[sg_idx].id;
+    // Collect this subgraph's descendant IDs (BFS)
+    let mut sg_ids = vec![sg_id];
+    let mut i = 0;
+    while i < sg_ids.len() {
+        let pid = sg_ids[i];
+        for sg in &dag.subgraphs {
+            if sg.parent_id == Some(pid) {
+                sg_ids.push(sg.id);
+            }
+        }
+        i += 1;
+    }
+
+    let mut result = Vec::new();
+    for (node_idx, &(nid, _)) in dag.nodes.iter().enumerate() {
+        if let Some(&nsg_id) = dag.node_subgraph.get(&nid) {
+            if sg_ids.contains(&nsg_id) {
+                result.push(node_idx);
+            }
+        }
+    }
+    result
+}
+
+/// Detect and fix horizontal overlaps between sibling subgraph bounding boxes
+/// by shifting `real_node_coords` for nodes inside overlapping subgraphs.
+///
+/// Uses a right-frontier sweep so that each sibling's shift accounts for
+/// all prior shifts in the same parent group (prevents stale-bbox bugs).
+///
+/// Returns the extra width added (0 if no adjustment needed).
+pub(crate) fn fix_subgraph_overlaps(
+    dag: &Graph<'_>,
+    real_node_coords: &mut [(usize, usize, usize, usize)], // (level, pos, x, width)
+) -> usize {
+    let sg_count = dag.subgraphs.len();
+    if sg_count < 2 { return 0; }
+
+    let sg_id_to_idx: HashMap<usize, usize> = dag
+        .subgraphs
+        .iter()
+        .enumerate()
+        .map(|(i, sg)| (sg.id, i))
+        .collect();
+
+    // Compute nesting depth for each subgraph
+    let mut depths: Vec<usize> = vec![0; sg_count];
+    for (i, sg) in dag.subgraphs.iter().enumerate() {
+        let mut d = 0;
+        let mut cur = sg.parent_id;
+        while let Some(pid) = cur {
+            d += 1;
+            cur = dag.subgraphs.iter().find(|s| s.id == pid).and_then(|s| s.parent_id);
+        }
+        depths[i] = d;
+    }
+    let max_depth = depths.iter().copied().max().unwrap_or(0);
+
+    // Minimum gap between nodes of different subgraphs on the same level.
+    // Must cover the padding on each side plus the gap between borders:
+    //   H_PAD(right of left-sg) + SIBLING_GAP + H_PAD(left of right-sg)
+    let cross_sg_gap: usize = 2 * SUBGRAPH_H_PAD + SIBLING_GAP;
+
+    // Build per-node → immediate subgraph-idx lookup (None if unaffiliated).
+    let node_sg: Vec<Option<usize>> = dag
+        .nodes
+        .iter()
+        .map(|&(nid, _)| {
+            dag.node_subgraph
+                .get(&nid)
+                .and_then(|sid| sg_id_to_idx.get(sid).copied())
+        })
+        .collect();
+
+    // Compute level range (min_level, max_level) per subgraph, including descendants.
+    // Two subgraphs on disjoint level ranges can freely overlap in x.
+    let mut sg_level_range: Vec<(usize, usize)> = vec![(usize::MAX, 0); sg_count];
+    for (node_idx, _) in dag.nodes.iter().enumerate() {
+        if let Some(sg_idx) = node_sg[node_idx] {
+            if node_idx < real_node_coords.len() {
+                let level = real_node_coords[node_idx].0;
+                let (ref mut min_l, ref mut max_l) = sg_level_range[sg_idx];
+                if level < *min_l { *min_l = level; }
+                if level > *max_l { *max_l = level; }
+            }
+        }
+    }
+    // Propagate child level ranges to parents (bottom-up)
+    for depth in (0..=max_depth).rev() {
+        for sg_idx in 0..sg_count {
+            if depths[sg_idx] != depth { continue; }
+            if let Some(parent_id) = dag.subgraphs[sg_idx].parent_id {
+                if let Some(&pidx) = sg_id_to_idx.get(&parent_id) {
+                    let (cl, cr) = sg_level_range[sg_idx];
+                    if cl == usize::MAX { continue; }
+                    let (ref mut pl, ref mut pr) = sg_level_range[pidx];
+                    if cl < *pl { *pl = cl; }
+                    if cr > *pr { *pr = cr; }
+                }
+            }
+        }
+    }
+
+    // Compute padded bounding box (left, right) per subgraph from real_node_coords.
+    let compute_bboxes = |coords: &[(usize, usize, usize, usize)]| -> Vec<Option<(usize, usize)>> {
+        let mut envs: Vec<Option<(usize, usize)>> = vec![None; sg_count];
+        for (node_idx, _) in dag.nodes.iter().enumerate() {
+            if let Some(sg_idx) = node_sg[node_idx] {
+                if node_idx >= coords.len() { continue; }
+                let (_, _, x, width) = coords[node_idx];
+                let right = x + width;
+                envs[sg_idx] = Some(match envs[sg_idx] {
+                    None => (x, right),
+                    Some((mn, mx)) => (mn.min(x), mx.max(right)),
+                });
+            }
+        }
+        // Propagate children to parents (bottom-up)
+        for depth in (0..=max_depth).rev() {
+            for sg_idx in 0..sg_count {
+                if depths[sg_idx] != depth { continue; }
+                if let Some(parent_id) = dag.subgraphs[sg_idx].parent_id {
+                    if let Some(&pidx) = sg_id_to_idx.get(&parent_id) {
+                        if let Some((cx, cr)) = envs[sg_idx] {
+                            let exp = (cx.saturating_sub(SUBGRAPH_H_PAD), cr + SUBGRAPH_H_PAD);
+                            envs[pidx] = Some(match envs[pidx] {
+                                None => exp,
+                                Some((px, pr)) => (px.min(exp.0), pr.max(exp.1)),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        envs.iter().enumerate().map(|(sg_idx, env)| {
+            env.map(|(mn, mx)| {
+                let left = mn.saturating_sub(SUBGRAPH_H_PAD);
+                let right = mx + SUBGRAPH_H_PAD;
+                let label_w = dag.subgraphs[sg_idx].label.len() + 4;
+                let width = right.saturating_sub(left);
+                let right = if width < label_w { left + label_w } else { right };
+                (left, right)
+            })
+        }).collect()
+    };
+
+    let mut total_extra = 0usize;
+
+    // Process overlap repair iteratively (up to 8 rounds for convergence).
+    // Each round detects overlaps, shifts subgraph nodes, then repairs
+    // per-level collisions.  Collision repair can widen bboxes by a few
+    // chars, so subsequent rounds mop up any cascade.
+    for _round in 0..8 {
+        let bbox_x = compute_bboxes(real_node_coords);
+
+        // Group siblings by parent, detect overlaps
+        let mut parent_groups: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+        for (sg_idx, sg) in dag.subgraphs.iter().enumerate() {
+            if bbox_x[sg_idx].is_some() {
+                parent_groups.entry(sg.parent_id).or_default().push(sg_idx);
+            }
+        }
+
+        let mut any_shifted = false;
+
+        for (_parent, siblings) in &mut parent_groups {
+            if siblings.len() < 2 { continue; }
+            siblings.sort_by_key(|&idx| bbox_x[idx].map(|(l, _)| l).unwrap_or(0));
+
+            // Level-aware pairwise sweep: only enforce separation between
+            // siblings whose rendered level ranges share at least one level.
+            // Subgraphs on disjoint levels (e.g. Frontend 2-3, Backend 4-8)
+            // can freely overlap in x — edge routing rows between levels
+            // provide enough vertical space for both subgraph borders.
+            let mut processed: Vec<(usize, usize, usize, usize)> = Vec::new(); // (sg_idx, eff_right, min_l, max_l)
+
+            for &sg_idx in siblings.iter() {
+                if let Some((left, right)) = bbox_x[sg_idx] {
+                    let (cur_min_l, cur_max_l) = sg_level_range[sg_idx];
+
+                    // Effective frontier: max right edge among processed
+                    // siblings that share at least one level.
+                    let mut eff_frontier = 0usize;
+                    let mut has_level_overlap = false;
+                    for &(_, prev_right, prev_min_l, prev_max_l) in &processed {
+                        let overlaps = prev_min_l <= cur_max_l
+                            && cur_min_l <= prev_max_l;
+                        if overlaps && prev_right > eff_frontier {
+                            eff_frontier = prev_right;
+                            has_level_overlap = true;
+                        }
+                    }
+
+                    if has_level_overlap && eff_frontier + SIBLING_GAP > left {
+                        let shift = eff_frontier + SIBLING_GAP - left;
+
+                        let node_indices =
+                            collect_sg_node_indices(dag, sg_idx, &sg_id_to_idx);
+                        for &ni in &node_indices {
+                            if ni < real_node_coords.len() {
+                                real_node_coords[ni].2 += shift;
+                            }
+                        }
+                        total_extra += shift;
+                        any_shifted = true;
+
+                        processed.push((sg_idx, right + shift, cur_min_l, cur_max_l));
+                    } else {
+                        processed.push((sg_idx, right, cur_min_l, cur_max_l));
+                    }
+                }
+            }
+        }
+
+        if !any_shifted { break; }
+
+        // After shifting subgraph nodes, fix per-level collisions.
+        // Use a larger gap for nodes that belong to different subgraphs
+        // so that resulting bboxes (which add H_PAD on each side) don't
+        // re-overlap and trigger another round.
+        let max_level = real_node_coords.iter().map(|c| c.0).max().unwrap_or(0);
+        for level in 0..=max_level {
+            let mut level_nodes: Vec<usize> = Vec::new();
+            for (ni, &(lvl, _, _, _)) in real_node_coords.iter().enumerate() {
+                if lvl == level { level_nodes.push(ni); }
+            }
+            level_nodes.sort_by_key(|&ni| real_node_coords[ni].2);
+
+            for j in 1..level_nodes.len() {
+                let prev = level_nodes[j - 1];
+                let curr = level_nodes[j];
+                let need_sg_gap = match (node_sg[prev], node_sg[curr]) {
+                    (Some(a), Some(b)) => a != b,
+                    _ => false,
+                };
+                let gap = if need_sg_gap { cross_sg_gap } else { 3 };
+                let prev_right =
+                    real_node_coords[prev].2 + real_node_coords[prev].3 + gap;
+                if real_node_coords[curr].2 < prev_right {
+                    real_node_coords[curr].2 = prev_right;
+                }
+            }
+        }
+    }
+
+    total_extra
 }
 
 // ── Bounding box computation ─────────────────────────────────────────────

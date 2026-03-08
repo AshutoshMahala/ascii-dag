@@ -223,7 +223,20 @@ pub fn compute_layout_arena_csr<'b>(
         temps.real_coords,
         max_level,
         max_width,
+        !graph.has_subgraphs(), // skip per-level centering for subgraph layouts
     );
+
+    // Step 6b: Fix sibling subgraph overlaps introduced by centering
+    if graph.has_subgraphs() {
+        let extra = fix_subgraph_overlaps_csr(
+            graph,
+            temps.real_coords,
+            temps.sg_envelopes,
+            temps.sg_depths,
+            temps.node_slots,
+        );
+        max_width = max_width.saturating_add(extra as Coord);
+    }
 
     // Step 7: Build dummy positions using actual virtual level positions
     build_dummy_positions_csr(
@@ -885,11 +898,7 @@ fn vnode_subgraph_csr(graph: &CsrGraph<'_>, vnode_type: Idx, vnode_idx: Idx) -> 
 
 /// Count subgraph boundary transitions between two subgraph chains.
 /// Returns (exits_from_prev + entries_into_curr).
-fn sg_boundary_transitions(graph: &CsrGraph<'_>, prev: Option<usize>, curr: Option<usize>) -> usize {
-    // Walk both chains to find common ancestor
-    let _prev_depth = graph.sg_chain_depth(prev);
-    let _curr_depth = graph.sg_chain_depth(curr);
-
+fn sg_boundary_exits_entries(graph: &CsrGraph<'_>, prev: Option<usize>, curr: Option<usize>) -> (usize, usize) {
     // Build chains (root first) using simple iteration — max depth is small
     let mut prev_chain = [0usize; 16];
     let mut prev_len = 0usize;
@@ -924,7 +933,7 @@ fn sg_boundary_transitions(graph: &CsrGraph<'_>, prev: Option<usize>, curr: Opti
         .take_while(|(a, b)| a == b)
         .count();
 
-    (prev_len - common) + (curr_len - common)
+    (prev_len - common, curr_len - common)
 }
 
 /// Insert horizontal subgraph padding into x_coords.
@@ -964,8 +973,11 @@ fn subgraph_padding_csr(
                 let prev_sg = vnode_subgraph_csr(graph, prev_type, prev_idx);
                 let curr_sg = vnode_subgraph_csr(graph, curr_type, curr_idx);
                 if prev_sg != curr_sg {
-                    let transitions = sg_boundary_transitions(graph, prev_sg, curr_sg);
-                    x += transitions * SUBGRAPH_H_PAD;
+                    // CSS-style margin collapsing: max(exit_margin, entry_margin)
+                    let (exits, entries) = sg_boundary_exits_entries(graph, prev_sg, curr_sg);
+                    let exit_margin = exits * SUBGRAPH_H_PAD;
+                    let entry_margin = entries * SUBGRAPH_H_PAD;
+                    x += core::cmp::max(exit_margin, entry_margin);
                 }
             }
             if pos < x_coords.len() {
@@ -999,6 +1011,254 @@ fn subgraph_padding_csr(
     }
 
     global_max_width
+}
+
+// ── Sibling subgraph overlap repair (CSR) ────────────────────────────────
+
+/// Minimum gap (chars) between bounding boxes of sibling subgraphs.
+const SIBLING_GAP: usize = 1;
+
+/// Check if `node_idx` belongs to `target_sg` or any of its descendants.
+fn node_in_sg_subtree(graph: &CsrGraph<'_>, node_idx: usize, target_sg: usize) -> bool {
+    if let Some(mut sg) = graph.node_subgraph(node_idx) {
+        loop {
+            if sg == target_sg { return true; }
+            match graph.subgraph_parent(sg) {
+                Some(p) => sg = p,
+                None => return false,
+            }
+        }
+    }
+    false
+}
+
+/// CSR equivalent of `fix_subgraph_overlaps` in subgraph.rs.
+///
+/// Detects and fixes horizontal overlaps between sibling subgraph bounding
+/// boxes after centering. Uses only pre-allocated scratch buffers (no heap).
+///
+/// * `sg_envelopes` — scratch for bbox data: `(left, right, shift, 0)`.
+/// * `sg_depths` — scratch for nesting depths.
+/// * `scratch` — scratch for per-level node sorting (`node_slots`, `>= node_count`).
+fn fix_subgraph_overlaps_csr(
+    graph: &CsrGraph<'_>,
+    real_coords: &mut [(usize, usize, usize, usize)],
+    sg_envelopes: &mut [(usize, usize, usize, usize)],
+    sg_depths: &mut [usize],
+    scratch: &mut [usize],
+) -> usize {
+    let sg_count = graph.subgraph_count();
+    if sg_count < 2 { return 0; }
+    let node_count = graph.node_count().min(real_coords.len());
+
+    let cross_sg_gap: usize = 2 * SUBGRAPH_H_PAD + SIBLING_GAP;
+
+    // Fill nesting depths
+    for i in 0..sg_count {
+        sg_depths[i] = graph.sg_chain_depth(Some(i));
+    }
+    let max_depth = sg_depths[..sg_count].iter().copied().max().unwrap_or(0);
+
+    // Compute level range per subgraph (constant across rounds).
+    let mut sg_min_level = [usize::MAX; 128];
+    let mut sg_max_level = [0usize; 128];
+    for ni in 0..node_count {
+        if let Some(sg_idx) = graph.node_subgraph(ni) {
+            if sg_idx < sg_count && sg_idx < 128 {
+                let level = real_coords[ni].0;
+                if level < sg_min_level[sg_idx] { sg_min_level[sg_idx] = level; }
+                if level > sg_max_level[sg_idx] { sg_max_level[sg_idx] = level; }
+            }
+        }
+    }
+    // Propagate child level ranges to parents (bottom-up)
+    for depth in (0..=max_depth).rev() {
+        for sg_idx in 0..sg_count.min(128) {
+            if sg_depths[sg_idx] != depth { continue; }
+            if let Some(pidx) = graph.subgraph_parent(sg_idx) {
+                if pidx < 128 {
+                    let (cl, cr) = (sg_min_level[sg_idx], sg_max_level[sg_idx]);
+                    if cl == usize::MAX { continue; }
+                    if cl < sg_min_level[pidx] { sg_min_level[pidx] = cl; }
+                    if cr > sg_max_level[pidx] { sg_max_level[pidx] = cr; }
+                }
+            }
+        }
+    }
+
+    let mut total_extra = 0usize;
+
+    for _round in 0..8 {
+        // ── Compute padded bbox (left, right) per subgraph ──
+        for e in sg_envelopes[..sg_count].iter_mut() {
+            *e = (usize::MAX, 0, 0, 0);
+        }
+        for ni in 0..node_count {
+            if let Some(sg_idx) = graph.node_subgraph(ni) {
+                if sg_idx < sg_count {
+                    let (_, _, x, width) = real_coords[ni];
+                    let right = x + width;
+                    let (ref mut mn, ref mut mx, _, _) = sg_envelopes[sg_idx];
+                    if x < *mn { *mn = x; }
+                    if right > *mx { *mx = right; }
+                }
+            }
+        }
+        // Propagate children → parents (bottom-up)
+        for depth in (0..=max_depth).rev() {
+            for sg_idx in 0..sg_count {
+                if sg_depths[sg_idx] != depth { continue; }
+                if let Some(pidx) = graph.subgraph_parent(sg_idx) {
+                    let (cx, cr, _, _) = sg_envelopes[sg_idx];
+                    if cx == usize::MAX { continue; }
+                    let exp_l = cx.saturating_sub(SUBGRAPH_H_PAD);
+                    let exp_r = cr + SUBGRAPH_H_PAD;
+                    let (ref mut pl, ref mut pr, _, _) = sg_envelopes[pidx];
+                    if exp_l < *pl { *pl = exp_l; }
+                    if exp_r > *pr { *pr = exp_r; }
+                }
+            }
+        }
+        // Final padding + label-width expansion
+        for sg_idx in 0..sg_count {
+            let (mn, mx, _, _) = sg_envelopes[sg_idx];
+            if mn == usize::MAX { continue; }
+            let left = mn.saturating_sub(SUBGRAPH_H_PAD);
+            let mut right = mx + SUBGRAPH_H_PAD;
+            let label_w = graph.subgraph_label(sg_idx).len() + 4;
+            if right.saturating_sub(left) < label_w { right = left + label_w; }
+            sg_envelopes[sg_idx] = (left, right, 0, 0);
+        }
+
+        // ── Right-frontier sweep per parent group ──
+        let mut any_shifted = false;
+
+        // Iterate over each unique parent.  Sentinel 0 = top-level (None),
+        // sentinel 1..=sg_count = parent index 0..sg_count-1.
+        for parent_sentinel in 0..sg_count + 1 {
+            let parent: Option<usize> = if parent_sentinel == 0 {
+                None
+            } else {
+                Some(parent_sentinel - 1)
+            };
+
+            // Collect siblings (stack array, max 128)
+            let mut siblings = [0usize; 128];
+            let mut sib_count = 0usize;
+            for sg_idx in 0..sg_count {
+                if sg_envelopes[sg_idx].0 == usize::MAX { continue; }
+                if graph.subgraph_parent(sg_idx) == parent {
+                    if sib_count < 128 {
+                        siblings[sib_count] = sg_idx;
+                        sib_count += 1;
+                    }
+                }
+            }
+            if sib_count < 2 { continue; }
+
+            // Insertion-sort siblings by bbox left
+            for i in 1..sib_count {
+                let key = siblings[i];
+                let key_left = sg_envelopes[key].0;
+                let mut j = i;
+                while j > 0 && sg_envelopes[siblings[j - 1]].0 > key_left {
+                    siblings[j] = siblings[j - 1];
+                    j -= 1;
+                }
+                siblings[j] = key;
+            }
+
+            // Level-aware pairwise sweep: only separate siblings whose
+            // rendered level ranges share at least one level.
+            let mut processed = [(0usize, 0usize, 0usize, 0usize); 128]; // (sg_idx, eff_right, min_l, max_l)
+            let mut proc_count = 0usize;
+
+            for s in 0..sib_count {
+                let sg_idx = siblings[s];
+                let (left, right, _, _) = sg_envelopes[sg_idx];
+                let cur_min_l = sg_min_level[sg_idx.min(127)];
+                let cur_max_l = sg_max_level[sg_idx.min(127)];
+
+                let mut eff_frontier = 0usize;
+                let mut has_level_overlap = false;
+                for p in 0..proc_count {
+                    let (_, prev_right, prev_min_l, prev_max_l) = processed[p];
+                    let overlaps = prev_min_l <= cur_max_l
+                        && cur_min_l <= prev_max_l;
+                    if overlaps && prev_right > eff_frontier {
+                        eff_frontier = prev_right;
+                        has_level_overlap = true;
+                    }
+                }
+
+                if has_level_overlap && eff_frontier + SIBLING_GAP > left {
+                    let shift = eff_frontier + SIBLING_GAP - left;
+                    for ni in 0..node_count {
+                        if node_in_sg_subtree(graph, ni, sg_idx) {
+                            real_coords[ni].2 += shift;
+                        }
+                    }
+                    total_extra += shift;
+                    any_shifted = true;
+                    if proc_count < 128 {
+                        processed[proc_count] = (sg_idx, right + shift, cur_min_l, cur_max_l);
+                        proc_count += 1;
+                    }
+                } else {
+                    if proc_count < 128 {
+                        processed[proc_count] = (sg_idx, right, cur_min_l, cur_max_l);
+                        proc_count += 1;
+                    }
+                }
+            }
+        }
+
+        if !any_shifted { break; }
+
+        // ── Per-level collision repair ──
+        let max_level = real_coords[..node_count]
+            .iter()
+            .map(|c| c.0)
+            .max()
+            .unwrap_or(0);
+        for level in 0..=max_level {
+            // Collect nodes on this level into scratch[]
+            let mut count = 0usize;
+            for ni in 0..node_count {
+                if real_coords[ni].0 == level && count < scratch.len() {
+                    scratch[count] = ni;
+                    count += 1;
+                }
+            }
+            // Insertion-sort by x
+            for i in 1..count {
+                let key = scratch[i];
+                let key_x = real_coords[key].2;
+                let mut j = i;
+                while j > 0 && real_coords[scratch[j - 1]].2 > key_x {
+                    scratch[j] = scratch[j - 1];
+                    j -= 1;
+                }
+                scratch[j] = key;
+            }
+            // Fix collisions
+            for j in 1..count {
+                let prev = scratch[j - 1];
+                let curr = scratch[j];
+                let need_sg_gap = match (graph.node_subgraph(prev), graph.node_subgraph(curr)) {
+                    (Some(a), Some(b)) => a != b,
+                    _ => false,
+                };
+                let gap = if need_sg_gap { cross_sg_gap } else { 3 };
+                let needed = real_coords[prev].2 + real_coords[prev].3 + gap;
+                if real_coords[curr].2 < needed {
+                    real_coords[curr].2 = needed;
+                }
+            }
+        }
+    }
+
+    total_extra
 }
 
 /// Compute per-level Y extras for subgraph borders.
@@ -1435,6 +1695,7 @@ fn build_real_coords_csr(
     real_coords: &mut [(usize, usize, usize, usize)],
     max_level: Idx,
     max_width: Coord,
+    center: bool,
 ) {
     let max_pos = x_coords.len();
     let max_vnode_idx = vnode_data.len() / 2;
@@ -1454,7 +1715,7 @@ fn build_real_coords_csr(
         } else {
             0
         };
-        let offset: usize = if (max_width as usize) > level_width {
+        let offset: usize = if center && (max_width as usize) > level_width {
             (max_width as usize - level_width) / 2
         } else {
             0

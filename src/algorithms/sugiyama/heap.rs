@@ -218,10 +218,14 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         }
     }
 
-    // Apply centering offsets to real node coordinates
+    // Apply centering offsets to real node coordinates.
+    // When subgraphs are present, skip per-level centering: the median
+    // x-assignment already places children near parents, and independent
+    // centering of each level destroys that vertical alignment (zigzag).
+    let center_levels = !dag.has_subgraphs();
     for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
         let level_width = level_widths[level_idx];
-        let level_offset = if max_width > level_width {
+        let level_offset = if center_levels && max_width > level_width {
             (max_width - level_width) / 2
         } else {
             0
@@ -235,6 +239,18 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             }
         }
     }
+
+    // Fix sibling subgraph overlaps that arise from centering (different levels
+    // get different centering offsets, which can push bounding boxes together).
+    let max_width = if dag.has_subgraphs() {
+        let extra = crate::algorithms::sugiyama::subgraph::fix_subgraph_overlaps(
+            dag,
+            &mut real_node_coords,
+        );
+        max_width + extra
+    } else {
+        max_width
+    };
 
     let mut node_slots = vec![usize::MAX; dag.nodes.len()];
     let mut edge_slots = vec![0usize; dag.edges.len()];
