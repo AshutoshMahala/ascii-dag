@@ -346,6 +346,57 @@ impl<'a> LayoutIRArena<'a> {
         self.nodes.is_empty()
     }
 
+    // ── Query methods (parity with LayoutIR) ─────────────────────────────
+
+    /// Get all edges originating from a node (by node ID).
+    pub fn edges_from(&self, node_id: usize) -> impl Iterator<Item = &LayoutEdgeArena> {
+        self.edges.iter().filter(move |e| e.from_id == node_id)
+    }
+
+    /// Get all edges ending at a node (by node ID).
+    pub fn edges_to(&self, node_id: usize) -> impl Iterator<Item = &LayoutEdgeArena> {
+        self.edges.iter().filter(move |e| e.to_id == node_id)
+    }
+
+    /// Get bounding box for a node: `(x, y, width, height)`.
+    #[inline]
+    pub fn node_bounds(&self, node: &LayoutNodeArena) -> (usize, usize, usize, usize) {
+        (node.x, node.y, node.width, node.height)
+    }
+
+    /// Find the node at a given coordinate (hit testing).
+    pub fn node_at(&self, x: usize, y: usize) -> Option<&LayoutNodeArena> {
+        self.nodes.iter().find(|node| {
+            x >= node.x && x < node.x + node.width && y >= node.y && y < node.y + node.height
+        })
+    }
+
+    /// Check if two edges cross each other.
+    pub fn edges_cross(&self, edge1: &LayoutEdgeArena, edge2: &LayoutEdgeArena) -> bool {
+        let (min1, max1) = if edge1.from_x <= edge1.to_x {
+            (edge1.from_x, edge1.to_x)
+        } else {
+            (edge1.to_x, edge1.from_x)
+        };
+        let (min2, max2) = if edge2.from_x <= edge2.to_x {
+            (edge2.from_x, edge2.to_x)
+        } else {
+            (edge2.to_x, edge2.from_x)
+        };
+        let h_overlap = min1 < max2 && min2 < max1;
+        let v_overlap = edge1.from_y < edge2.to_y && edge2.from_y < edge1.to_y;
+        let dir1 = edge1.to_x as isize - edge1.from_x as isize;
+        let dir2 = edge2.to_x as isize - edge2.from_x as isize;
+        let opposite_dir = (dir1 > 0 && dir2 < 0) || (dir1 < 0 && dir2 > 0);
+        h_overlap && v_overlap && opposite_dir
+    }
+
+    /// Get a deterministic color index for an edge (for colored renderers).
+    #[inline]
+    pub fn edge_color_index(&self, edge: &LayoutEdgeArena) -> usize {
+        edge.edge_index
+    }
+
     /// Check if a label can be placed without collision.
     /// Returns true if all positions are empty (space) or the edge's vertical line (│).
     pub(crate) fn can_place_label(&self, buffer: &[char], label: &str, x: usize) -> bool {
@@ -367,6 +418,41 @@ impl<'a> LayoutIRArena<'a> {
             }
         }
         true
+    }
+
+    // ── Alloc-gated query methods ────────────────────────────────────────
+
+    /// Get edges that connect nodes from `from_level` to the next level.
+    ///
+    /// Returns `(from_center_x, to_center_x)` pairs for drawing connections.
+    #[cfg(feature = "alloc")]
+    pub fn edges_between_levels(&self, from_level: usize) -> alloc::vec::Vec<(usize, usize)> {
+        let to_level = from_level + 1;
+        self.edges
+            .iter()
+            .filter_map(|edge| {
+                let from_node = self.node_by_id(edge.from_id)?;
+                let to_node = self.node_by_id(edge.to_id)?;
+                if from_node.level == from_level && to_node.level == to_level {
+                    Some((from_node.center_x, to_node.center_x))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Get all edges whose source node is at the given level.
+    #[cfg(feature = "alloc")]
+    pub fn edges_from_level(&self, level: usize) -> alloc::vec::Vec<&LayoutEdgeArena> {
+        self.edges
+            .iter()
+            .filter(|edge| {
+                self.node_by_id(edge.from_id)
+                    .map(|n| n.level == level)
+                    .unwrap_or(false)
+            })
+            .collect()
     }
 }
 

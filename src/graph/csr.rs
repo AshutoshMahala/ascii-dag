@@ -354,6 +354,95 @@ impl<'a> CsrGraph<'a> {
     ) -> Result<crate::ir::arena::LayoutIRArena<'b>, crate::errors::GraphError> {
         crate::algorithms::sugiyama::arena_csr::compute_layout_arena_csr(self, config, temp_arena, output_arena)
     }
+
+    /// Create a `CsrGraph` from node and edge slices (batch construction).
+    ///
+    /// Edges use **node IDs** (not indices), matching the `Graph::from_edges` API.
+    /// Returns `None` if the arena is too small or an edge references an unknown ID.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ascii_dag::graph::arena::Arena;
+    /// use ascii_dag::graph::csr::CsrGraph;
+    ///
+    /// let size = CsrGraph::required_arena_size(3, 2, 10);
+    /// let mut buf = vec![0u8; size];
+    /// let mut arena = Arena::new(&mut buf);
+    /// let csr = CsrGraph::from_edges(
+    ///     &mut arena,
+    ///     &[(1, "A"), (2, "B"), (3, "C")],
+    ///     &[(1, 2), (2, 3)],
+    /// ).unwrap();
+    /// assert_eq!(csr.node_count(), 3);
+    /// assert_eq!(csr.edge_count(), 2);
+    /// ```
+    pub fn from_edges(
+        arena: &'a mut Arena<'a>,
+        nodes: &[(usize, &str)],
+        edges: &[(usize, usize)],
+    ) -> Option<CsrGraph<'a>> {
+        let label_bytes: usize = nodes.iter().map(|(_, l)| l.len()).sum();
+        let mut builder = CsrGraphBuilder::new(arena, nodes.len(), edges.len(), label_bytes + 64)?;
+
+        for &(id, label) in nodes {
+            builder.add_node(id, label)?;
+        }
+
+        // Map IDs to indices for edges
+        for &(from_id, to_id) in edges {
+            let from_idx = nodes.iter().position(|&(id, _)| id == from_id)?;
+            let to_idx = nodes.iter().position(|&(id, _)| id == to_id)?;
+            builder.add_edge(from_idx, to_idx)?;
+        }
+
+        builder.build()
+    }
+
+    /// Create a `CsrGraph` from node and labeled edge slices (batch construction).
+    ///
+    /// Edges use **node IDs** (not indices), matching the `Graph::from_edges_labeled` API.
+    /// Returns `None` if the arena is too small or an edge references an unknown ID.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ascii_dag::graph::arena::Arena;
+    /// use ascii_dag::graph::csr::CsrGraph;
+    ///
+    /// let size = CsrGraph::required_arena_size(3, 2, 30);
+    /// let mut buf = vec![0u8; size];
+    /// let mut arena = Arena::new(&mut buf);
+    /// let csr = CsrGraph::from_edges_labeled(
+    ///     &mut arena,
+    ///     &[(1, "A"), (2, "B"), (3, "C")],
+    ///     &[(1, 2, Some("uses")), (2, 3, None)],
+    /// ).unwrap();
+    /// assert_eq!(csr.node_count(), 3);
+    /// assert_eq!(csr.edge_count(), 2);
+    /// ```
+    pub fn from_edges_labeled(
+        arena: &'a mut Arena<'a>,
+        nodes: &[(usize, &str)],
+        edges: &[(usize, usize, Option<&str>)],
+    ) -> Option<CsrGraph<'a>> {
+        let node_label_bytes: usize = nodes.iter().map(|(_, l)| l.len()).sum();
+        let edge_label_bytes: usize = edges.iter().map(|(_, _, l)| l.map_or(0, |s| s.len())).sum();
+        let label_bytes = node_label_bytes + edge_label_bytes;
+        let mut builder = CsrGraphBuilder::new(arena, nodes.len(), edges.len(), label_bytes + 64)?;
+
+        for &(id, label) in nodes {
+            builder.add_node(id, label)?;
+        }
+
+        for &(from_id, to_id, label) in edges {
+            let from_idx = nodes.iter().position(|&(id, _)| id == from_id)?;
+            let to_idx = nodes.iter().position(|&(id, _)| id == to_id)?;
+            builder.add_edge_with_label(from_idx, to_idx, label.unwrap_or(""))?;
+        }
+
+        builder.build()
+    }
 }
 
 /// Helper struct for writing to a byte buffer without allocation.
