@@ -47,6 +47,9 @@ pub struct LayoutNodeArena {
     pub height: usize,
     /// Center X coordinate (for edge routing)
     pub center_x: usize,
+    /// Center Y coordinate (for edge routing, e.g. `y + height / 2`).
+    /// Mirrors zigraph's `LayoutNode.center_y`.
+    pub center_y: usize,
     /// The level (depth) this node is at
     pub level: usize,
     /// Position within the level (0-indexed from left)
@@ -64,6 +67,16 @@ pub enum EdgePathArena {
     Direct,
     /// L-shaped connection with a horizontal segment
     Corner { horizontal_y: usize },
+    /// Routed through a side channel (for skip-level edges).
+    /// Mirrors heap `EdgePath::SideChannel`.
+    SideChannel {
+        /// X coordinate of the vertical channel
+        channel_x: usize,
+        /// Starting Y of the channel
+        start_y: usize,
+        /// Ending Y of the channel
+        end_y: usize,
+    },
     /// Multi-segment path (waypoints stored separately)
     MultiSegment {
         /// Start index into waypoints array
@@ -72,6 +85,18 @@ pub enum EdgePathArena {
         waypoints_len: usize,
         /// Vertical offset for the start of the edge
         start_y_offset: usize,
+    },
+    /// Bézier spline hint (for SVG/canvas renderers; ASCII renderers fall back to Direct).
+    /// Mirrors zigraph's `EdgePath.spline`.
+    Spline {
+        /// First control point X
+        cp1_x: usize,
+        /// First control point Y
+        cp1_y: usize,
+        /// Second control point X
+        cp2_x: usize,
+        /// Second control point Y
+        cp2_y: usize,
     },
 }
 
@@ -90,6 +115,9 @@ pub struct LayoutEdgeArena {
     pub to_x: usize,
     /// Target node's top Y coordinate
     pub to_y: usize,
+    /// Whether this edge has an arrowhead (true for directed edges).
+    /// Mirrors zigraph's `LayoutEdge.directed`.
+    pub directed: bool,
     /// Whether this edge was reversed during cycle breaking (back-edge).
     pub reversed: bool,
     /// How the edge is routed

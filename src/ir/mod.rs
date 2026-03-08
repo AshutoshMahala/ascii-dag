@@ -41,6 +41,7 @@ pub mod arena;
 pub(crate) mod arena_builder;
 pub(crate) mod arena_colored;
 pub(crate) mod arena_render;
+pub mod json;
 
 #[cfg(feature = "alloc")]
 use alloc::vec;
@@ -106,6 +107,9 @@ pub struct LayoutNode<'a> {
     pub height: usize,
     /// Center X coordinate (for edge routing)
     pub center_x: usize,
+    /// Center Y coordinate (for edge routing, e.g. `y + height / 2`).
+    /// Mirrors zigraph's `LayoutNode.center_y`.
+    pub center_y: usize,
     /// The level (depth) this node is at
     pub level: usize,
     /// Position within the level (0-indexed from left)
@@ -140,6 +144,18 @@ pub enum EdgePath {
         waypoints: Vec<(usize, usize)>,
         /// Vertical offset for the start of the edge (to prevent overlaps at source)
         start_y_offset: usize,
+    },
+    /// Bézier spline hint (for SVG/canvas renderers; ASCII renderers fall back to Direct).
+    /// Mirrors zigraph's `EdgePath.spline`.
+    Spline {
+        /// First control point X
+        cp1_x: usize,
+        /// First control point Y
+        cp1_y: usize,
+        /// Second control point X
+        cp2_x: usize,
+        /// Second control point Y
+        cp2_y: usize,
     },
 }
 

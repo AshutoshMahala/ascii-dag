@@ -427,14 +427,16 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                 } else {
                     NodeKind::Explicit
                 };
+                let node_height = dag.get_node_height(*idx);
                 builder.add_node(LayoutNode {
                     id,
                     label,
                     y,
                     x,
                     width,
-                    height: dag.get_node_height(*idx),
+                    height: node_height,
                     center_x: x + width / 2,
+                    center_y: y + node_height.saturating_sub(1) / 2,
                     level: level_idx,
                     level_position: pos,
                     kind,
@@ -613,6 +615,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                             waypoints[0].0
                         }
                     }
+                    EdgePath::Spline { .. } => from_x,
                 };
 
                 // Center the label on the edge's X position

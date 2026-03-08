@@ -106,6 +106,7 @@ fn run_heap() {
             ascii_dag::ir::EdgePath::MultiSegment { waypoints, .. } => {
                 format!("MultiSegment ({} waypoints)", waypoints.len())
             }
+            ascii_dag::ir::EdgePath::Spline { .. } => "Spline (Bézier curve)".to_string(),
         };
         println!(
             "  {} → {}: ({},{}) → ({},{}) [{}]",

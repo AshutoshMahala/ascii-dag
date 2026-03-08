@@ -509,6 +509,18 @@ impl<'a> LayoutIRArena<'a> {
                     }
                 }
             }
+            // SideChannel / Spline: fall back to Direct rendering
+            EdgePathArena::SideChannel { .. } | EdgePathArena::Spline { .. } => {
+                if from_x < line_buffer.len() {
+                    if y == from_y + 1 && edge.reversed {
+                        line_buffer[from_x] = ARROW_UP_DASHED;
+                    } else if y == to_y - 1 && !edge.reversed {
+                        line_buffer[from_x] = ARROW_DOWN;
+                    } else if !is_arrow(line_buffer[from_x]) {
+                        line_buffer[from_x] = vline;
+                    }
+                }
+            }
         }
     }
 

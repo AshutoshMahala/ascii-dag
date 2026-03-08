@@ -12,7 +12,7 @@
 
 use crate::ir::{EdgePath, LayoutIR, SubgraphInfo};
 use crate::render::chars::{
-    merge_chars, ARROW_DOWN, ARROW_DOWN_DASHED, CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR, CROSS, H_LINE, H_LINE_DASHED, V_LINE,
+    merge_chars, ARROW_DOWN, ARROW_DOWN_DASHED, ARROW_UP_DASHED, CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR, CROSS, H_LINE, H_LINE_DASHED, V_LINE,
     V_LINE_DASHED,
 };
 use crate::render::colors::{self, Palette};
@@ -1033,6 +1033,23 @@ impl<'a> LayoutIR<'a> {
                     }
                 }
             }
+            // Spline: ASCII can't render curves — fall back to Direct
+            EdgePath::Spline { .. } => {
+                let x = edge.from_x;
+                if x < buffer.len() && y > edge.from_y && y < edge.to_y {
+                    if y == edge.from_y + 1 && edge.reversed {
+                        buffer[x] = ARROW_UP_DASHED;
+                    } else if y == edge.to_y - 1 && !edge.reversed {
+                        buffer[x] = ARROW_DOWN;
+                    } else {
+                        if buffer[x] == H_LINE || buffer[x] == H_LINE_DASHED {
+                            buffer[x] = CROSS;
+                        } else {
+                            buffer[x] = vline;
+                        }
+                    }
+                }
+            }
         }
 
         // NOTE: Edge labels are painted separately in render_scanline_to step 2,
@@ -1154,6 +1171,7 @@ impl<'a> LayoutIR<'a> {
                     waypoints[0].0
                 }
             }
+            EdgePath::Spline { .. } => edge.from_x,
         }
     }
 
@@ -1450,6 +1468,22 @@ impl<'a> LayoutIR<'a> {
                             buffer[x1] = merge_chars(buffer[x1], vline);
                             colors[x1] = color;
                         }
+                    }
+                }
+            }
+            // Spline: ASCII can't render curves — fall back to Direct
+            EdgePath::Spline { .. } => {
+                let x = edge.from_x;
+                if x < buffer.len() && y > edge.from_y && y < edge.to_y {
+                    if y == edge.from_y + 1 && edge.reversed {
+                        buffer[x] = ARROW_UP_DASHED;
+                        colors[x] = color;
+                    } else if y == edge.to_y - 1 && !edge.reversed {
+                        buffer[x] = ARROW_DOWN;
+                        colors[x] = color;
+                    } else {
+                        buffer[x] = merge_chars(buffer[x], vline);
+                        colors[x] = color;
                     }
                 }
             }

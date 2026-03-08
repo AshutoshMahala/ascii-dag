@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- **JSON serialization (zigraph v1.2)**: Both IR surfaces can serialize to zigraph-compatible JSON.
+  - Heap: `LayoutIR::to_json() -> String` (requires `alloc`)
+  - Arena: `LayoutIRArena::serialize_json(&mut [u8]) -> Option<usize>` (no_std, no alloc)
+- **`center_y`** on `LayoutNode` and `LayoutNodeArena` — computed during layout.
+- **`directed`** field on `LayoutEdgeArena` — matches heap `LayoutEdge`.
+- **`Spline` path variant** on both `EdgePath` and `EdgePathArena` — cubic control points (`cp1_x/y`, `cp2_x/y`), forward-compatible with zigraph's spline hints.
+- **`SideChannel` path variant** on both `EdgePath` and `EdgePathArena` — lateral routing slot, forward-compatible with zigraph.
 - **True `no_alloc` support**: The arena/CSR layout path now compiles without the `alloc` feature. Use `--no-default-features --features arena` for a fully heap-free build suitable for `no_std` embedded targets.
 - **Feature flag cleanup**: `generic` feature now implies `alloc` (all generic algorithms require heap allocation). `render::chars` and `render::colors` are available without alloc.
 - **Subgraph / cluster support**: Group nodes into labeled, nestable clusters with `add_subgraph()`, `put_nodes().inside()`, and `put_subgraphs().inside()`. Rendered as double-line boxes (`╔═╗║╚═╝`) with labels inside, matching zigraph's visual style.

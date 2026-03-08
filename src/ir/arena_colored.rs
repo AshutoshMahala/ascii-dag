@@ -753,6 +753,21 @@ impl<'a> LayoutIRArena<'a> {
                     }
                 }
             }
+            // SideChannel / Spline: fall back to Direct rendering
+            EdgePathArena::SideChannel { .. } | EdgePathArena::Spline { .. } => {
+                if from_x < line_buffer.len() {
+                    if y == from_y + 1 && edge.reversed {
+                        line_buffer[from_x] = ARROW_UP_DASHED;
+                        color_buffer[from_x] = color;
+                    } else if y == to_y - 1 && !edge.reversed {
+                        line_buffer[from_x] = ARROW_DOWN;
+                        color_buffer[from_x] = color;
+                    } else if !is_arrow(line_buffer[from_x]) {
+                        line_buffer[from_x] = vline;
+                        color_buffer[from_x] = color;
+                    }
+                }
+            }
         }
     }
 

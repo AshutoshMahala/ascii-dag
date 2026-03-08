@@ -761,8 +761,11 @@ for edge in ir.edges() {
         ascii_dag::ir::EdgePath::SideChannel { channel_x, .. } => {
             println!("  Route: side channel at x={}", channel_x);
         }
-        ascii_dag::ir::EdgePath::MultiSegment { waypoints } => {
+        ascii_dag::ir::EdgePath::MultiSegment { waypoints, .. } => {
             println!("  Route: {} waypoints", waypoints.len());
+        }
+        ascii_dag::ir::EdgePath::Spline { .. } => {
+            println!("  Route: spline (Bézier curve)");
         }
     }
 }

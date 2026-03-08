@@ -598,6 +598,8 @@ pub fn compute_layout_arena_csr<'b>(
                             if l_y <= *horizontal_y { eff_from_x } else { eff_to_x }
                         }
                         EdgePathArena::MultiSegment { .. } => eff_from_x,
+                        // SideChannel / Spline: fall back to source X
+                        _ => eff_from_x,
                     };
                     let label_len_with_quotes = len + 2;
                     let l_x = edge_x_at_label.saturating_sub(label_len_with_quotes / 2);
@@ -616,6 +618,7 @@ pub fn compute_layout_arena_csr<'b>(
             from_y,
             to_x: eff_to_x,
             to_y,
+            directed: true,
             reversed: is_back,
             path,
             edge_index: edge_idx,
@@ -1511,9 +1514,10 @@ fn compute_sg_bounding_boxes(
         if x == usize::MAX { continue; }
         let width = right.saturating_sub(x);
         let height = bottom.saturating_sub(y);
-        let parent = graph.subgraph_parent(sg_idx);
+        let sg_id = graph.subgraph_id(sg_idx);
+        let parent_id = graph.subgraph_parent(sg_idx).map(|p| graph.subgraph_id(p));
         let label = graph.subgraph_label(sg_idx);
-        builder.add_subgraph(sg_idx, parent, label, x, y, width, height);
+        builder.add_subgraph(sg_id, parent_id, label, x, y, width, height);
     }
 }
 

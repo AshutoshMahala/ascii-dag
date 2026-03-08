@@ -442,6 +442,8 @@ impl<'a> Graph<'a> {
                                         if l_y <= *horizontal_y { from_x } else { to_x }
                                     }
                                     EdgePathArena::MultiSegment { .. } => from_x,
+                                    // SideChannel / Spline: fall back to source X
+                                    _ => from_x,
                                 };
                             let label_len_with_quotes = len + 2;
                             let l_x = edge_x_at_label.saturating_sub(label_len_with_quotes / 2);
@@ -460,6 +462,7 @@ impl<'a> Graph<'a> {
                     from_y,
                     to_x,
                     to_y,
+                    directed: true,
                     reversed: false,
                     path,
                     edge_index: edge_idx,
