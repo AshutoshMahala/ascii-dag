@@ -157,34 +157,48 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         widths.push(level_w);
     }
 
-    // Calculate total width and centering offsets
-    let level_widths: Vec<usize> = if dag.has_subgraphs() {
-        // Insert extra horizontal padding at subgraph boundary transitions
+    // Insert extra horizontal padding at subgraph boundary transitions
+    if dag.has_subgraphs() {
         crate::algorithms::sugiyama::subgraph::subgraph_padding(
             dag,
             &virtual_levels,
             &mut x_coords,
             &widths,
-        )
-    } else {
-        x_coords
-            .iter()
-            .zip(widths.iter())
-            .map(|(xs, ws)| {
-                xs.iter()
-                    .zip(ws.iter())
-                    .map(|(x, w)| x + w)
-                    .max()
-                    .unwrap_or(0)
-            })
-            .collect()
-    };
+        );
+    }
+
+    // Step 4b: Refine x-coordinates — shift nodes toward their connected
+    // neighbors on adjacent levels to reduce zigzag edges (median placement).
+    // Then compact subgraphs. Run iteratively: compaction moves what it can,
+    // then refinement propagates through dummy chains, unlocking further
+    // compaction in the next round.
+    let node_edge_indices_for_refine = build_node_edge_indices(dag);
+    let compact_rounds = if dag.has_subgraphs() { 3 } else { 1 };
+    for _ in 0..compact_rounds {
+        refine_x_positions(dag, &virtual_levels, &mut x_coords, &widths, &node_edge_indices_for_refine);
+        if dag.has_subgraphs() {
+            compact_subgraphs(dag, &virtual_levels, &mut x_coords, &widths);
+        }
+    }
+
+    // Calculate total width and centering offsets
+    let level_widths: Vec<usize> = x_coords
+        .iter()
+        .zip(widths.iter())
+        .map(|(xs, ws)| {
+            xs.iter()
+                .zip(ws.iter())
+                .map(|(x, w)| x + w)
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
 
     // Add small buffer for bounded edge offsets (max 3 chars) plus 1 for routing
     // Also add limited expansion for labels (4 chars each side) if any edges have labels
     let has_labeled_edges = dag.edges.iter().any(|(_, _, label)| label.is_some());
     let label_margin = if has_labeled_edges { 8 } else { 0 }; // 4 chars each side
-    let subgraph_margin = if dag.has_subgraphs() { 6 } else { 0 }; // border padding
+    let subgraph_margin = if dag.has_subgraphs() { 4 } else { 0 }; // border padding
     let max_width = level_widths.iter().max().unwrap_or(&0) + 4 + label_margin + subgraph_margin;
 
     // Step 5: Build LayoutIR
@@ -450,7 +464,9 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
     let mut dummy_positions: Vec<Vec<(usize, usize)>> = vec![Vec::new(); dag.edges.len()];
     for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
         let level_width = level_widths[level_idx];
-        let level_offset = if max_width > level_width {
+        // Apply the same centering policy as real nodes: skip when subgraphs
+        // are present to avoid misalignment between real and dummy positions.
+        let level_offset = if center_levels && max_width > level_width {
             (max_width - level_width) / 2
         } else {
             0
@@ -475,6 +491,15 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
     }
 
     let mut level_edge_next = vec![0usize; max_level + 1];
+
+    // Collect all horizontal Y values used by edge routing segments.
+    // These will be passed to bounding box computation so subgraph borders
+    // can be shifted to avoid overlapping with edge routing rows.
+    let mut edge_routing_ys: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+    // Per-level routing floor: the maximum Y used by edge routing at each level.
+    // Bottom borders of subgraphs closing at level L must be placed BELOW this floor.
+    let mut level_routing_floor: Vec<usize> = vec![0; max_level + 1];
 
     // Step 6: Add edges with proper routing
     for (edge_idx, &(from_id, to_id, label)) in dag.edges.iter().enumerate() {
@@ -523,8 +548,13 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                         0
                     };
 
+                    let hy = from_y + edge_start_row + slot;
+                    edge_routing_ys.insert(hy);
+                    if layout_from_level < level_routing_floor.len() {
+                        level_routing_floor[layout_from_level] = level_routing_floor[layout_from_level].max(hy);
+                    }
                     EdgePath::Corner {
-                        horizontal_y: from_y + edge_start_row + slot,
+                        horizontal_y: hy,
                     }
                 }
             } else {
@@ -537,8 +567,13 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                     } else {
                         0
                     };
+                    let hy = from_y + edge_start_row + slot;
+                    edge_routing_ys.insert(hy);
+                    if layout_from_level < level_routing_floor.len() {
+                        level_routing_floor[layout_from_level] = level_routing_floor[layout_from_level].max(hy);
+                    }
                     EdgePath::Corner {
-                        horizontal_y: from_y + edge_start_row + slot,
+                        horizontal_y: hy,
                     }
                 } else {
                     // Build waypoints through dummy nodes with Y slot separation
@@ -549,7 +584,10 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                         level_edge_next[level] += 1;
 
                         let wp_edge_start_row = max_node_height[level] + if has_labeled_edges { 1 } else { 0 };
-                        waypoints.push((x, level_y_offsets[level] + wp_edge_start_row + slot));
+                        let wp_y = level_y_offsets[level] + wp_edge_start_row + slot;
+                        edge_routing_ys.insert(wp_y);
+                        level_routing_floor[level] = level_routing_floor[level].max(wp_y);
+                        waypoints.push((x, wp_y));
                     }
 
                     let slot = if node_slots[layout_src_idx] != usize::MAX {
@@ -560,6 +598,45 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
 
                     // Calculate offset from (y+1)
                     let start_y_offset = (edge_start_row + slot).saturating_sub(1);
+
+                    // Record the INITIAL corner Y (first segment routing) — the paint
+                    // code draws a horizontal segment at from_y + 1 + start_y_offset,
+                    // which is NOT a waypoint Y but still occupies a row.
+                    let initial_corner_y = from_y + 1 + start_y_offset;
+                    edge_routing_ys.insert(initial_corner_y);
+                    if layout_from_level < level_routing_floor.len() {
+                        level_routing_floor[layout_from_level] = level_routing_floor[layout_from_level].max(initial_corner_y);
+                    }
+
+                    // Also record intermediate corner Ys: the paint code draws
+                    // horizontal segments at waypoint_y + 1 between consecutive
+                    // waypoints when they differ in X.
+                    for (wi, window) in waypoints.windows(2).enumerate() {
+                        let wp_y = window[0].1;
+                        let next_x = window[1].0;
+                        let this_x = window[0].0;
+                        if this_x != next_x {
+                            let inter_corner_y = wp_y + 1;
+                            edge_routing_ys.insert(inter_corner_y);
+                            // Update routing floor for the level this waypoint belongs to
+                            let wp_level = dummies[wi].0;
+                            if wp_level < level_routing_floor.len() {
+                                level_routing_floor[wp_level] = level_routing_floor[wp_level].max(inter_corner_y);
+                            }
+                        }
+                    }
+                    // Also between last waypoint and target
+                    if let Some(&(last_wp_x, last_wp_y)) = waypoints.last() {
+                        if last_wp_x != to_x {
+                            let inter_corner_y = last_wp_y + 1;
+                            edge_routing_ys.insert(inter_corner_y);
+                            if let Some(&(last_level, _)) = dummies.last() {
+                                if last_level < level_routing_floor.len() {
+                                    level_routing_floor[last_level] = level_routing_floor[last_level].max(inter_corner_y);
+                                }
+                            }
+                        }
+                    }
 
                     EdgePath::MultiSegment {
                         waypoints,
@@ -660,6 +737,8 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             &real_node_coords,
             &level_y_offsets,
             total_height,
+            &edge_routing_ys,
+            &level_routing_floor,
         );
         for info in sg_infos {
             builder.add_subgraph(info);
@@ -685,6 +764,381 @@ fn build_node_edge_indices(dag: &Graph<'_>) -> Vec<Vec<usize>> {
         }
     }
     node_edges
+}
+
+// ── X-coordinate refinement (median placement) ─────────────────────────
+
+/// Refine x-coordinates by shifting nodes toward the median x of their
+/// connected neighbors on adjacent levels. This is the "coordinate
+/// assignment" step of the Sugiyama algorithm — it reduces zigzag edges
+/// by aligning parents and children vertically.
+///
+/// Uses alternating down-sweeps (align with parents) and up-sweeps
+/// (align with children) for several iterations. Each node is shifted
+/// toward its ideal position, constrained by minimum spacing with its
+/// neighbors on the same level.
+fn refine_x_positions(
+    dag: &Graph<'_>,
+    virtual_levels: &[Vec<VNode>],
+    x_coords: &mut [Vec<usize>],
+    widths: &[Vec<usize>],
+    node_edge_indices: &[Vec<usize>],
+) {
+    use crate::algorithms::sugiyama::subgraph::vnode_subgraph;
+
+    let num_levels = virtual_levels.len();
+    if num_levels <= 1 {
+        return;
+    }
+
+    const MIN_GAP: usize = 3;
+    const SG_GAP: usize = 5; // gap between nodes of different subgraphs (H_PAD + SIBLING + H_PAD)
+    const ITERATIONS: usize = 8;
+
+    // Helper: compute minimum gap between adjacent nodes, accounting for
+    // subgraph boundary padding.
+    let gap_between = |level: usize, left_pos: usize, right_pos: usize| -> usize {
+        let left_sg = vnode_subgraph(dag, &virtual_levels[level][left_pos]);
+        let right_sg = vnode_subgraph(dag, &virtual_levels[level][right_pos]);
+        if left_sg != right_sg { SG_GAP } else { MIN_GAP }
+    };
+
+    // Also enforce left margin for the first node if it's inside a subgraph
+    let left_margin = |level: usize| -> usize {
+        if virtual_levels[level].is_empty() {
+            return 0;
+        }
+        let sg = vnode_subgraph(dag, &virtual_levels[level][0]);
+        if sg.is_some() { 2 } else { 0 } // SUBGRAPH_H_PAD
+    };
+
+    // Helper: compute median center-x of connected neighbors on an adjacent level.
+    // Returns None if no connections exist.
+    let connected_median_x = |vnode: &VNode,
+                               adj_vnodes: &[VNode],
+                               adj_x: &[usize],
+                               adj_w: &[usize]|
+     -> Option<usize> {
+        // Build lookup: real node index → center-x, edge index → center-x
+        let mut positions: Vec<usize> = Vec::new();
+
+        match vnode {
+            VNode::Real(idx) => {
+                for &edge_idx in &node_edge_indices[*idx] {
+                    let &(from_id, to_id, _) = &dag.edges[edge_idx];
+
+                    // Check real endpoints on adjacent level
+                    for &nid in &[from_id, to_id] {
+                        if let Some(nidx) = dag.node_index(nid) {
+                            if nidx != *idx {
+                                // Find position of nidx on adjacent level
+                                for (p, av) in adj_vnodes.iter().enumerate() {
+                                    if let VNode::Real(ri) = av {
+                                        if *ri == nidx {
+                                            positions.push(adj_x[p] + adj_w[p] / 2);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Check dummy on adjacent level
+                    for (p, av) in adj_vnodes.iter().enumerate() {
+                        if let VNode::Dummy { edge_idx: ei } = av {
+                            if *ei == edge_idx {
+                                positions.push(adj_x[p] + adj_w[p] / 2);
+                            }
+                        }
+                    }
+                }
+            }
+            VNode::Dummy { edge_idx } => {
+                let &(from_id, to_id, _) = &dag.edges[*edge_idx];
+
+                // Check same-edge dummy on adjacent level
+                for (p, av) in adj_vnodes.iter().enumerate() {
+                    if let VNode::Dummy { edge_idx: ei } = av {
+                        if *ei == *edge_idx {
+                            positions.push(adj_x[p] + adj_w[p] / 2);
+                        }
+                    }
+                }
+
+                // Check real endpoints on adjacent level
+                for &nid in &[from_id, to_id] {
+                    if let Some(nidx) = dag.node_index(nid) {
+                        for (p, av) in adj_vnodes.iter().enumerate() {
+                            if let VNode::Real(ri) = av {
+                                if *ri == nidx {
+                                    positions.push(adj_x[p] + adj_w[p] / 2);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if positions.is_empty() {
+            return None;
+        }
+        positions.sort_unstable();
+        let median = if positions.len() % 2 == 1 {
+            positions[positions.len() / 2]
+        } else {
+            let mid = positions.len() / 2;
+            (positions[mid - 1] + positions[mid]) / 2
+        };
+        Some(median)
+    };
+
+    // Helper: compute and apply the shift for one node on a level.
+    let shift_node =
+        |x_coords: &mut [Vec<usize>], level: usize, pos: usize, target_center: usize,
+         widths: &[Vec<usize>], gap_fn: &dyn Fn(usize, usize, usize) -> usize,
+         margin_fn: &dyn Fn(usize) -> usize| {
+            let n = x_coords[level].len();
+            let my_w = widths[level][pos];
+            let target_x = target_center.saturating_sub(my_w / 2);
+
+            let min_x = if pos == 0 {
+                margin_fn(level)
+            } else {
+                let g = gap_fn(level, pos - 1, pos);
+                x_coords[level][pos - 1] + widths[level][pos - 1] + g
+            };
+            let max_x = if pos + 1 < n {
+                let g = gap_fn(level, pos, pos + 1);
+                x_coords[level][pos + 1].saturating_sub(my_w + g)
+            } else {
+                usize::MAX
+            };
+
+            x_coords[level][pos] = target_x.max(min_x).min(max_x);
+        };
+
+    for _iter in 0..ITERATIONS {
+        // Down sweep: align with parents (level above)
+        for level in 1..num_levels {
+            let adj_level = level - 1;
+            let n = virtual_levels[level].len();
+
+            // Pass 1: right-to-left — allows nodes to cascade leftward
+            for pos in (0..n).rev() {
+                if let Some(tc) = connected_median_x(
+                    &virtual_levels[level][pos],
+                    &virtual_levels[adj_level],
+                    &x_coords[adj_level],
+                    &widths[adj_level],
+                ) {
+                    shift_node(x_coords, level, pos, tc, &widths, &gap_between, &left_margin);
+                }
+            }
+
+            // Pass 2: left-to-right — allows nodes to cascade rightward
+            for pos in 0..n {
+                if let Some(tc) = connected_median_x(
+                    &virtual_levels[level][pos],
+                    &virtual_levels[adj_level],
+                    &x_coords[adj_level],
+                    &widths[adj_level],
+                ) {
+                    shift_node(x_coords, level, pos, tc, &widths, &gap_between, &left_margin);
+                }
+            }
+        }
+
+        // Up sweep: align with children (level below)
+        for level in (0..num_levels - 1).rev() {
+            let adj_level = level + 1;
+            let n = virtual_levels[level].len();
+
+            // Pass 1: right-to-left
+            for pos in (0..n).rev() {
+                if let Some(tc) = connected_median_x(
+                    &virtual_levels[level][pos],
+                    &virtual_levels[adj_level],
+                    &x_coords[adj_level],
+                    &widths[adj_level],
+                ) {
+                    shift_node(x_coords, level, pos, tc, &widths, &gap_between, &left_margin);
+                }
+            }
+
+            // Pass 2: left-to-right
+            for pos in 0..n {
+                if let Some(tc) = connected_median_x(
+                    &virtual_levels[level][pos],
+                    &virtual_levels[adj_level],
+                    &x_coords[adj_level],
+                    &widths[adj_level],
+                ) {
+                    shift_node(x_coords, level, pos, tc, &widths, &gap_between, &left_margin);
+                }
+            }
+        }
+    }
+}
+
+/// Compact subgraphs by pulling member nodes toward the subgraph centroid.
+///
+/// After x-refinement, nodes may be far from their subgraph siblings because
+/// they followed cross-subgraph edge connections. This pass identifies such
+/// outliers and shifts them inward, respecting same-level gap constraints.
+/// When a member is blocked by non-member neighbors, it cascades the push
+/// to those neighbors to make room.
+fn compact_subgraphs(
+    dag: &Graph<'_>,
+    virtual_levels: &[Vec<VNode>],
+    x_coords: &mut [Vec<usize>],
+    widths: &[Vec<usize>],
+) {
+    use crate::algorithms::sugiyama::subgraph::vnode_subgraph;
+
+    const MIN_GAP: usize = 3;
+    const SG_GAP: usize = 5;
+
+    // Helper: minimum gap between two adjacent positions on a level.
+    let gap_between = |level: usize, left_pos: usize, right_pos: usize| -> usize {
+        let left_sg = vnode_subgraph(dag, &virtual_levels[level][left_pos]);
+        let right_sg = vnode_subgraph(dag, &virtual_levels[level][right_pos]);
+        if left_sg != right_sg { SG_GAP } else { MIN_GAP }
+    };
+
+    // Cascading push: shift node at `pos` on `level` to `target_x`, and push
+    // all neighbors in `direction` as needed to maintain gap constraints.
+    // direction: -1 = push left, +1 = push right
+    let cascade_push = |x_coords: &mut [Vec<usize>], level: usize, pos: usize,
+                        target_x: usize, direction: isize| {
+        x_coords[level][pos] = target_x;
+        if direction < 0 {
+            // Push leftward: fix pos-1, pos-2, ... if they overlap
+            let mut i = pos;
+            while i > 0 {
+                let g = gap_between(level, i - 1, i);
+                let needed = x_coords[level][i].saturating_sub(widths[level][i - 1] + g);
+                if x_coords[level][i - 1] <= needed {
+                    break; // no overlap
+                }
+                // Can't push past left edge
+                let margin = if i - 1 == 0 {
+                    let sg = vnode_subgraph(dag, &virtual_levels[level][0]);
+                    if sg.is_some() { 2 } else { 0 }
+                } else {
+                    0
+                };
+                x_coords[level][i - 1] = needed.max(margin);
+                i -= 1;
+            }
+        } else {
+            // Push rightward: fix pos+1, pos+2, ...
+            let n = x_coords[level].len();
+            let mut i = pos;
+            while i + 1 < n {
+                let g = gap_between(level, i, i + 1);
+                let needed = x_coords[level][i] + widths[level][i] + g;
+                if x_coords[level][i + 1] >= needed {
+                    break;
+                }
+                x_coords[level][i + 1] = needed;
+                i += 1;
+            }
+        }
+    };
+
+    let sg_ids: Vec<usize> = dag.subgraphs.iter().map(|s| s.id).collect();
+
+    for &sg_id in &sg_ids {
+        let mut members: Vec<(usize, usize)> = Vec::new();
+
+        for (level, vnodes) in virtual_levels.iter().enumerate() {
+            for (pos, vnode) in vnodes.iter().enumerate() {
+                if vnode_subgraph(dag, vnode) == Some(sg_id) {
+                    members.push((level, pos));
+                }
+            }
+        }
+
+        if members.len() <= 1 {
+            continue;
+        }
+
+        // Compute centroid from real nodes only (dummies follow edges and
+        // shouldn't anchor the center).
+        let real_members: Vec<(usize, usize)> = members
+            .iter()
+            .filter(|&&(l, p)| matches!(virtual_levels[l][p], VNode::Real(_)))
+            .copied()
+            .collect();
+        let centroid_members = if real_members.is_empty() { &members } else { &real_members };
+        let sum: usize = centroid_members
+            .iter()
+            .map(|&(l, p)| x_coords[l][p] + widths[l][p] / 2)
+            .sum();
+        let centroid = sum / centroid_members.len();
+
+        // Sort members by distance from centroid (farthest first).
+        let mut by_distance: Vec<(usize, usize, usize)> = members
+            .iter()
+            .map(|&(l, p)| {
+                let cx = x_coords[l][p] + widths[l][p] / 2;
+                let dist = if cx > centroid { cx - centroid } else { centroid - cx };
+                (l, p, dist)
+            })
+            .collect();
+        by_distance.sort_by(|a, b| b.2.cmp(&a.2));
+
+        for &(level, pos, dist) in &by_distance {
+            if dist < SG_GAP {
+                continue; // close enough, don't bother
+            }
+
+            let my_w = widths[level][pos];
+            let my_cx = x_coords[level][pos] + my_w / 2;
+            let target_x = centroid.saturating_sub(my_w / 2);
+
+            // Simple constraint check (no cascading) first.
+            let n = x_coords[level].len();
+            let min_x = if pos == 0 {
+                let sg = vnode_subgraph(dag, &virtual_levels[level][0]);
+                if sg.is_some() { 2 } else { 0 }
+            } else {
+                let g = gap_between(level, pos - 1, pos);
+                x_coords[level][pos - 1] + widths[level][pos - 1] + g
+            };
+            let max_x = if pos + 1 < n {
+                let g = gap_between(level, pos, pos + 1);
+                x_coords[level][pos + 1].saturating_sub(my_w + g)
+            } else {
+                usize::MAX
+            };
+
+            let simple_x = target_x.max(min_x).min(max_x);
+
+            // Check if simple move is sufficient.
+            let simple_ok = (my_cx > centroid && simple_x < x_coords[level][pos])
+                || (my_cx < centroid && simple_x > x_coords[level][pos]);
+
+            if simple_ok {
+                x_coords[level][pos] = simple_x;
+            } else if my_cx > centroid && target_x < min_x {
+                // Need to push left neighbors leftward to make room.
+                // Only cascade for real nodes to avoid over-disturbing the layout.
+                if matches!(virtual_levels[level][pos], VNode::Real(_)) {
+                    // Limit how far we push: at most half the distance to centroid
+                    let push_target = (x_coords[level][pos] + target_x) / 2;
+                    cascade_push(x_coords, level, pos, push_target, -1);
+                }
+            } else if my_cx < centroid && target_x > max_x {
+                // Need to push right neighbors rightward.
+                if matches!(virtual_levels[level][pos], VNode::Real(_)) {
+                    let push_target = (x_coords[level][pos] + target_x) / 2;
+                    cascade_push(x_coords, level, pos, push_target, 1);
+                }
+            }
+        }
+    }
 }
 
 /// Crossing reduction for virtual levels (includes dummy nodes).

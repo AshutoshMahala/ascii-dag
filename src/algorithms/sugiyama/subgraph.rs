@@ -109,11 +109,28 @@ fn count_boundary_exits_entries(dag: &Graph<'_>, prev_sg: Option<usize>, curr_sg
 
 // ── Block-partitioned crossing reduction ─────────────────────────────────
 
+/// Walk the subgraph ancestry to find the root ancestor (the one with no parent).
+/// Returns `None` for unaffiliated nodes.
+fn root_subgraph(dag: &Graph<'_>, sg_id: Option<usize>) -> Option<usize> {
+    let mut cur = sg_id;
+    let mut root = sg_id;
+    while let Some(id) = cur {
+        root = cur;
+        cur = dag.subgraphs.iter().find(|s| s.id == id).and_then(|s| s.parent_id);
+    }
+    root
+}
+
 /// Partition a single virtual level into per-subgraph blocks.
 ///
-/// Returns the level re-ordered so that nodes in the same subgraph are
-/// contiguous, with unaffiliated nodes placed between blocks according to
-/// their original median position.
+/// Returns the level re-ordered so that nodes in the same root-level
+/// subgraph tree are contiguous, with unaffiliated nodes placed between
+/// blocks according to their original median position.
+///
+/// Uses the **root ancestor** subgraph as the block key so that sibling
+/// subgraphs (e.g. AZ-1 and AZ-2 inside eu-west-1) stay together and
+/// unaffiliated cross-subgraph edge dummies are placed outside the group
+/// rather than splitting siblings apart.
 ///
 /// The caller runs the normal median/exchange reduction **within** each
 /// block, then calls this function to re-order blocks by their average
@@ -126,11 +143,12 @@ pub(crate) fn block_partition_level(
         return Vec::new();
     }
 
-    // Assign each vnode to a block key: Some(sg_id) or None (unaffiliated)
+    // Assign each vnode to a block key: root ancestor subgraph ID, or None (unaffiliated)
     let mut blocks: HashMap<Option<usize>, Vec<(usize, VNode)>> = HashMap::new();
     for (pos, vnode) in level.iter().enumerate() {
         let sg = vnode_subgraph(dag, vnode);
-        blocks.entry(sg).or_default().push((pos, *vnode));
+        let root_sg = root_subgraph(dag, sg);
+        blocks.entry(root_sg).or_default().push((pos, *vnode));
     }
 
     // Compute average original position per block for ordering
@@ -196,23 +214,23 @@ pub(crate) fn subgraph_padding(
         let mut new_x = Vec::with_capacity(vnodes.len());
         let mut x = 0usize;
 
-        // Left-side padding: depth of the first node's subgraph chain
-        let first_depth = sg_chain_depth(dag, vnode_subgraph(dag, &vnodes[0]));
-        x += first_depth * SUBGRAPH_H_PAD;
+        // Left-side padding: one border's worth if inside a subgraph.
+        // The bbox pass handles nesting expansion, so we only need the
+        // immediate border's padding here — not the full ancestry chain.
+        let first_sg = vnode_subgraph(dag, &vnodes[0]);
+        if first_sg.is_some() {
+            x += SUBGRAPH_H_PAD;
+        }
 
         for (i, vnode) in vnodes.iter().enumerate() {
             if i > 0 {
                 let prev_sg = vnode_subgraph(dag, &vnodes[i - 1]);
                 let curr_sg = vnode_subgraph(dag, vnode);
                 if prev_sg != curr_sg {
-                    // CSS-style margin collapsing: each side contributes a margin
-                    // proportional to its nesting depth, and we take the larger one
-                    // rather than summing both. This prevents quadratic blowup when
-                    // many deeply-nested subgraphs sit side by side.
-                    let (exits, entries) = count_boundary_exits_entries(dag, prev_sg, curr_sg);
-                    let exit_margin = exits * SUBGRAPH_H_PAD;
-                    let entry_margin = entries * SUBGRAPH_H_PAD;
-                    x += core::cmp::max(exit_margin, entry_margin);
+                    // Constant padding per boundary transition: one exit margin
+                    // + one entry margin. The bbox pass handles depth-proportional
+                    // expansion, so we only need a fixed gap here.
+                    x += SUBGRAPH_H_PAD * 2;
                 }
             }
             new_x.push(x);
@@ -220,9 +238,9 @@ pub(crate) fn subgraph_padding(
             x += w + 3; // standard spacing
         }
 
-        // Right-side padding: depth of the last node's subgraph chain
-        let last_depth = sg_chain_depth(dag, vnode_subgraph(dag, vnodes.last().unwrap()));
-        let right_extra = last_depth * SUBGRAPH_H_PAD;
+        // Right-side padding: one border's worth if last node is inside a subgraph.
+        let last_sg = vnode_subgraph(dag, vnodes.last().unwrap());
+        let right_extra = if last_sg.is_some() { SUBGRAPH_H_PAD } else { 0 };
 
         let total = new_x
             .iter()
@@ -310,9 +328,8 @@ pub(crate) fn fix_subgraph_overlaps(
     let max_depth = depths.iter().copied().max().unwrap_or(0);
 
     // Minimum gap between nodes of different subgraphs on the same level.
-    // Must cover the padding on each side plus the gap between borders:
-    //   H_PAD(right of left-sg) + SIBLING_GAP + H_PAD(left of right-sg)
-    let cross_sg_gap: usize = 2 * SUBGRAPH_H_PAD + SIBLING_GAP;
+    // Each side contributes one H_PAD for its border, plus a sibling gap between borders.
+    let cross_sg_gap: usize = SUBGRAPH_H_PAD + SIBLING_GAP + SUBGRAPH_H_PAD;
 
     // Build per-node → immediate subgraph-idx lookup (None if unaffiliated).
     let node_sg: Vec<Option<usize>> = dag
@@ -369,13 +386,16 @@ pub(crate) fn fix_subgraph_overlaps(
             }
         }
         // Propagate children to parents (bottom-up)
+        // Use a minimal gap: the child bbox already includes its own H_PAD,
+        // so the parent only needs 1 char for border + gap.
+        const PROP_GAP: usize = 1;
         for depth in (0..=max_depth).rev() {
             for sg_idx in 0..sg_count {
                 if depths[sg_idx] != depth { continue; }
                 if let Some(parent_id) = dag.subgraphs[sg_idx].parent_id {
                     if let Some(&pidx) = sg_id_to_idx.get(&parent_id) {
                         if let Some((cx, cr)) = envs[sg_idx] {
-                            let exp = (cx.saturating_sub(SUBGRAPH_H_PAD), cr + SUBGRAPH_H_PAD);
+                            let exp = (cx.saturating_sub(PROP_GAP), cr + PROP_GAP);
                             envs[pidx] = Some(match envs[pidx] {
                                 None => exp,
                                 Some((px, pr)) => (px.min(exp.0), pr.max(exp.1)),
@@ -705,6 +725,8 @@ pub(crate) fn compute_bounding_boxes<'a>(
     real_node_coords: &[(usize, usize, usize, usize)], // (level, pos, x, width) per node_idx
     level_y_offsets: &[usize],
     total_height: usize,
+    edge_routing_ys: &std::collections::HashSet<usize>,
+    level_routing_floor: &[usize],
 ) -> Vec<SubgraphInfo<'a>> {
     if dag.subgraphs.is_empty() {
         return Vec::new();
@@ -723,6 +745,8 @@ pub(crate) fn compute_bounding_boxes<'a>(
     // Pass 1: compute envelope from member nodes
     // (min_x, min_y, max_x_plus_w, max_y)
     let mut envelopes: Vec<Option<(usize, usize, usize, usize)>> = vec![None; sg_count];
+    // Track the max level of each subgraph's member nodes (for routing floor lookup)
+    let mut sg_max_level: Vec<usize> = vec![0; sg_count];
 
     for (node_idx, &(id, _label)) in dag.nodes.iter().enumerate() {
         if let Some(&sg_id) = dag.node_subgraph.get(&id) {
@@ -736,6 +760,8 @@ pub(crate) fn compute_bounding_boxes<'a>(
                 // Node occupies 1 line of height
                 let node_max_y = y + 1;
                 let node_max_x = x + width;
+
+                sg_max_level[sg_idx] = sg_max_level[sg_idx].max(level);
 
                 envelopes[sg_idx] = Some(match envelopes[sg_idx] {
                     None => (x, y, node_max_x, node_max_y),
@@ -774,7 +800,22 @@ pub(crate) fn compute_bounding_boxes<'a>(
             let x = min_x.saturating_sub(SUBGRAPH_H_PAD);
             let y = min_y.saturating_sub(SUBGRAPH_V_PAD_TOP);
             let right = max_x + SUBGRAPH_H_PAD;
-            let bottom = (max_y + SUBGRAPH_V_PAD_BOTTOM).min(total_height);
+            // Place bottom border below edge routing area if possible.
+            // The routing floor is the max Y used by any edge routing at the
+            // subgraph's last level — the border must be below it.
+            let last_level = sg_max_level[sg_idx];
+            let routing_floor = if last_level < level_routing_floor.len() {
+                level_routing_floor[last_level]
+            } else {
+                0
+            };
+            let base_bottom = max_y + SUBGRAPH_V_PAD_BOTTOM;
+            // Ensure bottom border row (base_bottom - 1) is below the routing floor
+            let bottom = if routing_floor > 0 && base_bottom.saturating_sub(1) <= routing_floor {
+                (routing_floor + 2).min(total_height) // +2: 1 blank row + border row
+            } else {
+                base_bottom.min(total_height)
+            };
             // Ensure width fits the label: ║ Label ║ needs label_len + 4
             let width = right.saturating_sub(x);
             let min_label_width = sg.label.len() + 4;
@@ -788,16 +829,19 @@ pub(crate) fn compute_bounding_boxes<'a>(
     }
 
     // Pass 2: propagate child bounding boxes to parents (bottom-up)
-    // Add SUBGRAPH_H_PAD-cell margin so child borders don't touch parent borders.
+    // The child bbox already includes its own SUBGRAPH_H_PAD. The parent only
+    // needs enough extra to draw its own border without touching the child's
+    // border — 1 char for the border line + 1 char gap.
+    const PARENT_CHILD_H_GAP: usize = 1;
     for &sg_idx in &order {
         let sg = &dag.subgraphs[sg_idx];
         if let Some(parent_id) = sg.parent_id {
             if let Some(&parent_idx) = sg_id_to_idx.get(&parent_id) {
                 if let Some((cx, cy, cr, cb)) = bboxes[sg_idx] {
                     let expanded = (
-                        cx.saturating_sub(SUBGRAPH_H_PAD),
+                        cx.saturating_sub(PARENT_CHILD_H_GAP),
                         cy.saturating_sub(SUBGRAPH_V_PAD_TOP),
-                        cr + SUBGRAPH_H_PAD,
+                        cr + PARENT_CHILD_H_GAP,
                         cb + SUBGRAPH_V_PAD_BOTTOM,
                     );
                     bboxes[parent_idx] = Some(match bboxes[parent_idx] {
@@ -831,6 +875,33 @@ pub(crate) fn compute_bounding_boxes<'a>(
             };
             // Apply parent-level H_PAD around entire bbox (if it grew from children)
             bboxes[sg_idx] = Some((x, y, right, bottom));
+        }
+    }
+
+    // Post-process: shift borders that would overlap with edge routing rows.
+    // If a top or bottom border row coincides with a horizontal edge routing Y,
+    // expand the bbox to push the border 1 row further away.
+    if !edge_routing_ys.is_empty() {
+        for sg_idx in 0..sg_count {
+            if let Some((x, y, right, bottom)) = bboxes[sg_idx] {
+                let mut new_y = y;
+                let mut new_bottom = bottom;
+
+                // Top border is at row `y`. If it's an edge routing row, push it up.
+                if edge_routing_ys.contains(&y) && y > 0 {
+                    new_y = y - 1;
+                }
+
+                // Bottom border is at row `bottom - 1`. If it's an edge routing row, push it down.
+                let bottom_row = bottom.saturating_sub(1);
+                if edge_routing_ys.contains(&bottom_row) {
+                    new_bottom = bottom + 1;
+                }
+
+                if new_y != y || new_bottom != bottom {
+                    bboxes[sg_idx] = Some((x, new_y, right, new_bottom));
+                }
+            }
         }
     }
 
