@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.1] - 2026-03-25
+
+### Improved
+- **Subgraph layout quality**: Added iterative x-coordinate refinement and cascading subgraph compaction passes. Nodes now align more tightly with their connected neighbors across levels, reducing zigzag edges inside clusters.
+
 ## [0.9.0] - 2026-03-07
 
 ### Added
