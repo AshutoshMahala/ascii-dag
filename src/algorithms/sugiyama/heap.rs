@@ -18,10 +18,10 @@
 //! using arena allocation and `Idx`-typed indices. The two paths produce
 //! visually compatible output but operate on different type systems.
 
-use crate::algorithms::sugiyama::crossing::{count_crossings_pair, CrossingReducer};
 use crate::algorithms::sugiyama::config::{CycleBreaking, LayoutConfig};
+use crate::algorithms::sugiyama::crossing::{CrossingReducer, count_crossings_pair};
 use crate::graph::Graph;
-use crate::ir::{EdgePath, LayoutEdge, LayoutIRBuilder, LayoutIR, LayoutNode, NodeKind};
+use crate::ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, NodeKind};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -104,9 +104,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
     // For back edges, the layout direction is reversed (to → from in level space)
     for (edge_idx, &(from_id, to_id, _label)) in dag.edges.iter().enumerate() {
         let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
-        if let (Some(from_idx), Some(to_idx)) =
-            (dag.node_index(from_id), dag.node_index(to_id))
-        {
+        if let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id)) {
             // For back edges, layout-direction is reversed
             let (layout_from, layout_to) = if is_back {
                 (node_levels[to_idx], node_levels[from_idx])
@@ -124,7 +122,13 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
     }
 
     // Step 3: Apply crossing reduction WITH dummy nodes included
-    reduce_crossings_virtual(dag, &mut virtual_levels, &node_levels, max_level, config.crossing_pipeline());
+    reduce_crossings_virtual(
+        dag,
+        &mut virtual_levels,
+        &node_levels,
+        max_level,
+        config.crossing_pipeline(),
+    );
 
     // Step 3b: Block-partitioned level ordering for subgraph adjacency
     if dag.has_subgraphs() {
@@ -170,13 +174,20 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
     // Step 4b: Refine x-coordinates — shift nodes toward their connected
     // neighbors on adjacent levels to reduce zigzag edges (median placement).
     // Then compact subgraphs. Run iteratively: compaction moves what it can,
-    // then refinement propagates through dummy chains, unlocking further
-    // compaction in the next round.
-    let node_edge_indices_for_refine = build_node_edge_indices(dag);
-    let compact_rounds = if dag.has_subgraphs() { 3 } else { 1 };
-    for _ in 0..compact_rounds {
-        refine_x_positions(dag, &virtual_levels, &mut x_coords, &widths, &node_edge_indices_for_refine);
-        if dag.has_subgraphs() {
+    // x-refinement and subgraph compaction (iterative).
+    // x-refinement is only beneficial for subgraph layouts; skipping it for
+    // plain graphs avoids an O(N²/L) cost on large inputs.
+    if dag.has_subgraphs() {
+        let node_edge_indices_for_refine = build_node_edge_indices(dag);
+        let compact_rounds = 3;
+        for _ in 0..compact_rounds {
+            refine_x_positions(
+                dag,
+                &virtual_levels,
+                &mut x_coords,
+                &widths,
+                &node_edge_indices_for_refine,
+            );
             compact_subgraphs(dag, &virtual_levels, &mut x_coords, &widths);
         }
     }
@@ -269,8 +280,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
     let mut node_slots = vec![usize::MAX; dag.nodes.len()];
     let mut edge_slots = vec![0usize; dag.edges.len()];
 
-    let mut level_occupied_slots: Vec<Vec<Vec<(usize, usize)>>> =
-        vec![Vec::new(); max_level + 1];
+    let mut level_occupied_slots: Vec<Vec<Vec<(usize, usize)>>> = vec![Vec::new(); max_level + 1];
 
     // Maximum horizontal routing rows per level.
     // Gives full visual separation for typical fan-in (≤8 sources),
@@ -279,9 +289,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
 
     // 1. Assign slots greedy
     for (i, &(from_id, to_id, _)) in dag.edges.iter().enumerate() {
-        if let (Some(from_idx), Some(to_idx)) =
-            (dag.node_index(from_id), dag.node_index(to_id))
-        {
+        if let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id)) {
             let from_level = node_levels[from_idx];
             let to_level = node_levels[to_idx];
 
@@ -340,8 +348,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                                 }
                             }
 
-                            let collide =
-                                occupied.iter().any(|&(s, e)| s < max_x && e > min_x);
+                            let collide = occupied.iter().any(|&(s, e)| s < max_x && e > min_x);
                             if !collide {
                                 occupied.push((min_x, max_x));
                                 chosen_slot = Some(s_idx);
@@ -389,11 +396,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
 
     // When subgraphs exist, compute per-boundary extra rows for opening/closing borders
     let (sg_initial_offset, sg_boundary_extras, sg_trailing_extra) = if dag.has_subgraphs() {
-        crate::algorithms::sugiyama::subgraph::compute_level_y_extras(
-            dag,
-            &node_levels,
-            max_level,
-        )
+        crate::algorithms::sugiyama::subgraph::compute_level_y_extras(dag, &node_levels, max_level)
     } else {
         (0, vec![0; max_level + 1], 0)
     };
@@ -420,7 +423,8 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         let slots_needed = adjacent_slots.max(skip_slots);
         let extra_lines = slots_needed.saturating_sub(1);
 
-        let height = max_node_height[level] + routing_overhead + extra_lines + sg_boundary_extras[level];
+        let height =
+            max_node_height[level] + routing_overhead + extra_lines + sg_boundary_extras[level];
         current_offset += height;
     }
 
@@ -503,9 +507,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
 
     // Step 6: Add edges with proper routing
     for (edge_idx, &(from_id, to_id, label)) in dag.edges.iter().enumerate() {
-        if let (Some(from_idx), Some(to_idx)) =
-            (dag.node_index(from_id), dag.node_index(to_id))
-        {
+        if let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id)) {
             let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
 
             // Self-loops: skip layout routing (rendered as ↺ indicator by renderer)
@@ -529,7 +531,8 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             let from_x = src_x_base + src_width / 2;
             let to_x = dst_x_base + dst_width / 2;
             // from_y = bottom row of source node (so edges start below it)
-            let from_y = level_y_offsets[layout_from_level] + max_node_height[layout_from_level] - 1;
+            let from_y =
+                level_y_offsets[layout_from_level] + max_node_height[layout_from_level] - 1;
             let to_y = level_y_offsets[layout_to_level];
 
             // Edge routing starts 1 row below the bottom of the source node
@@ -551,11 +554,10 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                     let hy = from_y + edge_start_row + slot;
                     edge_routing_ys.insert(hy);
                     if layout_from_level < level_routing_floor.len() {
-                        level_routing_floor[layout_from_level] = level_routing_floor[layout_from_level].max(hy);
+                        level_routing_floor[layout_from_level] =
+                            level_routing_floor[layout_from_level].max(hy);
                     }
-                    EdgePath::Corner {
-                        horizontal_y: hy,
-                    }
+                    EdgePath::Corner { horizontal_y: hy }
                 }
             } else {
                 // Skip-level edge - use dummy node positions for MultiSegment path
@@ -570,11 +572,10 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                     let hy = from_y + edge_start_row + slot;
                     edge_routing_ys.insert(hy);
                     if layout_from_level < level_routing_floor.len() {
-                        level_routing_floor[layout_from_level] = level_routing_floor[layout_from_level].max(hy);
+                        level_routing_floor[layout_from_level] =
+                            level_routing_floor[layout_from_level].max(hy);
                     }
-                    EdgePath::Corner {
-                        horizontal_y: hy,
-                    }
+                    EdgePath::Corner { horizontal_y: hy }
                 } else {
                     // Build waypoints through dummy nodes with Y slot separation
                     let mut waypoints = Vec::with_capacity(dummies.len());
@@ -583,7 +584,8 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                         let slot = level_edge_next[level];
                         level_edge_next[level] += 1;
 
-                        let wp_edge_start_row = max_node_height[level] + if has_labeled_edges { 1 } else { 0 };
+                        let wp_edge_start_row =
+                            max_node_height[level] + if has_labeled_edges { 1 } else { 0 };
                         let wp_y = level_y_offsets[level] + wp_edge_start_row + slot;
                         edge_routing_ys.insert(wp_y);
                         level_routing_floor[level] = level_routing_floor[level].max(wp_y);
@@ -605,7 +607,8 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                     let initial_corner_y = from_y + 1 + start_y_offset;
                     edge_routing_ys.insert(initial_corner_y);
                     if layout_from_level < level_routing_floor.len() {
-                        level_routing_floor[layout_from_level] = level_routing_floor[layout_from_level].max(initial_corner_y);
+                        level_routing_floor[layout_from_level] =
+                            level_routing_floor[layout_from_level].max(initial_corner_y);
                     }
 
                     // Also record intermediate corner Ys: the paint code draws
@@ -621,7 +624,8 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                             // Update routing floor for the level this waypoint belongs to
                             let wp_level = dummies[wi].0;
                             if wp_level < level_routing_floor.len() {
-                                level_routing_floor[wp_level] = level_routing_floor[wp_level].max(inter_corner_y);
+                                level_routing_floor[wp_level] =
+                                    level_routing_floor[wp_level].max(inter_corner_y);
                             }
                         }
                     }
@@ -632,7 +636,8 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                             edge_routing_ys.insert(inter_corner_y);
                             if let Some(&(last_level, _)) = dummies.last() {
                                 if last_level < level_routing_floor.len() {
-                                    level_routing_floor[last_level] = level_routing_floor[last_level].max(inter_corner_y);
+                                    level_routing_floor[last_level] =
+                                        level_routing_floor[last_level].max(inter_corner_y);
                                 }
                             }
                         }
@@ -814,109 +819,109 @@ fn refine_x_positions(
 
     // Helper: compute median center-x of connected neighbors on an adjacent level.
     // Returns None if no connections exist.
-    let connected_median_x = |vnode: &VNode,
-                               adj_vnodes: &[VNode],
-                               adj_x: &[usize],
-                               adj_w: &[usize]|
-     -> Option<usize> {
-        // Build lookup: real node index → center-x, edge index → center-x
-        let mut positions: Vec<usize> = Vec::new();
+    let connected_median_x =
+        |vnode: &VNode, adj_vnodes: &[VNode], adj_x: &[usize], adj_w: &[usize]| -> Option<usize> {
+            // Build lookup: real node index → center-x, edge index → center-x
+            let mut positions: Vec<usize> = Vec::new();
 
-        match vnode {
-            VNode::Real(idx) => {
-                for &edge_idx in &node_edge_indices[*idx] {
-                    let &(from_id, to_id, _) = &dag.edges[edge_idx];
+            match vnode {
+                VNode::Real(idx) => {
+                    for &edge_idx in &node_edge_indices[*idx] {
+                        let &(from_id, to_id, _) = &dag.edges[edge_idx];
 
-                    // Check real endpoints on adjacent level
-                    for &nid in &[from_id, to_id] {
-                        if let Some(nidx) = dag.node_index(nid) {
-                            if nidx != *idx {
-                                // Find position of nidx on adjacent level
-                                for (p, av) in adj_vnodes.iter().enumerate() {
-                                    if let VNode::Real(ri) = av {
-                                        if *ri == nidx {
-                                            positions.push(adj_x[p] + adj_w[p] / 2);
+                        // Check real endpoints on adjacent level
+                        for &nid in &[from_id, to_id] {
+                            if let Some(nidx) = dag.node_index(nid) {
+                                if nidx != *idx {
+                                    // Find position of nidx on adjacent level
+                                    for (p, av) in adj_vnodes.iter().enumerate() {
+                                        if let VNode::Real(ri) = av {
+                                            if *ri == nidx {
+                                                positions.push(adj_x[p] + adj_w[p] / 2);
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    // Check dummy on adjacent level
-                    for (p, av) in adj_vnodes.iter().enumerate() {
-                        if let VNode::Dummy { edge_idx: ei } = av {
-                            if *ei == edge_idx {
-                                positions.push(adj_x[p] + adj_w[p] / 2);
-                            }
-                        }
-                    }
-                }
-            }
-            VNode::Dummy { edge_idx } => {
-                let &(from_id, to_id, _) = &dag.edges[*edge_idx];
-
-                // Check same-edge dummy on adjacent level
-                for (p, av) in adj_vnodes.iter().enumerate() {
-                    if let VNode::Dummy { edge_idx: ei } = av {
-                        if *ei == *edge_idx {
-                            positions.push(adj_x[p] + adj_w[p] / 2);
-                        }
-                    }
-                }
-
-                // Check real endpoints on adjacent level
-                for &nid in &[from_id, to_id] {
-                    if let Some(nidx) = dag.node_index(nid) {
+                        // Check dummy on adjacent level
                         for (p, av) in adj_vnodes.iter().enumerate() {
-                            if let VNode::Real(ri) = av {
-                                if *ri == nidx {
+                            if let VNode::Dummy { edge_idx: ei } = av {
+                                if *ei == edge_idx {
                                     positions.push(adj_x[p] + adj_w[p] / 2);
                                 }
                             }
                         }
                     }
                 }
-            }
-        }
+                VNode::Dummy { edge_idx } => {
+                    let &(from_id, to_id, _) = &dag.edges[*edge_idx];
 
-        if positions.is_empty() {
-            return None;
-        }
-        positions.sort_unstable();
-        let median = if positions.len() % 2 == 1 {
-            positions[positions.len() / 2]
-        } else {
-            let mid = positions.len() / 2;
-            (positions[mid - 1] + positions[mid]) / 2
+                    // Check same-edge dummy on adjacent level
+                    for (p, av) in adj_vnodes.iter().enumerate() {
+                        if let VNode::Dummy { edge_idx: ei } = av {
+                            if *ei == *edge_idx {
+                                positions.push(adj_x[p] + adj_w[p] / 2);
+                            }
+                        }
+                    }
+
+                    // Check real endpoints on adjacent level
+                    for &nid in &[from_id, to_id] {
+                        if let Some(nidx) = dag.node_index(nid) {
+                            for (p, av) in adj_vnodes.iter().enumerate() {
+                                if let VNode::Real(ri) = av {
+                                    if *ri == nidx {
+                                        positions.push(adj_x[p] + adj_w[p] / 2);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if positions.is_empty() {
+                return None;
+            }
+            positions.sort_unstable();
+            let median = if positions.len() % 2 == 1 {
+                positions[positions.len() / 2]
+            } else {
+                let mid = positions.len() / 2;
+                (positions[mid - 1] + positions[mid]) / 2
+            };
+            Some(median)
         };
-        Some(median)
-    };
 
     // Helper: compute and apply the shift for one node on a level.
-    let shift_node =
-        |x_coords: &mut [Vec<usize>], level: usize, pos: usize, target_center: usize,
-         widths: &[Vec<usize>], gap_fn: &dyn Fn(usize, usize, usize) -> usize,
-         margin_fn: &dyn Fn(usize) -> usize| {
-            let n = x_coords[level].len();
-            let my_w = widths[level][pos];
-            let target_x = target_center.saturating_sub(my_w / 2);
+    let shift_node = |x_coords: &mut [Vec<usize>],
+                      level: usize,
+                      pos: usize,
+                      target_center: usize,
+                      widths: &[Vec<usize>],
+                      gap_fn: &dyn Fn(usize, usize, usize) -> usize,
+                      margin_fn: &dyn Fn(usize) -> usize| {
+        let n = x_coords[level].len();
+        let my_w = widths[level][pos];
+        let target_x = target_center.saturating_sub(my_w / 2);
 
-            let min_x = if pos == 0 {
-                margin_fn(level)
-            } else {
-                let g = gap_fn(level, pos - 1, pos);
-                x_coords[level][pos - 1] + widths[level][pos - 1] + g
-            };
-            let max_x = if pos + 1 < n {
-                let g = gap_fn(level, pos, pos + 1);
-                x_coords[level][pos + 1].saturating_sub(my_w + g)
-            } else {
-                usize::MAX
-            };
-
-            x_coords[level][pos] = target_x.max(min_x).min(max_x);
+        let min_x = if pos == 0 {
+            margin_fn(level)
+        } else {
+            let g = gap_fn(level, pos - 1, pos);
+            x_coords[level][pos - 1] + widths[level][pos - 1] + g
         };
+        let max_x = if pos + 1 < n {
+            let g = gap_fn(level, pos, pos + 1);
+            x_coords[level][pos + 1].saturating_sub(my_w + g)
+        } else {
+            usize::MAX
+        };
+
+        x_coords[level][pos] = target_x.max(min_x).min(max_x);
+    };
 
     for _iter in 0..ITERATIONS {
         // Down sweep: align with parents (level above)
@@ -932,7 +937,7 @@ fn refine_x_positions(
                     &x_coords[adj_level],
                     &widths[adj_level],
                 ) {
-                    shift_node(x_coords, level, pos, tc, &widths, &gap_between, &left_margin);
+                    shift_node(x_coords, level, pos, tc, widths, &gap_between, &left_margin);
                 }
             }
 
@@ -944,7 +949,7 @@ fn refine_x_positions(
                     &x_coords[adj_level],
                     &widths[adj_level],
                 ) {
-                    shift_node(x_coords, level, pos, tc, &widths, &gap_between, &left_margin);
+                    shift_node(x_coords, level, pos, tc, widths, &gap_between, &left_margin);
                 }
             }
         }
@@ -962,7 +967,7 @@ fn refine_x_positions(
                     &x_coords[adj_level],
                     &widths[adj_level],
                 ) {
-                    shift_node(x_coords, level, pos, tc, &widths, &gap_between, &left_margin);
+                    shift_node(x_coords, level, pos, tc, widths, &gap_between, &left_margin);
                 }
             }
 
@@ -974,7 +979,7 @@ fn refine_x_positions(
                     &x_coords[adj_level],
                     &widths[adj_level],
                 ) {
-                    shift_node(x_coords, level, pos, tc, &widths, &gap_between, &left_margin);
+                    shift_node(x_coords, level, pos, tc, widths, &gap_between, &left_margin);
                 }
             }
         }
@@ -1009,8 +1014,11 @@ fn compact_subgraphs(
     // Cascading push: shift node at `pos` on `level` to `target_x`, and push
     // all neighbors in `direction` as needed to maintain gap constraints.
     // direction: -1 = push left, +1 = push right
-    let cascade_push = |x_coords: &mut [Vec<usize>], level: usize, pos: usize,
-                        target_x: usize, direction: isize| {
+    let cascade_push = |x_coords: &mut [Vec<usize>],
+                        level: usize,
+                        pos: usize,
+                        target_x: usize,
+                        direction: isize| {
         x_coords[level][pos] = target_x;
         if direction < 0 {
             // Push leftward: fix pos-1, pos-2, ... if they overlap
@@ -1071,7 +1079,11 @@ fn compact_subgraphs(
             .filter(|&&(l, p)| matches!(virtual_levels[l][p], VNode::Real(_)))
             .copied()
             .collect();
-        let centroid_members = if real_members.is_empty() { &members } else { &real_members };
+        let centroid_members = if real_members.is_empty() {
+            &members
+        } else {
+            &real_members
+        };
         let sum: usize = centroid_members
             .iter()
             .map(|&(l, p)| x_coords[l][p] + widths[l][p] / 2)
@@ -1083,7 +1095,7 @@ fn compact_subgraphs(
             .iter()
             .map(|&(l, p)| {
                 let cx = x_coords[l][p] + widths[l][p] / 2;
-                let dist = if cx > centroid { cx - centroid } else { centroid - cx };
+                let dist = cx.abs_diff(centroid);
                 (l, p, dist)
             })
             .collect();

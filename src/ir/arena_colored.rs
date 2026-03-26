@@ -1,10 +1,11 @@
 //! ANSI-colored rendering for arena-backed layout IR.
 
-use super::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena};
+use super::arena::{
+    EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena,
+};
 use crate::render::chars::{
-    ARROW_DOWN, ARROW_DOWN_DASHED, ARROW_UP_DASHED,
-    CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR, CROSS,
-    H_LINE, H_LINE_DASHED, SELF_LOOP, V_LINE, V_LINE_DASHED,
+    ARROW_DOWN, ARROW_DOWN_DASHED, ARROW_UP_DASHED, CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR,
+    CROSS, H_LINE, H_LINE_DASHED, SELF_LOOP, V_LINE, V_LINE_DASHED,
 };
 
 /// Arrows take precedence — non-arrow chars must not overwrite them.
@@ -668,7 +669,9 @@ impl<'a> LayoutIRArena<'a> {
                                     if line_buffer[x] == ' ' {
                                         line_buffer[x] = hline;
                                         color_buffer[x] = color;
-                                    } else if line_buffer[x] == V_LINE || line_buffer[x] == V_LINE_DASHED {
+                                    } else if line_buffer[x] == V_LINE
+                                        || line_buffer[x] == V_LINE_DASHED
+                                    {
                                         line_buffer[x] = CROSS;
                                         // Keep vertical color
                                     }
@@ -689,7 +692,9 @@ impl<'a> LayoutIRArena<'a> {
                                 if y == y1 + 1 && edge.reversed {
                                     line_buffer[x1] = ARROW_UP_DASHED;
                                     color_buffer[x1] = color;
-                                } else if line_buffer[x1] == H_LINE || line_buffer[x1] == H_LINE_DASHED {
+                                } else if line_buffer[x1] == H_LINE
+                                    || line_buffer[x1] == H_LINE_DASHED
+                                {
                                     line_buffer[x1] = CROSS;
                                     color_buffer[x1] = color;
                                 } else if !is_arrow(line_buffer[x1]) {
@@ -718,7 +723,9 @@ impl<'a> LayoutIRArena<'a> {
                                     } else if line_buffer[x] == ' ' {
                                         line_buffer[x] = hline;
                                         color_buffer[x] = color;
-                                    } else if line_buffer[x] == V_LINE || line_buffer[x] == V_LINE_DASHED {
+                                    } else if line_buffer[x] == V_LINE
+                                        || line_buffer[x] == V_LINE_DASHED
+                                    {
                                         line_buffer[x] = CROSS;
                                         // Keep vertical color
                                     }
@@ -872,22 +879,34 @@ impl<'a> LayoutIRArena<'a> {
         sg: &SubgraphInfoArena,
         y: usize,
     ) {
-        if y < sg.y || y >= sg.y + sg.height { return; }
+        if y < sg.y || y >= sg.y + sg.height {
+            return;
+        }
         let left = sg.x;
         let right = sg.x + sg.width.saturating_sub(1);
-        if left >= line_buffer.len() { return; }
+        if left >= line_buffer.len() {
+            return;
+        }
         let right = right.min(line_buffer.len() - 1);
 
         if y == sg.y {
-            line_buffer[left] = '╔'; color_buffer[left] = 0;
-            if right > left { line_buffer[right] = '╗'; color_buffer[right] = 0; }
+            line_buffer[left] = '╔';
+            color_buffer[left] = 0;
+            if right > left {
+                line_buffer[right] = '╗';
+                color_buffer[right] = 0;
+            }
             for col in (left + 1)..right {
                 line_buffer[col] = Self::merge_h_border_c(line_buffer[col]);
                 color_buffer[col] = 0;
             }
         } else if y == sg.y + sg.height - 1 {
-            line_buffer[left] = '╚'; color_buffer[left] = 0;
-            if right > left { line_buffer[right] = '╝'; color_buffer[right] = 0; }
+            line_buffer[left] = '╚';
+            color_buffer[left] = 0;
+            if right > left {
+                line_buffer[right] = '╝';
+                color_buffer[right] = 0;
+            }
             for col in (left + 1)..right {
                 line_buffer[col] = Self::merge_h_border_c(line_buffer[col]);
                 color_buffer[col] = 0;
@@ -908,7 +927,9 @@ impl<'a> LayoutIRArena<'a> {
             '│' | '┊' | '┼' | '├' | '┤' => '╪',
             '↓' | '⇣' | '┌' | '┐' | '┬' => '╤',
             '↑' | '⇡' | '└' | '┘' | '┴' => '╧',
-            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => existing,
+            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => {
+                existing
+            }
             _ => '═',
         }
     }
@@ -919,7 +940,9 @@ impl<'a> LayoutIRArena<'a> {
             '─' | '┈' | '┼' | '┬' | '┴' => '╫',
             '→' | '┌' | '└' | '├' => '╞',
             '←' | '┐' | '┘' | '┤' => '╡',
-            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => existing,
+            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => {
+                existing
+            }
             _ => '║',
         }
     }
@@ -934,10 +957,16 @@ impl<'a> LayoutIRArena<'a> {
         y: usize,
     ) {
         let label_y = sg.y + 1;
-        if y != label_y { return; }
-        if sg.width < 4 || sg.height < 3 { return; }
+        if y != label_y {
+            return;
+        }
+        if sg.width < 4 || sg.height < 3 {
+            return;
+        }
         let label = self.subgraph_label(sg_idx);
-        if label.is_empty() { return; }
+        if label.is_empty() {
+            return;
+        }
 
         let label_start = sg.x + 2;
         let max_len = sg.width.saturating_sub(4);

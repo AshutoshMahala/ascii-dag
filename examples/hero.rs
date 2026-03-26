@@ -31,16 +31,16 @@ fn main() {
     g.add_node(8, "Dash");
 
     // ── Edges (with labels) ──────────────────────────────────────
-    g.add_edge(1, 2, Some("http"));         // Client → Gateway
-    g.add_edge(2, 3, None);                 // Gateway → Users
-    g.add_edge(2, 4, None);                 // Gateway → Orders
-    g.add_edge(3, 5, Some("read"));         // Users → DB
-    g.add_edge(4, 5, Some("write"));        // Orders → DB
-    g.add_edge(4, 6, Some("emit"));         // Orders → Queue
-    g.add_edge(6, 7, Some("notify"));       // Queue → Mailer
-    g.add_edge(5, 8, Some("sync"));         // DB → Dash
-    g.add_edge(7, 8, None);                 // Mailer → Dash
-    g.add_edge(1, 8, Some("trace"));        // Client → Dash (deep skip-level!)
+    g.add_edge(1, 2, Some("http")); // Client → Gateway
+    g.add_edge(2, 3, None); // Gateway → Users
+    g.add_edge(2, 4, None); // Gateway → Orders
+    g.add_edge(3, 5, Some("read")); // Users → DB
+    g.add_edge(4, 5, Some("write")); // Orders → DB
+    g.add_edge(4, 6, Some("emit")); // Orders → Queue
+    g.add_edge(6, 7, Some("notify")); // Queue → Mailer
+    g.add_edge(5, 8, Some("sync")); // DB → Dash
+    g.add_edge(7, 8, None); // Mailer → Dash
+    g.add_edge(1, 8, Some("trace")); // Client → Dash (deep skip-level!)
 
     // Self-cycle: Gateway retries on failure
     g.add_edge(2, 2, Some("retry"));
@@ -51,16 +51,24 @@ fn main() {
     // ── Subgraphs ────────────────────────────────────────────────
     // Services cluster
     let svc = g.add_subgraph("Services");
-    g.put_nodes(&[3, 4]).inside(svc).expect("place nodes in Services");
+    g.put_nodes(&[3, 4])
+        .inside(svc)
+        .expect("place nodes in Services");
 
     // Data cluster
     let data = g.add_subgraph("Data");
-    g.put_nodes(&[5, 6]).inside(data).expect("place nodes in Data");
+    g.put_nodes(&[5, 6])
+        .inside(data)
+        .expect("place nodes in Data");
 
     // Nested: Async inside Data
     let async_sg = g.add_subgraph("Async");
-    g.put_nodes(&[6]).inside(async_sg).expect("place Queue in Async");
-    g.put_subgraphs(&[async_sg]).inside(data).expect("nest Async in Data");
+    g.put_nodes(&[6])
+        .inside(async_sg)
+        .expect("place Queue in Async");
+    g.put_subgraphs(&[async_sg])
+        .inside(data)
+        .expect("nest Async in Data");
 
     // ── Render ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().collect();

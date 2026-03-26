@@ -12,8 +12,8 @@
 
 use crate::ir::{EdgePath, LayoutIR, SubgraphInfo};
 use crate::render::chars::{
-    merge_chars, ARROW_DOWN, ARROW_DOWN_DASHED, ARROW_UP_DASHED, CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR, CROSS, H_LINE, H_LINE_DASHED, SELF_LOOP,
-    V_LINE, V_LINE_DASHED,
+    ARROW_DOWN, ARROW_DOWN_DASHED, ARROW_UP_DASHED, CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR,
+    CROSS, H_LINE, H_LINE_DASHED, SELF_LOOP, V_LINE, V_LINE_DASHED, merge_chars,
 };
 use crate::render::colors::{self, Palette};
 use alloc::string::String;
@@ -209,7 +209,7 @@ impl<'a> LayoutIR<'a> {
                 if let Some((_, label_y)) = edge.label_position {
                     pending_labels.push((edge_idx, label_y, label_y, false));
                 } else {
-                     // Fallback for edges without pre-calculated position (shouldn't happen with valid layout)
+                    // Fallback for edges without pre-calculated position (shouldn't happen with valid layout)
                     let min_y = edge.from_y.saturating_add(2);
                     let max_y = edge.to_y.saturating_sub(2);
                     if max_y >= min_y {
@@ -251,7 +251,7 @@ impl<'a> LayoutIR<'a> {
                 // 2. Greedy label placement: try to place pending labels at this Y
                 // Skip rows that have nodes to avoid label-node collisions
                 let has_nodes = !occupancy.node_indices.is_empty();
-                
+
                 if !has_nodes {
                     for (edge_idx, min_y, max_y, placed) in pending_labels.iter_mut() {
                         if *placed {
@@ -259,7 +259,7 @@ impl<'a> LayoutIR<'a> {
                         }
                         // Ensure we are within the valid vertical range for this edge
                         if y < *min_y || y > *max_y {
-                            continue; 
+                            continue;
                         }
 
                         let edge = &self.edges()[*edge_idx];
@@ -272,7 +272,8 @@ impl<'a> LayoutIR<'a> {
 
                             // Check collision with line buffer
                             if self.can_place_label(&line_buffer, label, label_x) {
-                                let color_idx = edge_color_indices.get(*edge_idx).copied().unwrap_or(0);
+                                let color_idx =
+                                    edge_color_indices.get(*edge_idx).copied().unwrap_or(0);
                                 let color = palette_colors[color_idx % palette_colors.len()];
                                 self.paint_edge_label_colored(
                                     &mut line_buffer,
@@ -694,7 +695,9 @@ impl<'a> LayoutIR<'a> {
             // Edge going upward to border (T-up)
             '↑' | '⇡' | '└' | '┘' | '┴' => '╧',
             // Already a double-line char (nested border overlap) — keep it
-            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => existing,
+            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => {
+                existing
+            }
             // Everything else (space, etc.) → plain horizontal double
             _ => '═',
         }
@@ -711,7 +714,9 @@ impl<'a> LayoutIR<'a> {
             // Edge going left from border (T-left)
             '←' | '┐' | '┘' | '┤' => '╡',
             // Already a double-line char — keep it
-            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => existing,
+            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => {
+                existing
+            }
             // Everything else → plain vertical double
             _ => '║',
         }
@@ -786,7 +791,11 @@ impl<'a> LayoutIR<'a> {
         // Select solid or dashed chars based on reversed flag
         let vline = if edge.reversed { V_LINE_DASHED } else { V_LINE };
         let hline = if edge.reversed { H_LINE_DASHED } else { H_LINE };
-        let arrow = if edge.reversed { ARROW_DOWN_DASHED } else { ARROW_DOWN };
+        let arrow = if edge.reversed {
+            ARROW_DOWN_DASHED
+        } else {
+            ARROW_DOWN
+        };
 
         match &edge.path {
             EdgePath::Direct => {
@@ -1017,7 +1026,8 @@ impl<'a> LayoutIR<'a> {
                                     } else {
                                         if buffer[x] == ' ' {
                                             buffer[x] = hline;
-                                        } else if buffer[x] == V_LINE || buffer[x] == V_LINE_DASHED {
+                                        } else if buffer[x] == V_LINE || buffer[x] == V_LINE_DASHED
+                                        {
                                             buffer[x] = CROSS;
                                         }
                                     }
@@ -1177,14 +1187,19 @@ impl<'a> LayoutIR<'a> {
                     edge.to_x
                 }
             }
-            EdgePath::SideChannel { channel_x, start_y, .. } => {
+            EdgePath::SideChannel {
+                channel_x, start_y, ..
+            } => {
                 if y < *start_y {
                     edge.from_x
                 } else {
                     *channel_x
                 }
             }
-            EdgePath::MultiSegment { waypoints, start_y_offset } => {
+            EdgePath::MultiSegment {
+                waypoints,
+                start_y_offset,
+            } => {
                 let horizontal_y = edge.from_y + 1 + start_y_offset;
                 if y <= horizontal_y || waypoints.is_empty() {
                     edge.from_x
@@ -1276,7 +1291,11 @@ impl<'a> LayoutIR<'a> {
     ) {
         let vline = if edge.reversed { V_LINE_DASHED } else { V_LINE };
         let hline = if edge.reversed { H_LINE_DASHED } else { H_LINE };
-        let arrow = if edge.reversed { ARROW_DOWN_DASHED } else { ARROW_DOWN };
+        let arrow = if edge.reversed {
+            ARROW_DOWN_DASHED
+        } else {
+            ARROW_DOWN
+        };
 
         match &edge.path {
             EdgePath::Direct => {
@@ -1475,7 +1494,8 @@ impl<'a> LayoutIR<'a> {
                                         if edge.reversed && is_first_segment && corner_y <= y1 + 1 {
                                             buffer[x] = ARROW_UP_DASHED;
                                         } else {
-                                            let proposed = if x1 < x2 { CORNER_DR } else { CORNER_DL };
+                                            let proposed =
+                                                if x1 < x2 { CORNER_DR } else { CORNER_DL };
                                             buffer[x] = merge_chars(buffer[x], proposed);
                                         }
                                     } else if x == x2 {

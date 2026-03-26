@@ -124,7 +124,6 @@ impl<'a> Graph<'a> {
             }
         }
     }
-
 }
 
 #[cfg(test)]

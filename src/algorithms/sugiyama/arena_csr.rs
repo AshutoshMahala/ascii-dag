@@ -3,12 +3,12 @@
 //! Pure-CSR layout pipeline: avoids all heap allocations and HashMap lookups
 //! by operating directly on CSR graph indices.
 
-use crate::graph::arena::Arena;
-use crate::graph::csr::CsrGraph;
-use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
 use super::config::{CycleBreaking, LayoutConfig};
 use super::crossing::CrossingReducer;
 use crate::errors::GraphError;
+use crate::graph::arena::Arena;
+use crate::graph::csr::CsrGraph;
+use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
 
 // Import configurable index types
 #[cfg(feature = "arena")]
@@ -96,7 +96,10 @@ pub fn compute_layout_arena_csr<'b>(
     // Validate against index type limits
     let max_count = node_count.max(edge_count);
     if max_count > MAX_NODES {
-        return Err(GraphError::ExceedsMaxNodes { count: max_count, max: MAX_NODES });
+        return Err(GraphError::ExceedsMaxNodes {
+            count: max_count,
+            max: MAX_NODES,
+        });
     }
 
     // Calculate total label bytes (node + edge labels, iterating CSR is cheap)
@@ -121,7 +124,8 @@ pub fn compute_layout_arena_csr<'b>(
     // Step 1: Cycle breaking — allocate back_edges and run DFS before other temps
     let back_edges = {
         let be_size = edge_count.max(1);
-        let (be_ptr, _) = temp_arena.alloc_raw::<bool>(be_size)
+        let (be_ptr, _) = temp_arena
+            .alloc_raw::<bool>(be_size)
             .ok_or(GraphError::ArenaOom)?;
         // Safety: alloc_raw zeroes memory, so all false
         unsafe { core::slice::from_raw_parts_mut(be_ptr, be_size) }
@@ -162,7 +166,9 @@ pub fn compute_layout_arena_csr<'b>(
     // Populate level_vdummy_counts for crossing reduction
     temps.level_vdummy_counts.fill(0);
     for level in 0..=(max_level as usize) {
-        if level + 1 >= temps.vlevel_offsets.len() { break; }
+        if level + 1 >= temps.vlevel_offsets.len() {
+            break;
+        }
         let start = temps.vlevel_offsets[level] as usize;
         let end = temps.vlevel_offsets[level + 1] as usize;
         for pos in start..end {
@@ -219,18 +225,20 @@ pub fn compute_layout_arena_csr<'b>(
         );
     }
 
-    // Step 5c: Refine x-coordinates and compact subgraphs (iterative)
-    let compact_rounds = if graph.has_subgraphs() { 3 } else { 1 };
-    for _ in 0..compact_rounds {
-        refine_x_positions_csr(
-            graph,
-            temps.vlevel_offsets,
-            temps.vnode_data,
-            temps.x_coords,
-            temps.widths,
-            max_level as usize,
-        );
-        if graph.has_subgraphs() {
+    // Step 5c: Refine x-coordinates and compact subgraphs (iterative).
+    // x-refinement is only beneficial for subgraph layouts; skipping it for
+    // plain graphs avoids an O(N²/L) cost on large inputs.
+    if graph.has_subgraphs() {
+        let compact_rounds = 3;
+        for _ in 0..compact_rounds {
+            refine_x_positions_csr(
+                graph,
+                temps.vlevel_offsets,
+                temps.vnode_data,
+                temps.x_coords,
+                temps.widths,
+                max_level as usize,
+            );
             compact_subgraphs_csr(
                 graph,
                 temps.vlevel_offsets,
@@ -246,17 +254,24 @@ pub fn compute_layout_arena_csr<'b>(
     let mut max_width: Coord = {
         let mut new_max: Coord = 0;
         for level in 0..=max_level as usize {
-            if level + 1 >= temps.vlevel_offsets.len() { break; }
+            if level + 1 >= temps.vlevel_offsets.len() {
+                break;
+            }
             let start = temps.vlevel_offsets[level] as usize;
             let end = temps.vlevel_offsets[level + 1] as usize;
             for pos in start..end {
                 let right = temps.x_coords[pos].saturating_add(temps.widths[pos]);
-                if right > new_max { new_max = right; }
+                if right > new_max {
+                    new_max = right;
+                }
             }
         }
         let label_margin: Coord = if graph.has_edge_labels() { 8 } else { 0 };
         let sg_margin: Coord = if graph.has_subgraphs() { 4 } else { 0 };
-        new_max.saturating_add(4).saturating_add(label_margin).saturating_add(sg_margin)
+        new_max
+            .saturating_add(4)
+            .saturating_add(label_margin)
+            .saturating_add(sg_margin)
     };
 
     // Step 6: Build real node coordinates
@@ -313,21 +328,31 @@ pub fn compute_layout_arena_csr<'b>(
 
     // 2. Assign slots by scanning edges (same iteration order as Step 9)
     for (ei, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
-        if from_idx == to_idx { continue; }
+        if from_idx == to_idx {
+            continue;
+        }
         let is_back = back_edges.get(ei).copied().unwrap_or(false);
-        let (src_idx, dst_idx) = if is_back { (to_idx, from_idx) } else { (from_idx, to_idx) };
+        let (src_idx, dst_idx) = if is_back {
+            (to_idx, from_idx)
+        } else {
+            (from_idx, to_idx)
+        };
         if src_idx >= temps.real_coords.len() || dst_idx >= temps.real_coords.len() {
             continue;
         }
         let (src_level, _, src_x_base, src_width) = temps.real_coords[src_idx];
         let (dst_level, _, dst_x_base, dst_width) = temps.real_coords[dst_idx];
 
-        if dst_level <= src_level { continue; }
+        if dst_level <= src_level {
+            continue;
+        }
 
         let src_x_center = src_x_base + src_width / 2;
         let dst_x_center = dst_x_base + dst_width / 2;
         let is_vertical = src_x_center == dst_x_center && dst_level == src_level + 1;
-        if is_vertical { continue; }
+        if is_vertical {
+            continue;
+        }
 
         let (min_x, max_x) = if src_x_center < dst_x_center {
             (src_x_center, dst_x_center + 1)
@@ -336,7 +361,9 @@ pub fn compute_layout_arena_csr<'b>(
         };
 
         let lvl = src_level;
-        if lvl >= alloc_size { continue; }
+        if lvl >= alloc_size {
+            continue;
+        }
 
         if temps.node_slots[src_idx] != usize::MAX {
             // Source already has a slot — merge interval into its bounding box
@@ -344,8 +371,12 @@ pub fn compute_layout_arena_csr<'b>(
             let base = lvl * MAX_SLOTS_PER_LEVEL + slot;
             if base < temps.slot_bounds.len() {
                 let (ref mut bmin, ref mut bmax) = temps.slot_bounds[base];
-                if min_x < *bmin { *bmin = min_x; }
-                if max_x > *bmax { *bmax = max_x; }
+                if min_x < *bmin {
+                    *bmin = min_x;
+                }
+                if max_x > *bmax {
+                    *bmax = max_x;
+                }
             }
         } else {
             // New source — find a conflict-free slot via greedy first-fit scan
@@ -360,8 +391,12 @@ pub fn compute_layout_arena_csr<'b>(
                     if max_x <= bmin || min_x >= bmax {
                         // Share this slot — merge bounding box
                         let (ref mut sbmin, ref mut sbmax) = temps.slot_bounds[base];
-                        if min_x < *sbmin { *sbmin = min_x; }
-                        if max_x > *sbmax { *sbmax = max_x; }
+                        if min_x < *sbmin {
+                            *sbmin = min_x;
+                        }
+                        if max_x > *sbmax {
+                            *sbmax = max_x;
+                        }
                         chosen = Some(s);
                         break;
                     }
@@ -467,7 +502,8 @@ pub fn compute_layout_arena_csr<'b>(
         total_label_bytes + sg_label_bytes,
         max_level as usize + 1,
         sg_count,
-    ).ok_or(GraphError::BuilderFailed)?;
+    )
+    .ok_or(GraphError::BuilderFailed)?;
 
     // Add buffer for edge routing (+4) plus label margin
     let label_margin = if has_labeled_edges { 8 } else { 0 };
@@ -481,18 +517,21 @@ pub fn compute_layout_arena_csr<'b>(
         let id = graph.node_id(idx);
         let label = graph.node_label(idx);
 
-        builder.add_node(
-            id,
-            label,
-            x as usize,
-            y,
-            width as usize,
-            graph.node_height(idx),
-            level as usize,
-            pos as usize,
-            crate::ir::NodeKind::Explicit,
-        ).ok_or(GraphError::ArenaOom)?;
-        builder.add_node_to_level(level as usize, idx)
+        builder
+            .add_node(
+                id,
+                label,
+                x as usize,
+                y,
+                width as usize,
+                graph.node_height(idx),
+                level as usize,
+                pos as usize,
+                crate::ir::NodeKind::Explicit,
+            )
+            .ok_or(GraphError::ArenaOom)?;
+        builder
+            .add_node_to_level(level as usize, idx)
             .ok_or(GraphError::ArenaOom)?;
     }
 
@@ -536,8 +575,8 @@ pub fn compute_layout_arena_csr<'b>(
         let from_x = (src_x_base + src_width / 2) as usize;
         let to_x = (dst_x_base + dst_width / 2) as usize;
         // from_y = bottom of source node (top + max_node_height - 1)
-        let from_y = level_y_offsets[src_level as usize]
-            + max_node_heights[src_level as usize] as usize - 1;
+        let from_y =
+            level_y_offsets[src_level as usize] + max_node_heights[src_level as usize] as usize - 1;
         let to_y = level_y_offsets[dst_level as usize];
 
         // Store original semantic IDs (not layout-direction IDs)
@@ -558,9 +597,12 @@ pub fn compute_layout_arena_csr<'b>(
         let in_two_node_cycle = from_x == to_x && from_idx != to_idx && {
             let edge_count = graph.edge_count();
             (0..edge_count).any(|ej| {
-                if ej == edge_idx { return false; }
+                if ej == edge_idx {
+                    return false;
+                }
                 let (f, t) = graph.edge(ej);
-                f == to_idx && t == from_idx
+                f == to_idx
+                    && t == from_idx
                     && back_edges.get(ej).copied().unwrap_or(false) != is_back
             })
         };
@@ -584,9 +626,7 @@ pub fn compute_layout_arena_csr<'b>(
                 if src_lvl < level_routing_floor.len() {
                     level_routing_floor[src_lvl] = level_routing_floor[src_lvl].max(hy);
                 }
-                EdgePathArena::Corner {
-                    horizontal_y: hy,
-                }
+                EdgePathArena::Corner { horizontal_y: hy }
             }
         } else if dst_level > src_level + 1 {
             let dummy_start = temps.dummy_offsets[edge_idx] as usize;
@@ -613,7 +653,8 @@ pub fn compute_layout_arena_csr<'b>(
 
                     // Calculate Y using level_y_offsets + max_node_height at intermediate level
                     let y_base = level_y_offsets[lvl_idx]
-                        + max_node_heights.get(lvl_idx).copied().unwrap_or(1) as usize - 1;
+                        + max_node_heights.get(lvl_idx).copied().unwrap_or(1) as usize
+                        - 1;
                     let wp_y = y_base + edge_start_row + dummy_slot as usize;
                     waypoint_scratch[i] = (x as usize, wp_y);
                     // Track routing floor
@@ -631,7 +672,8 @@ pub fn compute_layout_arena_csr<'b>(
                     let initial_corner_y = from_y + 1 + start_y_offset;
                     let src_lvl = src_level as usize;
                     if src_lvl < level_routing_floor.len() {
-                        level_routing_floor[src_lvl] = level_routing_floor[src_lvl].max(initial_corner_y);
+                        level_routing_floor[src_lvl] =
+                            level_routing_floor[src_lvl].max(initial_corner_y);
                     }
 
                     // Record intermediate corner Ys: the paint code draws
@@ -644,7 +686,8 @@ pub fn compute_layout_arena_csr<'b>(
                             let inter_corner_y = this_y + 1;
                             let wp_level = temps.dummy_data[dummy_start + wi].0 as usize;
                             if wp_level < level_routing_floor.len() {
-                                level_routing_floor[wp_level] = level_routing_floor[wp_level].max(inter_corner_y);
+                                level_routing_floor[wp_level] =
+                                    level_routing_floor[wp_level].max(inter_corner_y);
                             }
                         }
                     }
@@ -653,9 +696,11 @@ pub fn compute_layout_arena_csr<'b>(
                         let (last_wp_x, last_wp_y) = waypoint_scratch[waypoint_count - 1];
                         if last_wp_x != eff_to_x {
                             let inter_corner_y = last_wp_y + 1;
-                            let last_level = temps.dummy_data[dummy_start + waypoint_count - 1].0 as usize;
+                            let last_level =
+                                temps.dummy_data[dummy_start + waypoint_count - 1].0 as usize;
                             if last_level < level_routing_floor.len() {
-                                level_routing_floor[last_level] = level_routing_floor[last_level].max(inter_corner_y);
+                                level_routing_floor[last_level] =
+                                    level_routing_floor[last_level].max(inter_corner_y);
                             }
                         }
                     }
@@ -671,9 +716,7 @@ pub fn compute_layout_arena_csr<'b>(
                     if src_lvl < level_routing_floor.len() {
                         level_routing_floor[src_lvl] = level_routing_floor[src_lvl].max(hy);
                     }
-                    EdgePathArena::Corner {
-                        horizontal_y: hy,
-                    }
+                    EdgePathArena::Corner { horizontal_y: hy }
                 }
             } else {
                 let hy = from_y + edge_start_row + slot;
@@ -681,9 +724,7 @@ pub fn compute_layout_arena_csr<'b>(
                 if src_lvl < level_routing_floor.len() {
                     level_routing_floor[src_lvl] = level_routing_floor[src_lvl].max(hy);
                 }
-                EdgePathArena::Corner {
-                    horizontal_y: hy,
-                }
+                EdgePathArena::Corner { horizontal_y: hy }
             }
         } else {
             EdgePathArena::Direct
@@ -691,28 +732,31 @@ pub fn compute_layout_arena_csr<'b>(
 
         // Store edge label if present
         let edge_label_text = graph.edge_label(edge_idx);
-        let (e_label_offset, e_label_len, e_label_x, e_label_y) =
-            if !edge_label_text.is_empty() {
-                if let Some((offset, len)) = builder.add_edge_label(edge_label_text) {
-                    let l_y = from_y + 2;
-                    let edge_x_at_label = match &path {
-                        EdgePathArena::Direct => eff_from_x,
-                        EdgePathArena::Corner { horizontal_y } => {
-                            if l_y <= *horizontal_y { eff_from_x } else { eff_to_x }
+        let (e_label_offset, e_label_len, e_label_x, e_label_y) = if !edge_label_text.is_empty() {
+            if let Some((offset, len)) = builder.add_edge_label(edge_label_text) {
+                let l_y = from_y + 2;
+                let edge_x_at_label = match &path {
+                    EdgePathArena::Direct => eff_from_x,
+                    EdgePathArena::Corner { horizontal_y } => {
+                        if l_y <= *horizontal_y {
+                            eff_from_x
+                        } else {
+                            eff_to_x
                         }
-                        EdgePathArena::MultiSegment { .. } => eff_from_x,
-                        // SideChannel / Spline: fall back to source X
-                        _ => eff_from_x,
-                    };
-                    let label_len_with_quotes = len + 2;
-                    let l_x = edge_x_at_label.saturating_sub(label_len_with_quotes / 2);
-                    (offset, len, l_x, l_y)
-                } else {
-                    (0, 0, 0, 0)
-                }
+                    }
+                    EdgePathArena::MultiSegment { .. } => eff_from_x,
+                    // SideChannel / Spline: fall back to source X
+                    _ => eff_from_x,
+                };
+                let label_len_with_quotes = len + 2;
+                let l_x = edge_x_at_label.saturating_sub(label_len_with_quotes / 2);
+                (offset, len, l_x, l_y)
             } else {
                 (0, 0, 0, 0)
-            };
+            }
+        } else {
+            (0, 0, 0, 0)
+        };
 
         builder.add_edge(LayoutEdgeArena {
             from_id,
@@ -845,23 +889,37 @@ fn alloc_layout_temps_csr<'b>(
             slot_bounds: core::slice::from_raw_parts_mut(slot_bounds_ptr, slot_bounds_size),
             level_dummy_next: core::slice::from_raw_parts_mut(level_dummy_next_ptr, max_levels + 1),
             waypoint_scratch: core::slice::from_raw_parts_mut(waypoint_scratch_ptr, max_levels + 1),
-            level_vdummy_counts: core::slice::from_raw_parts_mut(level_vdummy_counts_ptr, max_levels + 1),
-            level_routing_floor: core::slice::from_raw_parts_mut(level_routing_floor_ptr, max_levels + 1),
+            level_vdummy_counts: core::slice::from_raw_parts_mut(
+                level_vdummy_counts_ptr,
+                max_levels + 1,
+            ),
+            level_routing_floor: core::slice::from_raw_parts_mut(
+                level_routing_floor_ptr,
+                max_levels + 1,
+            ),
             dummy_data: core::slice::from_raw_parts_mut(dummy_data_ptr, max_dummy_waypoints),
             medians: core::slice::from_raw_parts_mut(medians_ptr, max_level_size),
             positions: core::slice::from_raw_parts_mut(positions_ptr, max_level_size),
             sg_ranges: if sg_count > 0 {
                 core::slice::from_raw_parts_mut(sg_ranges_ptr, sg_count)
-            } else { &mut [] },
+            } else {
+                &mut []
+            },
             sg_depths: if sg_count > 0 {
                 core::slice::from_raw_parts_mut(sg_depths_ptr, sg_count)
-            } else { &mut [] },
+            } else {
+                &mut []
+            },
             sg_envelopes: if sg_count > 0 {
                 core::slice::from_raw_parts_mut(sg_envelopes_ptr, sg_count)
-            } else { &mut [] },
+            } else {
+                &mut []
+            },
             sg_y_extras: if sg_count > 0 {
                 core::slice::from_raw_parts_mut(sg_y_extras_ptr, max_levels + 1)
-            } else { &mut [] },
+            } else {
+                &mut []
+            },
         })
     }
 }
@@ -873,11 +931,7 @@ fn alloc_layout_temps_csr<'b>(
 /// All temporaries are allocated from `arena` — no heap allocation.
 ///
 /// Self-loops (from == to) are unconditionally marked as back edges.
-fn detect_back_edges_csr(
-    graph: &CsrGraph<'_>,
-    back_edges: &mut [bool],
-    arena: &mut Arena<'_>,
-) {
+fn detect_back_edges_csr(graph: &CsrGraph<'_>, back_edges: &mut [bool], arena: &mut Arena<'_>) {
     let node_count = graph.node_count();
     let edge_count = graph.edge_count();
 
@@ -899,11 +953,19 @@ fn detect_back_edges_csr(
 
     // Build edge-from CSR: for each source node, the list of outgoing edge indices.
     // Allocate from arena: offsets[node_count+1] + data[edge_count] + color[node_count] + stack[node_count]
-    let Some((offsets_ptr, _)) = arena.alloc_raw::<u32>(node_count + 1) else { return };
-    let Some((edata_ptr, _)) = arena.alloc_raw::<u32>(edge_count) else { return };
-    let Some((color_ptr, _)) = arena.alloc_raw::<u8>(node_count) else { return };
+    let Some((offsets_ptr, _)) = arena.alloc_raw::<u32>(node_count + 1) else {
+        return;
+    };
+    let Some((edata_ptr, _)) = arena.alloc_raw::<u32>(edge_count) else {
+        return;
+    };
+    let Some((color_ptr, _)) = arena.alloc_raw::<u8>(node_count) else {
+        return;
+    };
     // Stack entries: (node_index as u32, edge_iterator_position as u32)
-    let Some((stack_ptr, _)) = arena.alloc_raw_uninit::<(u32, u32)>(node_count) else { return };
+    let Some((stack_ptr, _)) = arena.alloc_raw_uninit::<(u32, u32)>(node_count) else {
+        return;
+    };
 
     let offsets = unsafe { core::slice::from_raw_parts_mut(offsets_ptr, node_count + 1) };
     let edata = unsafe { core::slice::from_raw_parts_mut(edata_ptr, edge_count) };
@@ -994,7 +1056,9 @@ fn root_subgraph_csr(graph: &CsrGraph<'_>, sg_idx: Option<usize>) -> Option<usiz
     let mut cur = sg_idx;
     let mut root = sg_idx;
     while let Some(idx) = cur {
-        if idx >= graph.subgraph_count() { break; }
+        if idx >= graph.subgraph_count() {
+            break;
+        }
         root = cur;
         cur = graph.subgraph_parent(idx);
     }
@@ -1022,11 +1086,15 @@ fn block_partition_levels_csr(
     let mut scratch: [(Idx, Idx, usize); MAX_LEVEL_SIZE] = [(0, 0, 0); MAX_LEVEL_SIZE];
 
     for level in 0..=max_level {
-        if level + 1 >= vlevel_offsets.len() { break; }
+        if level + 1 >= vlevel_offsets.len() {
+            break;
+        }
         let start = vlevel_offsets[level] as usize;
         let end = vlevel_offsets[level + 1] as usize;
         let count = end - start;
-        if count <= 1 || count > MAX_LEVEL_SIZE { continue; }
+        if count <= 1 || count > MAX_LEVEL_SIZE {
+            continue;
+        }
 
         // Collect vnodes with their root subgraph key
         for i in 0..count {
@@ -1056,7 +1124,9 @@ fn block_partition_levels_csr(
                 }
             }
             if found == usize::MAX {
-                if num_blocks >= MAX_BLOCKS { continue; }
+                if num_blocks >= MAX_BLOCKS {
+                    continue;
+                }
                 found = num_blocks;
                 block_keys[num_blocks] = key;
                 num_blocks += 1;
@@ -1074,7 +1144,9 @@ fn block_partition_levels_csr(
 
         // Sort blocks by average position (insertion sort for small N)
         let mut block_order = [0usize; MAX_BLOCKS];
-        for i in 0..num_blocks { block_order[i] = i; }
+        for i in 0..num_blocks {
+            block_order[i] = i;
+        }
         for i in 1..num_blocks {
             let mut j = i;
             while j > 0 && block_avg[block_order[j]] < block_avg[block_order[j - 1]] {
@@ -1116,46 +1188,6 @@ fn vnode_subgraph_csr(graph: &CsrGraph<'_>, vnode_type: Idx, vnode_idx: Idx) -> 
     }
 }
 
-/// Count subgraph boundary transitions between two subgraph chains.
-/// Returns (exits_from_prev + entries_into_curr).
-fn sg_boundary_exits_entries(graph: &CsrGraph<'_>, prev: Option<usize>, curr: Option<usize>) -> (usize, usize) {
-    // Build chains (root first) using simple iteration — max depth is small
-    let mut prev_chain = [0usize; 16];
-    let mut prev_len = 0usize;
-    {
-        let mut c = prev;
-        while let Some(idx) = c {
-            if idx >= graph.subgraph_count() || prev_len >= 16 { break; }
-            prev_chain[prev_len] = idx;
-            prev_len += 1;
-            c = graph.subgraph_parent(idx);
-        }
-        // Reverse to get root first
-        prev_chain[..prev_len].reverse();
-    }
-
-    let mut curr_chain = [0usize; 16];
-    let mut curr_len = 0usize;
-    {
-        let mut c = curr;
-        while let Some(idx) = c {
-            if idx >= graph.subgraph_count() || curr_len >= 16 { break; }
-            curr_chain[curr_len] = idx;
-            curr_len += 1;
-            c = graph.subgraph_parent(idx);
-        }
-        curr_chain[..curr_len].reverse();
-    }
-
-    // Common prefix length
-    let common = prev_chain[..prev_len].iter()
-        .zip(curr_chain[..curr_len].iter())
-        .take_while(|(a, b)| a == b)
-        .count();
-
-    (prev_len - common, curr_len - common)
-}
-
 /// Insert horizontal subgraph padding into x_coords.
 /// Returns the updated max_width.
 fn subgraph_padding_csr(
@@ -1169,10 +1201,14 @@ fn subgraph_padding_csr(
     let mut global_max_width = 0usize;
 
     for level in 0..=max_level as usize {
-        if level + 1 >= vlevel_offsets.len() { break; }
+        if level + 1 >= vlevel_offsets.len() {
+            break;
+        }
         let start = vlevel_offsets[level] as usize;
         let end = vlevel_offsets[level + 1] as usize;
-        if start >= end { continue; }
+        if start >= end {
+            continue;
+        }
 
         let mut x = 0usize;
 
@@ -1187,7 +1223,7 @@ fn subgraph_padding_csr(
 
         for pos in start..end {
             if pos > start {
-                let prev_type = vnode_data[( pos - 1) * 2];
+                let prev_type = vnode_data[(pos - 1) * 2];
                 let prev_idx = vnode_data[(pos - 1) * 2 + 1];
                 let curr_type = vnode_data[pos * 2];
                 let curr_idx = vnode_data[pos * 2 + 1];
@@ -1219,7 +1255,9 @@ fn subgraph_padding_csr(
             let px = x_coords.get(pos).copied().unwrap_or(0) as usize;
             let pw = widths.get(pos).copied().unwrap_or(3) as usize;
             let r = px + pw;
-            if r > level_max { level_max = r; }
+            if r > level_max {
+                level_max = r;
+            }
         }
         level_max += right_extra;
         if level_max > global_max_width {
@@ -1290,12 +1328,7 @@ fn connected_median_csr(
             for ap in adj_start..adj_end {
                 let at = vnode_data[ap * 2];
                 let ai = vnode_data[ap * 2 + 1] as usize;
-                if at == 1 && ai == edge_idx {
-                    if pcount < 32 {
-                        positions[pcount] = x_coords[ap].saturating_add(widths[ap] / 2);
-                        pcount += 1;
-                    }
-                } else if at == 0 && (ai == from || ai == to) {
+                if (at == 1 && ai == edge_idx) || (at == 0 && (ai == from || ai == to)) {
                     if pcount < 32 {
                         positions[pcount] = x_coords[ap].saturating_add(widths[ap] / 2);
                         pcount += 1;
@@ -1305,7 +1338,9 @@ fn connected_median_csr(
         }
     }
 
-    if pcount == 0 { return None; }
+    if pcount == 0 {
+        return None;
+    }
     positions[..pcount].sort_unstable();
     let median = if pcount % 2 == 1 {
         positions[pcount / 2]
@@ -1326,18 +1361,35 @@ fn gap_between_csr(graph: &CsrGraph<'_>, vnode_data: &[Idx], pos_a: usize, pos_b
     let b_idx = vnode_data[pos_b * 2 + 1];
     let a_sg = vnode_subgraph_csr(graph, a_type, a_idx);
     let b_sg = vnode_subgraph_csr(graph, b_type, b_idx);
-    if a_sg != b_sg && (a_sg.is_some() || b_sg.is_some()) { SG_GAP } else { MIN_GAP }
+    if a_sg != b_sg && (a_sg.is_some() || b_sg.is_some()) {
+        SG_GAP
+    } else {
+        MIN_GAP
+    }
 }
 
 /// Left margin for a level (H_PAD if first node is in a subgraph).
-fn left_margin_csr(graph: &CsrGraph<'_>, vnode_data: &[Idx], vlevel_offsets: &[Idx], level: usize) -> Coord {
-    if level + 1 >= vlevel_offsets.len() { return 0; }
+fn left_margin_csr(
+    graph: &CsrGraph<'_>,
+    vnode_data: &[Idx],
+    vlevel_offsets: &[Idx],
+    level: usize,
+) -> Coord {
+    if level + 1 >= vlevel_offsets.len() {
+        return 0;
+    }
     let start = vlevel_offsets[level] as usize;
     let end = vlevel_offsets[level + 1] as usize;
-    if start >= end { return 0; }
+    if start >= end {
+        return 0;
+    }
     let vtype = vnode_data[start * 2];
     let vidx = vnode_data[start * 2 + 1];
-    if vnode_subgraph_csr(graph, vtype, vidx).is_some() { 2 } else { 0 }
+    if vnode_subgraph_csr(graph, vtype, vidx).is_some() {
+        2
+    } else {
+        0
+    }
 }
 
 /// Refine x-coordinates by shifting nodes toward the median position of their
@@ -1353,7 +1405,9 @@ fn refine_x_positions_csr(
     const ITERATIONS: usize = 8;
 
     let num_levels = max_level + 1;
-    if num_levels <= 1 { return; }
+    if num_levels <= 1 {
+        return;
+    }
 
     // Helper: apply a single sweep (down or up) for one level
     fn sweep_level(
@@ -1369,24 +1423,32 @@ fn refine_x_positions_csr(
         let start = vlevel_offsets[level] as usize;
         let end = vlevel_offsets[level + 1] as usize;
         let n = end - start;
-        if n == 0 { return; }
+        if n == 0 {
+            return;
+        }
         let margin = left_margin_csr(graph, vnode_data, vlevel_offsets, level);
 
         // Right-to-left pass
         for i in (0..n).rev() {
             let pos = start + i;
-            if let Some(tc) = connected_median_csr(graph, vnode_data, x_coords, widths, pos, adj_start, adj_end) {
+            if let Some(tc) =
+                connected_median_csr(graph, vnode_data, x_coords, widths, pos, adj_start, adj_end)
+            {
                 let my_w = widths[pos];
                 let target = tc.saturating_sub(my_w / 2);
                 let min_x = if i == 0 {
                     margin
                 } else {
                     let prev = start + i - 1;
-                    x_coords[prev].saturating_add(widths[prev]).saturating_add(gap_between_csr(graph, vnode_data, prev, pos))
+                    x_coords[prev]
+                        .saturating_add(widths[prev])
+                        .saturating_add(gap_between_csr(graph, vnode_data, prev, pos))
                 };
                 let max_x = if i + 1 < n {
                     let next = start + i + 1;
-                    x_coords[next].saturating_sub(my_w.saturating_add(gap_between_csr(graph, vnode_data, pos, next)))
+                    x_coords[next].saturating_sub(
+                        my_w.saturating_add(gap_between_csr(graph, vnode_data, pos, next)),
+                    )
                 } else {
                     Coord::MAX
                 };
@@ -1397,18 +1459,24 @@ fn refine_x_positions_csr(
         // Left-to-right pass
         for i in 0..n {
             let pos = start + i;
-            if let Some(tc) = connected_median_csr(graph, vnode_data, x_coords, widths, pos, adj_start, adj_end) {
+            if let Some(tc) =
+                connected_median_csr(graph, vnode_data, x_coords, widths, pos, adj_start, adj_end)
+            {
                 let my_w = widths[pos];
                 let target = tc.saturating_sub(my_w / 2);
                 let min_x = if i == 0 {
                     margin
                 } else {
                     let prev = start + i - 1;
-                    x_coords[prev].saturating_add(widths[prev]).saturating_add(gap_between_csr(graph, vnode_data, prev, pos))
+                    x_coords[prev]
+                        .saturating_add(widths[prev])
+                        .saturating_add(gap_between_csr(graph, vnode_data, prev, pos))
                 };
                 let max_x = if i + 1 < n {
                     let next = start + i + 1;
-                    x_coords[next].saturating_sub(my_w.saturating_add(gap_between_csr(graph, vnode_data, pos, next)))
+                    x_coords[next].saturating_sub(
+                        my_w.saturating_add(gap_between_csr(graph, vnode_data, pos, next)),
+                    )
                 } else {
                     Coord::MAX
                 };
@@ -1420,23 +1488,45 @@ fn refine_x_positions_csr(
     for _iter in 0..ITERATIONS {
         // Down sweep: align with parents
         for level in 1..num_levels {
-            if level + 1 >= vlevel_offsets.len() { break; }
+            if level + 1 >= vlevel_offsets.len() {
+                break;
+            }
             let adj_start = vlevel_offsets[level - 1] as usize;
             let adj_end = vlevel_offsets[level] as usize;
-            sweep_level(graph, vlevel_offsets, vnode_data, x_coords, widths, level, adj_start, adj_end);
+            sweep_level(
+                graph,
+                vlevel_offsets,
+                vnode_data,
+                x_coords,
+                widths,
+                level,
+                adj_start,
+                adj_end,
+            );
         }
 
         // Up sweep: align with children
         if num_levels >= 2 {
             for level in (0..num_levels - 1).rev() {
-                if level + 2 >= vlevel_offsets.len() { break; }
+                if level + 2 >= vlevel_offsets.len() {
+                    break;
+                }
                 let adj_start = vlevel_offsets[level + 1] as usize;
                 let adj_end = if level + 2 < vlevel_offsets.len() {
                     vlevel_offsets[level + 2] as usize
                 } else {
                     vlevel_offsets[level + 1] as usize
                 };
-                sweep_level(graph, vlevel_offsets, vnode_data, x_coords, widths, level, adj_start, adj_end);
+                sweep_level(
+                    graph,
+                    vlevel_offsets,
+                    vnode_data,
+                    x_coords,
+                    widths,
+                    level,
+                    adj_start,
+                    adj_end,
+                );
             }
         }
     }
@@ -1457,7 +1547,9 @@ fn compact_subgraphs_csr(
     const SG_GAP: Coord = 5;
 
     let sg_count = graph.subgraph_count();
-    if sg_count == 0 { return; }
+    if sg_count == 0 {
+        return;
+    }
 
     // Collect members per subgraph and compute centroid, then push toward it.
     // Use fixed-size arrays since subgraph count is bounded.
@@ -1472,7 +1564,9 @@ fn compact_subgraphs_csr(
         let mut centroid_n = 0usize;
 
         for level in 0..=max_level {
-            if level + 1 >= vlevel_offsets.len() { break; }
+            if level + 1 >= vlevel_offsets.len() {
+                break;
+            }
             let start = vlevel_offsets[level] as usize;
             let end = vlevel_offsets[level + 1] as usize;
             for pos in start..end {
@@ -1493,7 +1587,9 @@ fn compact_subgraphs_csr(
             }
         }
 
-        if member_count <= 1 { continue; }
+        if member_count <= 1 {
+            continue;
+        }
 
         // Use real-node centroid if available, otherwise all members
         let centroid = if centroid_n > 0 {
@@ -1510,7 +1606,7 @@ fn compact_subgraphs_csr(
         for i in 0..member_count {
             let (level, pos) = members[i];
             let cx = x_coords[pos].saturating_add(widths[pos] / 2);
-            let dist = if cx > centroid { cx - centroid } else { centroid - cx };
+            let dist = cx.abs_diff(centroid);
             by_dist[i] = (level, pos, dist);
         }
         // Sort by distance descending (insertion sort)
@@ -1524,7 +1620,9 @@ fn compact_subgraphs_csr(
 
         for mi in 0..member_count {
             let (level, pos, dist) = by_dist[mi];
-            if dist < SG_GAP { continue; }
+            if dist < SG_GAP {
+                continue;
+            }
 
             let start = vlevel_offsets[level] as usize;
             let end = vlevel_offsets[level + 1] as usize;
@@ -1539,14 +1637,22 @@ fn compact_subgraphs_csr(
             let min_x = if i == 0 {
                 let vtype = vnode_data[start * 2];
                 let vidx = vnode_data[start * 2 + 1];
-                if vnode_subgraph_csr(graph, vtype, vidx).is_some() { 2 } else { 0 }
+                if vnode_subgraph_csr(graph, vtype, vidx).is_some() {
+                    2
+                } else {
+                    0
+                }
             } else {
                 let prev = start + i - 1;
-                x_coords[prev].saturating_add(widths[prev]).saturating_add(gap_between_csr(graph, vnode_data, prev, pos))
+                x_coords[prev]
+                    .saturating_add(widths[prev])
+                    .saturating_add(gap_between_csr(graph, vnode_data, prev, pos))
             };
             let max_x = if i + 1 < n {
                 let next = start + i + 1;
-                x_coords[next].saturating_sub(my_w.saturating_add(gap_between_csr(graph, vnode_data, pos, next)))
+                x_coords[next].saturating_sub(
+                    my_w.saturating_add(gap_between_csr(graph, vnode_data, pos, next)),
+                )
             } else {
                 Coord::MAX
             };
@@ -1570,12 +1676,20 @@ fn compact_subgraphs_csr(
                         let prev = start + k - 1;
                         let g = gap_between_csr(graph, vnode_data, prev, cur);
                         let needed = x_coords[cur].saturating_sub(widths[prev].saturating_add(g));
-                        if x_coords[prev] <= needed { break; }
+                        if x_coords[prev] <= needed {
+                            break;
+                        }
                         let margin = if k - 1 == 0 {
                             let vt = vnode_data[start * 2];
                             let vi = vnode_data[start * 2 + 1];
-                            if vnode_subgraph_csr(graph, vt, vi).is_some() { 2 } else { 0 }
-                        } else { 0 };
+                            if vnode_subgraph_csr(graph, vt, vi).is_some() {
+                                2
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        };
                         x_coords[prev] = needed.max(margin);
                         k -= 1;
                     }
@@ -1592,7 +1706,9 @@ fn compact_subgraphs_csr(
                         let next = start + k + 1;
                         let g = gap_between_csr(graph, vnode_data, cur, next);
                         let needed = x_coords[cur].saturating_add(widths[cur]).saturating_add(g);
-                        if x_coords[next] >= needed { break; }
+                        if x_coords[next] >= needed {
+                            break;
+                        }
                         x_coords[next] = needed;
                         k += 1;
                     }
@@ -1611,7 +1727,9 @@ const SIBLING_GAP: usize = 1;
 fn node_in_sg_subtree(graph: &CsrGraph<'_>, node_idx: usize, target_sg: usize) -> bool {
     if let Some(mut sg) = graph.node_subgraph(node_idx) {
         loop {
-            if sg == target_sg { return true; }
+            if sg == target_sg {
+                return true;
+            }
             match graph.subgraph_parent(sg) {
                 Some(p) => sg = p,
                 None => return false,
@@ -1637,7 +1755,9 @@ fn fix_subgraph_overlaps_csr(
     scratch: &mut [usize],
 ) -> usize {
     let sg_count = graph.subgraph_count();
-    if sg_count < 2 { return 0; }
+    if sg_count < 2 {
+        return 0;
+    }
     let node_count = graph.node_count().min(real_coords.len());
 
     let cross_sg_gap: usize = 2 * SUBGRAPH_H_PAD + SIBLING_GAP;
@@ -1655,21 +1775,33 @@ fn fix_subgraph_overlaps_csr(
         if let Some(sg_idx) = graph.node_subgraph(ni) {
             if sg_idx < sg_count && sg_idx < 128 {
                 let level = real_coords[ni].0;
-                if level < sg_min_level[sg_idx] { sg_min_level[sg_idx] = level; }
-                if level > sg_max_level[sg_idx] { sg_max_level[sg_idx] = level; }
+                if level < sg_min_level[sg_idx] {
+                    sg_min_level[sg_idx] = level;
+                }
+                if level > sg_max_level[sg_idx] {
+                    sg_max_level[sg_idx] = level;
+                }
             }
         }
     }
     // Propagate child level ranges to parents (bottom-up)
     for depth in (0..=max_depth).rev() {
         for sg_idx in 0..sg_count.min(128) {
-            if sg_depths[sg_idx] != depth { continue; }
+            if sg_depths[sg_idx] != depth {
+                continue;
+            }
             if let Some(pidx) = graph.subgraph_parent(sg_idx) {
                 if pidx < 128 {
                     let (cl, cr) = (sg_min_level[sg_idx], sg_max_level[sg_idx]);
-                    if cl == usize::MAX { continue; }
-                    if cl < sg_min_level[pidx] { sg_min_level[pidx] = cl; }
-                    if cr > sg_max_level[pidx] { sg_max_level[pidx] = cr; }
+                    if cl == usize::MAX {
+                        continue;
+                    }
+                    if cl < sg_min_level[pidx] {
+                        sg_min_level[pidx] = cl;
+                    }
+                    if cr > sg_max_level[pidx] {
+                        sg_max_level[pidx] = cr;
+                    }
                 }
             }
         }
@@ -1688,8 +1820,12 @@ fn fix_subgraph_overlaps_csr(
                     let (_, _, x, width) = real_coords[ni];
                     let right = x + width;
                     let (ref mut mn, ref mut mx, _, _) = sg_envelopes[sg_idx];
-                    if x < *mn { *mn = x; }
-                    if right > *mx { *mx = right; }
+                    if x < *mn {
+                        *mn = x;
+                    }
+                    if right > *mx {
+                        *mx = right;
+                    }
                 }
             }
         }
@@ -1699,26 +1835,38 @@ fn fix_subgraph_overlaps_csr(
         const PROP_GAP: usize = 1;
         for depth in (0..=max_depth).rev() {
             for sg_idx in 0..sg_count {
-                if sg_depths[sg_idx] != depth { continue; }
+                if sg_depths[sg_idx] != depth {
+                    continue;
+                }
                 if let Some(pidx) = graph.subgraph_parent(sg_idx) {
                     let (cx, cr, _, _) = sg_envelopes[sg_idx];
-                    if cx == usize::MAX { continue; }
+                    if cx == usize::MAX {
+                        continue;
+                    }
                     let exp_l = cx.saturating_sub(PROP_GAP);
                     let exp_r = cr + PROP_GAP;
                     let (ref mut pl, ref mut pr, _, _) = sg_envelopes[pidx];
-                    if exp_l < *pl { *pl = exp_l; }
-                    if exp_r > *pr { *pr = exp_r; }
+                    if exp_l < *pl {
+                        *pl = exp_l;
+                    }
+                    if exp_r > *pr {
+                        *pr = exp_r;
+                    }
                 }
             }
         }
         // Final padding + label-width expansion
         for sg_idx in 0..sg_count {
             let (mn, mx, _, _) = sg_envelopes[sg_idx];
-            if mn == usize::MAX { continue; }
+            if mn == usize::MAX {
+                continue;
+            }
             let left = mn.saturating_sub(SUBGRAPH_H_PAD);
             let mut right = mx + SUBGRAPH_H_PAD;
             let label_w = graph.subgraph_label(sg_idx).len() + 4;
-            if right.saturating_sub(left) < label_w { right = left + label_w; }
+            if right.saturating_sub(left) < label_w {
+                right = left + label_w;
+            }
             sg_envelopes[sg_idx] = (left, right, 0, 0);
         }
 
@@ -1738,7 +1886,9 @@ fn fix_subgraph_overlaps_csr(
             let mut siblings = [0usize; 128];
             let mut sib_count = 0usize;
             for sg_idx in 0..sg_count {
-                if sg_envelopes[sg_idx].0 == usize::MAX { continue; }
+                if sg_envelopes[sg_idx].0 == usize::MAX {
+                    continue;
+                }
                 if graph.subgraph_parent(sg_idx) == parent {
                     if sib_count < 128 {
                         siblings[sib_count] = sg_idx;
@@ -1746,7 +1896,9 @@ fn fix_subgraph_overlaps_csr(
                     }
                 }
             }
-            if sib_count < 2 { continue; }
+            if sib_count < 2 {
+                continue;
+            }
 
             // Insertion-sort siblings by bbox left
             for i in 1..sib_count {
@@ -1775,8 +1927,7 @@ fn fix_subgraph_overlaps_csr(
                 let mut has_level_overlap = false;
                 for p in 0..proc_count {
                     let (_, prev_right, prev_min_l, prev_max_l) = processed[p];
-                    let overlaps = prev_min_l <= cur_max_l
-                        && cur_min_l <= prev_max_l;
+                    let overlaps = prev_min_l <= cur_max_l && cur_min_l <= prev_max_l;
                     if overlaps && prev_right > eff_frontier {
                         eff_frontier = prev_right;
                         has_level_overlap = true;
@@ -1805,7 +1956,9 @@ fn fix_subgraph_overlaps_csr(
             }
         }
 
-        if !any_shifted { break; }
+        if !any_shifted {
+            break;
+        }
 
         // ── Per-level collision repair ──
         let max_level = real_coords[..node_count]
@@ -1879,8 +2032,12 @@ fn compute_sg_y_extras(
             if sg_idx < sg_count {
                 let lvl = node_levels[node_idx] as usize;
                 let (ref mut first, ref mut last) = sg_ranges[sg_idx];
-                if lvl < *first { *first = lvl; }
-                if lvl > *last { *last = lvl; }
+                if lvl < *first {
+                    *first = lvl;
+                }
+                if lvl > *last {
+                    *last = lvl;
+                }
             }
         }
     }
@@ -1891,15 +2048,25 @@ fn compute_sg_y_extras(
         changed = false;
         for i in 0..sg_count {
             let (cf, cl) = sg_ranges[i];
-            if cf == usize::MAX { continue; } // no nodes
+            if cf == usize::MAX {
+                continue;
+            } // no nodes
             if let Some(pi) = graph.subgraph_parent(i) {
                 if pi < sg_count {
                     let (ref mut pf, ref mut pl) = sg_ranges[pi];
                     if *pf == usize::MAX {
-                        *pf = cf; *pl = cl; changed = true;
+                        *pf = cf;
+                        *pl = cl;
+                        changed = true;
                     } else {
-                        if cf < *pf { *pf = cf; changed = true; }
-                        if cl > *pl { *pl = cl; changed = true; }
+                        if cf < *pf {
+                            *pf = cf;
+                            changed = true;
+                        }
+                        if cl > *pl {
+                            *pl = cl;
+                            changed = true;
+                        }
                     }
                 }
             }
@@ -1912,7 +2079,9 @@ fn compute_sg_y_extras(
         let mut cur = graph.subgraph_parent(i);
         while let Some(pid) = cur {
             depth += 1;
-            if pid >= sg_count { break; }
+            if pid >= sg_count {
+                break;
+            }
             cur = graph.subgraph_parent(pid);
         }
         sg_depths[i] = depth;
@@ -1923,7 +2092,9 @@ fn compute_sg_y_extras(
         let mut count = 1;
         let mut cur = graph.subgraph_parent(sg_idx);
         while let Some(pid) = cur {
-            if pid >= sg_count { break; }
+            if pid >= sg_count {
+                break;
+            }
             let (f, l) = sg_ranges[pid];
             if f != usize::MAX && l == boundary_level {
                 count += 1;
@@ -1938,7 +2109,9 @@ fn compute_sg_y_extras(
         let mut count = 1;
         let mut cur = graph.subgraph_parent(sg_idx);
         while let Some(pid) = cur {
-            if pid >= sg_count { break; }
+            if pid >= sg_count {
+                break;
+            }
             let (f, _l) = sg_ranges[pid];
             if f == boundary_level {
                 count += 1;
@@ -1956,7 +2129,9 @@ fn compute_sg_y_extras(
         let (f, _) = sg_ranges[i];
         if f == 0 {
             let d = stacked_opening(i, 0);
-            if d > max_open_at_0 { max_open_at_0 = d; }
+            if d > max_open_at_0 {
+                max_open_at_0 = d;
+            }
         }
     }
     let initial_offset = max_open_at_0 * SUBGRAPH_V_PAD_TOP;
@@ -1971,20 +2146,26 @@ fn compute_sg_y_extras(
 
         for i in 0..sg_count {
             let (f, l) = sg_ranges[i];
-            if f == usize::MAX { continue; }
+            if f == usize::MAX {
+                continue;
+            }
             if l == boundary_after {
                 let d = stacked_closing(i, boundary_after);
-                if d > max_close { max_close = d; }
+                if d > max_close {
+                    max_close = d;
+                }
             }
             if f == next_level {
                 let d = stacked_opening(i, next_level);
-                if d > max_open { max_open = d; }
+                if d > max_open {
+                    max_open = d;
+                }
             }
         }
 
         if boundary_after < sg_y_extras.len() {
-            sg_y_extras[boundary_after] = max_close * SUBGRAPH_V_PAD_BOTTOM
-                + max_open * SUBGRAPH_V_PAD_TOP;
+            sg_y_extras[boundary_after] =
+                max_close * SUBGRAPH_V_PAD_BOTTOM + max_open * SUBGRAPH_V_PAD_TOP;
         }
     }
 
@@ -1992,10 +2173,14 @@ fn compute_sg_y_extras(
     let mut max_close_at_end = 0usize;
     for i in 0..sg_count {
         let (f, l) = sg_ranges[i];
-        if f == usize::MAX { continue; }
+        if f == usize::MAX {
+            continue;
+        }
         if l == max_level {
             let d = stacked_closing(i, max_level);
-            if d > max_close_at_end { max_close_at_end = d; }
+            if d > max_close_at_end {
+                max_close_at_end = d;
+            }
         }
     }
     let trailing_extra = max_close_at_end * SUBGRAPH_V_PAD_BOTTOM;
@@ -2018,7 +2203,9 @@ fn compute_sg_bounding_boxes(
     builder: &mut LayoutIRArenaBuilder<'_>,
 ) {
     let sg_count = graph.subgraph_count();
-    if sg_count == 0 { return; }
+    if sg_count == 0 {
+        return;
+    }
 
     // Pass 1: compute node envelope per subgraph
     // Also track max level per subgraph for routing floor lookup
@@ -2029,8 +2216,12 @@ fn compute_sg_bounding_boxes(
 
     for node_idx in 0..graph.node_count() {
         if let Some(sg_idx) = graph.node_subgraph(node_idx) {
-            if sg_idx >= sg_count { continue; }
-            if node_idx >= real_coords.len() { continue; }
+            if sg_idx >= sg_count {
+                continue;
+            }
+            if node_idx >= real_coords.len() {
+                continue;
+            }
             let (level, _, x, width) = real_coords[node_idx];
             let y = level_y_offsets.get(level).copied().unwrap_or(0);
             let node_max_y = y + 1;
@@ -2041,17 +2232,27 @@ fn compute_sg_bounding_boxes(
             }
 
             let (ref mut min_x, ref mut min_y, ref mut max_x, ref mut max_y) = sg_envelopes[sg_idx];
-            if x < *min_x { *min_x = x; }
-            if y < *min_y { *min_y = y; }
-            if node_max_x > *max_x { *max_x = node_max_x; }
-            if node_max_y > *max_y { *max_y = node_max_y; }
+            if x < *min_x {
+                *min_x = x;
+            }
+            if y < *min_y {
+                *min_y = y;
+            }
+            if node_max_x > *max_x {
+                *max_x = node_max_x;
+            }
+            if node_max_y > *max_y {
+                *max_y = node_max_y;
+            }
         }
     }
 
     // Pass 1.5: Convert envelopes to padded bboxes
     for sg_idx in 0..sg_count {
         let (min_x, min_y, max_x, max_y) = sg_envelopes[sg_idx];
-        if min_x == usize::MAX { continue; } // no nodes
+        if min_x == usize::MAX {
+            continue;
+        } // no nodes
 
         let x = min_x.saturating_sub(SUBGRAPH_H_PAD);
         let y = min_y.saturating_sub(SUBGRAPH_V_PAD_TOP);
@@ -2076,7 +2277,11 @@ fn compute_sg_bounding_boxes(
         let label = graph.subgraph_label(sg_idx);
         let min_label_width = label.len() + 4;
         let width = right.saturating_sub(x);
-        let right = if width < min_label_width { x + min_label_width } else { right };
+        let right = if width < min_label_width {
+            x + min_label_width
+        } else {
+            right
+        };
 
         sg_envelopes[sg_idx] = (x, y, right, bottom);
     }
@@ -2086,7 +2291,9 @@ fn compute_sg_bounding_boxes(
     // Use simple bubble iteration (sg_count is small)
     let mut order = [0usize; 64];
     let effective_sg = sg_count.min(64);
-    for i in 0..effective_sg { order[i] = i; }
+    for i in 0..effective_sg {
+        order[i] = i;
+    }
     // Sort by depth descending (simple insertion sort for small N)
     for i in 1..effective_sg {
         let mut j = i;
@@ -2099,9 +2306,13 @@ fn compute_sg_bounding_boxes(
     for oi in 0..effective_sg {
         let sg_idx = order[oi];
         if let Some(parent_idx) = graph.subgraph_parent(sg_idx) {
-            if parent_idx >= sg_count { continue; }
+            if parent_idx >= sg_count {
+                continue;
+            }
             let (cx, cy, cr, cb) = sg_envelopes[sg_idx];
-            if cx == usize::MAX { continue; }
+            if cx == usize::MAX {
+                continue;
+            }
             let expanded = (
                 cx.saturating_sub(SUBGRAPH_H_PAD),
                 cy.saturating_sub(SUBGRAPH_V_PAD_TOP),
@@ -2110,12 +2321,23 @@ fn compute_sg_bounding_boxes(
             );
             let (ref mut px, ref mut py, ref mut pr, ref mut pb) = sg_envelopes[parent_idx];
             if *px == usize::MAX {
-                *px = expanded.0; *py = expanded.1; *pr = expanded.2; *pb = expanded.3;
+                *px = expanded.0;
+                *py = expanded.1;
+                *pr = expanded.2;
+                *pb = expanded.3;
             } else {
-                if expanded.0 < *px { *px = expanded.0; }
-                if expanded.1 < *py { *py = expanded.1; }
-                if expanded.2 > *pr { *pr = expanded.2; }
-                if expanded.3 > *pb { *pb = expanded.3; }
+                if expanded.0 < *px {
+                    *px = expanded.0;
+                }
+                if expanded.1 < *py {
+                    *py = expanded.1;
+                }
+                if expanded.2 > *pr {
+                    *pr = expanded.2;
+                }
+                if expanded.3 > *pb {
+                    *pb = expanded.3;
+                }
             }
         }
     }
@@ -2126,7 +2348,9 @@ fn compute_sg_bounding_boxes(
     if has_routing {
         for sg_idx in 0..effective_sg {
             let (x, y, right, bottom) = sg_envelopes[sg_idx];
-            if x == usize::MAX { continue; }
+            if x == usize::MAX {
+                continue;
+            }
             let mut new_y = y;
             let mut new_bottom = bottom;
 
@@ -2158,7 +2382,9 @@ fn compute_sg_bounding_boxes(
     // Add subgraph bounding boxes to builder
     for sg_idx in 0..effective_sg {
         let (x, y, right, bottom) = sg_envelopes[sg_idx];
-        if x == usize::MAX { continue; }
+        if x == usize::MAX {
+            continue;
+        }
         let width = right.saturating_sub(x);
         let height = bottom.saturating_sub(y);
         let sg_id = graph.subgraph_id(sg_idx);
@@ -2181,7 +2407,9 @@ fn calculate_levels_csr(graph: &CsrGraph<'_>, levels: &mut [Idx], back_edges: &[
 
         for (ei, (from, to)) in graph.edges_iter().enumerate() {
             // Skip self-loops
-            if from == to { continue; }
+            if from == to {
+                continue;
+            }
             // For back edges, flip direction so cycles don't prevent convergence
             let is_back = back_edges.get(ei).copied().unwrap_or(false);
             let (src, dst) = if is_back { (to, from) } else { (from, to) };
@@ -2507,7 +2735,9 @@ fn reduce_crossings_csr(
     level_vdummy_counts: &[Idx],
 ) {
     // One-time init: positions is alloc_raw_uninit, fill with sentinel
-    for p in positions.iter_mut() { *p = Idx::MAX; }
+    for p in positions.iter_mut() {
+        *p = Idx::MAX;
+    }
 
     for reducer in crossing_pipeline {
         match reducer {
@@ -2516,16 +2746,30 @@ fn reduce_crossings_csr(
                     // Top-down pass
                     for level in 1..=max_level {
                         median_reorder_csr_level(
-                            graph, vlevel_offsets, vnode_data, edge_indices,
-                            level, level - 1, true, medians, positions,
+                            graph,
+                            vlevel_offsets,
+                            vnode_data,
+                            edge_indices,
+                            level,
+                            level - 1,
+                            true,
+                            medians,
+                            positions,
                             level_vdummy_counts,
                         );
                     }
                     // Bottom-up pass
                     for level in (0..max_level).rev() {
                         median_reorder_csr_level(
-                            graph, vlevel_offsets, vnode_data, edge_indices,
-                            level, level + 1, false, medians, positions,
+                            graph,
+                            vlevel_offsets,
+                            vnode_data,
+                            edge_indices,
+                            level,
+                            level + 1,
+                            false,
+                            medians,
+                            positions,
                             level_vdummy_counts,
                         );
                     }
@@ -2535,15 +2779,27 @@ fn reduce_crossings_csr(
                 for _ in 0..*passes {
                     for level in 1..=max_level {
                         adjacent_exchange_csr_level(
-                            graph, vlevel_offsets, vnode_data, edge_indices,
-                            level, level - 1, true, positions,
+                            graph,
+                            vlevel_offsets,
+                            vnode_data,
+                            edge_indices,
+                            level,
+                            level - 1,
+                            true,
+                            positions,
                             level_vdummy_counts,
                         );
                     }
                     for level in (0..max_level).rev() {
                         adjacent_exchange_csr_level(
-                            graph, vlevel_offsets, vnode_data, edge_indices,
-                            level, level + 1, false, positions,
+                            graph,
+                            vlevel_offsets,
+                            vnode_data,
+                            edge_indices,
+                            level,
+                            level + 1,
+                            false,
+                            positions,
                             level_vdummy_counts,
                         );
                     }
@@ -2570,13 +2826,15 @@ fn median_reorder_csr_level(
     let cur_start = vlevel_offsets[level] as usize;
     let cur_end = vlevel_offsets[level + 1] as usize;
     let count = cur_end - cur_start;
-    if count < 2 { return; }
+    if count < 2 {
+        return;
+    }
 
     let adj_start = vlevel_offsets[adj_level] as usize;
     let adj_end = vlevel_offsets[adj_level + 1] as usize;
 
-    let adj_has_dummies = adj_level < level_vdummy_counts.len()
-        && level_vdummy_counts[adj_level] > 0;
+    let adj_has_dummies =
+        adj_level < level_vdummy_counts.len() && level_vdummy_counts[adj_level] > 0;
 
     // Build position map for real nodes in adjacent level (sparse-clear optimized)
     let adj_size = adj_end - adj_start;
@@ -2585,10 +2843,14 @@ fn median_reorder_csr_level(
     let use_sparse_clear = adj_size <= 512;
 
     if !use_sparse_clear {
-        for p in positions.iter_mut() { *p = Idx::MAX; }
+        for p in positions.iter_mut() {
+            *p = Idx::MAX;
+        }
     }
     for adj_pos in adj_start..adj_end {
-        if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+        if adj_pos * 2 + 1 >= vnode_data.len() {
+            break;
+        }
         if vnode_data[adj_pos * 2] == 0 {
             let node_idx = vnode_data[adj_pos * 2 + 1] as usize;
             if node_idx < positions.len() {
@@ -2630,7 +2892,9 @@ fn median_reorder_csr_level(
             }
             if adj_has_dummies {
                 for adj_pos in adj_start..adj_end {
-                    if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+                    if adj_pos * 2 + 1 >= vnode_data.len() {
+                        break;
+                    }
                     if vnode_data[adj_pos * 2] == 1 {
                         let eidx = vnode_data[adj_pos * 2 + 1] as usize;
                         if eidx < edge_indices.len() {
@@ -2649,8 +2913,7 @@ fn median_reorder_csr_level(
             // Dummy node
             let (from_idx, to_idx) = edge_indices[vidx];
             for &endpoint in &[from_idx as usize, to_idx as usize] {
-                if endpoint < positions.len() && positions[endpoint] != Idx::MAX
-                    && neigh_count < 16
+                if endpoint < positions.len() && positions[endpoint] != Idx::MAX && neigh_count < 16
                 {
                     neigh[neigh_count] = positions[endpoint] as usize;
                     neigh_count += 1;
@@ -2658,7 +2921,9 @@ fn median_reorder_csr_level(
             }
             if adj_has_dummies {
                 for adj_pos in adj_start..adj_end {
-                    if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+                    if adj_pos * 2 + 1 >= vnode_data.len() {
+                        break;
+                    }
                     if vnode_data[adj_pos * 2] == 1
                         && vnode_data[adj_pos * 2 + 1] as usize == vidx
                         && neigh_count < 16
@@ -2729,10 +2994,12 @@ fn adjacent_exchange_csr_level(
     let cur_start = vlevel_offsets[level] as usize;
     let cur_end = vlevel_offsets[level + 1] as usize;
     let count = cur_end - cur_start;
-    if count < 2 { return; }
+    if count < 2 {
+        return;
+    }
 
-    let adj_has_dummies = adj_level < level_vdummy_counts.len()
-        && level_vdummy_counts[adj_level] > 0;
+    let adj_has_dummies =
+        adj_level < level_vdummy_counts.len() && level_vdummy_counts[adj_level] > 0;
 
     let adj_start = vlevel_offsets[adj_level] as usize;
     let adj_end = vlevel_offsets[adj_level + 1] as usize;
@@ -2744,10 +3011,14 @@ fn adjacent_exchange_csr_level(
     let use_sparse_clear = adj_size <= 512;
 
     if !use_sparse_clear {
-        for p in positions.iter_mut() { *p = Idx::MAX; }
+        for p in positions.iter_mut() {
+            *p = Idx::MAX;
+        }
     }
     for adj_pos in adj_start..adj_end {
-        if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+        if adj_pos * 2 + 1 >= vnode_data.len() {
+            break;
+        }
         if vnode_data[adj_pos * 2] == 0 {
             let node_idx = vnode_data[adj_pos * 2 + 1] as usize;
             if node_idx < positions.len() {
@@ -2774,22 +3045,41 @@ fn adjacent_exchange_csr_level(
         let mut v_count = 0;
 
         gather_csr_neighbours(
-            graph, vnode_data, edge_indices, positions,
-            u_pos, adj_start, adj_end, use_parents, adj_has_dummies,
-            &mut u_neigh, &mut u_count,
+            graph,
+            vnode_data,
+            edge_indices,
+            positions,
+            u_pos,
+            adj_start,
+            adj_end,
+            use_parents,
+            adj_has_dummies,
+            &mut u_neigh,
+            &mut u_count,
         );
         gather_csr_neighbours(
-            graph, vnode_data, edge_indices, positions,
-            v_pos, adj_start, adj_end, use_parents, adj_has_dummies,
-            &mut v_neigh, &mut v_count,
+            graph,
+            vnode_data,
+            edge_indices,
+            positions,
+            v_pos,
+            adj_start,
+            adj_end,
+            use_parents,
+            adj_has_dummies,
+            &mut v_neigh,
+            &mut v_count,
         );
 
         let mut cross_uv: usize = 0;
         let mut cross_vu: usize = 0;
         for &a in &u_neigh[..u_count] {
             for &b in &v_neigh[..v_count] {
-                if a > b { cross_uv += 1; }
-                else if a < b { cross_vu += 1; }
+                if a > b {
+                    cross_uv += 1;
+                } else if a < b {
+                    cross_vu += 1;
+                }
             }
         }
 
@@ -2846,13 +3136,14 @@ fn gather_csr_neighbours(
         }
         if adj_has_dummies {
             for adj_pos in adj_start..adj_end {
-                if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+                if adj_pos * 2 + 1 >= vnode_data.len() {
+                    break;
+                }
                 if vnode_data[adj_pos * 2] == 1 {
                     let eidx = vnode_data[adj_pos * 2 + 1] as usize;
                     if eidx < edge_indices.len() {
                         let (from_idx, to_idx) = edge_indices[eidx];
-                        if (from_idx as usize == vidx || to_idx as usize == vidx)
-                            && *out_count < 16
+                        if (from_idx as usize == vidx || to_idx as usize == vidx) && *out_count < 16
                         {
                             out[*out_count] = (adj_pos - adj_start) as usize;
                             *out_count += 1;
@@ -2865,16 +3156,16 @@ fn gather_csr_neighbours(
         // Dummy node
         let (from_idx, to_idx) = edge_indices[vidx];
         for &endpoint in &[from_idx as usize, to_idx as usize] {
-            if endpoint < positions.len() && positions[endpoint] != Idx::MAX
-                && *out_count < 16
-            {
+            if endpoint < positions.len() && positions[endpoint] != Idx::MAX && *out_count < 16 {
                 out[*out_count] = positions[endpoint] as usize;
                 *out_count += 1;
             }
         }
         if adj_has_dummies {
             for adj_pos in adj_start..adj_end {
-                if adj_pos * 2 + 1 >= vnode_data.len() { break; }
+                if adj_pos * 2 + 1 >= vnode_data.len() {
+                    break;
+                }
                 if vnode_data[adj_pos * 2] == 1
                     && vnode_data[adj_pos * 2 + 1] as usize == vidx
                     && *out_count < 16
@@ -2912,11 +3203,15 @@ impl<'a> Graph<'a> {
             #[cfg(feature = "std")]
             {
                 let mut levels = vec![0u32; node_count];
-                let edge_idx: alloc::vec::Vec<(usize, usize)> = self.edges.iter().map(|&(from_id, to_id, _)| {
-                    let fi = self.node_index(from_id).unwrap_or(usize::MAX);
-                    let ti = self.node_index(to_id).unwrap_or(usize::MAX);
-                    (fi, ti)
-                }).collect();
+                let edge_idx: alloc::vec::Vec<(usize, usize)> = self
+                    .edges
+                    .iter()
+                    .map(|&(from_id, to_id, _)| {
+                        let fi = self.node_index(from_id).unwrap_or(usize::MAX);
+                        let ti = self.node_index(to_id).unwrap_or(usize::MAX);
+                        (fi, ti)
+                    })
+                    .collect();
                 let mut changed = true;
                 let mut passes = 0;
                 while changed && passes < node_count {
@@ -3106,7 +3401,10 @@ mod tests {
 
         let ir = ir.unwrap();
         assert_eq!(ir.node_count(), 3);
-        assert!(ir.edge_count() >= 2, "should have at least 2 edges (self-loops skipped)");
+        assert!(
+            ir.edge_count() >= 2,
+            "should have at least 2 edges (self-loops skipped)"
+        );
 
         // Check that the reversed edge is marked
         let mut found_reversed = false;
@@ -3115,7 +3413,10 @@ mod tests {
                 found_reversed = true;
             }
         }
-        assert!(found_reversed, "cyclic graph should have at least one reversed edge");
+        assert!(
+            found_reversed,
+            "cyclic graph should have at least one reversed edge"
+        );
     }
 
     #[test]
@@ -3148,9 +3449,11 @@ mod tests {
         // Diamond: A→B, A→C, B→D, C→D, plus back edge D→A
         let mut graph_buf = [0u8; 16384];
         let mut graph_arena = Arena::new(&mut graph_buf);
-        let graph = build_csr_graph(&mut graph_arena, 4, &[
-            (0, 1), (0, 2), (1, 3), (2, 3), (3, 0),
-        ]);
+        let graph = build_csr_graph(
+            &mut graph_arena,
+            4,
+            &[(0, 1), (0, 2), (1, 3), (2, 3), (3, 0)],
+        );
 
         let config = LayoutConfig::standard();
         let mut temp_buf = [0u8; 65536];
@@ -3239,11 +3542,17 @@ mod tests {
         // The two edges should be offset from each other (not overlapping)
         let e0 = ir.edge(0);
         let e1 = ir.edge(1);
-        assert_ne!(e0.from_x, e1.from_x, "2-node cycle edges must not share the same column");
+        assert_ne!(
+            e0.from_x, e1.from_x,
+            "2-node cycle edges must not share the same column"
+        );
 
         // The forward edge should be left of the back-edge
         let (fwd, bck) = if e0.reversed { (e1, e0) } else { (e0, e1) };
-        assert!(fwd.from_x < bck.from_x, "forward edge should be left of back-edge");
+        assert!(
+            fwd.from_x < bck.from_x,
+            "forward edge should be left of back-edge"
+        );
 
         // Rendering should succeed
         let mut render_buf = vec![0u8; 4096];
@@ -3282,10 +3591,18 @@ mod tests {
         let mut render_buf = vec![0u8; 4096];
         let mut line_buf = vec![' '; 256];
         let mut scratch_buf = vec![0usize; 256];
-        let len = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf).unwrap();
+        let len = ir
+            .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf)
+            .unwrap();
         let output = core::str::from_utf8(&render_buf[..len]).unwrap();
-        assert!(output.contains('↺'), "rendered output should contain self-loop indicator ↺");
-        assert!(output.contains("[Loop]↺"), "↺ should appear right after the node bracket");
+        assert!(
+            output.contains('↺'),
+            "rendered output should contain self-loop indicator ↺"
+        );
+        assert!(
+            output.contains("[Loop]↺"),
+            "↺ should appear right after the node bracket"
+        );
     }
 
     #[test]
@@ -3327,7 +3644,9 @@ mod tests {
         let mut render_buf = vec![0u8; 8192];
         let mut line_buf = vec![' '; 256];
         let mut scratch_buf = vec![0usize; 256];
-        let len = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf).unwrap();
+        let len = ir
+            .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf)
+            .unwrap();
         let output = core::str::from_utf8(&render_buf[..len]).unwrap();
 
         // Should contain all node labels
@@ -3337,13 +3656,19 @@ mod tests {
         assert!(output.contains("[Merge]"));
         // Should contain arrow indicators and edge corners
         assert!(output.contains('↓'), "should contain down arrows");
-        assert!(output.contains('┌') || output.contains('└'),
-            "should contain corner characters for non-vertical edges");
+        assert!(
+            output.contains('┌') || output.contains('└'),
+            "should contain corner characters for non-vertical edges"
+        );
 
         // Count the total height: geometry-aware should produce compact output
         let line_count = output.lines().count();
         // Diamond with 4 nodes should be at most ~10 lines with compressed slots
-        assert!(line_count <= 12, "layout should be compact: got {} lines", line_count);
+        assert!(
+            line_count <= 12,
+            "layout should be compact: got {} lines",
+            line_count
+        );
     }
 
     #[test]
@@ -3353,9 +3678,8 @@ mod tests {
         let mut arena = Arena::new(&mut buf);
         let sg_label_bytes = 7; // "cluster"
         let label_bytes = 4 + sg_label_bytes; // A+B node labels + sg label
-        let mut builder = CsrGraphBuilder::new_with_subgraphs(
-            &mut arena, 2, 1, label_bytes, 1,
-        ).expect("builder");
+        let mut builder =
+            CsrGraphBuilder::new_with_subgraphs(&mut arena, 2, 1, label_bytes, 1).expect("builder");
         builder.add_node(0, "A");
         builder.add_node(1, "B");
         builder.add_edge(0, 1);
@@ -3387,7 +3711,8 @@ mod tests {
         let mut render_buf = vec![0u8; out_size];
         let mut line_buf = vec![' '; ir.width()];
         let mut scratch = vec![0usize; scratch_size];
-        let bytes = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
+        let bytes = ir
+            .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
             .expect("render");
         let output = core::str::from_utf8(&render_buf[..bytes]).expect("utf8");
 
@@ -3465,7 +3790,8 @@ mod tests {
         let mut render_buf = vec![0u8; out_size];
         let mut line_buf = vec![' '; ir.width()];
         let mut scratch = vec![0usize; scratch_size];
-        let bytes = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
+        let bytes = ir
+            .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
             .expect("render");
         let output = core::str::from_utf8(&render_buf[..bytes]).expect("utf8");
         assert!(output.contains("[A]"));

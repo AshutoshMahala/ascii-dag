@@ -107,7 +107,7 @@ pub fn char_direction_mask(c: char) -> u8 {
         TEE_RIGHT => DIR_UP | DIR_DOWN | DIR_RIGHT,
         CROSS => DIR_UP | DIR_DOWN | DIR_LEFT | DIR_RIGHT,
         ARROW_DOWN | ARROW_DOWN_DASHED => DIR_UP, // Arrow tip connects upward to the line above
-        ARROW_UP_DASHED => DIR_DOWN, // Upward arrow connects downward
+        ARROW_UP_DASHED => DIR_DOWN,              // Upward arrow connects downward
         _ => 0,
     }
 }

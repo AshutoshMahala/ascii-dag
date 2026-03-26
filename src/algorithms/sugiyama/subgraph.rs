@@ -20,9 +20,9 @@
 //! [`block_partition_level`] which the heap pipeline calls in place of
 //! its default ordering pass when subgraphs are present.
 
+use super::heap::VNode;
 use crate::graph::Graph;
 use crate::ir::SubgraphInfo;
-use super::heap::VNode;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -57,56 +57,6 @@ pub(crate) fn vnode_subgraph(dag: &Graph<'_>, vnode: &VNode) -> Option<usize> {
     }
 }
 
-/// Walk the subgraph ancestry chain for `sg_id` and return the nesting depth
-/// (0 → no subgraph, 1 → root-level subgraph, 2 → child of root, …).
-fn sg_chain_depth(dag: &Graph<'_>, sg_id: Option<usize>) -> usize {
-    let mut depth = 0usize;
-    let mut cur = sg_id;
-    while let Some(id) = cur {
-        depth += 1;
-        cur = dag.subgraphs.iter().find(|s| s.id == id).and_then(|s| s.parent_id);
-    }
-    depth
-}
-
-/// Build the full ancestry chain from `sg_id` up to the root (inclusive),
-/// with the root first (index 0) and the leaf last.
-fn sg_chain(dag: &Graph<'_>, sg_id: Option<usize>) -> Vec<usize> {
-    let mut chain = Vec::new();
-    let mut cur = sg_id;
-    while let Some(id) = cur {
-        chain.push(id);
-        cur = dag.subgraphs.iter().find(|s| s.id == id).and_then(|s| s.parent_id);
-    }
-    chain.reverse(); // root first
-    chain
-}
-
-/// Count the number of subgraph boundary exits and entries between two nodes.
-///
-/// For example, moving from a node in `[Root → A → X]` to a node in
-/// `[Root → B → Y]` crosses:
-///
-///   - 2 exits (leave X, leave A)
-///   - 2 entries (enter B, enter Y)
-///
-/// Returns `(exits, entries)`.
-fn count_boundary_exits_entries(dag: &Graph<'_>, prev_sg: Option<usize>, curr_sg: Option<usize>) -> (usize, usize) {
-    let prev_chain = sg_chain(dag, prev_sg);
-    let curr_chain = sg_chain(dag, curr_sg);
-
-    // Find the length of the shared common prefix
-    let common = prev_chain
-        .iter()
-        .zip(curr_chain.iter())
-        .take_while(|(a, b)| a == b)
-        .count();
-
-    let exits = prev_chain.len() - common;
-    let entries = curr_chain.len() - common;
-    (exits, entries)
-}
-
 // ── Block-partitioned crossing reduction ─────────────────────────────────
 
 /// Walk the subgraph ancestry to find the root ancestor (the one with no parent).
@@ -116,7 +66,11 @@ fn root_subgraph(dag: &Graph<'_>, sg_id: Option<usize>) -> Option<usize> {
     let mut root = sg_id;
     while let Some(id) = cur {
         root = cur;
-        cur = dag.subgraphs.iter().find(|s| s.id == id).and_then(|s| s.parent_id);
+        cur = dag
+            .subgraphs
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.parent_id);
     }
     root
 }
@@ -135,10 +89,7 @@ fn root_subgraph(dag: &Graph<'_>, sg_id: Option<usize>) -> Option<usize> {
 /// The caller runs the normal median/exchange reduction **within** each
 /// block, then calls this function to re-order blocks by their average
 /// position.
-pub(crate) fn block_partition_level(
-    dag: &Graph<'_>,
-    level: &[VNode],
-) -> Vec<VNode> {
+pub(crate) fn block_partition_level(dag: &Graph<'_>, level: &[VNode]) -> Vec<VNode> {
     if level.is_empty() {
         return Vec::new();
     }
@@ -305,7 +256,9 @@ pub(crate) fn fix_subgraph_overlaps(
     real_node_coords: &mut [(usize, usize, usize, usize)], // (level, pos, x, width)
 ) -> usize {
     let sg_count = dag.subgraphs.len();
-    if sg_count < 2 { return 0; }
+    if sg_count < 2 {
+        return 0;
+    }
 
     let sg_id_to_idx: HashMap<usize, usize> = dag
         .subgraphs
@@ -321,7 +274,11 @@ pub(crate) fn fix_subgraph_overlaps(
         let mut cur = sg.parent_id;
         while let Some(pid) = cur {
             d += 1;
-            cur = dag.subgraphs.iter().find(|s| s.id == pid).and_then(|s| s.parent_id);
+            cur = dag
+                .subgraphs
+                .iter()
+                .find(|s| s.id == pid)
+                .and_then(|s| s.parent_id);
         }
         depths[i] = d;
     }
@@ -350,22 +307,34 @@ pub(crate) fn fix_subgraph_overlaps(
             if node_idx < real_node_coords.len() {
                 let level = real_node_coords[node_idx].0;
                 let (ref mut min_l, ref mut max_l) = sg_level_range[sg_idx];
-                if level < *min_l { *min_l = level; }
-                if level > *max_l { *max_l = level; }
+                if level < *min_l {
+                    *min_l = level;
+                }
+                if level > *max_l {
+                    *max_l = level;
+                }
             }
         }
     }
     // Propagate child level ranges to parents (bottom-up)
     for depth in (0..=max_depth).rev() {
         for sg_idx in 0..sg_count {
-            if depths[sg_idx] != depth { continue; }
+            if depths[sg_idx] != depth {
+                continue;
+            }
             if let Some(parent_id) = dag.subgraphs[sg_idx].parent_id {
                 if let Some(&pidx) = sg_id_to_idx.get(&parent_id) {
                     let (cl, cr) = sg_level_range[sg_idx];
-                    if cl == usize::MAX { continue; }
+                    if cl == usize::MAX {
+                        continue;
+                    }
                     let (ref mut pl, ref mut pr) = sg_level_range[pidx];
-                    if cl < *pl { *pl = cl; }
-                    if cr > *pr { *pr = cr; }
+                    if cl < *pl {
+                        *pl = cl;
+                    }
+                    if cr > *pr {
+                        *pr = cr;
+                    }
                 }
             }
         }
@@ -376,7 +345,9 @@ pub(crate) fn fix_subgraph_overlaps(
         let mut envs: Vec<Option<(usize, usize)>> = vec![None; sg_count];
         for (node_idx, _) in dag.nodes.iter().enumerate() {
             if let Some(sg_idx) = node_sg[node_idx] {
-                if node_idx >= coords.len() { continue; }
+                if node_idx >= coords.len() {
+                    continue;
+                }
                 let (_, _, x, width) = coords[node_idx];
                 let right = x + width;
                 envs[sg_idx] = Some(match envs[sg_idx] {
@@ -391,7 +362,9 @@ pub(crate) fn fix_subgraph_overlaps(
         const PROP_GAP: usize = 1;
         for depth in (0..=max_depth).rev() {
             for sg_idx in 0..sg_count {
-                if depths[sg_idx] != depth { continue; }
+                if depths[sg_idx] != depth {
+                    continue;
+                }
                 if let Some(parent_id) = dag.subgraphs[sg_idx].parent_id {
                     if let Some(&pidx) = sg_id_to_idx.get(&parent_id) {
                         if let Some((cx, cr)) = envs[sg_idx] {
@@ -405,16 +378,23 @@ pub(crate) fn fix_subgraph_overlaps(
                 }
             }
         }
-        envs.iter().enumerate().map(|(sg_idx, env)| {
-            env.map(|(mn, mx)| {
-                let left = mn.saturating_sub(SUBGRAPH_H_PAD);
-                let right = mx + SUBGRAPH_H_PAD;
-                let label_w = dag.subgraphs[sg_idx].label.len() + 4;
-                let width = right.saturating_sub(left);
-                let right = if width < label_w { left + label_w } else { right };
-                (left, right)
+        envs.iter()
+            .enumerate()
+            .map(|(sg_idx, env)| {
+                env.map(|(mn, mx)| {
+                    let left = mn.saturating_sub(SUBGRAPH_H_PAD);
+                    let right = mx + SUBGRAPH_H_PAD;
+                    let label_w = dag.subgraphs[sg_idx].label.len() + 4;
+                    let width = right.saturating_sub(left);
+                    let right = if width < label_w {
+                        left + label_w
+                    } else {
+                        right
+                    };
+                    (left, right)
+                })
             })
-        }).collect()
+            .collect()
     };
 
     let mut total_extra = 0usize;
@@ -437,7 +417,9 @@ pub(crate) fn fix_subgraph_overlaps(
         let mut any_shifted = false;
 
         for siblings in parent_groups.values_mut() {
-            if siblings.len() < 2 { continue; }
+            if siblings.len() < 2 {
+                continue;
+            }
             siblings.sort_by_key(|&idx| bbox_x[idx].map(|(l, _)| l).unwrap_or(0));
 
             // Level-aware pairwise sweep: only enforce separation between
@@ -456,8 +438,7 @@ pub(crate) fn fix_subgraph_overlaps(
                     let mut eff_frontier = 0usize;
                     let mut has_level_overlap = false;
                     for &(_, prev_right, prev_min_l, prev_max_l) in &processed {
-                        let overlaps = prev_min_l <= cur_max_l
-                            && cur_min_l <= prev_max_l;
+                        let overlaps = prev_min_l <= cur_max_l && cur_min_l <= prev_max_l;
                         if overlaps && prev_right > eff_frontier {
                             eff_frontier = prev_right;
                             has_level_overlap = true;
@@ -467,8 +448,7 @@ pub(crate) fn fix_subgraph_overlaps(
                     if has_level_overlap && eff_frontier + SIBLING_GAP > left {
                         let shift = eff_frontier + SIBLING_GAP - left;
 
-                        let node_indices =
-                            collect_sg_node_indices(dag, sg_idx, &sg_id_to_idx);
+                        let node_indices = collect_sg_node_indices(dag, sg_idx, &sg_id_to_idx);
                         for &ni in &node_indices {
                             if ni < real_node_coords.len() {
                                 real_node_coords[ni].2 += shift;
@@ -485,7 +465,9 @@ pub(crate) fn fix_subgraph_overlaps(
             }
         }
 
-        if !any_shifted { break; }
+        if !any_shifted {
+            break;
+        }
 
         // After shifting subgraph nodes, fix per-level collisions.
         // Use a larger gap for nodes that belong to different subgraphs
@@ -495,7 +477,9 @@ pub(crate) fn fix_subgraph_overlaps(
         for level in 0..=max_level {
             let mut level_nodes: Vec<usize> = Vec::new();
             for (ni, &(lvl, _, _, _)) in real_node_coords.iter().enumerate() {
-                if lvl == level { level_nodes.push(ni); }
+                if lvl == level {
+                    level_nodes.push(ni);
+                }
             }
             level_nodes.sort_by_key(|&ni| real_node_coords[ni].2);
 
@@ -507,8 +491,7 @@ pub(crate) fn fix_subgraph_overlaps(
                     _ => false,
                 };
                 let gap = if need_sg_gap { cross_sg_gap } else { 3 };
-                let prev_right =
-                    real_node_coords[prev].2 + real_node_coords[prev].3 + gap;
+                let prev_right = real_node_coords[prev].2 + real_node_coords[prev].3 + gap;
                 if real_node_coords[curr].2 < prev_right {
                     real_node_coords[curr].2 = prev_right;
                 }
@@ -649,7 +632,8 @@ pub(crate) fn compute_level_y_extras(
     }
 
     // Initial offset: max stacked opening borders at level 0
-    let initial_open_depth = dag.subgraphs
+    let initial_open_depth = dag
+        .subgraphs
         .iter()
         .enumerate()
         .filter_map(|(i, _)| sg_ranges[i].as_ref().map(|r| (i, r)))
@@ -666,35 +650,34 @@ pub(crate) fn compute_level_y_extras(
         let next_level = boundary_after + 1;
 
         // Max stacked closing borders at boundary_after
-        let close_depth = dag.subgraphs
+        let close_depth = dag
+            .subgraphs
             .iter()
             .enumerate()
             .filter_map(|(i, _)| sg_ranges[i].as_ref().map(|r| (i, r)))
             .filter(|(_, (_, last))| *last == boundary_after)
-            .map(|(i, _)| {
-                stacked_borders_closing(dag, i, boundary_after, &sg_ranges)
-            })
+            .map(|(i, _)| stacked_borders_closing(dag, i, boundary_after, &sg_ranges))
             .max()
             .unwrap_or(0);
 
         // Max stacked opening borders at next_level
-        let open_depth = dag.subgraphs
+        let open_depth = dag
+            .subgraphs
             .iter()
             .enumerate()
             .filter_map(|(i, _)| sg_ranges[i].as_ref().map(|r| (i, r)))
             .filter(|(_, (first, _))| *first == next_level)
-            .map(|(i, _)| {
-                stacked_borders_opening(dag, i, next_level, &sg_ranges)
-            })
+            .map(|(i, _)| stacked_borders_opening(dag, i, next_level, &sg_ranges))
             .max()
             .unwrap_or(0);
 
-        extras[boundary_after] = close_depth * SUBGRAPH_V_PAD_BOTTOM
-            + open_depth * SUBGRAPH_V_PAD_TOP;
+        extras[boundary_after] =
+            close_depth * SUBGRAPH_V_PAD_BOTTOM + open_depth * SUBGRAPH_V_PAD_TOP;
     }
 
     // Trailing extra: space for subgraphs whose last member is at max_level
-    let trailing_close_depth = dag.subgraphs
+    let trailing_close_depth = dag
+        .subgraphs
         .iter()
         .enumerate()
         .filter_map(|(i, _)| sg_ranges[i].as_ref().map(|r| (i, r)))
@@ -783,7 +766,11 @@ pub(crate) fn compute_bounding_boxes<'a>(
         let mut current = sg.parent_id;
         while let Some(pid) = current {
             depth += 1;
-            current = dag.subgraphs.iter().find(|s| s.id == pid).and_then(|s| s.parent_id);
+            current = dag
+                .subgraphs
+                .iter()
+                .find(|s| s.id == pid)
+                .and_then(|s| s.parent_id);
         }
         depths[i] = depth;
     }

@@ -134,9 +134,9 @@ extern crate alloc;
 //   ir/             layout intermediate representation
 //   render/         ASCII / scanline renderers
 
-pub mod graph;
 pub mod algorithms;
 pub mod errors;
+pub mod graph;
 pub mod ir;
 pub mod render;
 pub mod validation;
@@ -144,21 +144,20 @@ pub mod validation;
 // ── Convenience re-exports (alloc-dependent) ────────────────────────────
 
 #[cfg(feature = "alloc")]
-pub use graph::{Graph, Subgraph};
-pub use graph::RenderMode;
-#[cfg(feature = "alloc")]
 pub use errors::Diagnostic;
 pub use errors::GraphError;
-pub use validation::Requirements;
+pub use graph::RenderMode;
+#[cfg(feature = "alloc")]
+pub use graph::{Graph, Subgraph};
+pub use ir::NodeKind;
 #[cfg(feature = "alloc")]
 pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};
-pub use ir::NodeKind;
+pub use validation::Requirements;
 // Primary config types (always available, no alloc needed)
 pub use algorithms::sugiyama::config::{
-    LayoutConfig, AlgorithmConfig, Routing,
-    CycleBreaking, Layering, Positioning,
+    AlgorithmConfig, CycleBreaking, Layering, LayoutConfig, Positioning, Routing,
 };
-pub use algorithms::sugiyama::crossing::{CrossingReducer, FAST, STANDARD, QUALITY};
+pub use algorithms::sugiyama::crossing::{CrossingReducer, FAST, QUALITY, STANDARD};
 
 // Legacy type (alloc-dependent, deprecated)
 #[cfg(feature = "alloc")]

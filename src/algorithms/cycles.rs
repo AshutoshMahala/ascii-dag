@@ -42,7 +42,7 @@ use alloc::{vec, vec::Vec};
 #[cfg(feature = "alloc")]
 const WHITE: u8 = 0; // Not yet visited
 #[cfg(feature = "alloc")]
-const GRAY: u8 = 1;  // On the current DFS stack (ancestor)
+const GRAY: u8 = 1; // On the current DFS stack (ancestor)
 #[cfg(feature = "alloc")]
 const BLACK: u8 = 2; // Fully processed
 
@@ -166,7 +166,7 @@ impl<'a> Graph<'a> {
                     *child_pos += 1;
 
                     match color[child_idx] {
-                        GRAY => return true,   // back edge → cycle
+                        GRAY => return true, // back edge → cycle
                         WHITE => {
                             color[child_idx] = GRAY;
                             stack.push((child_idx, 0));

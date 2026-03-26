@@ -85,8 +85,8 @@ fn run_heap() {
 
 #[cfg(feature = "arena")]
 fn run_csr() {
-    use ascii_dag::graph::arena::Arena;
     use ascii_dag::LayoutConfig;
+    use ascii_dag::graph::arena::Arena;
 
     // Helper: build CsrGraph from a Graph, layout via arena, render colored
     fn render_csr_colored(dag: &Graph, palette: Palette) {

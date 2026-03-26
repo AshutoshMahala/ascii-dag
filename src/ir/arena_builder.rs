@@ -1,7 +1,7 @@
 //! Builder for constructing [`LayoutIRArena`] from arena memory.
 
-use crate::graph::arena::Arena;
 use super::arena::{LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena};
+use crate::graph::arena::Arena;
 
 /// Builder for constructing LayoutIRArena from arena memory.
 pub struct LayoutIRArenaBuilder<'a> {
@@ -36,7 +36,15 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         max_label_bytes: usize,
         max_levels: usize,
     ) -> Option<Self> {
-        Self::new_with_subgraphs(arena, max_nodes, max_edges, max_waypoints, max_label_bytes, max_levels, 0)
+        Self::new_with_subgraphs(
+            arena,
+            max_nodes,
+            max_edges,
+            max_waypoints,
+            max_label_bytes,
+            max_levels,
+            0,
+        )
     }
 
     /// Create a new builder with subgraph support.
@@ -263,8 +271,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
                 return None;
             }
             let offset = self.label_offset;
-            self.labels[offset..offset + label_bytes.len()]
-                .copy_from_slice(label_bytes);
+            self.labels[offset..offset + label_bytes.len()].copy_from_slice(label_bytes);
             self.label_offset += label_bytes.len();
             (offset, label_bytes.len())
         } else {

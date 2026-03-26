@@ -43,13 +43,13 @@ pub enum RenderMode {
 
 // Everything below requires the `alloc` feature (Vec, String, HashMap).
 #[cfg(feature = "alloc")]
-use alloc::{vec, string::String, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 
+#[cfg(feature = "alloc")]
+use crate::algorithms::sugiyama::config::LayoutConfig;
 #[cfg(feature = "alloc")]
 #[allow(deprecated)]
 use crate::algorithms::sugiyama::config::SugiyamaConfig;
-#[cfg(feature = "alloc")]
-use crate::algorithms::sugiyama::config::LayoutConfig;
 #[cfg(feature = "alloc")]
 use crate::algorithms::sugiyama::crossing::CrossingReducer;
 #[cfg(feature = "alloc")]
@@ -130,10 +130,10 @@ pub struct Graph<'a> {
     pub(crate) node_heights: Vec<usize>,     // Cached node heights (1 = single-line)
     pub(crate) children: Vec<Vec<usize>>,    // Adjacency list: children[idx] = child indices
     pub(crate) parents: Vec<Vec<usize>>,     // Adjacency list: parents[idx] = parent indices
-    pub(crate) sugiyama_config: SugiyamaConfig,          // Full Sugiyama pipeline configuration
-    pub(crate) subgraphs: Vec<Subgraph<'a>>,             // Named clusters
-    pub(crate) node_subgraph: HashMap<usize, usize>,     // node_id → subgraph_id
-    pub(crate) next_subgraph_id: usize,                  // Monotonic ID counter
+    pub(crate) sugiyama_config: SugiyamaConfig, // Full Sugiyama pipeline configuration
+    pub(crate) subgraphs: Vec<Subgraph<'a>>, // Named clusters
+    pub(crate) node_subgraph: HashMap<usize, usize>, // node_id → subgraph_id
+    pub(crate) next_subgraph_id: usize,      // Monotonic ID counter
 }
 
 #[cfg(feature = "alloc")]
@@ -791,10 +791,7 @@ impl<'a> Graph<'a> {
     ///
     /// let ir = dag.compute_layout_with_config(&LayoutConfig::quality());
     /// ```
-    pub fn compute_layout_with_config(
-        &self,
-        config: &LayoutConfig<'_>,
-    ) -> crate::ir::LayoutIR<'a> {
+    pub fn compute_layout_with_config(&self, config: &LayoutConfig<'_>) -> crate::ir::LayoutIR<'a> {
         let mut dag = self.clone();
         dag.render_mode = config.render_mode;
         crate::algorithms::sugiyama::heap::compute_layout_cfg(&dag, config)
@@ -817,7 +814,10 @@ impl<'a> Graph<'a> {
     ///
     /// let ir = dag.compute_layout_with(&SugiyamaConfig::quality());
     /// ```
-    #[deprecated(since = "0.9.0", note = "use compute_layout_with_config(&LayoutConfig) instead")]
+    #[deprecated(
+        since = "0.9.0",
+        note = "use compute_layout_with_config(&LayoutConfig) instead"
+    )]
     pub fn compute_layout_with(
         &self,
         config: &crate::algorithms::sugiyama::config::SugiyamaConfig,
@@ -872,7 +872,10 @@ impl<'a> Graph<'a> {
     /// assert_eq!(g.node_subgraph(1), Some(sg));
     /// ```
     pub fn put_nodes<'g>(&'g mut self, node_ids: &'g [usize]) -> NodePlacer<'g, 'a> {
-        NodePlacer { graph: self, node_ids }
+        NodePlacer {
+            graph: self,
+            node_ids,
+        }
     }
 
     /// Start a fluent builder to nest subgraphs inside a parent.
@@ -892,7 +895,10 @@ impl<'a> Graph<'a> {
     /// g.put_subgraphs(&[inner]).inside(outer).unwrap();
     /// ```
     pub fn put_subgraphs<'g>(&'g mut self, sg_ids: &'g [usize]) -> SubgraphPlacer<'g, 'a> {
-        SubgraphPlacer { graph: self, sg_ids }
+        SubgraphPlacer {
+            graph: self,
+            sg_ids,
+        }
     }
 
     /// Number of subgraphs defined on this graph.
@@ -936,7 +942,11 @@ impl<'a> Graph<'a> {
             if id == ancestor {
                 return true;
             }
-            current = self.subgraphs.iter().find(|s| s.id == id).and_then(|s| s.parent_id);
+            current = self
+                .subgraphs
+                .iter()
+                .find(|s| s.id == id)
+                .and_then(|s| s.parent_id);
         }
         false
     }
@@ -1195,12 +1205,30 @@ mod tests {
         let ir = g.compute_layout();
         assert_eq!(ir.subgraphs().len(), 2);
 
-        let parent = ir.subgraphs().iter().find(|s| s.label == "Backend").unwrap();
-        let child = ir.subgraphs().iter().find(|s| s.label == "Database").unwrap();
+        let parent = ir
+            .subgraphs()
+            .iter()
+            .find(|s| s.label == "Backend")
+            .unwrap();
+        let child = ir
+            .subgraphs()
+            .iter()
+            .find(|s| s.label == "Database")
+            .unwrap();
 
         // Child must be fully contained within parent
-        assert!(child.x >= parent.x, "child.x={} < parent.x={}", child.x, parent.x);
-        assert!(child.y >= parent.y, "child.y={} < parent.y={}", child.y, parent.y);
+        assert!(
+            child.x >= parent.x,
+            "child.x={} < parent.x={}",
+            child.x,
+            parent.x
+        );
+        assert!(
+            child.y >= parent.y,
+            "child.y={} < parent.y={}",
+            child.y,
+            parent.y
+        );
         assert!(
             child.x + child.width <= parent.x + parent.width,
             "child right edge {} > parent right edge {}",

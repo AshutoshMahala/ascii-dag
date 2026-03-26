@@ -40,12 +40,17 @@ fn example_simple_cluster() {
     g.add_edge(1, 2, None);
 
     let backend = g.add_subgraph("Backend");
-    g.put_nodes(&[1, 2]).inside(backend).expect("place nodes in Backend");
+    g.put_nodes(&[1, 2])
+        .inside(backend)
+        .expect("place nodes in Backend");
 
     let ir = g.compute_layout();
     println!("   {} subgraph(s) in IR", ir.subgraphs().len());
     for sg in ir.subgraphs() {
-        println!("   {:?} at ({},{}) {}×{}", sg.label, sg.x, sg.y, sg.width, sg.height);
+        println!(
+            "   {:?} at ({},{}) {}×{}",
+            sg.label, sg.x, sg.y, sg.width, sg.height
+        );
     }
     println!();
     println!("{}", ir.render_scanline());
@@ -66,8 +71,12 @@ fn example_two_clusters() {
 
     let fe = g.add_subgraph("Frontend");
     let be = g.add_subgraph("Backend");
-    g.put_nodes(&[1]).inside(fe).expect("place React in Frontend");
-    g.put_nodes(&[2, 3]).inside(be).expect("place nodes in Backend");
+    g.put_nodes(&[1])
+        .inside(fe)
+        .expect("place React in Frontend");
+    g.put_nodes(&[2, 3])
+        .inside(be)
+        .expect("place nodes in Backend");
 
     let ir = g.compute_layout();
     println!("   {} subgraph(s) in IR", ir.subgraphs().len());
@@ -90,13 +99,22 @@ fn example_nested_clusters() {
 
     let be = g.add_subgraph("Backend");
     let db = g.add_subgraph("Database");
-    g.put_nodes(&[1, 2, 3]).inside(be).expect("place nodes in Backend");
-    g.put_nodes(&[3]).inside(db).expect("place Postgres in Database");
-    g.put_subgraphs(&[db]).inside(be).expect("nest Database in Backend");
+    g.put_nodes(&[1, 2, 3])
+        .inside(be)
+        .expect("place nodes in Backend");
+    g.put_nodes(&[3])
+        .inside(db)
+        .expect("place Postgres in Database");
+    g.put_subgraphs(&[db])
+        .inside(be)
+        .expect("nest Database in Backend");
 
     let ir = g.compute_layout();
     for sg in ir.subgraphs() {
-        println!("   {:?} parent={:?} at ({},{}) {}×{}", sg.label, sg.parent_id, sg.x, sg.y, sg.width, sg.height);
+        println!(
+            "   {:?} parent={:?} at ({},{}) {}×{}",
+            sg.label, sg.parent_id, sg.x, sg.y, sg.width, sg.height
+        );
     }
     println!();
     println!("{}", ir.render_scanline());
@@ -171,23 +189,40 @@ fn example_horizontal_siblings() {
     let order_svc = g.add_subgraph("OrderService");
     let order_api = g.add_subgraph("API");
     let order_data = g.add_subgraph("Data");
-    g.put_subgraphs(&[order_api, order_data]).inside(order_svc).expect("nest in OrderService");
-    g.put_nodes(&[10, 11]).inside(order_api).expect("place order API nodes");
-    g.put_nodes(&[12]).inside(order_data).expect("place OrderDB");
+    g.put_subgraphs(&[order_api, order_data])
+        .inside(order_svc)
+        .expect("nest in OrderService");
+    g.put_nodes(&[10, 11])
+        .inside(order_api)
+        .expect("place order API nodes");
+    g.put_nodes(&[12])
+        .inside(order_data)
+        .expect("place OrderDB");
 
     let pay_svc = g.add_subgraph("PaymentService");
     let pay_proc = g.add_subgraph("Processing");
     let pay_store = g.add_subgraph("Storage");
-    g.put_subgraphs(&[pay_proc, pay_store]).inside(pay_svc).expect("nest in PaymentService");
-    g.put_nodes(&[20, 21]).inside(pay_proc).expect("place payment proc nodes");
-    g.put_nodes(&[22]).inside(pay_store).expect("place PaymentDB");
+    g.put_subgraphs(&[pay_proc, pay_store])
+        .inside(pay_svc)
+        .expect("nest in PaymentService");
+    g.put_nodes(&[20, 21])
+        .inside(pay_proc)
+        .expect("place payment proc nodes");
+    g.put_nodes(&[22])
+        .inside(pay_store)
+        .expect("place PaymentDB");
 
     let monitoring = g.add_subgraph("Monitoring");
-    g.put_nodes(&[30, 31]).inside(monitoring).expect("place monitoring nodes");
+    g.put_nodes(&[30, 31])
+        .inside(monitoring)
+        .expect("place monitoring nodes");
 
     let ir = g.compute_layout();
     for sg in ir.subgraphs() {
-        println!("   {:?} parent={:?} at ({},{}) {}×{}", sg.label, sg.parent_id, sg.x, sg.y, sg.width, sg.height);
+        println!(
+            "   {:?} parent={:?} at ({},{}) {}×{}",
+            sg.label, sg.parent_id, sg.x, sg.y, sg.width, sg.height
+        );
     }
     println!();
     println!("{}", ir.render_scanline());
@@ -197,8 +232,8 @@ fn example_horizontal_siblings() {
 // ── CSR Mode ────────────────────────────────────────────────────────────
 
 fn run_csr() {
-    use ascii_dag::graph::arena::Arena;
     use ascii_dag::LayoutConfig;
+    use ascii_dag::graph::arena::Arena;
 
     /// Helper: convert Graph to CSR, lay out, and render via arena pipeline.
     fn render_csr(dag: &Graph) {
@@ -223,8 +258,15 @@ fn run_csr() {
             println!(
                 "   id={} parent={} at ({},{}) {}×{}",
                 sg.id,
-                if sg.parent_idx == usize::MAX { "none".to_string() } else { sg.parent_idx.to_string() },
-                sg.x, sg.y, sg.width, sg.height,
+                if sg.parent_idx == usize::MAX {
+                    "none".to_string()
+                } else {
+                    sg.parent_idx.to_string()
+                },
+                sg.x,
+                sg.y,
+                sg.width,
+                sg.height,
             );
         }
         println!();
@@ -237,10 +279,9 @@ fn run_csr() {
 
         if let Some(len) =
             ir.render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
+            && let Ok(s) = std::str::from_utf8(&render_buffer[..len])
         {
-            if let Ok(s) = std::str::from_utf8(&render_buffer[..len]) {
-                println!("{}\n", s);
-            }
+            println!("{}\n", s);
         }
     }
 
@@ -339,19 +380,33 @@ fn run_csr() {
         let order_svc = g.add_subgraph("OrderService");
         let order_api = g.add_subgraph("API");
         let order_data = g.add_subgraph("Data");
-        g.put_subgraphs(&[order_api, order_data]).inside(order_svc).expect("nest in OrderService");
-        g.put_nodes(&[10, 11]).inside(order_api).expect("place order API nodes");
-        g.put_nodes(&[12]).inside(order_data).expect("place OrderDB");
+        g.put_subgraphs(&[order_api, order_data])
+            .inside(order_svc)
+            .expect("nest in OrderService");
+        g.put_nodes(&[10, 11])
+            .inside(order_api)
+            .expect("place order API nodes");
+        g.put_nodes(&[12])
+            .inside(order_data)
+            .expect("place OrderDB");
 
         let pay_svc = g.add_subgraph("PaymentService");
         let pay_proc = g.add_subgraph("Processing");
         let pay_store = g.add_subgraph("Storage");
-        g.put_subgraphs(&[pay_proc, pay_store]).inside(pay_svc).expect("nest in PaymentService");
-        g.put_nodes(&[20, 21]).inside(pay_proc).expect("place payment proc");
-        g.put_nodes(&[22]).inside(pay_store).expect("place PaymentDB");
+        g.put_subgraphs(&[pay_proc, pay_store])
+            .inside(pay_svc)
+            .expect("nest in PaymentService");
+        g.put_nodes(&[20, 21])
+            .inside(pay_proc)
+            .expect("place payment proc");
+        g.put_nodes(&[22])
+            .inside(pay_store)
+            .expect("place PaymentDB");
 
         let monitoring = g.add_subgraph("Monitoring");
-        g.put_nodes(&[30, 31]).inside(monitoring).expect("place monitoring nodes");
+        g.put_nodes(&[30, 31])
+            .inside(monitoring)
+            .expect("place monitoring nodes");
 
         render_csr(&g);
     }

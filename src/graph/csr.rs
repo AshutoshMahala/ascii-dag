@@ -216,9 +216,7 @@ impl<'a> CsrGraph<'a> {
     /// Check if any edge has a label.
     #[inline]
     pub fn has_edge_labels(&self) -> bool {
-        (0..self.edge_count).any(|i| {
-            self.edges[i * EDGE_STRIDE + EDGE_LABEL_LEN] != 0
-        })
+        (0..self.edge_count).any(|i| self.edges[i * EDGE_STRIDE + EDGE_LABEL_LEN] != 0)
     }
 
     /// Iterate over all edges as (from_index, to_index) pairs.
@@ -270,7 +268,11 @@ impl<'a> CsrGraph<'a> {
     pub fn node_subgraph(&self, node_idx: usize) -> Option<usize> {
         if node_idx < self.node_subgraph.len() {
             let v = self.node_subgraph[node_idx];
-            if v == u32::MAX { None } else { Some(v as usize) }
+            if v == u32::MAX {
+                None
+            } else {
+                Some(v as usize)
+            }
         } else {
             None
         }
@@ -282,7 +284,9 @@ impl<'a> CsrGraph<'a> {
         let mut depth = 0usize;
         let mut cur = sg_idx;
         while let Some(idx) = cur {
-            if idx >= self.subgraph_count { break; }
+            if idx >= self.subgraph_count {
+                break;
+            }
             depth += 1;
             cur = self.subgraph_parent(idx);
         }
@@ -352,7 +356,12 @@ impl<'a> CsrGraph<'a> {
         temp_arena: &mut Arena<'_>,
         output_arena: &'b mut Arena<'b>,
     ) -> Result<crate::ir::arena::LayoutIRArena<'b>, crate::errors::GraphError> {
-        crate::algorithms::sugiyama::arena_csr::compute_layout_arena_csr(self, config, temp_arena, output_arena)
+        crate::algorithms::sugiyama::arena_csr::compute_layout_arena_csr(
+            self,
+            config,
+            temp_arena,
+            output_arena,
+        )
     }
 
     /// Create a `CsrGraph` from node and edge slices (batch construction).
@@ -599,7 +608,17 @@ impl<'a> CsrGraphBuilder<'a> {
         let (sg_data_ptr, _) = arena.alloc_raw::<usize>(max_subgraphs * SUBGRAPH_STRIDE)?;
         let (node_sg_ptr, _) = arena.alloc_raw::<u32>(max_nodes)?;
 
-        let (nodes, edges, children_offsets, children_data, parents_offsets, parents_data, labels, subgraph_data, node_subgraph) = unsafe {
+        let (
+            nodes,
+            edges,
+            children_offsets,
+            children_data,
+            parents_offsets,
+            parents_data,
+            labels,
+            subgraph_data,
+            node_subgraph,
+        ) = unsafe {
             (
                 core::slice::from_raw_parts_mut(nodes_ptr, max_nodes * NODE_STRIDE),
                 core::slice::from_raw_parts_mut(edges_ptr, max_edges * EDGE_STRIDE),
@@ -690,7 +709,12 @@ impl<'a> CsrGraphBuilder<'a> {
     }
 
     /// Add a labeled edge between two node INDICES.
-    pub fn add_edge_with_label(&mut self, from_idx: usize, to_idx: usize, label: &str) -> Option<()> {
+    pub fn add_edge_with_label(
+        &mut self,
+        from_idx: usize,
+        to_idx: usize,
+        label: &str,
+    ) -> Option<()> {
         if self.current_edge_count >= self.max_edges {
             return None;
         }
@@ -934,7 +958,9 @@ impl<'a> super::Graph<'a> {
 
         // Calculate total label bytes needed (node + edge + subgraph labels share storage)
         let node_label_bytes: usize = self.nodes.iter().map(|(_, label)| label.len()).sum();
-        let edge_label_bytes: usize = self.edges.iter()
+        let edge_label_bytes: usize = self
+            .edges
+            .iter()
             .filter_map(|(_, _, label)| label.map(|l| l.len()))
             .sum();
         let sg_label_bytes: usize = self.subgraphs.iter().map(|sg| sg.label.len()).sum();
@@ -1033,8 +1059,7 @@ impl<'a> super::Graph<'a> {
                 // Copy edge label if present
                 if let Some(lbl) = edge_label {
                     let lbl_bytes = lbl.as_bytes();
-                    labels[label_offset..label_offset + lbl_bytes.len()]
-                        .copy_from_slice(lbl_bytes);
+                    labels[label_offset..label_offset + lbl_bytes.len()].copy_from_slice(lbl_bytes);
                     edges[edge_idx * EDGE_STRIDE + EDGE_LABEL_PTR] = label_offset as u32;
                     edges[edge_idx * EDGE_STRIDE + EDGE_LABEL_LEN] = lbl_bytes.len() as u32;
                     label_offset += lbl_bytes.len();
@@ -1092,15 +1117,16 @@ impl<'a> super::Graph<'a> {
             let sg_data = unsafe {
                 core::slice::from_raw_parts_mut(sg_data_ptr.unwrap(), sg_count * SUBGRAPH_STRIDE)
             };
-            let node_sg = unsafe {
-                core::slice::from_raw_parts_mut(node_sg_ptr.unwrap(), node_count)
-            };
+            let node_sg =
+                unsafe { core::slice::from_raw_parts_mut(node_sg_ptr.unwrap(), node_count) };
             node_sg.fill(u32::MAX);
 
             // Build heap-subgraph-ID → CSR-index mapping
             // Since we're in the alloc feature, we can use Vec
             use alloc::vec::Vec;
-            let id_to_idx: Vec<(usize, usize)> = self.subgraphs.iter()
+            let id_to_idx: Vec<(usize, usize)> = self
+                .subgraphs
+                .iter()
                 .enumerate()
                 .map(|(i, sg)| (sg.id, i))
                 .collect();
@@ -1111,7 +1137,8 @@ impl<'a> super::Graph<'a> {
                     None => 0,
                     Some(pid) => {
                         // Find parent's CSR index
-                        id_to_idx.iter()
+                        id_to_idx
+                            .iter()
                             .find(|&&(id, _)| id == pid)
                             .map(|&(_, idx)| idx + 1)
                             .unwrap_or(0)
@@ -1161,7 +1188,9 @@ impl<'a> super::Graph<'a> {
     /// Estimate the arena size needed for CSR conversion.
     pub fn estimate_csr_arena_size(&self) -> usize {
         let node_label_bytes: usize = self.nodes.iter().map(|(_, label)| label.len()).sum();
-        let edge_label_bytes: usize = self.edges.iter()
+        let edge_label_bytes: usize = self
+            .edges
+            .iter()
             .filter_map(|(_, _, label)| label.map(|l| l.len()))
             .sum();
         let sg_label_bytes: usize = self.subgraphs.iter().map(|sg| sg.label.len()).sum();

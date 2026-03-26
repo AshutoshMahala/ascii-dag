@@ -430,9 +430,9 @@ impl<'a> LayoutIR<'a> {
     /// Find the node at a given coordinate (for mouse interaction).
     /// Returns None if no node is at that position.
     pub fn node_at(&self, x: usize, y: usize) -> Option<&LayoutNode<'a>> {
-        self.nodes
-            .iter()
-            .find(|node| x >= node.x && x < node.x + node.width && y >= node.y && y < node.y + node.height)
+        self.nodes.iter().find(|node| {
+            x >= node.x && x < node.x + node.width && y >= node.y && y < node.y + node.height
+        })
     }
 
     /// Get edges that connect nodes at a specific level to the next level.

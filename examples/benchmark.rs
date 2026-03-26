@@ -1,7 +1,7 @@
-use ascii_dag::graph::arena::Arena;
-use ascii_dag::graph::csr::CsrGraphBuilder;
 use ascii_dag::algorithms::sugiyama::config::LayoutConfig;
 use ascii_dag::graph::Graph;
+use ascii_dag::graph::arena::Arena;
+use ascii_dag::graph::csr::CsrGraphBuilder;
 use std::io::{self, Write};
 use std::time::Instant;
 
@@ -121,7 +121,8 @@ fn run_comparison(topology: Topology, count: usize) {
     {
         // Scale graph arena: labels + node/edge structs + overhead
         let label_bytes: usize = nodes.iter().map(|(_, l)| l.len()).sum::<usize>() + 256;
-        let graph_size = (label_bytes + (nodes.len() + edges.len()) * 64 + 64 * 1024).max(256 * 1024);
+        let graph_size =
+            (label_bytes + (nodes.len() + edges.len()) * 64 + 64 * 1024).max(256 * 1024);
 
         let mut graph_mem = vec![0u8; graph_size];
         let mut temp_mem = vec![0u8; arena_size];

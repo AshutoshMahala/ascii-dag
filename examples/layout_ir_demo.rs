@@ -44,7 +44,6 @@ fn build_demo_dag() -> Graph<'static> {
 }
 
 fn run_heap() {
-
     // ═══════════════════════════════════════════════════════════════════════
     // STEP 1: BUILD - Construct the graph
     // ═══════════════════════════════════════════════════════════════════════
@@ -164,8 +163,8 @@ fn run_heap() {
 
 #[cfg(feature = "arena")]
 fn run_csr() {
-    use ascii_dag::graph::arena::Arena;
     use ascii_dag::LayoutConfig;
+    use ascii_dag::graph::arena::Arena;
 
     let dag = build_demo_dag();
 
@@ -178,7 +177,11 @@ fn run_csr() {
     let mut csr_buf = vec![0u8; csr_size];
     let mut csr_arena = Arena::new(&mut csr_buf);
     let csr = dag.to_csr(&mut csr_arena).expect("CSR conversion failed");
-    println!("CsrGraph: {} nodes, {} edges\n", csr.node_count(), csr.edge_count());
+    println!(
+        "CsrGraph: {} nodes, {} edges\n",
+        csr.node_count(),
+        csr.edge_count()
+    );
 
     // STEP 2: COMPUTE — arena-based layout
     println!("┌─────────────────────────────────────────┐");
@@ -197,7 +200,11 @@ fn run_csr() {
         .expect("Layout failed");
 
     println!("LayoutIRArena generated:");
-    println!("  • Canvas size: {} × {} characters", ir.width(), ir.height());
+    println!(
+        "  • Canvas size: {} × {} characters",
+        ir.width(),
+        ir.height()
+    );
     println!("  • Levels: {}", ir.level_count());
     println!("  • Nodes: {}", ir.node_count());
     println!("  • Edges: {}", ir.edge_count());
@@ -226,7 +233,10 @@ fn run_csr() {
         let waypoints = ir.edge_waypoints(edge);
         println!(
             "  edge {}: from_id={}, to_id={}, waypoints={}",
-            i, edge.from_id, edge.to_id, waypoints.len()
+            i,
+            edge.from_id,
+            edge.to_id,
+            waypoints.len()
         );
     }
     println!();
@@ -241,7 +251,9 @@ fn run_csr() {
     let mut line_buffer = vec![' '; ir.width().max(1) + 16];
     let mut scratch_buffer = vec![0usize; scratch_len + 256];
 
-    if let Some(len) = ir.render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer) {
+    if let Some(len) =
+        ir.render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
+    {
         if let Ok(s) = std::str::from_utf8(&render_buffer[..len]) {
             println!("{}", s);
         }

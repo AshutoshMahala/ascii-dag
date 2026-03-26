@@ -34,8 +34,8 @@ fn main() {
     let use_csr = args.iter().any(|a| a == "--csr");
 
     if use_csr {
-        use ascii_dag::graph::arena::Arena;
         use ascii_dag::LayoutConfig;
+        use ascii_dag::graph::arena::Arena;
         println!("(Arena/CSR Mode)");
 
         // Convert Graph → CsrGraph → arena layout
@@ -52,7 +52,8 @@ fn main() {
         let mut temp_arena = Arena::new(&mut temp_buffer);
         let mut output_arena = Arena::new(&mut output_buffer);
 
-        if let Ok(ir) = csr_graph.compute_layout_arena(&config, &mut temp_arena, &mut output_arena) {
+        if let Ok(ir) = csr_graph.compute_layout_arena(&config, &mut temp_arena, &mut output_arena)
+        {
             let mut edge_colors = vec![0usize; ir.edge_count()];
             let palette_colors = Palette::Ansi.colors();
             ir.compute_edge_colors(&mut edge_colors, palette_colors.len());
@@ -71,10 +72,9 @@ fn main() {
                 &edge_colors,
                 palette_colors,
                 &mut skipped_buffer,
-            ) {
-                if let Ok(s) = std::str::from_utf8(&render_buffer[..len]) {
-                    println!("{}", s);
-                }
+            ) && let Ok(s) = std::str::from_utf8(&render_buffer[..len])
+            {
+                println!("{}", s);
             }
         }
     } else {

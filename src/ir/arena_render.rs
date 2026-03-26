@@ -1,10 +1,11 @@
 //! Plain (non-colored) rendering for arena-backed layout IR.
 
-use super::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena};
+use super::arena::{
+    EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena,
+};
 use crate::render::chars::{
-    ARROW_DOWN, ARROW_DOWN_DASHED, ARROW_UP_DASHED,
-    CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR, CROSS,
-    H_LINE, H_LINE_DASHED, SELF_LOOP, V_LINE, V_LINE_DASHED,
+    ARROW_DOWN, ARROW_DOWN_DASHED, ARROW_UP_DASHED, CORNER_DL, CORNER_DR, CORNER_UL, CORNER_UR,
+    CROSS, H_LINE, H_LINE_DASHED, SELF_LOOP, V_LINE, V_LINE_DASHED,
 };
 
 /// Arrows take precedence — non-arrow chars must not overwrite them.
@@ -244,7 +245,13 @@ impl<'a> LayoutIRArena<'a> {
     }
 
     /// Paint a node on the line buffer.
-    fn paint_node(&self, line_buffer: &mut [char], node_idx: usize, node: &LayoutNodeArena, y: usize) {
+    fn paint_node(
+        &self,
+        line_buffer: &mut [char],
+        node_idx: usize,
+        node: &LayoutNodeArena,
+        y: usize,
+    ) {
         let x = node.x;
         let row = y - node.y;
 
@@ -431,7 +438,9 @@ impl<'a> LayoutIRArena<'a> {
                                 if x < line_buffer.len() && !is_arrow(line_buffer[x]) {
                                     if line_buffer[x] == ' ' {
                                         line_buffer[x] = hline;
-                                    } else if line_buffer[x] == V_LINE || line_buffer[x] == V_LINE_DASHED {
+                                    } else if line_buffer[x] == V_LINE
+                                        || line_buffer[x] == V_LINE_DASHED
+                                    {
                                         line_buffer[x] = CROSS;
                                     }
                                 }
@@ -450,7 +459,9 @@ impl<'a> LayoutIRArena<'a> {
                             if y >= start_drop && y < corner_y && x1 < line_buffer.len() {
                                 if y == y1 + 1 && edge.reversed {
                                     line_buffer[x1] = ARROW_UP_DASHED;
-                                } else if line_buffer[x1] == H_LINE || line_buffer[x1] == H_LINE_DASHED {
+                                } else if line_buffer[x1] == H_LINE
+                                    || line_buffer[x1] == H_LINE_DASHED
+                                {
                                     line_buffer[x1] = CROSS;
                                 } else if !is_arrow(line_buffer[x1]) {
                                     line_buffer[x1] = vline;
@@ -477,7 +488,9 @@ impl<'a> LayoutIRArena<'a> {
                                     } else {
                                         if line_buffer[x] == ' ' {
                                             line_buffer[x] = hline;
-                                        } else if line_buffer[x] == V_LINE || line_buffer[x] == V_LINE_DASHED {
+                                        } else if line_buffer[x] == V_LINE
+                                            || line_buffer[x] == V_LINE_DASHED
+                                        {
                                             line_buffer[x] = CROSS;
                                         }
                                     }
@@ -544,28 +557,32 @@ impl<'a> LayoutIRArena<'a> {
     /// Paint a subgraph border on the given line buffer row.
     /// Uses double-line box-drawing chars (╔═╗║╚═╝) with merge functions
     /// for edge-border junctions.
-    fn paint_subgraph_border(
-        line_buffer: &mut [char],
-        sg: &SubgraphInfoArena,
-        y: usize,
-    ) {
-        if y < sg.y || y >= sg.y + sg.height { return; }
+    fn paint_subgraph_border(line_buffer: &mut [char], sg: &SubgraphInfoArena, y: usize) {
+        if y < sg.y || y >= sg.y + sg.height {
+            return;
+        }
         let left = sg.x;
         let right = sg.x + sg.width.saturating_sub(1);
-        if left >= line_buffer.len() { return; }
+        if left >= line_buffer.len() {
+            return;
+        }
         let right = right.min(line_buffer.len() - 1);
 
         if y == sg.y {
             // Top border: ╔═══╗
             line_buffer[left] = '╔';
-            if right > left { line_buffer[right] = '╗'; }
+            if right > left {
+                line_buffer[right] = '╗';
+            }
             for col in (left + 1)..right {
                 line_buffer[col] = Self::merge_h_border(line_buffer[col]);
             }
         } else if y == sg.y + sg.height - 1 {
             // Bottom border: ╚═══╝
             line_buffer[left] = '╚';
-            if right > left { line_buffer[right] = '╝'; }
+            if right > left {
+                line_buffer[right] = '╝';
+            }
             for col in (left + 1)..right {
                 line_buffer[col] = Self::merge_h_border(line_buffer[col]);
             }
@@ -585,7 +602,9 @@ impl<'a> LayoutIRArena<'a> {
             '│' | '┊' | '┼' | '├' | '┤' => '╪',
             '↓' | '⇣' | '┌' | '┐' | '┬' => '╤',
             '↑' | '⇡' | '└' | '┘' | '┴' => '╧',
-            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => existing,
+            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => {
+                existing
+            }
             _ => '═',
         }
     }
@@ -597,7 +616,9 @@ impl<'a> LayoutIRArena<'a> {
             '─' | '┈' | '┼' | '┬' | '┴' => '╫',
             '→' | '┌' | '└' | '├' => '╞',
             '←' | '┐' | '┘' | '┤' => '╡',
-            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => existing,
+            '╔' | '╗' | '╚' | '╝' | '═' | '║' | '╪' | '╫' | '╤' | '╧' | '╞' | '╡' => {
+                existing
+            }
             _ => '║',
         }
     }
@@ -611,10 +632,16 @@ impl<'a> LayoutIRArena<'a> {
         y: usize,
     ) {
         let label_y = sg.y + 1;
-        if y != label_y { return; }
-        if sg.width < 4 || sg.height < 3 { return; }
+        if y != label_y {
+            return;
+        }
+        if sg.width < 4 || sg.height < 3 {
+            return;
+        }
         let label = self.subgraph_label(sg_idx);
-        if label.is_empty() { return; }
+        if label.is_empty() {
+            return;
+        }
 
         let label_start = sg.x + 2;
         let max_len = sg.width.saturating_sub(4);

@@ -33,9 +33,9 @@
 //! All codes are composed from named macro building blocks at compile time via
 //! `wdp!`. Any unrecognised token causes a compile error.
 
-use core::fmt;
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
+use core::fmt;
 
 // ── WDP code composition ────────────────────────────────────────────────
 //
@@ -50,8 +50,12 @@ use alloc::boxed::Box;
 /// - `E` — Error: operation failed, needs attention (blocking)
 /// - `W` — Warning: potential issue, operation continues (non-blocking)
 macro_rules! severity {
-    (E) => { "E" };
-    (W) => { "W" };
+    (E) => {
+        "E"
+    };
+    (W) => {
+        "W"
+    };
 }
 
 /// Maps component tokens to their WDP string (Part 2).
@@ -61,10 +65,18 @@ macro_rules! severity {
 /// - `Arena`       — arena allocator itself (reserved for future)
 /// - `Layout`      — heap/standard layout (reserved for future)
 macro_rules! component {
-    (Graph)       => { "Graph" };
-    (ArenaLayout) => { "ArenaLayout" };
-    (Arena)       => { "Arena" };
-    (Layout)      => { "Layout" };
+    (Graph) => {
+        "Graph"
+    };
+    (ArenaLayout) => {
+        "ArenaLayout"
+    };
+    (Arena) => {
+        "Arena"
+    };
+    (Layout) => {
+        "Layout"
+    };
 }
 
 /// Maps primary tokens to their WDP string (Part 3).
@@ -83,13 +95,27 @@ macro_rules! component {
 /// - `Node`    — node-count capacity issues (index type overflow)
 /// - `Level`   — level-depth capacity issues
 macro_rules! primary {
-    (Node)     => { "Node" };
-    (Edge)     => { "Edge" };
-    (Dag)      => { "Dag" };
-    (Subgraph) => { "Subgraph" };
-    (Alloc)    => { "Alloc" };
-    (Builder)  => { "Builder" };
-    (Level)    => { "Level" };
+    (Node) => {
+        "Node"
+    };
+    (Edge) => {
+        "Edge"
+    };
+    (Dag) => {
+        "Dag"
+    };
+    (Subgraph) => {
+        "Subgraph"
+    };
+    (Alloc) => {
+        "Alloc"
+    };
+    (Builder) => {
+        "Builder"
+    };
+    (Level) => {
+        "Level"
+    };
 }
 
 /// Maps sequence tokens to their WDP numeric code (Part 4).
@@ -107,14 +133,30 @@ macro_rules! primary {
 /// | 021 | NOT_FOUND | Resource | Referenced element not found |
 /// | 026 | EXHAUSTED | Resource | Resource exhausted (OOM, capacity) |
 macro_rules! sequence {
-    (MISSING)     => { "001" };
-    (MISMATCH)    => { "002" };
-    (INVALID)     => { "003" };
-    (OVERFLOW)    => { "004" };
-    (DUPLICATE)   => { "007" };
-    (UNSUPPORTED) => { "009" };
-    (NOT_FOUND)   => { "021" };
-    (EXHAUSTED)   => { "026" };
+    (MISSING) => {
+        "001"
+    };
+    (MISMATCH) => {
+        "002"
+    };
+    (INVALID) => {
+        "003"
+    };
+    (OVERFLOW) => {
+        "004"
+    };
+    (DUPLICATE) => {
+        "007"
+    };
+    (UNSUPPORTED) => {
+        "009"
+    };
+    (NOT_FOUND) => {
+        "021"
+    };
+    (EXHAUSTED) => {
+        "026"
+    };
 }
 
 /// Compose a WDP Level 0 error code from four named tokens.
@@ -128,9 +170,12 @@ macro_rules! sequence {
 macro_rules! wdp {
     ($sev:ident . $comp:ident . $pri:ident . $seq:ident) => {
         concat!(
-            severity!($sev), ".",
-            component!($comp), ".",
-            primary!($pri), ".",
+            severity!($sev),
+            ".",
+            component!($comp),
+            ".",
+            primary!($pri),
+            ".",
             sequence!($seq)
         )
     };
@@ -315,27 +360,15 @@ impl GraphError {
     #[inline]
     pub fn hint(&self) -> &'static str {
         match self {
-            Self::EmptyGraph => {
-                "Add at least one node before computing layout"
-            }
-            Self::NodeNotFound(_) => {
-                "Call add_node() before referencing this node ID"
-            }
-            Self::CycleDetected => {
-                "Enable cycle breaking or remove the back edge"
-            }
+            Self::EmptyGraph => "Add at least one node before computing layout",
+            Self::NodeNotFound(_) => "Call add_node() before referencing this node ID",
+            Self::CycleDetected => "Enable cycle breaking or remove the back edge",
             Self::SubgraphCycle => {
                 "A subgraph cannot be nested inside itself or its own descendant"
             }
-            Self::SubgraphNotFound(_) => {
-                "Call add_subgraph() before referencing this subgraph ID"
-            }
-            Self::ArenaOom => {
-                "Increase the arena buffer size; use estimate_layout_arena_size()"
-            }
-            Self::BuilderFailed => {
-                "Increase the output arena buffer size"
-            }
+            Self::SubgraphNotFound(_) => "Call add_subgraph() before referencing this subgraph ID",
+            Self::ArenaOom => "Increase the arena buffer size; use estimate_layout_arena_size()",
+            Self::BuilderFailed => "Increase the output arena buffer size",
             Self::ExceedsMaxNodes { .. } => {
                 "Use a larger index type (arena-idx-u32) or reduce graph size"
             }
@@ -358,7 +391,11 @@ impl fmt::Display for GraphError {
             Self::ArenaOom => write!(f, "arena out of memory"),
             Self::BuilderFailed => write!(f, "IR builder allocation failed"),
             Self::ExceedsMaxNodes { count, max } => {
-                write!(f, "node/edge count {} exceeds index-type max {}", count, max)
+                write!(
+                    f,
+                    "node/edge count {} exceeds index-type max {}",
+                    count, max
+                )
             }
             Self::ExceedsMaxLevels { depth, max } => {
                 write!(f, "graph depth {} exceeds max levels {}", depth, max)
@@ -470,7 +507,9 @@ impl Diagnostic {
 
     /// Iterate over the full chain: self, then cause, then cause's cause, etc.
     pub fn chain(&self) -> DiagnosticChain<'_> {
-        DiagnosticChain { current: Some(self) }
+        DiagnosticChain {
+            current: Some(self),
+        }
     }
 }
 
@@ -527,4 +566,3 @@ impl<'a> Iterator for DiagnosticChain<'a> {
         Some(diag)
     }
 }
-

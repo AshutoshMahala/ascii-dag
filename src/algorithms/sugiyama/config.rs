@@ -21,7 +21,7 @@
 //! let cfg = LayoutConfig::quality();
 //! ```
 
-use super::crossing::{CrossingReducer, FAST, STANDARD, QUALITY};
+use super::crossing::{CrossingReducer, FAST, QUALITY, STANDARD};
 use crate::graph::RenderMode;
 
 #[cfg(feature = "alloc")]
@@ -59,7 +59,6 @@ pub enum Layering {
     /// Fast O(N+E) fixed-point algorithm.  Assigns each node a level
     /// equal to 1 + max(parent levels).
     LongestPath,
-
     // Future: NetworkSimplex — minimises total edge span
 }
 
@@ -73,7 +72,6 @@ pub enum Positioning {
     /// Places nodes sequentially with fixed spacing.  Fast and
     /// collision-free.
     Compact,
-
     // Future: Barycentric — centre nodes relative to neighbours
     // Future: BrandesKopf — multi-pass iterative centering
 }
@@ -219,7 +217,9 @@ impl<'a> LayoutConfig<'a> {
     /// Extract the crossing pipeline (returns empty slice for non-Sugiyama).
     pub const fn crossing_pipeline(&self) -> &'a [CrossingReducer] {
         match &self.algorithm {
-            AlgorithmConfig::Sugiyama { crossing_pipeline, .. } => crossing_pipeline,
+            AlgorithmConfig::Sugiyama {
+                crossing_pipeline, ..
+            } => crossing_pipeline,
         }
     }
 

@@ -68,11 +68,26 @@ impl<'b> JsonWriter<'b> {
         self.write_byte(b'"')?;
         for &b in s.as_bytes() {
             match b {
-                b'"' => { self.write_byte(b'\\')?; self.write_byte(b'"')?; }
-                b'\\' => { self.write_byte(b'\\')?; self.write_byte(b'\\')?; }
-                b'\n' => { self.write_byte(b'\\')?; self.write_byte(b'n')?; }
-                b'\r' => { self.write_byte(b'\\')?; self.write_byte(b'r')?; }
-                b'\t' => { self.write_byte(b'\\')?; self.write_byte(b't')?; }
+                b'"' => {
+                    self.write_byte(b'\\')?;
+                    self.write_byte(b'"')?;
+                }
+                b'\\' => {
+                    self.write_byte(b'\\')?;
+                    self.write_byte(b'\\')?;
+                }
+                b'\n' => {
+                    self.write_byte(b'\\')?;
+                    self.write_byte(b'n')?;
+                }
+                b'\r' => {
+                    self.write_byte(b'\\')?;
+                    self.write_byte(b'r')?;
+                }
+                b'\t' => {
+                    self.write_byte(b'\\')?;
+                    self.write_byte(b't')?;
+                }
                 0..=0x1f => {
                     // \u00XX for other control chars
                     self.write_bytes(b"\\u00")?;
@@ -81,7 +96,9 @@ impl<'b> JsonWriter<'b> {
                     self.write_byte(if hi < 10 { b'0' + hi } else { b'a' + hi - 10 })?;
                     self.write_byte(if lo < 10 { b'0' + lo } else { b'a' + lo - 10 })?;
                 }
-                _ => { self.write_byte(b)?; }
+                _ => {
+                    self.write_byte(b)?;
+                }
             }
         }
         self.write_byte(b'"')
@@ -105,7 +122,11 @@ impl<'b> JsonWriter<'b> {
     }
 
     fn write_bool(&mut self, b: bool) -> Option<()> {
-        if b { self.write_bytes(b"true") } else { self.write_bytes(b"false") }
+        if b {
+            self.write_bytes(b"true")
+        } else {
+            self.write_bytes(b"false")
+        }
     }
 
     fn write_null(&mut self) -> Option<()> {
@@ -121,8 +142,10 @@ impl<'b> JsonWriter<'b> {
 
 // ── Arena path: serialize to byte buffer ─────────────────────────────────
 
-use super::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena};
 use super::NodeKind;
+use super::arena::{
+    EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena,
+};
 
 impl<'a> LayoutIRArena<'a> {
     /// Serialize the layout IR to JSON (zigraph v1.2 schema).
@@ -166,7 +189,9 @@ impl<'a> LayoutIRArena<'a> {
         w.write_key("nodes")?;
         w.write_byte(b'[')?;
         for (i, node) in self.nodes().iter().enumerate() {
-            if i > 0 { w.write_byte(b',')?; }
+            if i > 0 {
+                w.write_byte(b',')?;
+            }
             write_node_arena(&mut w, node, self.node_label(i))?;
         }
         w.write_byte(b']')?;
@@ -176,8 +201,14 @@ impl<'a> LayoutIRArena<'a> {
         w.write_key("edges")?;
         w.write_byte(b'[')?;
         for (i, edge) in self.edges().iter().enumerate() {
-            if i > 0 { w.write_byte(b',')?; }
-            let label = if edge.label_len > 0 { Some(self.edge_label(i)) } else { None };
+            if i > 0 {
+                w.write_byte(b',')?;
+            }
+            let label = if edge.label_len > 0 {
+                Some(self.edge_label(i))
+            } else {
+                None
+            };
             write_edge_arena(&mut w, edge, label, self)?;
         }
         w.write_byte(b']')?;
@@ -188,7 +219,9 @@ impl<'a> LayoutIRArena<'a> {
             w.write_key("subgraphs")?;
             w.write_byte(b'[')?;
             for (i, sg) in self.subgraphs().iter().enumerate() {
-                if i > 0 { w.write_byte(b',')?; }
+                if i > 0 {
+                    w.write_byte(b',')?;
+                }
                 write_subgraph_arena(&mut w, sg, self.subgraph_label(i))?;
             }
             w.write_byte(b']')?;
@@ -211,11 +244,20 @@ impl<'a> LayoutIRArena<'a> {
         // Each subgraph: ~120 bytes
         let sgs = self.subgraph_count().saturating_mul(120);
         // Waypoints: ~20 bytes each
-        let wps: usize = self.edges().iter().map(|e| match e.path {
-            EdgePathArena::MultiSegment { waypoints_len, .. } => waypoints_len.saturating_mul(20),
-            _ => 0,
-        }).fold(0usize, |a, b| a.saturating_add(b));
-        base.saturating_add(nodes).saturating_add(edges).saturating_add(sgs).saturating_add(wps)
+        let wps: usize = self
+            .edges()
+            .iter()
+            .map(|e| match e.path {
+                EdgePathArena::MultiSegment { waypoints_len, .. } => {
+                    waypoints_len.saturating_mul(20)
+                }
+                _ => 0,
+            })
+            .fold(0usize, |a, b| a.saturating_add(b));
+        base.saturating_add(nodes)
+            .saturating_add(edges)
+            .saturating_add(sgs)
+            .saturating_add(wps)
     }
 }
 
@@ -338,16 +380,18 @@ fn write_edge_path_arena(
     ir: &LayoutIRArena<'_>,
 ) -> Option<()> {
     match edge.path {
-        EdgePathArena::Direct => {
-            w.write_bytes(b"{\"type\":\"direct\"}")
-        }
+        EdgePathArena::Direct => w.write_bytes(b"{\"type\":\"direct\"}"),
         EdgePathArena::Corner { horizontal_y } => {
             w.write_bytes(b"{\"type\":\"corner\",")?;
             w.write_key("horizontal_y")?;
             w.write_usize(horizontal_y)?;
             w.write_byte(b'}')
         }
-        EdgePathArena::SideChannel { channel_x, start_y, end_y } => {
+        EdgePathArena::SideChannel {
+            channel_x,
+            start_y,
+            end_y,
+        } => {
             w.write_bytes(b"{\"type\":\"side_channel\",")?;
             w.write_key("channel_x")?;
             w.write_usize(channel_x)?;
@@ -359,13 +403,19 @@ fn write_edge_path_arena(
             w.write_usize(end_y)?;
             w.write_byte(b'}')
         }
-        EdgePathArena::MultiSegment { waypoints_start, waypoints_len, .. } => {
+        EdgePathArena::MultiSegment {
+            waypoints_start,
+            waypoints_len,
+            ..
+        } => {
             w.write_bytes(b"{\"type\":\"multi_segment\",")?;
             w.write_key("waypoints")?;
             w.write_byte(b'[')?;
             let wps = ir.edge_waypoints_raw(waypoints_start, waypoints_len);
             for (i, &(x, y)) in wps.iter().enumerate() {
-                if i > 0 { w.write_byte(b',')?; }
+                if i > 0 {
+                    w.write_byte(b',')?;
+                }
                 w.write_byte(b'[')?;
                 w.write_usize(x)?;
                 w.write_byte(b',')?;
@@ -375,7 +425,12 @@ fn write_edge_path_arena(
             w.write_byte(b']')?;
             w.write_byte(b'}')
         }
-        EdgePathArena::Spline { cp1_x, cp1_y, cp2_x, cp2_y } => {
+        EdgePathArena::Spline {
+            cp1_x,
+            cp1_y,
+            cp2_x,
+            cp2_y,
+        } => {
             w.write_bytes(b"{\"type\":\"spline\",")?;
             w.write_key("cp1_x")?;
             w.write_usize(cp1_x)?;
@@ -431,9 +486,9 @@ fn write_subgraph_arena(w: &mut JsonWriter<'_>, sg: &SubgraphInfoArena, label: &
 
 #[cfg(feature = "alloc")]
 mod heap_json {
-    use alloc::string::String;
     use super::VERSION;
     use crate::ir::{EdgePath, LayoutEdge, LayoutIR, LayoutNode, NodeKind, SubgraphInfo};
+    use alloc::string::String;
 
     impl<'a> LayoutIR<'a> {
         /// Serialize the layout IR to a JSON string (zigraph v1.2 schema).
@@ -480,7 +535,9 @@ mod heap_json {
             push_key(out, "nodes");
             out.push('[');
             for (i, node) in self.nodes().iter().enumerate() {
-                if i > 0 { out.push(','); }
+                if i > 0 {
+                    out.push(',');
+                }
                 write_node_heap(out, node);
             }
             out.push(']');
@@ -490,7 +547,9 @@ mod heap_json {
             push_key(out, "edges");
             out.push('[');
             for (i, edge) in self.edges().iter().enumerate() {
-                if i > 0 { out.push(','); }
+                if i > 0 {
+                    out.push(',');
+                }
                 write_edge_heap(out, edge);
             }
             out.push(']');
@@ -501,7 +560,9 @@ mod heap_json {
                 push_key(out, "subgraphs");
                 out.push('[');
                 for (i, sg) in self.subgraphs().iter().enumerate() {
-                    if i > 0 { out.push(','); }
+                    if i > 0 {
+                        out.push(',');
+                    }
                     write_subgraph_heap(out, sg);
                 }
                 out.push(']');
@@ -511,7 +572,8 @@ mod heap_json {
         }
 
         fn estimate_json_size(&self) -> usize {
-            100usize.saturating_add(self.nodes().len().saturating_mul(150))
+            100usize
+                .saturating_add(self.nodes().len().saturating_mul(150))
                 .saturating_add(self.edges().len().saturating_mul(200))
                 .saturating_add(self.subgraphs().len().saturating_mul(120))
         }
@@ -553,16 +615,36 @@ mod heap_json {
     fn write_node_heap(out: &mut String, node: &LayoutNode<'_>) {
         out.push('{');
 
-        push_key(out, "id"); push_usize(out, node.id); out.push(',');
-        push_key(out, "label"); push_json_str(out, node.label); out.push(',');
-        push_key(out, "x"); push_usize(out, node.x); out.push(',');
-        push_key(out, "y"); push_usize(out, node.y); out.push(',');
-        push_key(out, "width"); push_usize(out, node.width); out.push(',');
-        push_key(out, "height"); push_usize(out, node.height); out.push(',');
-        push_key(out, "center_x"); push_usize(out, node.center_x); out.push(',');
-        push_key(out, "center_y"); push_usize(out, node.center_y); out.push(',');
-        push_key(out, "level"); push_usize(out, node.level); out.push(',');
-        push_key(out, "level_position"); push_usize(out, node.level_position); out.push(',');
+        push_key(out, "id");
+        push_usize(out, node.id);
+        out.push(',');
+        push_key(out, "label");
+        push_json_str(out, node.label);
+        out.push(',');
+        push_key(out, "x");
+        push_usize(out, node.x);
+        out.push(',');
+        push_key(out, "y");
+        push_usize(out, node.y);
+        out.push(',');
+        push_key(out, "width");
+        push_usize(out, node.width);
+        out.push(',');
+        push_key(out, "height");
+        push_usize(out, node.height);
+        out.push(',');
+        push_key(out, "center_x");
+        push_usize(out, node.center_x);
+        out.push(',');
+        push_key(out, "center_y");
+        push_usize(out, node.center_y);
+        out.push(',');
+        push_key(out, "level");
+        push_usize(out, node.level);
+        out.push(',');
+        push_key(out, "level_position");
+        push_usize(out, node.level_position);
+        out.push(',');
 
         push_key(out, "kind");
         match node.kind {
@@ -581,14 +663,29 @@ mod heap_json {
     fn write_edge_heap(out: &mut String, edge: &LayoutEdge<'_>) {
         out.push('{');
 
-        push_key(out, "from"); push_usize(out, edge.from_id); out.push(',');
-        push_key(out, "to"); push_usize(out, edge.to_id); out.push(',');
-        push_key(out, "from_x"); push_usize(out, edge.from_x); out.push(',');
-        push_key(out, "from_y"); push_usize(out, edge.from_y); out.push(',');
-        push_key(out, "to_x"); push_usize(out, edge.to_x); out.push(',');
-        push_key(out, "to_y"); push_usize(out, edge.to_y); out.push(',');
-        push_key(out, "edge_index"); push_usize(out, edge.edge_index); out.push(',');
-        push_key(out, "directed"); push_bool(out, edge.directed);
+        push_key(out, "from");
+        push_usize(out, edge.from_id);
+        out.push(',');
+        push_key(out, "to");
+        push_usize(out, edge.to_id);
+        out.push(',');
+        push_key(out, "from_x");
+        push_usize(out, edge.from_x);
+        out.push(',');
+        push_key(out, "from_y");
+        push_usize(out, edge.from_y);
+        out.push(',');
+        push_key(out, "to_x");
+        push_usize(out, edge.to_x);
+        out.push(',');
+        push_key(out, "to_y");
+        push_usize(out, edge.to_y);
+        out.push(',');
+        push_key(out, "edge_index");
+        push_usize(out, edge.edge_index);
+        out.push(',');
+        push_key(out, "directed");
+        push_bool(out, edge.directed);
 
         if edge.reversed {
             out.push(',');
@@ -602,12 +699,15 @@ mod heap_json {
 
         if let Some(label) = edge.label {
             out.push(',');
-            push_key(out, "label"); push_json_str(out, label);
+            push_key(out, "label");
+            push_json_str(out, label);
             if let Some((lx, ly)) = edge.label_position {
                 out.push(',');
-                push_key(out, "label_x"); push_usize(out, lx);
+                push_key(out, "label_x");
+                push_usize(out, lx);
                 out.push(',');
-                push_key(out, "label_y"); push_usize(out, ly);
+                push_key(out, "label_y");
+                push_usize(out, ly);
             }
         }
 
@@ -621,16 +721,24 @@ mod heap_json {
             }
             EdgePath::Corner { horizontal_y } => {
                 out.push_str("{\"type\":\"corner\",");
-                push_key(out, "horizontal_y"); push_usize(out, *horizontal_y);
+                push_key(out, "horizontal_y");
+                push_usize(out, *horizontal_y);
                 out.push('}');
             }
-            EdgePath::SideChannel { channel_x, start_y, end_y } => {
+            EdgePath::SideChannel {
+                channel_x,
+                start_y,
+                end_y,
+            } => {
                 out.push_str("{\"type\":\"side_channel\",");
-                push_key(out, "channel_x"); push_usize(out, *channel_x);
+                push_key(out, "channel_x");
+                push_usize(out, *channel_x);
                 out.push(',');
-                push_key(out, "start_y"); push_usize(out, *start_y);
+                push_key(out, "start_y");
+                push_usize(out, *start_y);
                 out.push(',');
-                push_key(out, "end_y"); push_usize(out, *end_y);
+                push_key(out, "end_y");
+                push_usize(out, *end_y);
                 out.push('}');
             }
             EdgePath::MultiSegment { waypoints, .. } => {
@@ -638,7 +746,9 @@ mod heap_json {
                 push_key(out, "waypoints");
                 out.push('[');
                 for (i, &(x, y)) in waypoints.iter().enumerate() {
-                    if i > 0 { out.push(','); }
+                    if i > 0 {
+                        out.push(',');
+                    }
                     out.push('[');
                     push_usize(out, x);
                     out.push(',');
@@ -648,15 +758,24 @@ mod heap_json {
                 out.push(']');
                 out.push('}');
             }
-            EdgePath::Spline { cp1_x, cp1_y, cp2_x, cp2_y } => {
+            EdgePath::Spline {
+                cp1_x,
+                cp1_y,
+                cp2_x,
+                cp2_y,
+            } => {
                 out.push_str("{\"type\":\"spline\",");
-                push_key(out, "cp1_x"); push_usize(out, *cp1_x);
+                push_key(out, "cp1_x");
+                push_usize(out, *cp1_x);
                 out.push(',');
-                push_key(out, "cp1_y"); push_usize(out, *cp1_y);
+                push_key(out, "cp1_y");
+                push_usize(out, *cp1_y);
                 out.push(',');
-                push_key(out, "cp2_x"); push_usize(out, *cp2_x);
+                push_key(out, "cp2_x");
+                push_usize(out, *cp2_x);
                 out.push(',');
-                push_key(out, "cp2_y"); push_usize(out, *cp2_y);
+                push_key(out, "cp2_y");
+                push_usize(out, *cp2_y);
                 out.push('}');
             }
         }
@@ -665,18 +784,29 @@ mod heap_json {
     fn write_subgraph_heap(out: &mut String, sg: &SubgraphInfo<'_>) {
         out.push('{');
 
-        push_key(out, "id"); push_usize(out, sg.id); out.push(',');
-        push_key(out, "label"); push_json_str(out, sg.label); out.push(',');
+        push_key(out, "id");
+        push_usize(out, sg.id);
+        out.push(',');
+        push_key(out, "label");
+        push_json_str(out, sg.label);
+        out.push(',');
         push_key(out, "parent_id");
         match sg.parent_id {
             Some(pid) => push_usize(out, pid),
             None => out.push_str("null"),
         }
         out.push(',');
-        push_key(out, "x"); push_usize(out, sg.x); out.push(',');
-        push_key(out, "y"); push_usize(out, sg.y); out.push(',');
-        push_key(out, "width"); push_usize(out, sg.width); out.push(',');
-        push_key(out, "height"); push_usize(out, sg.height);
+        push_key(out, "x");
+        push_usize(out, sg.x);
+        out.push(',');
+        push_key(out, "y");
+        push_usize(out, sg.y);
+        out.push(',');
+        push_key(out, "width");
+        push_usize(out, sg.width);
+        out.push(',');
+        push_key(out, "height");
+        push_usize(out, sg.height);
 
         out.push('}');
     }
@@ -689,10 +819,7 @@ mod tests {
 
     #[test]
     fn heap_json_roundtrip_basic() {
-        let dag = Graph::from_edges(
-            &[(1, "A"), (2, "B"), (3, "C")],
-            &[(1, 2), (1, 3), (2, 3)],
-        );
+        let dag = Graph::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (1, 3), (2, 3)]);
         let ir = dag.compute_layout();
         let json = ir.to_json();
 
@@ -739,10 +866,7 @@ mod tests {
 
     #[test]
     fn heap_json_label_escaping() {
-        let dag = Graph::from_edges(
-            &[(1, "say \"hello\""), (2, "line\nnewline")],
-            &[(1, 2)],
-        );
+        let dag = Graph::from_edges(&[(1, "say \"hello\""), (2, "line\nnewline")], &[(1, 2)]);
         let ir = dag.compute_layout();
         let json = ir.to_json();
 
@@ -754,7 +878,7 @@ mod tests {
     fn heap_json_reversed_edge() {
         let dag = Graph::from_edges(
             &[(1, "A"), (2, "B")],
-            &[(1, 2), (2, 1)],  // cycle
+            &[(1, 2), (2, 1)], // cycle
         );
         let ir = dag.compute_layout();
         let json = ir.to_json();
@@ -765,10 +889,7 @@ mod tests {
 
     #[test]
     fn heap_json_dimensions() {
-        let dag = Graph::from_edges(
-            &[(1, "X"), (2, "Y")],
-            &[(1, 2)],
-        );
+        let dag = Graph::from_edges(&[(1, "X"), (2, "Y")], &[(1, 2)]);
         let ir = dag.compute_layout();
         let json = ir.to_json();
 
@@ -782,9 +903,9 @@ mod tests {
 #[cfg(test)]
 #[cfg(feature = "arena")]
 mod arena_tests {
-    use crate::graph::csr::CsrGraph;
-    use crate::graph::arena::Arena;
     use crate::algorithms::sugiyama::config::LayoutConfig;
+    use crate::graph::arena::Arena;
+    use crate::graph::csr::CsrGraph;
 
     fn make_ir_json(
         nodes: &[(usize, &str)],
@@ -793,17 +914,15 @@ mod arena_tests {
     ) -> usize {
         let mut graph_backing = [0u8; 16384];
         let mut graph_arena = Arena::new(&mut graph_backing);
-        let graph = CsrGraph::from_edges(
-            &mut graph_arena,
-            nodes,
-            edges,
-        ).unwrap();
+        let graph = CsrGraph::from_edges(&mut graph_arena, nodes, edges).unwrap();
         let config = LayoutConfig::standard();
         let mut temp_backing = [0u8; 65536];
         let mut temp_arena = Arena::new(&mut temp_backing);
         let mut out_backing = [0u8; 65536];
         let mut output_arena = Arena::new(&mut out_backing);
-        let ir = graph.compute_layout_arena(&config, &mut temp_arena, &mut output_arena).unwrap();
+        let ir = graph
+            .compute_layout_arena(&config, &mut temp_arena, &mut output_arena)
+            .unwrap();
         ir.serialize_json(json_buf).unwrap()
     }
 
@@ -833,17 +952,16 @@ mod arena_tests {
     fn arena_json_buffer_too_small() {
         let mut graph_backing = [0u8; 16384];
         let mut graph_arena = Arena::new(&mut graph_backing);
-        let graph = CsrGraph::from_edges(
-            &mut graph_arena,
-            &[(1, "A"), (2, "B")],
-            &[(1, 2)],
-        ).unwrap();
+        let graph =
+            CsrGraph::from_edges(&mut graph_arena, &[(1, "A"), (2, "B")], &[(1, 2)]).unwrap();
         let config = LayoutConfig::standard();
         let mut temp_backing = [0u8; 65536];
         let mut temp_arena = Arena::new(&mut temp_backing);
         let mut out_backing = [0u8; 65536];
         let mut output_arena = Arena::new(&mut out_backing);
-        let ir = graph.compute_layout_arena(&config, &mut temp_arena, &mut output_arena).unwrap();
+        let ir = graph
+            .compute_layout_arena(&config, &mut temp_arena, &mut output_arena)
+            .unwrap();
 
         let mut tiny_buf = [0u8; 10];
         assert!(ir.serialize_json(&mut tiny_buf).is_none());
@@ -857,17 +975,25 @@ mod arena_tests {
             &mut graph_arena,
             &[(1, "A"), (2, "B"), (3, "C")],
             &[(1, 2), (1, 3), (2, 3)],
-        ).unwrap();
+        )
+        .unwrap();
         let config = LayoutConfig::standard();
         let mut temp_backing = [0u8; 65536];
         let mut temp_arena = Arena::new(&mut temp_backing);
         let mut out_backing = [0u8; 65536];
         let mut output_arena = Arena::new(&mut out_backing);
-        let ir = graph.compute_layout_arena(&config, &mut temp_arena, &mut output_arena).unwrap();
+        let ir = graph
+            .compute_layout_arena(&config, &mut temp_arena, &mut output_arena)
+            .unwrap();
 
         let estimate = ir.estimate_json_size();
         let mut buf = vec![0u8; estimate];
         let actual = ir.serialize_json(&mut buf).unwrap();
-        assert!(actual <= estimate, "actual {} > estimate {}", actual, estimate);
+        assert!(
+            actual <= estimate,
+            "actual {} > estimate {}",
+            actual,
+            estimate
+        );
     }
 }

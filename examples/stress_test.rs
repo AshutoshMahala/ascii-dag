@@ -1,6 +1,6 @@
+use ascii_dag::LayoutConfig;
 use ascii_dag::graph::Graph;
 use ascii_dag::render::colors::Palette;
-use ascii_dag::LayoutConfig;
 use std::time::Instant;
 
 #[cfg(feature = "arena")]
@@ -125,7 +125,10 @@ fn run_heap_test(name: &str, dag: &Graph, preset_name: Option<&str>) {
     // Show reversed edge info for cyclic graphs
     let reversed_count = ir.edges().iter().filter(|e| e.reversed).count();
     if reversed_count > 0 {
-        println!("  [Cycle breaking: {} reversed edge(s) rendered with dashed lines]\n", reversed_count);
+        println!(
+            "  [Cycle breaking: {} reversed edge(s) rendered with dashed lines]\n",
+            reversed_count
+        );
     }
 
     if name.contains("Massive") {
@@ -156,7 +159,10 @@ fn run_csr_test(name: &str, dag: &Graph) {
     let csr_graph = match dag.to_csr(&mut csr_arena) {
         Some(g) => g,
         None => {
-            println!("(Failed to convert Graph → CsrGraph, arena too small: {} KB)", csr_arena_size / 1024);
+            println!(
+                "(Failed to convert Graph → CsrGraph, arena too small: {} KB)",
+                csr_arena_size / 1024
+            );
             return;
         }
     };
@@ -176,44 +182,51 @@ fn run_csr_test(name: &str, dag: &Graph) {
     let mut output_arena = Arena::new(&mut output_buffer);
 
     // Step 4: CsrGraph → compute_layout_arena (the real no-alloc layout)
-    let output_len = match csr_graph.compute_layout_arena(&config, &mut temp_arena, &mut output_arena) {
-        Ok(layout) => {
-            if layout.is_empty() {
-                println!("(Layout returned empty)");
-                0
-            } else {
-                // Step 5: Render to buffer (no-alloc rendering)
-                let (render_est, scratch_len) = layout.estimate_render_size();
-                let render_size = render_est + 65536;
-                let line_buffer_size = (layout.width() + 1024).max(1024);
-                let mut render_buffer = vec![0u8; render_size];
-                let mut line_buffer = vec![' '; line_buffer_size];
-                let mut scratch_buffer = vec![0usize; scratch_len + 1024];
-
-                let bytes_written = layout
-                    .render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
-                    .unwrap_or(0);
-
-                if !name.contains("Massive") {
-                    if let Ok(s) = std::str::from_utf8(&render_buffer[..bytes_written]) {
-                        println!("{}", s);
-                    }
+    let output_len =
+        match csr_graph.compute_layout_arena(&config, &mut temp_arena, &mut output_arena) {
+            Ok(layout) => {
+                if layout.is_empty() {
+                    println!("(Layout returned empty)");
+                    0
                 } else {
-                    println!("(Output suppressed. Length: {} bytes)", bytes_written);
+                    // Step 5: Render to buffer (no-alloc rendering)
+                    let (render_est, scratch_len) = layout.estimate_render_size();
+                    let render_size = render_est + 65536;
+                    let line_buffer_size = (layout.width() + 1024).max(1024);
+                    let mut render_buffer = vec![0u8; render_size];
+                    let mut line_buffer = vec![' '; line_buffer_size];
+                    let mut scratch_buffer = vec![0usize; scratch_len + 1024];
+
+                    let bytes_written = layout
+                        .render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
+                        .unwrap_or(0);
+
+                    if !name.contains("Massive") {
+                        if let Ok(s) = std::str::from_utf8(&render_buffer[..bytes_written]) {
+                            println!("{}", s);
+                        }
+                    } else {
+                        println!("(Output suppressed. Length: {} bytes)", bytes_written);
+                    }
+                    bytes_written
                 }
-                bytes_written
             }
-        }
-        Err(e) => {
-            println!("(CSR layout failed: {:?}, arena size: {} KB)", e, arena_size / 1024);
-            0
-        }
-    };
+            Err(e) => {
+                println!(
+                    "(CSR layout failed: {:?}, arena size: {} KB)",
+                    e,
+                    arena_size / 1024
+                );
+                0
+            }
+        };
 
     let duration = start.elapsed();
     let total_kb = (csr_arena_size + arena_size * 2) as f64 / 1024.0;
-    println!(">>> [CSR] Layout+Rendered in {:?} (total buffers: {:.1} KB, output: {} bytes) <<<\n",
-        duration, total_kb, output_len);
+    println!(
+        ">>> [CSR] Layout+Rendered in {:?} (total buffers: {:.1} KB, output: {} bytes) <<<\n",
+        duration, total_kb, output_len
+    );
 }
 
 fn test_double_helix() -> Graph<'static> {
