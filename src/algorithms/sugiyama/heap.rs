@@ -74,6 +74,10 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         return LayoutIRBuilder::new().build();
     }
 
+    // Honor spacing config (previously ignored; see 0.10.0 changelog).
+    let node_spacing = config.node_spacing;
+    let level_spacing = config.level_spacing;
+
     // Cycle breaking: dispatch based on LayoutConfig.
     // DepthFirst detects back edges via three-color DFS.
     // None treats every edge as forward (caller asserts acyclicity).
@@ -154,7 +158,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             };
             level_x.push(x);
             level_w.push(width);
-            x += width + 3; // Standard spacing
+            x += width + node_spacing;
         }
 
         x_coords.push(level_x);
@@ -168,6 +172,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             &virtual_levels,
             &mut x_coords,
             &widths,
+            node_spacing,
         );
     }
 
@@ -187,8 +192,9 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                 &mut x_coords,
                 &widths,
                 &node_edge_indices_for_refine,
+                node_spacing,
             );
-            compact_subgraphs(dag, &virtual_levels, &mut x_coords, &widths);
+            compact_subgraphs(dag, &virtual_levels, &mut x_coords, &widths, node_spacing);
         }
     }
 
@@ -426,6 +432,11 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         let height =
             max_node_height[level] + routing_overhead + extra_lines + sg_boundary_extras[level];
         current_offset += height;
+        // Extra vertical gap between levels only — not after the last one,
+        // which would pad the bottom of the canvas with blank rows.
+        if level < max_level {
+            current_offset += level_spacing;
+        }
     }
 
     // Total height: current_offset already includes all subgraph border spacing
@@ -788,15 +799,16 @@ fn refine_x_positions(
     x_coords: &mut [Vec<usize>],
     widths: &[Vec<usize>],
     node_edge_indices: &[Vec<usize>],
+    node_spacing: usize,
 ) {
     use crate::algorithms::sugiyama::subgraph::vnode_subgraph;
 
     let num_levels = virtual_levels.len();
+
     if num_levels <= 1 {
         return;
     }
 
-    const MIN_GAP: usize = 3;
     const SG_GAP: usize = 5; // gap between nodes of different subgraphs (H_PAD + SIBLING + H_PAD)
     const ITERATIONS: usize = 8;
 
@@ -805,9 +817,8 @@ fn refine_x_positions(
     let gap_between = |level: usize, left_pos: usize, right_pos: usize| -> usize {
         let left_sg = vnode_subgraph(dag, &virtual_levels[level][left_pos]);
         let right_sg = vnode_subgraph(dag, &virtual_levels[level][right_pos]);
-        if left_sg != right_sg { SG_GAP } else { MIN_GAP }
+        if left_sg != right_sg { SG_GAP } else { node_spacing }
     };
-
     // Also enforce left margin for the first node if it's inside a subgraph
     let left_margin = |level: usize| -> usize {
         if virtual_levels[level].is_empty() {
@@ -998,17 +1009,17 @@ fn compact_subgraphs(
     virtual_levels: &[Vec<VNode>],
     x_coords: &mut [Vec<usize>],
     widths: &[Vec<usize>],
+    node_spacing: usize,
 ) {
     use crate::algorithms::sugiyama::subgraph::vnode_subgraph;
 
-    const MIN_GAP: usize = 3;
     const SG_GAP: usize = 5;
 
     // Helper: minimum gap between two adjacent positions on a level.
     let gap_between = |level: usize, left_pos: usize, right_pos: usize| -> usize {
         let left_sg = vnode_subgraph(dag, &virtual_levels[level][left_pos]);
         let right_sg = vnode_subgraph(dag, &virtual_levels[level][right_pos]);
-        if left_sg != right_sg { SG_GAP } else { MIN_GAP }
+        if left_sg != right_sg { SG_GAP } else { node_spacing }
     };
 
     // Cascading push: shift node at `pos` on `level` to `target_x`, and push

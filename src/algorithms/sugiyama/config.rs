@@ -121,11 +121,11 @@ pub enum AlgorithmConfig<'a> {
 ///
 /// # Presets
 ///
-/// | Preset | Algorithm | Crossing | Spacing |
-/// |--------|-----------|----------|---------|
-/// | [`fast()`](Self::fast) | Sugiyama | Median(2) | 3×2 |
-/// | [`standard()`](Self::standard) | Sugiyama | Median(4)→AdjExch(2) | 3×2 |
-/// | [`quality()`](Self::quality) | Sugiyama | Median(8)→AdjExch(4)→Median(2) | 3×2 |
+/// | Preset | Algorithm | Crossing | Spacing (node×level) |
+/// |--------|-----------|----------|----------------------|
+/// | [`fast()`](Self::fast) | Sugiyama | Median(2) | 3×0 |
+/// | [`standard()`](Self::standard) | Sugiyama | Median(4)→AdjExch(2) | 3×0 |
+/// | [`quality()`](Self::quality) | Sugiyama | Median(8)→AdjExch(4)→Median(2) | 3×0 |
 ///
 /// # Examples
 ///
@@ -143,10 +143,15 @@ pub struct LayoutConfig<'a> {
     /// Edge routing algorithm.
     pub routing: Routing,
 
-    /// Horizontal spacing between nodes (default: 3).
+    /// Horizontal spacing between adjacent nodes within a level (default: 3).
     pub node_spacing: usize,
 
-    /// Vertical spacing between levels (default: 2).
+    /// Vertical spacing between levels (default: 0).
+    ///
+    /// The default of 0 preserves the rendered output of releases prior to
+    /// 0.10.0, which advertised `level_spacing` in the config but never
+    /// applied it. Set to a positive value (e.g. 1–3) to add visible
+    /// vertical separation between layers.
     pub level_spacing: usize,
 
     /// Rendering mode (Auto, Vertical, Horizontal).
@@ -171,7 +176,7 @@ impl<'a> LayoutConfig<'a> {
             },
             routing: Routing::Direct,
             node_spacing: 3,
-            level_spacing: 2,
+            level_spacing: 0,
             render_mode: RenderMode::Auto,
             include_dummy_nodes: false,
             skip_validation: false,
@@ -189,7 +194,7 @@ impl<'a> LayoutConfig<'a> {
             },
             routing: Routing::Direct,
             node_spacing: 3,
-            level_spacing: 2,
+            level_spacing: 0,
             render_mode: RenderMode::Auto,
             include_dummy_nodes: false,
             skip_validation: false,
@@ -207,7 +212,7 @@ impl<'a> LayoutConfig<'a> {
             },
             routing: Routing::Direct,
             node_spacing: 3,
-            level_spacing: 2,
+            level_spacing: 0,
             render_mode: RenderMode::Auto,
             include_dummy_nodes: false,
             skip_validation: false,
@@ -350,7 +355,7 @@ impl<'a> From<&'a SugiyamaConfig> for LayoutConfig<'a> {
             },
             routing: Routing::Direct,
             node_spacing: 3,
-            level_spacing: 2,
+            level_spacing: 0,
             render_mode: sc.render_mode,
             include_dummy_nodes: false,
             skip_validation: false,
@@ -384,7 +389,7 @@ mod tests {
         assert_eq!(cfg.cycle_breaking(), CycleBreaking::DepthFirst);
         assert_eq!(cfg.crossing_pipeline().len(), 3);
         assert_eq!(cfg.node_spacing, 3);
-        assert_eq!(cfg.level_spacing, 2);
+        assert_eq!(cfg.level_spacing, 0);
     }
 }
 

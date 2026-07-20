@@ -1273,4 +1273,58 @@ mod tests {
             "label not found in output:\n{output}",
         );
     }
+
+    // ── Spacing config (regression: fields were silently ignored) ──────
+
+    /// R fans out to A/B/C (three adjacent nodes on level 1), converging on S.
+    fn spacing_test_graph() -> Graph<'static> {
+        Graph::from_edges(
+            &[(1, "R"), (2, "A"), (3, "B"), (4, "C"), (5, "S")],
+            &[(1, 2), (1, 3), (1, 4), (2, 5), (3, 5), (4, 5)],
+        )
+    }
+
+    #[test]
+    fn node_spacing_config_is_applied() {
+        let g = spacing_test_graph();
+        for spacing in [3usize, 8] {
+            let mut cfg = LayoutConfig::standard();
+            cfg.node_spacing = spacing;
+            let ir = g.compute_layout_with_config(&cfg);
+            let mut boxes: Vec<(usize, usize)> = ir
+                .nodes()
+                .iter()
+                .filter(|n| n.level == 1)
+                .map(|n| (n.x, n.width))
+                .collect();
+            boxes.sort_unstable();
+            assert_eq!(boxes.len(), 3);
+            for pair in boxes.windows(2) {
+                let gap = pair[1].0 - (pair[0].0 + pair[0].1);
+                assert_eq!(
+                    gap, spacing,
+                    "gap between adjacent nodes should equal node_spacing={spacing}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn level_spacing_config_is_applied() {
+        let g = spacing_test_graph();
+        let base = g.compute_layout_with_config(&LayoutConfig::standard());
+        let mut cfg = LayoutConfig::standard();
+        cfg.level_spacing = 2;
+        let spaced = g.compute_layout_with_config(&cfg);
+
+        let y_at = |ir: &crate::ir::LayoutIR<'_>, level: usize| {
+            ir.nodes().iter().find(|n| n.level == level).unwrap().y
+        };
+        // Each of the two inter-level gaps grows by level_spacing.
+        assert_eq!(y_at(&spaced, 1), y_at(&base, 1) + 2);
+        assert_eq!(y_at(&spaced, 2), y_at(&base, 2) + 4);
+        // No trailing gap after the last level: total height grows by
+        // exactly (levels - 1) * level_spacing.
+        assert_eq!(spaced.height(), base.height() + 4);
+    }
 }

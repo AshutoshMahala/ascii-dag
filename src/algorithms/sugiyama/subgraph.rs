@@ -149,6 +149,7 @@ pub(crate) fn subgraph_padding(
     virtual_levels: &[Vec<VNode>],
     x_coords: &mut [Vec<usize>],
     widths: &[Vec<usize>],
+    node_spacing: usize,
 ) -> Vec<usize> {
     let mut level_widths = Vec::with_capacity(virtual_levels.len());
 
@@ -186,7 +187,7 @@ pub(crate) fn subgraph_padding(
             }
             new_x.push(x);
             let w = widths[lvl].get(i).copied().unwrap_or(3);
-            x += w + 3; // standard spacing
+            x += w + node_spacing;
         }
 
         // Right-side padding: one border's worth if last node is inside a subgraph.

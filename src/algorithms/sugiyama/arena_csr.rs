@@ -204,6 +204,8 @@ pub fn compute_layout_arena_csr<'b>(
     }
 
     // Step 5: Assign x-coordinates
+    let node_spacing: Coord = config.node_spacing.min(Coord::MAX as usize) as Coord;
+    let node_spacing_usize: usize = config.node_spacing;
     assign_x_coords_csr(
         graph,
         temps.vlevel_offsets,
@@ -211,6 +213,7 @@ pub fn compute_layout_arena_csr<'b>(
         temps.x_coords,
         temps.widths,
         max_level,
+        node_spacing,
     );
 
     // Step 5b: Subgraph horizontal padding
@@ -222,6 +225,7 @@ pub fn compute_layout_arena_csr<'b>(
             temps.x_coords,
             temps.widths,
             max_level,
+            node_spacing_usize,
         );
     }
 
@@ -238,6 +242,7 @@ pub fn compute_layout_arena_csr<'b>(
                 temps.x_coords,
                 temps.widths,
                 max_level as usize,
+                node_spacing,
             );
             compact_subgraphs_csr(
                 graph,
@@ -246,6 +251,7 @@ pub fn compute_layout_arena_csr<'b>(
                 temps.x_coords,
                 temps.widths,
                 max_level as usize,
+                node_spacing,
             );
         }
     }
@@ -449,6 +455,7 @@ pub fn compute_layout_arena_csr<'b>(
 
     temps.level_y_offsets.fill(0);
     let routing_overhead: usize = if has_labeled_edges { 4 } else { 2 };
+    let level_spacing: usize = config.level_spacing;
 
     // Compute subgraph Y extras (vertical border space)
     let (sg_initial_offset, sg_trailing_extra) = if graph.has_subgraphs() {
@@ -474,6 +481,11 @@ pub fn compute_layout_arena_csr<'b>(
         let diff = slot_count.max(temps.dummy_counts[level] as usize);
         let height = node_height + routing_overhead + diff.saturating_sub(1);
         current_offset += height;
+        // Extra vertical gap between levels only — not after the last one,
+        // which would pad the bottom of the canvas with blank rows.
+        if level < max_level as usize {
+            current_offset += level_spacing;
+        }
         // Add subgraph border space after this level
         if graph.has_subgraphs() && level < temps.sg_y_extras.len() {
             current_offset += temps.sg_y_extras[level];
@@ -1197,6 +1209,7 @@ fn subgraph_padding_csr(
     x_coords: &mut [Coord],
     widths: &[Coord],
     max_level: Idx,
+    node_spacing: usize,
 ) -> usize {
     let mut global_max_width = 0usize;
 
@@ -1239,7 +1252,7 @@ fn subgraph_padding_csr(
                 x_coords[pos] = x as Coord;
             }
             let w = widths.get(pos).copied().unwrap_or(3) as usize;
-            x += w + 3; // standard spacing
+            x += w + node_spacing;
         }
 
         // Right padding: flat SUBGRAPH_H_PAD if last node is inside any subgraph
@@ -1352,8 +1365,13 @@ fn connected_median_csr(
 }
 
 /// Gap between adjacent nodes, accounting for subgraph boundaries.
-fn gap_between_csr(graph: &CsrGraph<'_>, vnode_data: &[Idx], pos_a: usize, pos_b: usize) -> Coord {
-    const MIN_GAP: Coord = 3;
+fn gap_between_csr(
+    graph: &CsrGraph<'_>,
+    vnode_data: &[Idx],
+    pos_a: usize,
+    pos_b: usize,
+    node_spacing: Coord,
+) -> Coord {
     const SG_GAP: Coord = 5;
     let a_type = vnode_data[pos_a * 2];
     let a_idx = vnode_data[pos_a * 2 + 1];
@@ -1364,7 +1382,7 @@ fn gap_between_csr(graph: &CsrGraph<'_>, vnode_data: &[Idx], pos_a: usize, pos_b
     if a_sg != b_sg && (a_sg.is_some() || b_sg.is_some()) {
         SG_GAP
     } else {
-        MIN_GAP
+        node_spacing
     }
 }
 
@@ -1401,6 +1419,7 @@ fn refine_x_positions_csr(
     x_coords: &mut [Coord],
     widths: &[Coord],
     max_level: usize,
+    node_spacing: Coord,
 ) {
     const ITERATIONS: usize = 8;
 
@@ -1419,6 +1438,7 @@ fn refine_x_positions_csr(
         level: usize,
         adj_start: usize,
         adj_end: usize,
+        node_spacing: Coord,
     ) {
         let start = vlevel_offsets[level] as usize;
         let end = vlevel_offsets[level + 1] as usize;
@@ -1442,12 +1462,12 @@ fn refine_x_positions_csr(
                     let prev = start + i - 1;
                     x_coords[prev]
                         .saturating_add(widths[prev])
-                        .saturating_add(gap_between_csr(graph, vnode_data, prev, pos))
+                        .saturating_add(gap_between_csr(graph, vnode_data, prev, pos, node_spacing))
                 };
                 let max_x = if i + 1 < n {
                     let next = start + i + 1;
                     x_coords[next].saturating_sub(
-                        my_w.saturating_add(gap_between_csr(graph, vnode_data, pos, next)),
+                        my_w.saturating_add(gap_between_csr(graph, vnode_data, pos, next, node_spacing)),
                     )
                 } else {
                     Coord::MAX
@@ -1470,12 +1490,12 @@ fn refine_x_positions_csr(
                     let prev = start + i - 1;
                     x_coords[prev]
                         .saturating_add(widths[prev])
-                        .saturating_add(gap_between_csr(graph, vnode_data, prev, pos))
+                        .saturating_add(gap_between_csr(graph, vnode_data, prev, pos, node_spacing))
                 };
                 let max_x = if i + 1 < n {
                     let next = start + i + 1;
                     x_coords[next].saturating_sub(
-                        my_w.saturating_add(gap_between_csr(graph, vnode_data, pos, next)),
+                        my_w.saturating_add(gap_between_csr(graph, vnode_data, pos, next, node_spacing)),
                     )
                 } else {
                     Coord::MAX
@@ -1502,6 +1522,7 @@ fn refine_x_positions_csr(
                 level,
                 adj_start,
                 adj_end,
+                node_spacing,
             );
         }
 
@@ -1526,6 +1547,7 @@ fn refine_x_positions_csr(
                     level,
                     adj_start,
                     adj_end,
+                    node_spacing,
                 );
             }
         }
@@ -1543,6 +1565,7 @@ fn compact_subgraphs_csr(
     x_coords: &mut [Coord],
     widths: &[Coord],
     max_level: usize,
+    node_spacing: Coord,
 ) {
     const SG_GAP: Coord = 5;
 
@@ -1646,12 +1669,12 @@ fn compact_subgraphs_csr(
                 let prev = start + i - 1;
                 x_coords[prev]
                     .saturating_add(widths[prev])
-                    .saturating_add(gap_between_csr(graph, vnode_data, prev, pos))
+                    .saturating_add(gap_between_csr(graph, vnode_data, prev, pos, node_spacing))
             };
             let max_x = if i + 1 < n {
                 let next = start + i + 1;
                 x_coords[next].saturating_sub(
-                    my_w.saturating_add(gap_between_csr(graph, vnode_data, pos, next)),
+                    my_w.saturating_add(gap_between_csr(graph, vnode_data, pos, next, node_spacing)),
                 )
             } else {
                 Coord::MAX
@@ -1674,7 +1697,7 @@ fn compact_subgraphs_csr(
                     while k > 0 {
                         let cur = start + k;
                         let prev = start + k - 1;
-                        let g = gap_between_csr(graph, vnode_data, prev, cur);
+                        let g = gap_between_csr(graph, vnode_data, prev, cur, node_spacing);
                         let needed = x_coords[cur].saturating_sub(widths[prev].saturating_add(g));
                         if x_coords[prev] <= needed {
                             break;
@@ -1704,7 +1727,7 @@ fn compact_subgraphs_csr(
                     while k + 1 < n {
                         let cur = start + k;
                         let next = start + k + 1;
-                        let g = gap_between_csr(graph, vnode_data, cur, next);
+                        let g = gap_between_csr(graph, vnode_data, cur, next, node_spacing);
                         let needed = x_coords[cur].saturating_add(widths[cur]).saturating_add(g);
                         if x_coords[next] >= needed {
                             break;
@@ -2522,6 +2545,7 @@ fn assign_x_coords_csr(
     x_coords: &mut [Coord],
     widths: &mut [Coord],
     max_level: Idx,
+    node_spacing: Coord,
 ) -> Coord {
     let mut max_width: Coord = 0;
     let max_pos = x_coords.len();
@@ -2554,7 +2578,7 @@ fn assign_x_coords_csr(
                 x_coords[pos] = x;
                 widths[pos] = width;
             }
-            x += width + 3;
+            x += width + node_spacing;
         }
 
         if end > start && end - 1 < x_coords.len() {
@@ -3797,5 +3821,83 @@ mod tests {
         assert!(output.contains("[A]"));
         assert!(output.contains("[B]"));
         assert!(output.contains("[C]"));
+    }
+
+    // ── Spacing config (regression: fields were silently ignored) ──────
+
+    /// A fans out to B/C/D (three adjacent nodes on level 1), converging on E.
+    const SPACING_TEST_EDGES: &[(usize, usize)] =
+        &[(0, 1), (0, 2), (0, 3), (1, 4), (2, 4), (3, 4)];
+
+    fn layout_with_config<'b>(
+        config: &LayoutConfig<'_>,
+        graph_buf: &mut [u8],
+        temp_buf: &mut [u8],
+        out_arena: &'b mut Arena<'b>,
+    ) -> LayoutIRArena<'b> {
+        let mut graph_arena = Arena::new(graph_buf);
+        let graph = build_csr_graph(&mut graph_arena, 5, SPACING_TEST_EDGES);
+        let mut temp_arena = Arena::new(temp_buf);
+        compute_layout_arena_csr(&graph, config, &mut temp_arena, out_arena).expect("layout")
+    }
+
+    #[test]
+    fn test_node_spacing_config_applied_csr() {
+        for spacing in [3usize, 8] {
+            let mut config = LayoutConfig::standard();
+            config.node_spacing = spacing;
+            let mut graph_buf = [0u8; 8192];
+            let mut temp_buf = [0u8; 65536];
+            let mut out_buf = [0u8; 65536];
+            let mut out_arena = Arena::new(&mut out_buf);
+            let ir = layout_with_config(&config, &mut graph_buf, &mut temp_buf, &mut out_arena);
+
+            let mut boxes: [(usize, usize); 3] = [(0, 0); 3];
+            let mut count = 0;
+            for n in ir.nodes() {
+                if n.level == 1 {
+                    boxes[count] = (n.x, n.width);
+                    count += 1;
+                }
+            }
+            assert_eq!(count, 3);
+            boxes.sort_unstable();
+            for pair in boxes.windows(2) {
+                let gap = pair[1].0 - (pair[0].0 + pair[0].1);
+                assert_eq!(
+                    gap, spacing,
+                    "gap between adjacent nodes should equal node_spacing={spacing}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_level_spacing_config_applied_csr() {
+        let base_config = LayoutConfig::standard();
+        let mut graph_buf = [0u8; 8192];
+        let mut temp_buf = [0u8; 65536];
+        let mut out_buf = [0u8; 65536];
+        let mut out_arena = Arena::new(&mut out_buf);
+        let base = layout_with_config(&base_config, &mut graph_buf, &mut temp_buf, &mut out_arena);
+
+        let mut spaced_config = LayoutConfig::standard();
+        spaced_config.level_spacing = 2;
+        let mut graph_buf2 = [0u8; 8192];
+        let mut temp_buf2 = [0u8; 65536];
+        let mut out_buf2 = [0u8; 65536];
+        let mut out_arena2 = Arena::new(&mut out_buf2);
+        let spaced =
+            layout_with_config(&spaced_config, &mut graph_buf2, &mut temp_buf2, &mut out_arena2);
+
+        let y_at = |ir: &LayoutIRArena<'_>, level: usize| {
+            ir.nodes().iter().find(|n| n.level == level).unwrap().y
+        };
+        // Each of the two inter-level gaps grows by level_spacing.
+        assert_eq!(y_at(&spaced, 1), y_at(&base, 1) + 2);
+        assert_eq!(y_at(&spaced, 2), y_at(&base, 2) + 4);
+        // No trailing gap after the last level: total height grows by
+        // exactly (levels - 1) * level_spacing.
+        assert_eq!(spaced.height(), base.height() + 4);
     }
 }

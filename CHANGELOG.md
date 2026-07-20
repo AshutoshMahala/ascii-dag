@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.10.0] - Unreleased
+
+### Fixed
+- **`LayoutConfig` spacing is now honored**: `node_spacing` and `level_spacing` were silently ignored (gaps hardcoded); both now apply in the heap and CSR layout paths. `level_spacing` default changed 2 → 0 to keep existing output unchanged.
+
 ## [0.9.1] - 2026-03-25
 
 ### Improved
