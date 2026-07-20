@@ -11,7 +11,11 @@
 //!    [`subgraph_padding`] inserts horizontal padding at subgraph boundary
 //!    transitions so borders don't overprint node text.
 //!
-//! 2. **After final coordinate assignment:**
+//! 2. **After sibling overlap repair ([`fix_subgraph_overlaps`]):**
+//!    [`clear_external_overlaps`] pushes unaffiliated nodes clear of each
+//!    cluster's projected border envelope (cluster-width feedback).
+//!
+//! 3. **After final coordinate assignment:**
 //!    [`compute_bounding_boxes`] walks the node list to emit
 //!    [`SubgraphInfo`] bounding boxes, propagating nested children
 //!    bottom-up.
@@ -129,6 +133,21 @@ pub(crate) fn block_partition_level(dag: &Graph<'_>, level: &[VNode]) -> Vec<VNo
 /// Per-subgraph horizontal padding constant (chars on each side of a border).
 const SUBGRAPH_H_PAD: usize = 2;
 
+/// Cap on how far a subgraph *label* may widen its bounding box.
+///
+/// A box is always wide enough for its member nodes; the label only
+/// forces extra width up to this total. Longer labels are truncated by
+/// the renderers (which clip to `width - 4`). Without a cap, a
+/// pathological heading would blow up the canvas — and with it the
+/// render buffer — linearly in the label length.
+const SUBGRAPH_LABEL_BOX_CAP: usize = 40;
+
+/// Minimum box width needed to show `label` (borders + spaces), capped.
+#[inline]
+fn label_min_width(label: &str) -> usize {
+    (label.len() + 4).min(SUBGRAPH_LABEL_BOX_CAP)
+}
+
 /// Vertical padding above first node: border row + label row + 1 blank row.
 pub(crate) const SUBGRAPH_V_PAD_TOP: usize = 3; // ╔═══╗ + ║ Label ║ + ║     ║
 /// Vertical padding below last node: 1 blank row + border row.
@@ -207,6 +226,211 @@ pub(crate) fn subgraph_padding(
     }
 
     level_widths
+}
+
+// ── Cluster-width feedback ───────────────────────────────────────────────
+
+/// Gap (in chars) between a cluster's drawn border and an external node.
+const ENVELOPE_CLEARANCE: usize = 1;
+
+/// Push unaffiliated nodes clear of subgraph bounding-box envelopes
+/// (cluster-width feedback).
+///
+/// [`subgraph_padding`] reserves space per level, but the border later
+/// drawn from [`compute_bounding_boxes`] is a *global* x-envelope: the
+/// member extent across all levels, padded, widened to fit the label,
+/// and expanded around children. Without feedback, an external node on
+/// a narrower level (or past a label-widened edge) renders *inside* the
+/// cluster border. This pass projects each cluster's final x-envelope
+/// with the same math and pushes overlapping external nodes to its
+/// right, iterating (bounded rounds) since a sweep can grow another
+/// cluster's envelope.
+///
+/// It runs on `real_node_coords` **after** [`fix_subgraph_overlaps`] so
+/// it sees the same coordinates the bounding boxes are computed from —
+/// running earlier would clear against envelopes that sibling-overlap
+/// repair later shifts.
+///
+/// Only **unaffiliated real nodes** are pushed:
+/// - Members of *other* clusters are left to [`fix_subgraph_overlaps`],
+///   which moves whole clusters. Pushing them individually here would
+///   stretch their cluster's envelope and cascade the widening.
+/// - Dummy vnodes are never pushed — an edge crossing a border renders
+///   with junction glyphs, and rerouting them costs unbounded width.
+///
+/// Returns the growth of the maximum node right edge (0 if nothing
+/// moved), which the caller folds into the canvas width.
+pub(crate) fn clear_external_overlaps(
+    dag: &Graph<'_>,
+    real_node_coords: &mut [(usize, usize, usize, usize)], // (level, pos, x, width)
+    node_spacing: usize,
+) -> usize {
+    let sg_count = dag.subgraphs.len();
+    if sg_count == 0 || real_node_coords.is_empty() {
+        return 0;
+    }
+
+    let sg_id_to_idx: HashMap<usize, usize> = dag
+        .subgraphs
+        .iter()
+        .enumerate()
+        .map(|(i, sg)| (sg.id, i))
+        .collect();
+    let parent_idx: Vec<Option<usize>> = dag
+        .subgraphs
+        .iter()
+        .map(|sg| sg.parent_id.and_then(|pid| sg_id_to_idx.get(&pid).copied()))
+        .collect();
+
+    // Deepest-first order for child → parent envelope propagation.
+    let mut depths = vec![0usize; sg_count];
+    for i in 0..sg_count {
+        let mut d = 0;
+        let mut cur = parent_idx[i];
+        while let Some(p) = cur {
+            d += 1;
+            cur = parent_idx[p];
+        }
+        depths[i] = d;
+    }
+    let mut order: Vec<usize> = (0..sg_count).collect();
+    order.sort_by(|a, b| depths[*b].cmp(&depths[*a]));
+
+    // Immediate subgraph index per node (None = unaffiliated).
+    let node_sg: Vec<Option<usize>> = dag
+        .nodes
+        .iter()
+        .map(|&(nid, _)| {
+            dag.node_subgraph
+                .get(&nid)
+                .and_then(|sid| sg_id_to_idx.get(sid).copied())
+        })
+        .collect();
+
+    let max_level = real_node_coords.iter().map(|c| c.0).max().unwrap_or(0);
+    let before_max_right = real_node_coords.iter().map(|c| c.2 + c.3).max().unwrap_or(0);
+
+    // Same cross-boundary gap the refinement passes use.
+    let sg_gap = SUBGRAPH_H_PAD * 2 + SIBLING_GAP;
+
+    for _round in 0..8 {
+        // ── Project per-cluster x-envelopes + level ranges ──
+        let mut bbox: Vec<Option<(usize, usize)>> = vec![None; sg_count];
+        let mut range: Vec<(usize, usize)> = vec![(usize::MAX, 0); sg_count];
+
+        for (node_idx, &(lvl, _, x, w)) in real_node_coords.iter().enumerate() {
+            if let Some(si) = node_sg.get(node_idx).copied().flatten() {
+                let r = x + w;
+                bbox[si] = Some(match bbox[si] {
+                    None => (x, r),
+                    Some((l, rr)) => (l.min(x), rr.max(r)),
+                });
+                let mut cur = Some(si);
+                while let Some(i) = cur {
+                    range[i].0 = range[i].0.min(lvl);
+                    range[i].1 = range[i].1.max(lvl);
+                    cur = parent_idx[i];
+                }
+            }
+        }
+
+        // Pad + label minimum (mirrors compute_bounding_boxes pass 1.5).
+        for (si, b) in bbox.iter_mut().enumerate() {
+            if let Some((l, r)) = *b {
+                let left = l.saturating_sub(SUBGRAPH_H_PAD);
+                let mut right = r + SUBGRAPH_H_PAD;
+                let min_label_width = label_min_width(dag.subgraphs[si].label);
+                if right - left < min_label_width {
+                    right = left + min_label_width;
+                }
+                *b = Some((left, right));
+            }
+        }
+
+        // Child → parent expansion, then label recheck (mirrors pass 2).
+        const PARENT_CHILD_H_GAP: usize = 1;
+        for &si in &order {
+            if let (Some((cl, cr)), Some(pi)) = (bbox[si], parent_idx[si]) {
+                let exp = (cl.saturating_sub(PARENT_CHILD_H_GAP), cr + PARENT_CHILD_H_GAP);
+                bbox[pi] = Some(match bbox[pi] {
+                    None => exp,
+                    Some((pl, pr)) => (pl.min(exp.0), pr.max(exp.1)),
+                });
+            }
+        }
+        for (si, b) in bbox.iter_mut().enumerate() {
+            if let Some((l, r)) = *b {
+                let min_label_width = label_min_width(dag.subgraphs[si].label);
+                if r - l < min_label_width {
+                    *b = Some((l, l + min_label_width));
+                }
+            }
+        }
+
+        // ── Push overlapping unaffiliated nodes right of each envelope ──
+        let mut moved = false;
+        let mut touched = vec![false; max_level + 1];
+        for si in 0..sg_count {
+            let Some((left, right)) = bbox[si] else {
+                continue;
+            };
+            let (first, last) = range[si];
+            if first == usize::MAX {
+                continue;
+            }
+            let mut cursors = vec![0usize; max_level + 1];
+            for c in cursors[first..=last.min(max_level)].iter_mut() {
+                *c = right + ENVELOPE_CLEARANCE;
+            }
+            for node_idx in 0..real_node_coords.len() {
+                if node_sg.get(node_idx).copied().flatten().is_some() {
+                    continue;
+                }
+                let (lvl, _, x, w) = real_node_coords[node_idx];
+                if lvl < first || lvl > last {
+                    continue;
+                }
+                if x < right && x + w > left {
+                    real_node_coords[node_idx].2 = cursors[lvl];
+                    cursors[lvl] += w + node_spacing;
+                    moved = true;
+                    touched[lvl] = true;
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+
+        // ── Re-establish min gaps on touched levels (push-right, x order) ──
+        for (lvl, lvl_touched) in touched.iter().enumerate() {
+            if !lvl_touched {
+                continue;
+            }
+            let mut level_nodes: Vec<usize> = (0..real_node_coords.len())
+                .filter(|&ni| real_node_coords[ni].0 == lvl)
+                .collect();
+            level_nodes.sort_by_key(|&ni| (real_node_coords[ni].2, ni));
+            for k in 1..level_nodes.len() {
+                let prev = level_nodes[k - 1];
+                let cur = level_nodes[k];
+                let prev_sg = node_sg[prev];
+                let cur_sg = node_sg[cur];
+                let gap = if prev_sg != cur_sg && (prev_sg.is_some() || cur_sg.is_some()) {
+                    sg_gap
+                } else {
+                    node_spacing
+                };
+                let min_x = real_node_coords[prev].2 + real_node_coords[prev].3 + gap;
+                if real_node_coords[cur].2 < min_x {
+                    real_node_coords[cur].2 = min_x;
+                }
+            }
+        }
+    }
+
+    let after_max_right = real_node_coords.iter().map(|c| c.2 + c.3).max().unwrap_or(0);
+    after_max_right.saturating_sub(before_max_right)
 }
 
 // ── Sibling subgraph overlap repair ──────────────────────────────────────
@@ -385,7 +609,7 @@ pub(crate) fn fix_subgraph_overlaps(
                 env.map(|(mn, mx)| {
                     let left = mn.saturating_sub(SUBGRAPH_H_PAD);
                     let right = mx + SUBGRAPH_H_PAD;
-                    let label_w = dag.subgraphs[sg_idx].label.len() + 4;
+                    let label_w = label_min_width(dag.subgraphs[sg_idx].label);
                     let width = right.saturating_sub(left);
                     let right = if width < label_w {
                         left + label_w
@@ -806,7 +1030,7 @@ pub(crate) fn compute_bounding_boxes<'a>(
             };
             // Ensure width fits the label: ║ Label ║ needs label_len + 4
             let width = right.saturating_sub(x);
-            let min_label_width = sg.label.len() + 4;
+            let min_label_width = label_min_width(sg.label);
             let right = if width < min_label_width {
                 x + min_label_width
             } else {
@@ -855,7 +1079,7 @@ pub(crate) fn compute_bounding_boxes<'a>(
         if let Some((x, y, right, bottom)) = bboxes[sg_idx] {
             // Re-check label width (parent may have grown but label still needs room)
             let width = right.saturating_sub(x);
-            let min_label_width = sg.label.len() + 4;
+            let min_label_width = label_min_width(sg.label);
             let right = if width < min_label_width {
                 x + min_label_width
             } else {

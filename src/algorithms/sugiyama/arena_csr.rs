@@ -75,6 +75,17 @@ pub(crate) struct LayoutTemps<'a> {
 // ── Subgraph layout constants ────────────────────────────────────────────
 /// Per-subgraph horizontal padding (chars on each side of border).
 const SUBGRAPH_H_PAD: usize = 2;
+/// Cap on how far a subgraph *label* may widen its bounding box.
+/// Twin of `subgraph::SUBGRAPH_LABEL_BOX_CAP`; renderers truncate longer
+/// labels to the box width, and the cap keeps a pathological heading from
+/// blowing up the canvas (and with it the render buffer).
+const SUBGRAPH_LABEL_BOX_CAP: usize = 40;
+
+/// Minimum box width needed to show `label` (borders + spaces), capped.
+#[inline]
+fn sg_label_min_width(label: &str) -> usize {
+    (label.len() + 4).min(SUBGRAPH_LABEL_BOX_CAP)
+}
 /// Vertical padding above first node: border + label + blank.
 const SUBGRAPH_V_PAD_TOP: usize = 3;
 /// Vertical padding below last node: blank + border.
@@ -302,6 +313,21 @@ pub fn compute_layout_arena_csr<'b>(
             temps.node_slots,
         );
         max_width = max_width.saturating_add(extra as Coord);
+
+        // Step 6c: Cluster-width feedback — push unaffiliated nodes clear
+        // of each cluster's projected border envelope (cross-level extent
+        // + label minimum). Runs after overlap repair so it sees the
+        // coordinates the bounding boxes will actually be computed from.
+        let pushed = clear_external_overlaps_csr(
+            graph,
+            temps.real_coords,
+            max_level as usize,
+            node_spacing_usize,
+            temps.sg_envelopes,
+            temps.sg_depths,
+            temps.positions,
+        );
+        max_width = max_width.saturating_add(pushed as Coord);
     }
 
     // Step 7: Build dummy positions using actual virtual level positions
@@ -519,7 +545,8 @@ pub fn compute_layout_arena_csr<'b>(
 
     // Add buffer for edge routing (+4) plus label margin
     let label_margin = if has_labeled_edges { 8 } else { 0 };
-    builder.set_dimensions(max_width as usize + 4 + label_margin, total_height);
+    let canvas_width = max_width as usize + 4 + label_margin;
+    builder.set_dimensions(canvas_width, total_height);
     builder.set_level_count(max_level as usize + 1);
 
     // Add nodes
@@ -793,7 +820,7 @@ pub fn compute_layout_arena_csr<'b>(
 
     // Step 10: Compute subgraph bounding boxes and add to builder
     if graph.has_subgraphs() {
-        compute_sg_bounding_boxes(
+        let sg_max_right = compute_sg_bounding_boxes(
             graph,
             temps.real_coords,
             temps.level_y_offsets,
@@ -803,6 +830,11 @@ pub fn compute_layout_arena_csr<'b>(
             temps.level_routing_floor,
             &mut builder,
         );
+        // The canvas must cover every border: a label-widened cluster box
+        // can extend past the node extent `canvas_width` was derived from.
+        if sg_max_right + 1 > canvas_width {
+            builder.set_dimensions(sg_max_right + 1, total_height);
+        }
     }
 
     Ok(builder.build())
@@ -1386,6 +1418,265 @@ fn gap_between_csr(
     }
 }
 
+/// Push unaffiliated nodes clear of subgraph bounding-box envelopes
+/// (cluster-width feedback). CSR twin of `subgraph::clear_external_overlaps`.
+///
+/// `subgraph_padding_csr` reserves space per level, but the border later
+/// drawn from `compute_sg_bounding_boxes` is a *global* x-envelope: the
+/// member extent across all levels, padded, widened to fit the label,
+/// and expanded around children. This pass projects that envelope with
+/// the same math and pushes overlapping external nodes right of it,
+/// iterating (bounded rounds).
+///
+/// It runs on `real_coords` **after** `fix_subgraph_overlaps_csr` so it
+/// sees the same coordinates the bounding boxes are computed from.
+/// Only **unaffiliated real nodes** are pushed: members of other clusters
+/// are left to the sibling-overlap repair (which moves whole clusters —
+/// pushing them individually would stretch their envelope and cascade),
+/// and dummies are never pushed (edges crossing a border render with
+/// junction glyphs).
+///
+/// `sg_envelopes` and `sg_depths` are borrowed as scratch (both are
+/// recomputed from scratch by their later users); `order_scratch` needs
+/// room for the largest level's real-node count.
+///
+/// Returns the growth of the maximum node right edge (0 if nothing moved).
+fn clear_external_overlaps_csr(
+    graph: &CsrGraph<'_>,
+    real_coords: &mut [(usize, usize, usize, usize)], // (level, pos, x, width)
+    max_level: usize,
+    node_spacing: usize,
+    sg_envelopes: &mut [(usize, usize, usize, usize)],
+    sg_depths: &mut [usize],
+    order_scratch: &mut [Idx],
+) -> usize {
+    let sg_count = graph.subgraph_count();
+    if sg_count == 0 || sg_count > sg_envelopes.len() || sg_count > sg_depths.len() {
+        return 0;
+    }
+    let node_count = graph.node_count().min(real_coords.len());
+    if node_count == 0 {
+        return 0;
+    }
+
+    const ENVELOPE_CLEARANCE: usize = 1;
+    // CSR levels are capped at 256 (`max_levels = node_count.min(256)`).
+    const MAX_LEVEL_SLOTS: usize = 257;
+    if max_level >= MAX_LEVEL_SLOTS {
+        return 0;
+    }
+    const SG_GAP: usize = 5;
+
+    for i in 0..sg_count {
+        sg_depths[i] = graph.sg_chain_depth(Some(i));
+    }
+    let max_depth = sg_depths[..sg_count].iter().copied().max().unwrap_or(0);
+
+    let before_max_right = real_coords[..node_count]
+        .iter()
+        .map(|c| c.2 + c.3)
+        .max()
+        .unwrap_or(0);
+
+    for _round in 0..8 {
+        // ── Project per-cluster x-envelopes + level ranges ──
+        // Scratch layout per subgraph: (left, right, first_level, last_level).
+        for e in sg_envelopes[..sg_count].iter_mut() {
+            *e = (usize::MAX, 0, usize::MAX, 0);
+        }
+
+        for node_idx in 0..node_count {
+            let Some(si) = graph.node_subgraph(node_idx) else {
+                continue;
+            };
+            if si >= sg_count {
+                continue;
+            }
+            let (level, _, x, w) = real_coords[node_idx];
+            let r = x + w;
+            let e = &mut sg_envelopes[si];
+            if x < e.0 {
+                e.0 = x;
+            }
+            if r > e.1 {
+                e.1 = r;
+            }
+            // Level range covers self and all ancestors.
+            let mut cur = Some(si);
+            while let Some(i) = cur {
+                if i < sg_count {
+                    let e = &mut sg_envelopes[i];
+                    if level < e.2 {
+                        e.2 = level;
+                    }
+                    if level > e.3 {
+                        e.3 = level;
+                    }
+                }
+                cur = graph.subgraph_parent(i);
+            }
+        }
+
+        // Pad + label minimum (mirrors compute_sg_bounding_boxes pass 1.5).
+        for si in 0..sg_count {
+            let (l, r, _, _) = sg_envelopes[si];
+            if l == usize::MAX {
+                continue;
+            }
+            let left = l.saturating_sub(SUBGRAPH_H_PAD);
+            let mut right = r + SUBGRAPH_H_PAD;
+            let min_label_width = sg_label_min_width(graph.subgraph_label(si));
+            if right - left < min_label_width {
+                right = left + min_label_width;
+            }
+            sg_envelopes[si].0 = left;
+            sg_envelopes[si].1 = right;
+        }
+
+        // Child → parent expansion deepest-first (mirrors pass 2).
+        let mut depth = max_depth;
+        loop {
+            for si in 0..sg_count {
+                if sg_depths[si] != depth {
+                    continue;
+                }
+                let (cl, cr, _, _) = sg_envelopes[si];
+                if cl == usize::MAX {
+                    continue;
+                }
+                if let Some(pi) = graph.subgraph_parent(si) {
+                    if pi >= sg_count {
+                        continue;
+                    }
+                    let exp_l = cl.saturating_sub(SUBGRAPH_H_PAD);
+                    let exp_r = cr + SUBGRAPH_H_PAD;
+                    let p = &mut sg_envelopes[pi];
+                    if p.0 == usize::MAX {
+                        p.0 = exp_l;
+                        p.1 = exp_r;
+                    } else {
+                        if exp_l < p.0 {
+                            p.0 = exp_l;
+                        }
+                        if exp_r > p.1 {
+                            p.1 = exp_r;
+                        }
+                    }
+                }
+            }
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        }
+        for si in 0..sg_count {
+            let (l, r, _, _) = sg_envelopes[si];
+            if l == usize::MAX {
+                continue;
+            }
+            let min_label_width = sg_label_min_width(graph.subgraph_label(si));
+            if r - l < min_label_width {
+                sg_envelopes[si].1 = l + min_label_width;
+            }
+        }
+
+        // ── Push overlapping unaffiliated nodes right of each envelope ──
+        let mut moved = false;
+        let mut touched = [false; MAX_LEVEL_SLOTS];
+        for si in 0..sg_count {
+            let (left, right, first, last) = sg_envelopes[si];
+            if left == usize::MAX || first == usize::MAX {
+                continue;
+            }
+            let mut cursors = [0usize; MAX_LEVEL_SLOTS];
+            for c in cursors[first..=last.min(max_level)].iter_mut() {
+                *c = right + ENVELOPE_CLEARANCE;
+            }
+            for node_idx in 0..node_count {
+                if graph.node_subgraph(node_idx).is_some() {
+                    continue;
+                }
+                let (level, _, x, w) = real_coords[node_idx];
+                if level < first || level > last || level >= MAX_LEVEL_SLOTS {
+                    continue;
+                }
+                if x < right && x + w > left {
+                    real_coords[node_idx].2 = cursors[level];
+                    cursors[level] += w + node_spacing;
+                    moved = true;
+                    touched[level] = true;
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+
+        // ── Re-establish min gaps on touched levels (push-right, x order) ──
+        // The insertion sort is quadratic in level size, so bound the level
+        // width it may run on; realistic subgraph levels are far smaller.
+        const GAP_SWEEP_MAX_LEVEL_SIZE: usize = 1024;
+        for level in 0..=max_level {
+            if !touched[level] {
+                continue;
+            }
+            // Collect this level's real nodes into the scratch.
+            let mut n = 0usize;
+            for node_idx in 0..node_count {
+                if real_coords[node_idx].0 == level {
+                    if n >= order_scratch.len() {
+                        n = usize::MAX;
+                        break;
+                    }
+                    order_scratch[n] = node_idx as Idx;
+                    n += 1;
+                }
+            }
+            if !(2..=GAP_SWEEP_MAX_LEVEL_SIZE).contains(&n) {
+                continue;
+            }
+            // Insertion sort by current x (stable).
+            for k in 1..n {
+                let mut j = k;
+                while j > 0 {
+                    let a = order_scratch[j - 1] as usize;
+                    let b = order_scratch[j] as usize;
+                    if (real_coords[a].2, order_scratch[j - 1])
+                        > (real_coords[b].2, order_scratch[j])
+                    {
+                        order_scratch.swap(j - 1, j);
+                        j -= 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            for k in 1..n {
+                let prev = order_scratch[k - 1] as usize;
+                let cur = order_scratch[k] as usize;
+                let prev_sg = graph.node_subgraph(prev);
+                let cur_sg = graph.node_subgraph(cur);
+                let gap = if prev_sg != cur_sg && (prev_sg.is_some() || cur_sg.is_some()) {
+                    SG_GAP
+                } else {
+                    node_spacing
+                };
+                let min_x = real_coords[prev].2 + real_coords[prev].3 + gap;
+                if real_coords[cur].2 < min_x {
+                    real_coords[cur].2 = min_x;
+                }
+            }
+        }
+    }
+
+    let after_max_right = real_coords[..node_count]
+        .iter()
+        .map(|c| c.2 + c.3)
+        .max()
+        .unwrap_or(0);
+    after_max_right.saturating_sub(before_max_right)
+}
+
 /// Left margin for a level (H_PAD if first node is in a subgraph).
 fn left_margin_csr(
     graph: &CsrGraph<'_>,
@@ -1886,7 +2177,7 @@ fn fix_subgraph_overlaps_csr(
             }
             let left = mn.saturating_sub(SUBGRAPH_H_PAD);
             let mut right = mx + SUBGRAPH_H_PAD;
-            let label_w = graph.subgraph_label(sg_idx).len() + 4;
+            let label_w = sg_label_min_width(graph.subgraph_label(sg_idx));
             if right.saturating_sub(left) < label_w {
                 right = left + label_w;
             }
@@ -2215,6 +2506,8 @@ fn compute_sg_y_extras(
 /// Uses sg_envelopes as scratch space.
 /// `level_routing_floor` contains the max Y used by edge routing at each level,
 /// so bottom borders can be placed below the routing area.
+/// Returns the maximum bounding-box right edge (`x + width`) across all
+/// subgraphs, so the caller can widen the canvas to cover every border.
 fn compute_sg_bounding_boxes(
     graph: &CsrGraph<'_>,
     real_coords: &[(usize, usize, usize, usize)], // (level, pos, x, width)
@@ -2224,10 +2517,10 @@ fn compute_sg_bounding_boxes(
     sg_envelopes: &mut [(usize, usize, usize, usize)],
     level_routing_floor: &[usize],
     builder: &mut LayoutIRArenaBuilder<'_>,
-) {
+) -> usize {
     let sg_count = graph.subgraph_count();
     if sg_count == 0 {
-        return;
+        return 0;
     }
 
     // Pass 1: compute node envelope per subgraph
@@ -2298,7 +2591,7 @@ fn compute_sg_bounding_boxes(
 
         // Ensure width fits label
         let label = graph.subgraph_label(sg_idx);
-        let min_label_width = label.len() + 4;
+        let min_label_width = sg_label_min_width(label);
         let width = right.saturating_sub(x);
         let right = if width < min_label_width {
             x + min_label_width
@@ -2403,6 +2696,7 @@ fn compute_sg_bounding_boxes(
     }
 
     // Add subgraph bounding boxes to builder
+    let mut max_right = 0usize;
     for sg_idx in 0..effective_sg {
         let (x, y, right, bottom) = sg_envelopes[sg_idx];
         if x == usize::MAX {
@@ -2414,7 +2708,9 @@ fn compute_sg_bounding_boxes(
         let parent_id = graph.subgraph_parent(sg_idx).map(|p| graph.subgraph_id(p));
         let label = graph.subgraph_label(sg_idx);
         builder.add_subgraph(sg_id, parent_id, label, x, y, width, height);
+        max_right = max_right.max(x + width);
     }
+    max_right
 }
 
 fn calculate_levels_csr(graph: &CsrGraph<'_>, levels: &mut [Idx], back_edges: &[bool]) -> Idx {
@@ -3899,5 +4195,122 @@ mod tests {
         // No trailing gap after the last level: total height grows by
         // exactly (levels - 1) * level_spacing.
         assert_eq!(spaced.height(), base.height() + 4);
+    }
+
+    // ── Cluster-width feedback (regression: external nodes rendered
+    //    inside subgraph borders) ────────────────────────────────────────
+
+    /// Build a one-subgraph graph, lay it out, and assert the nodes with
+    /// the given ids stay clear of every subgraph box.
+    fn assert_externals_clear_csr(
+        sg_label: &str,
+        nodes: &[(&str, bool)],
+        edges: &[(usize, usize)],
+        external_ids: &[usize],
+    ) {
+        let mut graph_buf = [0u8; 16384];
+        let mut graph_arena = Arena::new(&mut graph_buf);
+        let mut b =
+            CsrGraphBuilder::new_with_subgraphs(&mut graph_arena, 16, 16, 256, 4).expect("builder");
+        let sg = b.add_subgraph(0, sg_label).expect("sg");
+        for (i, (label, _)) in nodes.iter().enumerate() {
+            b.add_node(i, label).expect("node");
+        }
+        for (i, (_, inside)) in nodes.iter().enumerate() {
+            if *inside {
+                b.set_node_subgraph(i, sg).expect("assign");
+            }
+        }
+        for &(f, t) in edges {
+            b.add_edge(f, t).expect("edge");
+        }
+        let graph = b.build().expect("build");
+
+        let config = LayoutConfig::standard();
+        let mut temp_buf = [0u8; 65536];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_buf = [0u8; 65536];
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = compute_layout_arena_csr(&graph, &config, &mut temp_arena, &mut out_arena)
+            .expect("layout");
+
+        for sg in ir.subgraphs() {
+            assert!(
+                sg.x + sg.width <= ir.width(),
+                "canvas clips subgraph border (right {} > width {})",
+                sg.x + sg.width,
+                ir.width(),
+            );
+            for n in ir.nodes().iter().filter(|n| external_ids.contains(&n.id)) {
+                let x_overlap = n.x < sg.x + sg.width && n.x + n.width > sg.x;
+                let y_overlap = n.y >= sg.y && n.y < sg.y + sg.height;
+                assert!(
+                    !(x_overlap && y_overlap),
+                    "external node id={} overlaps subgraph box",
+                    n.id,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_book_length_label_capped_csr() {
+        let long_label = "L".repeat(300);
+        let mut graph_buf = [0u8; 16384];
+        let mut graph_arena = Arena::new(&mut graph_buf);
+        let mut b =
+            CsrGraphBuilder::new_with_subgraphs(&mut graph_arena, 4, 4, 512, 2).expect("builder");
+        let sg = b.add_subgraph(0, &long_label).expect("sg");
+        b.add_node(0, "A").expect("node");
+        b.add_node(1, "B").expect("node");
+        b.set_node_subgraph(0, sg).expect("assign");
+        b.set_node_subgraph(1, sg).expect("assign");
+        b.add_edge(0, 1).expect("edge");
+        let graph = b.build().expect("build");
+
+        let config = LayoutConfig::standard();
+        let mut temp_buf = [0u8; 65536];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_buf = [0u8; 65536];
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = compute_layout_arena_csr(&graph, &config, &mut temp_arena, &mut out_arena)
+            .expect("layout");
+
+        let info = &ir.subgraphs()[0];
+        assert!(
+            info.width <= 40,
+            "label must not widen the box past the cap (got {})",
+            info.width,
+        );
+        assert!(
+            ir.width() < 100,
+            "canvas must not scale with label length (got {})",
+            ir.width(),
+        );
+    }
+
+    #[test]
+    fn test_label_widened_subgraph_clear_of_externals_csr() {
+        assert_externals_clear_csr(
+            "VeryLongSubgraphLabelHere",
+            &[("X", true), ("E", false), ("X2", true), ("E2", false)],
+            &[(0, 2), (1, 3)],
+            &[1, 3],
+        );
+    }
+
+    #[test]
+    fn test_cross_level_envelope_clear_of_externals_csr() {
+        assert_externals_clear_csr(
+            "C",
+            &[
+                ("WideMemberNodeAAA", true),
+                ("WideMemberNodeBBB", true),
+                ("m", true),
+                ("ext", false),
+            ],
+            &[(0, 2), (1, 2), (0, 3)],
+            &[3],
+        );
     }
 }

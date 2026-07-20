@@ -4,6 +4,7 @@
 
 ### Fixed
 - **`LayoutConfig` spacing is now honored**: `node_spacing` and `level_spacing` were silently ignored (gaps hardcoded); both now apply in the heap and CSR layout paths. `level_spacing` default changed 2 → 0 to keep existing output unchanged.
+- **Cluster-width feedback**: unaffiliated nodes are pushed clear of subgraph borders (label-widened or inherited from wider levels), and the canvas now covers label-widened borders instead of clipping them. A subgraph label's contribution to box width is capped at 40 chars (longer labels are truncated by the renderer). Applies to both layout paths.
 
 ## [0.9.1] - 2026-03-25
 

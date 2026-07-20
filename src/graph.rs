@@ -1327,4 +1327,84 @@ mod tests {
         // exactly (levels - 1) * level_spacing.
         assert_eq!(spaced.height(), base.height() + 4);
     }
+
+    // ── Cluster-width feedback (regression: external nodes rendered
+    //    inside subgraph borders) ────────────────────────────────────────
+
+    fn assert_externals_clear(ir: &crate::ir::LayoutIR<'_>, externals: &[&str]) {
+        for sg in ir.subgraphs() {
+            assert!(
+                sg.x + sg.width <= ir.width(),
+                "canvas clips subgraph '{}' (border right {} > width {})",
+                sg.label,
+                sg.x + sg.width,
+                ir.width(),
+            );
+            for n in ir.nodes().iter().filter(|n| externals.contains(&n.label)) {
+                let x_overlap = n.x < sg.x + sg.width && n.x + n.width > sg.x;
+                let y_overlap = n.y >= sg.y && n.y < sg.y + sg.height;
+                assert!(
+                    !(x_overlap && y_overlap),
+                    "external node '{}' overlaps subgraph '{}' box",
+                    n.label,
+                    sg.label,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn label_widened_subgraph_does_not_swallow_external_nodes() {
+        let mut g = Graph::new();
+        g.add_node(1, "X");
+        g.add_node(2, "E");
+        g.add_node(3, "X2");
+        g.add_node(4, "E2");
+        g.add_edge(1, 3, None);
+        g.add_edge(2, 4, None);
+        let sg = g.add_subgraph("VeryLongSubgraphLabelHere");
+        g.put_nodes(&[1, 3]).inside(sg).unwrap();
+        assert_externals_clear(&g.compute_layout(), &["E", "E2"]);
+    }
+
+    #[test]
+    fn book_length_subgraph_label_is_capped() {
+        let long_label = "L".repeat(300);
+        let mut g = Graph::new();
+        g.add_node(1, "A");
+        g.add_node(2, "B");
+        g.add_edge(1, 2, None);
+        let sg = g.add_subgraph(&long_label);
+        g.put_nodes(&[1, 2]).inside(sg).unwrap();
+        let ir = g.compute_layout();
+        let info = &ir.subgraphs()[0];
+        assert!(
+            info.width <= 40,
+            "label must not widen the box past the cap (got {})",
+            info.width,
+        );
+        assert!(
+            ir.width() < 100,
+            "canvas must not scale with label length (got {})",
+            ir.width(),
+        );
+        // Renderer truncates the label to the box interior.
+        let out = ir.render_scanline();
+        assert!(out.lines().all(|l| l.chars().count() <= ir.width()));
+    }
+
+    #[test]
+    fn cross_level_subgraph_envelope_does_not_swallow_external_nodes() {
+        let mut g = Graph::new();
+        g.add_node(1, "WideMemberNodeAAA");
+        g.add_node(2, "WideMemberNodeBBB");
+        g.add_node(3, "m");
+        g.add_node(4, "ext");
+        g.add_edge(1, 3, None);
+        g.add_edge(2, 3, None);
+        g.add_edge(1, 4, None);
+        let sg = g.add_subgraph("C");
+        g.put_nodes(&[1, 2, 3]).inside(sg).unwrap();
+        assert_externals_clear(&g.compute_layout(), &["ext"]);
+    }
 }

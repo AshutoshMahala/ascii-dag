@@ -278,7 +278,16 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             dag,
             &mut real_node_coords,
         );
-        max_width + extra
+        // Cluster-width feedback: push unaffiliated nodes clear of each
+        // cluster's projected border envelope (cross-level extent + label
+        // minimum). Runs after overlap repair so it sees the coordinates
+        // the bounding boxes will actually be computed from.
+        let pushed = crate::algorithms::sugiyama::subgraph::clear_external_overlaps(
+            dag,
+            &mut real_node_coords,
+            node_spacing,
+        );
+        max_width + extra + pushed
     } else {
         max_width
     };
@@ -744,9 +753,10 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         }
     }
 
-    builder.set_dimensions(max_width, total_height);
-
-    // Compute subgraph bounding boxes if any subgraphs are defined
+    // Compute subgraph bounding boxes if any subgraphs are defined.
+    // The canvas must cover every border: a label-widened cluster box can
+    // extend past the node extent that `max_width` was derived from.
+    let mut canvas_width = max_width;
     if dag.has_subgraphs() {
         let sg_infos = crate::algorithms::sugiyama::subgraph::compute_bounding_boxes(
             dag,
@@ -757,9 +767,11 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             &level_routing_floor,
         );
         for info in sg_infos {
+            canvas_width = canvas_width.max(info.x + info.width + 1);
             builder.add_subgraph(info);
         }
     }
+    builder.set_dimensions(canvas_width, total_height);
 
     builder.build()
 }
