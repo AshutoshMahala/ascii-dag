@@ -446,58 +446,7 @@ pub(crate) fn clear_external_overlaps(
     let sg_gap = SUBGRAPH_H_PAD * 2 + SIBLING_GAP;
 
     for _round in 0..8 {
-        // ── Project per-cluster x-envelopes + level ranges ──
-        let mut bbox: Vec<Option<(usize, usize)>> = vec![None; sg_count];
-        let mut range: Vec<(usize, usize)> = vec![(usize::MAX, 0); sg_count];
-
-        for (node_idx, &(lvl, _, x, w)) in real_node_coords.iter().enumerate() {
-            if let Some(si) = node_sg.get(node_idx).copied().flatten() {
-                let r = x + w;
-                bbox[si] = Some(match bbox[si] {
-                    None => (x, r),
-                    Some((l, rr)) => (l.min(x), rr.max(r)),
-                });
-                let mut cur = Some(si);
-                while let Some(i) = cur {
-                    range[i].0 = range[i].0.min(lvl);
-                    range[i].1 = range[i].1.max(lvl);
-                    cur = parent_idx[i];
-                }
-            }
-        }
-
-        // Pad + label minimum (mirrors compute_bounding_boxes pass 1.5).
-        for (si, b) in bbox.iter_mut().enumerate() {
-            if let Some((l, r)) = *b {
-                let left = l.saturating_sub(SUBGRAPH_H_PAD);
-                let mut right = r + SUBGRAPH_H_PAD;
-                let min_label_width = label_min_width(dag.subgraphs[si].label);
-                if right - left < min_label_width {
-                    right = left + min_label_width;
-                }
-                *b = Some((left, right));
-            }
-        }
-
-        // Child → parent expansion, then label recheck (mirrors pass 2).
-        const PARENT_CHILD_H_GAP: usize = 1;
-        for &si in &order {
-            if let (Some((cl, cr)), Some(pi)) = (bbox[si], parent_idx[si]) {
-                let exp = (cl.saturating_sub(PARENT_CHILD_H_GAP), cr + PARENT_CHILD_H_GAP);
-                bbox[pi] = Some(match bbox[pi] {
-                    None => exp,
-                    Some((pl, pr)) => (pl.min(exp.0), pr.max(exp.1)),
-                });
-            }
-        }
-        for (si, b) in bbox.iter_mut().enumerate() {
-            if let Some((l, r)) = *b {
-                let min_label_width = label_min_width(dag.subgraphs[si].label);
-                if r - l < min_label_width {
-                    *b = Some((l, l + min_label_width));
-                }
-            }
-        }
+        let (bbox, range) = project_envelopes(dag, real_node_coords, &node_sg, &parent_idx, &order);
 
         // ── Push overlapping unaffiliated nodes right of each envelope ──
         let mut moved = false;
@@ -563,6 +512,321 @@ pub(crate) fn clear_external_overlaps(
 
     let after_max_right = real_node_coords.iter().map(|c| c.2 + c.3).max().unwrap_or(0);
     after_max_right.saturating_sub(before_max_right)
+}
+
+/// Per-cluster projected x-envelope: `None` if the cluster has no member
+/// nodes, else `(left, right)` including padding and label minimum.
+type Envelopes = Vec<Option<(usize, usize)>>;
+/// Per-cluster `(first_level, last_level)` range (self + descendants).
+type LevelRanges = Vec<(usize, usize)>;
+
+/// Project per-cluster x-envelopes and level ranges from current node
+/// coordinates, mirroring [`compute_bounding_boxes`] x-math: member
+/// extent, `SUBGRAPH_H_PAD`, label minimum width, child → parent
+/// expansion, label recheck. `order` must be deepest-first.
+fn project_envelopes(
+    dag: &Graph<'_>,
+    real_node_coords: &[(usize, usize, usize, usize)],
+    node_sg: &[Option<usize>],
+    parent_idx: &[Option<usize>],
+    order: &[usize],
+) -> (Envelopes, LevelRanges) {
+    let sg_count = parent_idx.len();
+    let mut bbox: Vec<Option<(usize, usize)>> = vec![None; sg_count];
+    let mut range: Vec<(usize, usize)> = vec![(usize::MAX, 0); sg_count];
+
+    for (node_idx, &(lvl, _, x, w)) in real_node_coords.iter().enumerate() {
+        if let Some(si) = node_sg.get(node_idx).copied().flatten() {
+            let r = x + w;
+            bbox[si] = Some(match bbox[si] {
+                None => (x, r),
+                Some((l, rr)) => (l.min(x), rr.max(r)),
+            });
+            let mut cur = Some(si);
+            while let Some(i) = cur {
+                range[i].0 = range[i].0.min(lvl);
+                range[i].1 = range[i].1.max(lvl);
+                cur = parent_idx[i];
+            }
+        }
+    }
+
+    // Pad + label minimum (mirrors compute_bounding_boxes pass 1.5).
+    for (si, b) in bbox.iter_mut().enumerate() {
+        if let Some((l, r)) = *b {
+            let left = l.saturating_sub(SUBGRAPH_H_PAD);
+            let mut right = r + SUBGRAPH_H_PAD;
+            let min_label_width = label_min_width(dag.subgraphs[si].label);
+            if right - left < min_label_width {
+                right = left + min_label_width;
+            }
+            *b = Some((left, right));
+        }
+    }
+
+    // Child → parent expansion, then label recheck (mirrors pass 2).
+    const PARENT_CHILD_H_GAP: usize = 1;
+    for &si in order {
+        if let (Some((cl, cr)), Some(pi)) = (bbox[si], parent_idx[si]) {
+            let exp = (cl.saturating_sub(PARENT_CHILD_H_GAP), cr + PARENT_CHILD_H_GAP);
+            bbox[pi] = Some(match bbox[pi] {
+                None => exp,
+                Some((pl, pr)) => (pl.min(exp.0), pr.max(exp.1)),
+            });
+        }
+    }
+    for (si, b) in bbox.iter_mut().enumerate() {
+        if let Some((l, r)) = *b {
+            let min_label_width = label_min_width(dag.subgraphs[si].label);
+            if r - l < min_label_width {
+                *b = Some((l, l + min_label_width));
+            }
+        }
+    }
+    (bbox, range)
+}
+
+/// Compact root clusters and unaffiliated nodes leftward.
+///
+/// [`fix_subgraph_overlaps`] separates overlapping clusters by shifting
+/// the right one further right, and nothing pulls clusters back together
+/// afterward — leaving wide empty gulfs crossed by long edge lines. This
+/// pass treats each **root** cluster as a rigid body (its internal layout
+/// and nested children move as one) and each unaffiliated node as a
+/// singleton body, sweeps bodies in left-to-right order, and shifts each
+/// as far left as the per-level frontier of already-placed bodies allows:
+/// envelope↔envelope keeps [`SIBLING_GAP`], envelope↔node keeps
+/// [`ENVELOPE_CLEARANCE`], node↔node keeps `node_spacing`. Shift-left
+/// only, so the canvas can only shrink and no constraint that held
+/// before can break.
+///
+/// Returns the reclaimed canvas width: the reduction of the rightmost
+/// extent, conservatively the smaller of the node-extent and
+/// envelope-extent reductions.
+pub(crate) fn compact_clusters(
+    dag: &Graph<'_>,
+    real_node_coords: &mut [(usize, usize, usize, usize)], // (level, pos, x, width)
+    virtual_levels: &[Vec<VNode>],
+    x_coords: &mut [Vec<usize>],
+    node_levels: &[usize],
+    node_spacing: usize,
+) -> usize {
+    let sg_count = dag.subgraphs.len();
+    if sg_count == 0 || real_node_coords.is_empty() {
+        return 0;
+    }
+
+    let sg_id_to_idx: HashMap<usize, usize> = dag
+        .subgraphs
+        .iter()
+        .enumerate()
+        .map(|(i, sg)| (sg.id, i))
+        .collect();
+    let parent_idx: Vec<Option<usize>> = dag
+        .subgraphs
+        .iter()
+        .map(|sg| sg.parent_id.and_then(|pid| sg_id_to_idx.get(&pid).copied()))
+        .collect();
+    let mut depths = vec![0usize; sg_count];
+    for i in 0..sg_count {
+        let mut d = 0;
+        let mut cur = parent_idx[i];
+        while let Some(p) = cur {
+            d += 1;
+            cur = parent_idx[p];
+        }
+        depths[i] = d;
+    }
+    let mut order: Vec<usize> = (0..sg_count).collect();
+    order.sort_by(|a, b| depths[*b].cmp(&depths[*a]));
+    let node_sg: Vec<Option<usize>> = dag
+        .nodes
+        .iter()
+        .map(|&(nid, _)| {
+            dag.node_subgraph
+                .get(&nid)
+                .and_then(|sid| sg_id_to_idx.get(sid).copied())
+        })
+        .collect();
+    let root_of = |mut i: usize| -> usize {
+        while let Some(p) = parent_idx[i] {
+            i = p;
+        }
+        i
+    };
+
+    let (bbox, range) = project_envelopes(dag, real_node_coords, &node_sg, &parent_idx, &order);
+    let max_level = real_node_coords.iter().map(|c| c.0).max().unwrap_or(0);
+    let before_node_right = real_node_coords.iter().map(|c| c.2 + c.3).max().unwrap_or(0);
+    let before_env_right = bbox.iter().flatten().map(|b| b.1).max().unwrap_or(0);
+
+    // Bodies: root clusters + unaffiliated nodes, in left-to-right order.
+    // (left, right, is_cluster, index)
+    let mut bodies: Vec<(usize, usize, bool, usize)> = Vec::new();
+    for si in 0..sg_count {
+        if parent_idx[si].is_none() {
+            if let Some((l, r)) = bbox[si] {
+                bodies.push((l, r, true, si));
+            }
+        }
+    }
+    for (ni, &(_, _, x, w)) in real_node_coords.iter().enumerate() {
+        if node_sg[ni].is_none() {
+            bodies.push((x, x + w, false, ni));
+        }
+    }
+    bodies.sort_unstable();
+
+    // Per-level frontiers of already-placed bodies.
+    let mut env_right: Vec<Option<usize>> = vec![None; max_level + 1];
+    let mut node_right: Vec<Option<usize>> = vec![None; max_level + 1];
+    // Shift applied to each real node, for realigning dummy waypoints below.
+    let mut delta_of_node: Vec<usize> = vec![0; real_node_coords.len()];
+
+    for &(env_left, env_r, is_cluster, idx) in &bodies {
+        if is_cluster {
+            let (first, last) = range[idx];
+            if first == usize::MAX {
+                continue;
+            }
+            let mut allowed = 0usize;
+            for lvl in first..=last.min(max_level) {
+                if let Some(er) = env_right[lvl] {
+                    allowed = allowed.max(er + SIBLING_GAP);
+                }
+                if let Some(nr) = node_right[lvl] {
+                    allowed = allowed.max(nr + ENVELOPE_CLEARANCE);
+                }
+            }
+            let delta = env_left.saturating_sub(allowed);
+            if delta > 0 {
+                for (ni, coords) in real_node_coords.iter_mut().enumerate() {
+                    if let Some(si) = node_sg[ni] {
+                        if root_of(si) == idx {
+                            coords.2 -= delta;
+                            delta_of_node[ni] = delta;
+                        }
+                    }
+                }
+            }
+            let new_right = env_r - delta;
+            for lvl in first..=last.min(max_level) {
+                env_right[lvl] = Some(env_right[lvl].map_or(new_right, |e| e.max(new_right)));
+            }
+        } else {
+            let (lvl, _, x, w) = real_node_coords[idx];
+            let mut allowed = 0usize;
+            if let Some(er) = env_right[lvl] {
+                allowed = allowed.max(er + ENVELOPE_CLEARANCE);
+            }
+            if let Some(nr) = node_right[lvl] {
+                allowed = allowed.max(nr + node_spacing);
+            }
+            let delta = x.saturating_sub(allowed);
+            if delta > 0 {
+                real_node_coords[idx].2 = x - delta;
+                delta_of_node[idx] = delta;
+            }
+            node_right[lvl] = Some(node_right[lvl].map_or(x - delta + w, |e| e.max(x - delta + w)));
+        }
+    }
+
+    // Realign dummy waypoints with the bodies that moved: an edge's dummy
+    // chain shifts by the interpolation of its endpoints' shifts across the
+    // levels it spans, so the chain stays connected to both ends instead of
+    // being left at its pre-compaction columns (which would draw the edge
+    // straight through whatever moved underneath it).
+    for (lvl, vnodes) in virtual_levels.iter().enumerate() {
+        for (pos, vnode) in vnodes.iter().enumerate() {
+            let VNode::Dummy { edge_idx } = vnode else {
+                continue;
+            };
+            let (from_id, to_id, _) = dag.edges[*edge_idx];
+            let (Some(f), Some(t)) = (dag.node_index(from_id), dag.node_index(to_id)) else {
+                continue;
+            };
+            if f >= delta_of_node.len() || t >= delta_of_node.len() {
+                continue;
+            }
+            let df = delta_of_node[f] as i64;
+            let dt = delta_of_node[t] as i64;
+            let lf = node_levels.get(f).copied().unwrap_or(0) as i64;
+            let lt = node_levels.get(t).copied().unwrap_or(0) as i64;
+            // Snap to the nearer endpoint's shift (not a smooth ramp): the
+            // chain stays straight in two runs with at most one jog at the
+            // midpoint, instead of jogging a little on every level.
+            let delta = if (lvl as i64 - lf).abs() <= (lt - lvl as i64).abs() {
+                df
+            } else {
+                dt
+            };
+            if let Some(x) = x_coords.get_mut(lvl).and_then(|l| l.get_mut(pos)) {
+                *x = x.saturating_sub(delta as usize);
+            }
+        }
+    }
+
+    let (bbox_after, _) = project_envelopes(dag, real_node_coords, &node_sg, &parent_idx, &order);
+    let after_node_right = real_node_coords.iter().map(|c| c.2 + c.3).max().unwrap_or(0);
+    let after_env_right = bbox_after.iter().flatten().map(|b| b.1).max().unwrap_or(0);
+    let node_reclaim = before_node_right.saturating_sub(after_node_right);
+    let env_reclaim = before_env_right.saturating_sub(after_env_right);
+    node_reclaim.min(env_reclaim)
+}
+
+/// Nudge dummy waypoints out of real node spans.
+///
+/// The vertical segment of a skip-level edge is drawn at its waypoint
+/// column, and that column crosses the node row of every level the edge
+/// passes through. After the coordinate passes move real nodes (overlap
+/// repair, tightening, compaction), a node can land on a stale waypoint
+/// column — the edge then renders straight through the node text. This
+/// pass moves any such waypoint to the nearest column outside the node's
+/// span. An edge crossing a subgraph *border* renders with junction
+/// glyphs and is acceptable; crossing a *node* never is, so only node
+/// spans are avoided.
+pub(crate) fn nudge_dummies_off_nodes(
+    virtual_levels: &[Vec<VNode>],
+    x_coords: &mut [Vec<usize>],
+    real_node_coords: &[(usize, usize, usize, usize)], // (level, pos, x, width)
+) {
+    let num_levels = virtual_levels.len();
+    let mut spans: Vec<Vec<(usize, usize)>> = vec![Vec::new(); num_levels];
+    for &(lvl, _, x, w) in real_node_coords {
+        if lvl < num_levels {
+            spans[lvl].push((x, x + w));
+        }
+    }
+    for s in spans.iter_mut() {
+        s.sort_unstable();
+    }
+
+    for (lvl, vnodes) in virtual_levels.iter().enumerate() {
+        for (pos, vnode) in vnodes.iter().enumerate() {
+            let VNode::Dummy { edge_idx } = vnode else {
+                continue;
+            };
+            // The renderer draws this edge's vertical at x + (edge_idx % 4).
+            let off = edge_idx % 4;
+            let Some(&x) = x_coords.get(lvl).and_then(|l| l.get(pos)) else {
+                continue;
+            };
+            let mut col = x + off;
+            for _ in 0..8 {
+                let Some(&(sl, sr)) = spans[lvl].iter().find(|&&(sl, sr)| col >= sl && col < sr)
+                else {
+                    break;
+                };
+                // Exit on the nearer side; going left past column `off` is
+                // impossible (the stored x is unsigned), so fall back right.
+                let go_left = sl > off && (col - sl) < (sr - col);
+                col = if go_left { sl - 1 } else { sr };
+            }
+            if col != x + off {
+                x_coords[lvl][pos] = col - off;
+            }
+        }
+    }
 }
 
 // ── Sibling subgraph overlap repair ──────────────────────────────────────

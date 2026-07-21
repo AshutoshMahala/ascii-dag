@@ -8,6 +8,8 @@
 
 ### Improved
 - **Tighter subgraph layouts**: a per-level tightening pass reclaims the horizontal slack left behind when sibling clusters are shifted apart, so children align under their parents again. Both layout paths.
+- **Inter-cluster compaction**: root clusters and loose nodes are pulled back together after overlap separation, removing the empty gulfs between boxes (up to −24% canvas width on the stress tiers). Both layout paths.
+- **Edges never cross node text**: dummy waypoints are realigned when compaction moves their endpoints and nudged out of node spans; an edge that must cross something crosses a subgraph border (rendered as a junction), never a node. Both layout paths.
 
 ## [0.9.1] - 2026-03-25
 

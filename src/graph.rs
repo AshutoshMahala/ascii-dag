@@ -1434,12 +1434,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tightening_never_overlaps_disjoint_boxes() {
-        // Tier-3 pattern from examples/subgraph_stress.rs: ArgoCD (CI/CD)
-        // has children deep inside eu-west-1. Tightening must not pull it
-        // out of the CI/CD envelope — that would expand the CI/CD box into
-        // the eu-west-1 box after the sibling shifts already separated them.
+    /// Tier-3 pattern from examples/subgraph_stress.rs: nested regions,
+    /// a CI/CD cluster whose member has children deep inside eu-west-1,
+    /// and cross-cluster edges. Shared by the tightening/compaction tests.
+    fn tier3_like_graph() -> Graph<'static> {
         let mut g = Graph::new();
         for (id, label) in [
             (1, "ALB"),
@@ -1518,7 +1516,16 @@ mod tests {
         g.put_nodes(&[20, 21, 22]).inside(cicd).unwrap();
         let obs = g.add_subgraph("Observability");
         g.put_nodes(&[23, 24, 25]).inside(obs).unwrap();
+        g
+    }
 
+    #[test]
+    fn tightening_never_overlaps_disjoint_boxes() {
+        // ArgoCD (CI/CD) has children deep inside eu-west-1. Tightening
+        // must not pull it out of the CI/CD envelope — that would expand
+        // the CI/CD box into the eu-west-1 box after the sibling shifts
+        // already separated them.
+        let g = tier3_like_graph();
         let ir = g.compute_layout();
         let boxes = ir.subgraphs();
         let is_ancestor = |anc: usize, mut id: usize| -> bool {
@@ -1554,6 +1561,418 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Tier-5 pattern from examples/subgraph_stress.rs (80 nodes, 24
+    /// clusters, depth 4): the only known reproducer for stale dummy
+    /// waypoints crossing node text after inter-cluster compaction.
+    fn tier5_like_graph() -> Graph<'static> {
+        let mut g = Graph::new();
+        let mut id = 0usize;
+        let mut next = || {
+            id += 1;
+            id
+        };
+
+        // ── Global Entry ──
+        let dns = next();
+        g.add_node(dns, "Route53");
+        let cdn = next();
+        g.add_node(cdn, "CloudFront");
+        let waf = next();
+        g.add_node(waf, "WAF");
+        g.add_edge(dns, cdn, None);
+        g.add_edge(cdn, waf, None);
+
+        // ── US Region ──
+        //   Frontend
+        let us_web = next();
+        g.add_node(us_web, "US-Web");
+        let us_mobile = next();
+        g.add_node(us_mobile, "US-Mobile");
+        let us_ssr = next();
+        g.add_node(us_ssr, "US-SSR");
+        g.add_edge(waf, us_web, None);
+        g.add_edge(waf, us_mobile, None);
+        g.add_edge(us_web, us_ssr, None);
+
+        //   Auth micro
+        let us_auth = next();
+        g.add_node(us_auth, "US-Auth");
+        let us_token = next();
+        g.add_node(us_token, "US-Token");
+        let us_mfa = next();
+        g.add_node(us_mfa, "US-MFA");
+        g.add_edge(us_web, us_auth, None);
+        g.add_edge(us_mobile, us_auth, None);
+        g.add_edge(us_auth, us_token, None);
+        g.add_edge(us_auth, us_mfa, None);
+
+        //   Biz logic
+        let us_order = next();
+        g.add_node(us_order, "US-Orders");
+        let us_pay = next();
+        g.add_node(us_pay, "US-Pay");
+        let us_inv = next();
+        g.add_node(us_inv, "US-Inv");
+        let us_ship = next();
+        g.add_node(us_ship, "US-Ship");
+        g.add_edge(us_auth, us_order, None);
+        g.add_edge(us_order, us_pay, None);
+        g.add_edge(us_order, us_inv, None);
+        g.add_edge(us_order, us_ship, None);
+
+        //   Databases
+        let us_pg = next();
+        g.add_node(us_pg, "US-Postgres");
+        let us_redis = next();
+        g.add_node(us_redis, "US-Redis");
+        let us_s3 = next();
+        g.add_node(us_s3, "US-S3");
+        g.add_edge(us_order, us_pg, None);
+        g.add_edge(us_pay, us_pg, None);
+        g.add_edge(us_auth, us_redis, None);
+        g.add_edge(us_inv, us_s3, None);
+
+        // ── EU Region (mirror, smaller) ──
+        let eu_web = next();
+        g.add_node(eu_web, "EU-Web");
+        let eu_auth = next();
+        g.add_node(eu_auth, "EU-Auth");
+        let eu_order = next();
+        g.add_node(eu_order, "EU-Orders");
+        let eu_pay = next();
+        g.add_node(eu_pay, "EU-Pay");
+        let eu_ship = next();
+        g.add_node(eu_ship, "EU-Ship");
+        let eu_pg = next();
+        g.add_node(eu_pg, "EU-Postgres");
+        let eu_redis = next();
+        g.add_node(eu_redis, "EU-Redis");
+        g.add_edge(waf, eu_web, None);
+        g.add_edge(eu_web, eu_auth, None);
+        g.add_edge(eu_auth, eu_order, None);
+        g.add_edge(eu_order, eu_pay, None);
+        g.add_edge(eu_order, eu_ship, None);
+        g.add_edge(eu_order, eu_pg, None);
+        g.add_edge(eu_auth, eu_redis, None);
+
+        // ── APAC Region ──
+        let ap_web = next();
+        g.add_node(ap_web, "AP-Web");
+        let ap_auth = next();
+        g.add_node(ap_auth, "AP-Auth");
+        let ap_order = next();
+        g.add_node(ap_order, "AP-Orders");
+        let ap_pg = next();
+        g.add_node(ap_pg, "AP-Postgres");
+        g.add_edge(waf, ap_web, None);
+        g.add_edge(ap_web, ap_auth, None);
+        g.add_edge(ap_auth, ap_order, None);
+        g.add_edge(ap_order, ap_pg, None);
+
+        // ── Messaging Layer ──
+        let kafka1 = next();
+        g.add_node(kafka1, "Kafka-1");
+        let kafka2 = next();
+        g.add_node(kafka2, "Kafka-2");
+        let zk = next();
+        g.add_node(zk, "Zookeeper");
+        let schema = next();
+        g.add_node(schema, "SchemaReg");
+        g.add_edge(us_order, kafka1, None);
+        g.add_edge(eu_order, kafka1, None);
+        g.add_edge(kafka1, kafka2, None);
+        g.add_edge(kafka1, zk, None);
+        g.add_edge(kafka2, schema, None);
+
+        // ── Data Platform ──
+        let spark = next();
+        g.add_node(spark, "Spark");
+        let flink = next();
+        g.add_node(flink, "Flink");
+        let airflow = next();
+        g.add_node(airflow, "Airflow");
+        let datalake = next();
+        g.add_node(datalake, "DataLake");
+        let redshift = next();
+        g.add_node(redshift, "Redshift");
+        let tableau = next();
+        g.add_node(tableau, "Tableau");
+        g.add_edge(kafka2, spark, None);
+        g.add_edge(kafka2, flink, None);
+        g.add_edge(airflow, spark, None);
+        g.add_edge(spark, datalake, None);
+        g.add_edge(flink, datalake, None);
+        g.add_edge(datalake, redshift, None);
+        g.add_edge(redshift, tableau, None);
+
+        // ── ML Platform ──
+        let mlflow = next();
+        g.add_node(mlflow, "MLflow");
+        let sagemaker = next();
+        g.add_node(sagemaker, "SageMaker");
+        let model_reg = next();
+        g.add_node(model_reg, "ModelReg");
+        let inference = next();
+        g.add_node(inference, "Inference");
+        g.add_edge(datalake, mlflow, None);
+        g.add_edge(mlflow, sagemaker, None);
+        g.add_edge(sagemaker, model_reg, None);
+        g.add_edge(model_reg, inference, None);
+        g.add_edge(inference, us_order, None); // predictions feed back
+
+        // ── Observability ──
+        let prom = next();
+        g.add_node(prom, "Prometheus");
+        let grafana = next();
+        g.add_node(grafana, "Grafana");
+        let jaeger = next();
+        g.add_node(jaeger, "Jaeger");
+        let loki = next();
+        g.add_node(loki, "Loki");
+        let cortex = next();
+        g.add_node(cortex, "Cortex");
+        let pager = next();
+        g.add_node(pager, "PagerDuty");
+        let opsgenie = next();
+        g.add_node(opsgenie, "OpsGenie");
+        g.add_edge(us_order, prom, None);
+        g.add_edge(eu_order, prom, None);
+        g.add_edge(prom, cortex, None);
+        g.add_edge(cortex, grafana, None);
+        g.add_edge(prom, jaeger, None);
+        g.add_edge(prom, loki, None);
+        g.add_edge(grafana, pager, None);
+        g.add_edge(grafana, opsgenie, None);
+
+        // ── Security ──
+        let vault = next();
+        g.add_node(vault, "Vault");
+        let cert_mgr = next();
+        g.add_node(cert_mgr, "CertMgr");
+        let guard = next();
+        g.add_node(guard, "GuardDuty");
+        let inspector = next();
+        g.add_node(inspector, "Inspector");
+        g.add_edge(us_auth, vault, None);
+        g.add_edge(eu_auth, vault, None);
+        g.add_edge(vault, cert_mgr, None);
+        g.add_edge(vault, guard, None);
+        g.add_edge(guard, inspector, None);
+
+        // ── DevOps / Platform ──
+        let github = next();
+        g.add_node(github, "GitHub");
+        let ci = next();
+        g.add_node(ci, "Actions");
+        let ecr = next();
+        g.add_node(ecr, "ECR");
+        let argo = next();
+        g.add_node(argo, "ArgoCD");
+        let tf = next();
+        g.add_node(tf, "Terraform");
+        let k8s_us = next();
+        g.add_node(k8s_us, "EKS-US");
+        let k8s_eu = next();
+        g.add_node(k8s_eu, "EKS-EU");
+        let k8s_ap = next();
+        g.add_node(k8s_ap, "EKS-AP");
+        g.add_edge(github, ci, None);
+        g.add_edge(ci, ecr, None);
+        g.add_edge(ecr, argo, None);
+        g.add_edge(argo, k8s_us, None);
+        g.add_edge(argo, k8s_eu, None);
+        g.add_edge(argo, k8s_ap, None);
+        g.add_edge(tf, k8s_us, None);
+        g.add_edge(tf, k8s_eu, None);
+        g.add_edge(tf, k8s_ap, None);
+
+        // ── Notifications ──
+        let sns = next();
+        g.add_node(sns, "SNS");
+        let ses = next();
+        g.add_node(ses, "SES");
+        let slack_hook = next();
+        g.add_node(slack_hook, "Slack");
+        g.add_edge(pager, sns, None);
+        g.add_edge(sns, ses, None);
+        g.add_edge(sns, slack_hook, None);
+
+        // ── Build subgraph hierarchy ──
+
+        // US Region → Frontend, Auth, Business, Data
+        let us_fe = g.add_subgraph("US-Frontend");
+        g.put_nodes(&[us_web, us_mobile, us_ssr])
+            .inside(us_fe)
+            .unwrap();
+        let us_au = g.add_subgraph("US-Auth");
+        g.put_nodes(&[us_auth, us_token, us_mfa])
+            .inside(us_au)
+            .unwrap();
+        let us_biz = g.add_subgraph("US-Business");
+        g.put_nodes(&[us_order, us_pay, us_inv, us_ship])
+            .inside(us_biz)
+            .unwrap();
+        let us_data = g.add_subgraph("US-Data");
+        g.put_nodes(&[us_pg, us_redis, us_s3])
+            .inside(us_data)
+            .unwrap();
+        let region_us = g.add_subgraph("US-East");
+        g.put_subgraphs(&[us_fe, us_au, us_biz, us_data])
+            .inside(region_us)
+            .unwrap();
+
+        // EU Region
+        let eu_svc = g.add_subgraph("EU-Services");
+        g.put_nodes(&[eu_web, eu_auth, eu_order, eu_pay, eu_ship])
+            .inside(eu_svc)
+            .unwrap();
+        let eu_db = g.add_subgraph("EU-Data");
+        g.put_nodes(&[eu_pg, eu_redis]).inside(eu_db).unwrap();
+        let region_eu = g.add_subgraph("EU-West");
+        g.put_subgraphs(&[eu_svc, eu_db]).inside(region_eu).unwrap();
+
+        // APAC Region
+        let region_ap = g.add_subgraph("APAC");
+        g.put_nodes(&[ap_web, ap_auth, ap_order, ap_pg])
+            .inside(region_ap)
+            .unwrap();
+
+        // Messaging
+        let sg_msg = g.add_subgraph("Event Bus");
+        g.put_nodes(&[kafka1, kafka2, zk, schema])
+            .inside(sg_msg)
+            .unwrap();
+
+        // Data Platform
+        let sg_ingest = g.add_subgraph("Ingestion");
+        g.put_nodes(&[spark, flink]).inside(sg_ingest).unwrap();
+        let sg_store = g.add_subgraph("Storage");
+        g.put_nodes(&[datalake, redshift]).inside(sg_store).unwrap();
+        let sg_dp = g.add_subgraph("Data Platform");
+        g.put_nodes(&[airflow, tableau]).inside(sg_dp).unwrap();
+        g.put_subgraphs(&[sg_ingest, sg_store])
+            .inside(sg_dp)
+            .unwrap();
+
+        // ML Platform
+        let sg_ml = g.add_subgraph("ML Platform");
+        g.put_nodes(&[mlflow, sagemaker, model_reg, inference])
+            .inside(sg_ml)
+            .unwrap();
+
+        // Observability
+        let sg_metrics = g.add_subgraph("Metrics");
+        g.put_nodes(&[prom, cortex, grafana])
+            .inside(sg_metrics)
+            .unwrap();
+        let sg_tracing = g.add_subgraph("Tracing");
+        g.put_nodes(&[jaeger, loki]).inside(sg_tracing).unwrap();
+        let sg_alert = g.add_subgraph("Alerting");
+        g.put_nodes(&[pager, opsgenie]).inside(sg_alert).unwrap();
+        let sg_obs = g.add_subgraph("Observability");
+        g.put_subgraphs(&[sg_metrics, sg_tracing, sg_alert])
+            .inside(sg_obs)
+            .unwrap();
+
+        // Security
+        let sg_sec = g.add_subgraph("Security");
+        g.put_nodes(&[vault, cert_mgr, guard, inspector])
+            .inside(sg_sec)
+            .unwrap();
+
+        // DevOps
+        let sg_cicd = g.add_subgraph("CI/CD");
+        g.put_nodes(&[github, ci, ecr, argo])
+            .inside(sg_cicd)
+            .unwrap();
+        let sg_infra = g.add_subgraph("Infrastructure");
+        g.put_nodes(&[tf, k8s_us, k8s_eu, k8s_ap])
+            .inside(sg_infra)
+            .unwrap();
+        let sg_devops = g.add_subgraph("Platform Eng");
+        g.put_subgraphs(&[sg_cicd, sg_infra])
+            .inside(sg_devops)
+            .unwrap();
+
+        // Notifications
+        let sg_notif = g.add_subgraph("Notifications");
+        g.put_nodes(&[sns, ses, slack_hook])
+            .inside(sg_notif)
+            .unwrap();
+
+        g
+    }
+
+    /// Assert no edge's vertical segment runs through node text.
+    fn assert_no_edge_crosses_nodes(ir: &crate::ir::LayoutIR<'_>) {
+        use crate::ir::EdgePath;
+        for edge in ir.edges() {
+            let EdgePath::MultiSegment { waypoints, .. } = &edge.path else {
+                continue;
+            };
+            // Vertical segments: (column, y range) per polyline leg.
+            let mut segments: Vec<(usize, usize, usize)> = Vec::new();
+            if let Some(&(x0, y0)) = waypoints.first() {
+                segments.push((x0, edge.from_y.min(y0), edge.from_y.max(y0)));
+            }
+            for pair in waypoints.windows(2) {
+                let (_, y_prev) = pair[0];
+                let (x, y) = pair[1];
+                segments.push((x, y_prev.min(y), y_prev.max(y)));
+            }
+            if let Some(&(_, y_last)) = waypoints.last() {
+                segments.push((edge.to_x, y_last.min(edge.to_y), y_last.max(edge.to_y)));
+            }
+            for node in ir.nodes() {
+                if node.id == edge.from_id || node.id == edge.to_id {
+                    continue;
+                }
+                for &(col, y0, y1) in &segments {
+                    let x_hit = col >= node.x && col < node.x + node.width;
+                    let y_hit = y0 < node.y + node.height && node.y <= y1;
+                    assert!(
+                        !(x_hit && y_hit),
+                        "edge {}→{} vertical at column {} (rows {}..{}) crosses node '{}' at ({},{} {}x{})",
+                        edge.from_id,
+                        edge.to_id,
+                        col,
+                        y0,
+                        y1,
+                        node.label,
+                        node.x,
+                        node.y,
+                        node.width,
+                        node.height,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn edge_verticals_never_cross_nodes() {
+        // The coordinate passes (overlap repair, tightening, compaction)
+        // move real nodes; dummy waypoints must be realigned and nudged so
+        // no edge's vertical segment runs through node text. Crossing a
+        // subgraph border is acceptable; crossing a node never is.
+        assert_no_edge_crosses_nodes(&tier3_like_graph().compute_layout());
+        assert_no_edge_crosses_nodes(&tier5_like_graph().compute_layout());
+    }
+
+    #[test]
+    fn clusters_compact_after_separation() {
+        // compact_clusters pulls root clusters back together after the
+        // sibling-overlap shifts. Without it this layout leaves wide empty
+        // gulfs between boxes and the canvas exceeds 450 columns.
+        let g = tier3_like_graph();
+        let ir = g.compute_layout();
+        assert!(
+            ir.width() <= 420,
+            "canvas width {} suggests inter-cluster compaction regressed",
+            ir.width(),
+        );
     }
 
     #[test]

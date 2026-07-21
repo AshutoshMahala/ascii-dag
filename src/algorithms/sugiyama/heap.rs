@@ -294,7 +294,24 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             &mut real_node_coords,
             node_spacing,
         );
-        max_width + extra + pushed
+        // Pull whole root clusters (and loose nodes) back together after
+        // the overlap shifts — reclaims the empty gulfs between boxes.
+        let reclaimed = crate::algorithms::sugiyama::subgraph::compact_clusters(
+            dag,
+            &mut real_node_coords,
+            &virtual_levels,
+            &mut x_coords,
+            &node_levels,
+            node_spacing,
+        );
+        // Waypoints must never cross node text (crossing a border renders
+        // as a junction and is acceptable; crossing a node is not).
+        crate::algorithms::sugiyama::subgraph::nudge_dummies_off_nodes(
+            &virtual_levels,
+            &mut x_coords,
+            &real_node_coords,
+        );
+        (max_width + extra + pushed).saturating_sub(reclaimed)
     } else {
         max_width
     };
