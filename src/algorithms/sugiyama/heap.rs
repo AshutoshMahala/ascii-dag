@@ -278,7 +278,40 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             dag,
             &mut real_node_coords,
         );
-        max_width + extra
+        // Reclaim slack the sibling shifts left behind: pull nodes toward
+        // their connected neighbors within current level bounds.
+        crate::algorithms::sugiyama::subgraph::tighten_levels(
+            dag,
+            &mut real_node_coords,
+            node_spacing,
+        );
+        // Cluster-width feedback: push unaffiliated nodes clear of each
+        // cluster's projected border envelope (cross-level extent + label
+        // minimum). Runs after overlap repair so it sees the coordinates
+        // the bounding boxes will actually be computed from.
+        let pushed = crate::algorithms::sugiyama::subgraph::clear_external_overlaps(
+            dag,
+            &mut real_node_coords,
+            node_spacing,
+        );
+        // Pull whole root clusters (and loose nodes) back together after
+        // the overlap shifts — reclaims the empty gulfs between boxes.
+        let reclaimed = crate::algorithms::sugiyama::subgraph::compact_clusters(
+            dag,
+            &mut real_node_coords,
+            &virtual_levels,
+            &mut x_coords,
+            &node_levels,
+            node_spacing,
+        );
+        // Waypoints must never cross node text (crossing a border renders
+        // as a junction and is acceptable; crossing a node is not).
+        crate::algorithms::sugiyama::subgraph::nudge_dummies_off_nodes(
+            &virtual_levels,
+            &mut x_coords,
+            &real_node_coords,
+        );
+        (max_width + extra + pushed).saturating_sub(reclaimed)
     } else {
         max_width
     };
@@ -744,9 +777,10 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         }
     }
 
-    builder.set_dimensions(max_width, total_height);
-
-    // Compute subgraph bounding boxes if any subgraphs are defined
+    // Compute subgraph bounding boxes if any subgraphs are defined.
+    // The canvas must cover every border: a label-widened cluster box can
+    // extend past the node extent that `max_width` was derived from.
+    let mut canvas_width = max_width;
     if dag.has_subgraphs() {
         let sg_infos = crate::algorithms::sugiyama::subgraph::compute_bounding_boxes(
             dag,
@@ -757,9 +791,11 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             &level_routing_floor,
         );
         for info in sg_infos {
+            canvas_width = canvas_width.max(info.x + info.width + 1);
             builder.add_subgraph(info);
         }
     }
+    builder.set_dimensions(canvas_width, total_height);
 
     builder.build()
 }

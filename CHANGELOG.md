@@ -4,6 +4,12 @@
 
 ### Fixed
 - **`LayoutConfig` spacing is now honored**: `node_spacing` and `level_spacing` were silently ignored (gaps hardcoded); both now apply in the heap and CSR layout paths. `level_spacing` default changed 2 → 0 to keep existing output unchanged.
+- **Cluster-width feedback**: unaffiliated nodes are pushed clear of subgraph borders (label-widened or inherited from wider levels), and the canvas now covers label-widened borders instead of clipping them. A subgraph label's contribution to box width is capped at 40 chars (longer labels are truncated by the renderer). Applies to both layout paths.
+
+### Improved
+- **Tighter subgraph layouts**: a per-level tightening pass reclaims the horizontal slack left behind when sibling clusters are shifted apart, so children align under their parents again. Both layout paths.
+- **Inter-cluster compaction**: root clusters and loose nodes are pulled back together after overlap separation, removing the empty gulfs between boxes (up to −24% canvas width on the stress tiers). Both layout paths.
+- **Edges never cross node text**: dummy waypoints are realigned when compaction moves their endpoints and nudged out of node spans; an edge that must cross something crosses a subgraph border (rendered as a junction), never a node. Both layout paths.
 
 ## [0.9.1] - 2026-03-25
 
