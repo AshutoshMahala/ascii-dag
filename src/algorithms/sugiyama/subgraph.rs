@@ -24,6 +24,9 @@
 //! [`block_partition_level`] which the heap pipeline calls in place of
 //! its default ordering pass when subgraphs are present.
 
+use super::geometry::{
+    DUMMY_WIDTH, ENVELOPE_CLEARANCE, SG_GAP, SIBLING_GAP, SUBGRAPH_H_PAD, label_min_width,
+};
 use super::heap::VNode;
 use crate::graph::Graph;
 use crate::ir::SubgraphInfo;
@@ -130,28 +133,7 @@ pub(crate) fn block_partition_level(dag: &Graph<'_>, level: &[VNode]) -> Vec<VNo
 
 // ── Subgraph padding ─────────────────────────────────────────────────────
 
-/// Per-subgraph horizontal padding constant (chars on each side of a border).
-const SUBGRAPH_H_PAD: usize = 2;
-
-/// Cap on how far a subgraph *label* may widen its bounding box.
-///
-/// A box is always wide enough for its member nodes; the label only
-/// forces extra width up to this total. Longer labels are truncated by
-/// the renderers (which clip to `width - 4`). Without a cap, a
-/// pathological heading would blow up the canvas — and with it the
-/// render buffer — linearly in the label length.
-const SUBGRAPH_LABEL_BOX_CAP: usize = 40;
-
-/// Minimum box width needed to show `label` (borders + spaces), capped.
-#[inline]
-fn label_min_width(label: &str) -> usize {
-    (label.len() + 4).min(SUBGRAPH_LABEL_BOX_CAP)
-}
-
-/// Vertical padding above first node: border row + label row + 1 blank row.
-pub(crate) const SUBGRAPH_V_PAD_TOP: usize = 3; // ╔═══╗ + ║ Label ║ + ║     ║
-/// Vertical padding below last node: 1 blank row + border row.
-pub(crate) const SUBGRAPH_V_PAD_BOTTOM: usize = 2; // ║     ║ + ╚═══════╝
+pub(crate) use super::geometry::{SUBGRAPH_V_PAD_BOTTOM, SUBGRAPH_V_PAD_TOP};
 
 /// Insert horizontal padding into x-coordinates at subgraph boundary
 /// transitions.
@@ -230,9 +212,6 @@ pub(crate) fn subgraph_padding(
 
 // ── Cluster-width feedback ───────────────────────────────────────────────
 
-/// Gap (in chars) between a cluster's drawn border and an external node.
-const ENVELOPE_CLEARANCE: usize = 1;
-
 /// Reclaim horizontal slack on each level (post-shift tightening).
 ///
 /// Sibling-overlap repair moves whole clusters right, which can leave a
@@ -270,7 +249,6 @@ pub(crate) fn tighten_levels(
         .iter()
         .map(|&(nid, _)| dag.node_subgraph.get(&nid).copied())
         .collect();
-    let sg_gap = SUBGRAPH_H_PAD * 2 + SIBLING_GAP;
 
     // Group node indices by level.
     let max_level = real_node_coords.iter().map(|c| c.0).max().unwrap_or(0);
@@ -319,13 +297,17 @@ pub(crate) fn tighten_levels(
                 let desired = target_center.saturating_sub(w / 2);
 
                 let mut min_x = if k == 0 {
-                    if node_sg[ni].is_some() { SUBGRAPH_H_PAD } else { 0 }
+                    if node_sg[ni].is_some() {
+                        SUBGRAPH_H_PAD
+                    } else {
+                        0
+                    }
                 } else {
                     let prev = level_nodes[k - 1];
                     let gap = if node_sg[prev] != node_sg[ni]
                         && (node_sg[prev].is_some() || node_sg[ni].is_some())
                     {
-                        sg_gap
+                        SG_GAP
                     } else {
                         node_spacing
                     };
@@ -336,7 +318,7 @@ pub(crate) fn tighten_levels(
                     let gap = if node_sg[next] != node_sg[ni]
                         && (node_sg[next].is_some() || node_sg[ni].is_some())
                     {
-                        sg_gap
+                        SG_GAP
                     } else {
                         node_spacing
                     };
@@ -440,10 +422,13 @@ pub(crate) fn clear_external_overlaps(
         .collect();
 
     let max_level = real_node_coords.iter().map(|c| c.0).max().unwrap_or(0);
-    let before_max_right = real_node_coords.iter().map(|c| c.2 + c.3).max().unwrap_or(0);
+    let before_max_right = real_node_coords
+        .iter()
+        .map(|c| c.2 + c.3)
+        .max()
+        .unwrap_or(0);
 
     // Same cross-boundary gap the refinement passes use.
-    let sg_gap = SUBGRAPH_H_PAD * 2 + SIBLING_GAP;
 
     for _round in 0..8 {
         let (bbox, range) = project_envelopes(dag, real_node_coords, &node_sg, &parent_idx, &order);
@@ -498,7 +483,7 @@ pub(crate) fn clear_external_overlaps(
                 let prev_sg = node_sg[prev];
                 let cur_sg = node_sg[cur];
                 let gap = if prev_sg != cur_sg && (prev_sg.is_some() || cur_sg.is_some()) {
-                    sg_gap
+                    SG_GAP
                 } else {
                     node_spacing
                 };
@@ -510,7 +495,11 @@ pub(crate) fn clear_external_overlaps(
         }
     }
 
-    let after_max_right = real_node_coords.iter().map(|c| c.2 + c.3).max().unwrap_or(0);
+    let after_max_right = real_node_coords
+        .iter()
+        .map(|c| c.2 + c.3)
+        .max()
+        .unwrap_or(0);
     after_max_right.saturating_sub(before_max_right)
 }
 
@@ -568,7 +557,10 @@ fn project_envelopes(
     const PARENT_CHILD_H_GAP: usize = 1;
     for &si in order {
         if let (Some((cl, cr)), Some(pi)) = (bbox[si], parent_idx[si]) {
-            let exp = (cl.saturating_sub(PARENT_CHILD_H_GAP), cr + PARENT_CHILD_H_GAP);
+            let exp = (
+                cl.saturating_sub(PARENT_CHILD_H_GAP),
+                cr + PARENT_CHILD_H_GAP,
+            );
             bbox[pi] = Some(match bbox[pi] {
                 None => exp,
                 Some((pl, pr)) => (pl.min(exp.0), pr.max(exp.1)),
@@ -608,7 +600,6 @@ pub(crate) fn compact_clusters(
     real_node_coords: &mut [(usize, usize, usize, usize)], // (level, pos, x, width)
     virtual_levels: &[Vec<VNode>],
     x_coords: &mut [Vec<usize>],
-    node_levels: &[usize],
     node_spacing: usize,
 ) -> usize {
     let sg_count = dag.subgraphs.len();
@@ -657,22 +648,38 @@ pub(crate) fn compact_clusters(
 
     let (bbox, range) = project_envelopes(dag, real_node_coords, &node_sg, &parent_idx, &order);
     let max_level = real_node_coords.iter().map(|c| c.0).max().unwrap_or(0);
-    let before_node_right = real_node_coords.iter().map(|c| c.2 + c.3).max().unwrap_or(0);
+    let before_node_right = real_node_coords
+        .iter()
+        .map(|c| c.2 + c.3)
+        .max()
+        .unwrap_or(0);
     let before_env_right = bbox.iter().flatten().map(|b| b.1).max().unwrap_or(0);
 
-    // Bodies: root clusters + unaffiliated nodes, in left-to-right order.
-    // (left, right, is_cluster, index)
-    let mut bodies: Vec<(usize, usize, bool, usize)> = Vec::new();
+    // Bodies in left-to-right order: root clusters, unaffiliated real
+    // nodes, and unaffiliated dummy waypoints. Dummies MUST participate —
+    // leaving them out lets a cluster slide left over an edge chain, which
+    // then renders running along (or on top of) the cluster's border.
+    // (left, right, tag, a, b): tag 0 = cluster(a=sg idx), 1 = node(a=node
+    // idx), 2 = dummy(a=level, b=pos).
+    let mut bodies: Vec<(usize, usize, u8, usize, usize)> = Vec::new();
     for si in 0..sg_count {
         if parent_idx[si].is_none() {
             if let Some((l, r)) = bbox[si] {
-                bodies.push((l, r, true, si));
+                bodies.push((l, r, 0, si, 0));
             }
         }
     }
     for (ni, &(_, _, x, w)) in real_node_coords.iter().enumerate() {
         if node_sg[ni].is_none() {
-            bodies.push((x, x + w, false, ni));
+            bodies.push((x, x + w, 1, ni, 0));
+        }
+    }
+    for (lvl, vnodes) in virtual_levels.iter().enumerate() {
+        for (pos, vnode) in vnodes.iter().enumerate() {
+            if matches!(vnode, VNode::Dummy { .. }) && vnode_subgraph(dag, vnode).is_none() {
+                let x = x_coords[lvl][pos];
+                bodies.push((x, x + DUMMY_WIDTH, 2, lvl, pos));
+            }
         }
     }
     bodies.sort_unstable();
@@ -680,94 +687,95 @@ pub(crate) fn compact_clusters(
     // Per-level frontiers of already-placed bodies.
     let mut env_right: Vec<Option<usize>> = vec![None; max_level + 1];
     let mut node_right: Vec<Option<usize>> = vec![None; max_level + 1];
-    // Shift applied to each real node, for realigning dummy waypoints below.
-    let mut delta_of_node: Vec<usize> = vec![0; real_node_coords.len()];
 
-    for &(env_left, env_r, is_cluster, idx) in &bodies {
-        if is_cluster {
-            let (first, last) = range[idx];
-            if first == usize::MAX {
-                continue;
-            }
-            let mut allowed = 0usize;
-            for lvl in first..=last.min(max_level) {
-                if let Some(er) = env_right[lvl] {
-                    allowed = allowed.max(er + SIBLING_GAP);
+    for &(env_left, env_r, tag, a, b) in &bodies {
+        match tag {
+            0 => {
+                let (first, last) = range[a];
+                if first == usize::MAX {
+                    continue;
                 }
-                if let Some(nr) = node_right[lvl] {
-                    allowed = allowed.max(nr + ENVELOPE_CLEARANCE);
+                let mut allowed = 0usize;
+                for lvl in first..=last.min(max_level) {
+                    if let Some(er) = env_right[lvl] {
+                        allowed = allowed.max(er + SIBLING_GAP);
+                    }
+                    if let Some(nr) = node_right[lvl] {
+                        allowed = allowed.max(nr + ENVELOPE_CLEARANCE);
+                    }
                 }
-            }
-            let delta = env_left.saturating_sub(allowed);
-            if delta > 0 {
-                for (ni, coords) in real_node_coords.iter_mut().enumerate() {
-                    if let Some(si) = node_sg[ni] {
-                        if root_of(si) == idx {
-                            coords.2 -= delta;
-                            delta_of_node[ni] = delta;
+                let delta = env_left.saturating_sub(allowed);
+                if delta > 0 {
+                    for (ni, coords) in real_node_coords.iter_mut().enumerate() {
+                        if let Some(si) = node_sg[ni] {
+                            if root_of(si) == a {
+                                coords.2 -= delta;
+                            }
+                        }
+                    }
+                    // Member dummies (both edge endpoints inside this
+                    // cluster) are part of the rigid body too.
+                    for (lvl, vnodes) in virtual_levels.iter().enumerate() {
+                        for (pos, vnode) in vnodes.iter().enumerate() {
+                            if !matches!(vnode, VNode::Dummy { .. }) {
+                                continue;
+                            }
+                            let member = vnode_subgraph(dag, vnode)
+                                .and_then(|sid| sg_id_to_idx.get(&sid).copied())
+                                .is_some_and(|si| root_of(si) == a);
+                            if member {
+                                x_coords[lvl][pos] = x_coords[lvl][pos].saturating_sub(delta);
+                            }
                         }
                     }
                 }
+                let new_right = env_r - delta;
+                for lvl in first..=last.min(max_level) {
+                    env_right[lvl] = Some(env_right[lvl].map_or(new_right, |e| e.max(new_right)));
+                }
             }
-            let new_right = env_r - delta;
-            for lvl in first..=last.min(max_level) {
-                env_right[lvl] = Some(env_right[lvl].map_or(new_right, |e| e.max(new_right)));
+            1 => {
+                let (lvl, _, x, w) = real_node_coords[a];
+                let mut allowed = 0usize;
+                if let Some(er) = env_right[lvl] {
+                    allowed = allowed.max(er + ENVELOPE_CLEARANCE);
+                }
+                if let Some(nr) = node_right[lvl] {
+                    allowed = allowed.max(nr + node_spacing);
+                }
+                let delta = x.saturating_sub(allowed);
+                if delta > 0 {
+                    real_node_coords[a].2 = x - delta;
+                }
+                node_right[lvl] =
+                    Some(node_right[lvl].map_or(x - delta + w, |e| e.max(x - delta + w)));
             }
-        } else {
-            let (lvl, _, x, w) = real_node_coords[idx];
-            let mut allowed = 0usize;
-            if let Some(er) = env_right[lvl] {
-                allowed = allowed.max(er + ENVELOPE_CLEARANCE);
-            }
-            if let Some(nr) = node_right[lvl] {
-                allowed = allowed.max(nr + node_spacing);
-            }
-            let delta = x.saturating_sub(allowed);
-            if delta > 0 {
-                real_node_coords[idx].2 = x - delta;
-                delta_of_node[idx] = delta;
-            }
-            node_right[lvl] = Some(node_right[lvl].map_or(x - delta + w, |e| e.max(x - delta + w)));
-        }
-    }
-
-    // Realign dummy waypoints with the bodies that moved: an edge's dummy
-    // chain shifts by the interpolation of its endpoints' shifts across the
-    // levels it spans, so the chain stays connected to both ends instead of
-    // being left at its pre-compaction columns (which would draw the edge
-    // straight through whatever moved underneath it).
-    for (lvl, vnodes) in virtual_levels.iter().enumerate() {
-        for (pos, vnode) in vnodes.iter().enumerate() {
-            let VNode::Dummy { edge_idx } = vnode else {
-                continue;
-            };
-            let (from_id, to_id, _) = dag.edges[*edge_idx];
-            let (Some(f), Some(t)) = (dag.node_index(from_id), dag.node_index(to_id)) else {
-                continue;
-            };
-            if f >= delta_of_node.len() || t >= delta_of_node.len() {
-                continue;
-            }
-            let df = delta_of_node[f] as i64;
-            let dt = delta_of_node[t] as i64;
-            let lf = node_levels.get(f).copied().unwrap_or(0) as i64;
-            let lt = node_levels.get(t).copied().unwrap_or(0) as i64;
-            // Snap to the nearer endpoint's shift (not a smooth ramp): the
-            // chain stays straight in two runs with at most one jog at the
-            // midpoint, instead of jogging a little on every level.
-            let delta = if (lvl as i64 - lf).abs() <= (lt - lvl as i64).abs() {
-                df
-            } else {
-                dt
-            };
-            if let Some(x) = x_coords.get_mut(lvl).and_then(|l| l.get_mut(pos)) {
-                *x = x.saturating_sub(delta as usize);
+            _ => {
+                let (lvl, pos) = (a, b);
+                let x = x_coords[lvl][pos];
+                let mut allowed = 0usize;
+                if let Some(er) = env_right[lvl] {
+                    allowed = allowed.max(er + ENVELOPE_CLEARANCE);
+                }
+                if let Some(nr) = node_right[lvl] {
+                    allowed = allowed.max(nr + node_spacing);
+                }
+                let delta = x.saturating_sub(allowed);
+                if delta > 0 {
+                    x_coords[lvl][pos] = x - delta;
+                }
+                let right = x - delta + DUMMY_WIDTH;
+                node_right[lvl] = Some(node_right[lvl].map_or(right, |e| e.max(right)));
             }
         }
     }
 
     let (bbox_after, _) = project_envelopes(dag, real_node_coords, &node_sg, &parent_idx, &order);
-    let after_node_right = real_node_coords.iter().map(|c| c.2 + c.3).max().unwrap_or(0);
+    let after_node_right = real_node_coords
+        .iter()
+        .map(|c| c.2 + c.3)
+        .max()
+        .unwrap_or(0);
     let after_env_right = bbox_after.iter().flatten().map(|b| b.1).max().unwrap_or(0);
     let node_reclaim = before_node_right.saturating_sub(after_node_right);
     let env_reclaim = before_env_right.saturating_sub(after_env_right);
@@ -830,9 +838,6 @@ pub(crate) fn nudge_dummies_off_nodes(
 }
 
 // ── Sibling subgraph overlap repair ──────────────────────────────────────
-
-/// Minimum gap (in characters) between the bounding boxes of sibling subgraphs.
-const SIBLING_GAP: usize = 1;
 
 /// Collect all node indices belonging to a subgraph or any of its descendants.
 fn collect_sg_node_indices(

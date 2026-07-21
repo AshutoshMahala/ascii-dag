@@ -1915,7 +1915,10 @@ mod tests {
             // Vertical segments: (column, y range) per polyline leg.
             let mut segments: Vec<(usize, usize, usize)> = Vec::new();
             if let Some(&(x0, y0)) = waypoints.first() {
-                segments.push((x0, edge.from_y.min(y0), edge.from_y.max(y0)));
+                // The painter starts this vertical at from_y + 1 + offset —
+                // strictly below the source's node row.
+                let start = edge.from_y + 1;
+                segments.push((x0, start.min(y0), start.max(y0)));
             }
             for pair in waypoints.windows(2) {
                 let (_, y_prev) = pair[0];

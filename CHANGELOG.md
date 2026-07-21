@@ -11,6 +11,12 @@
 - **Inter-cluster compaction**: root clusters and loose nodes are pulled back together after overlap separation, removing the empty gulfs between boxes (up to −24% canvas width on the stress tiers). Both layout paths.
 - **Edges never cross node text**: dummy waypoints are realigned when compaction moves their endpoints and nudged out of node spans; an edge that must cross something crosses a subgraph border (rendered as a junction), never a node. Both layout paths.
 
+### Internal
+- Rendered-output tests (`tests/layout_output.rs`): spacing config is now verified against the text a user sees, in both backends, plus a golden snapshot of the hero example (`cargo run --example hero` to regenerate).
+- Shared cluster-geometry constants moved to `algorithms/sugiyama/geometry.rs` — previously duplicated across the heap and CSR backends, where they could silently drift.
+- Packed vnode encoding in `arena_csr.rs` is now behind accessors (`vnode_kind`/`vnode_payload`/`vnode_set`).
+- Removed orphaned `src/layout/arena.rs` (631 lines, never included in the module tree).
+
 ## [0.9.1] - 2026-03-25
 
 ### Improved

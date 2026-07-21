@@ -12,6 +12,7 @@
 pub(crate) mod arena_csr;
 pub mod config;
 pub mod crossing;
+pub(crate) mod geometry;
 #[cfg(feature = "alloc")]
 pub(crate) mod heap;
 #[cfg(feature = "alloc")]

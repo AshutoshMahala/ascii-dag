@@ -14,61 +14,12 @@
 //!   cargo run --example hero           # plain
 //!   cargo run --example hero -- --color  # ANSI colors + legend
 
-use ascii_dag::Graph;
 use ascii_dag::render::colors::Palette;
 
+include!("shared/hero_graph.rs");
+
 fn main() {
-    let mut g = Graph::new();
-
-    // ── Nodes ────────────────────────────────────────────────────
-    g.add_node(1, "Client");
-    g.add_node(2, "Gateway");
-    g.add_node(3, "Users");
-    g.add_node(4, "Orders");
-    g.add_node(5, "DB");
-    g.add_node(6, "Queue");
-    g.add_node(7, "Mailer");
-    g.add_node(8, "Dash");
-
-    // ── Edges (with labels) ──────────────────────────────────────
-    g.add_edge(1, 2, Some("http")); // Client → Gateway
-    g.add_edge(2, 3, None); // Gateway → Users
-    g.add_edge(2, 4, None); // Gateway → Orders
-    g.add_edge(3, 5, Some("read")); // Users → DB
-    g.add_edge(4, 5, Some("write")); // Orders → DB
-    g.add_edge(4, 6, Some("emit")); // Orders → Queue
-    g.add_edge(6, 7, Some("notify")); // Queue → Mailer
-    g.add_edge(5, 8, Some("sync")); // DB → Dash
-    g.add_edge(7, 8, None); // Mailer → Dash
-    g.add_edge(1, 8, Some("trace")); // Client → Dash (deep skip-level!)
-
-    // Self-cycle: Gateway retries on failure
-    g.add_edge(2, 2, Some("retry"));
-
-    // Reversed edge: Dash feeds back to Gateway (back-edge / cycle)
-    g.add_edge(8, 2, Some("feedback"));
-
-    // ── Subgraphs ────────────────────────────────────────────────
-    // Services cluster
-    let svc = g.add_subgraph("Services");
-    g.put_nodes(&[3, 4])
-        .inside(svc)
-        .expect("place nodes in Services");
-
-    // Data cluster
-    let data = g.add_subgraph("Data");
-    g.put_nodes(&[5, 6])
-        .inside(data)
-        .expect("place nodes in Data");
-
-    // Nested: Async inside Data
-    let async_sg = g.add_subgraph("Async");
-    g.put_nodes(&[6])
-        .inside(async_sg)
-        .expect("place Queue in Async");
-    g.put_subgraphs(&[async_sg])
-        .inside(data)
-        .expect("nest Async in Data");
+    let g = hero_graph();
 
     // ── Render ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().collect();

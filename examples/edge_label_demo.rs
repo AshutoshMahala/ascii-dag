@@ -101,10 +101,9 @@ fn run_csr() {
             &edge_colors,
             palette_colors,
             &mut skipped_buffer,
-        ) {
-            if let Ok(s) = std::str::from_utf8(&render_buffer[..len]) {
-                println!("{}", s);
-            }
+        ) && let Ok(s) = std::str::from_utf8(&render_buffer[..len])
+        {
+            println!("{}", s);
         }
     }
 

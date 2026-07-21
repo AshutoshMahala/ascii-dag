@@ -12,11 +12,13 @@
 //! 5. **Slot allocation** — horizontal channel assignment for edge separation
 //! 6. **Edge routing** — direct, corner, or multi-segment paths
 //!
-//! # Relationship to Arena Path
+//! # Relationship to CSR Path
 //!
-//! The arena-based layout in `layout/arena.rs` implements the same algorithm
+//! The CSR-based layout in `arena_csr.rs` implements the same algorithm
 //! using arena allocation and `Idx`-typed indices. The two paths produce
 //! visually compatible output but operate on different type systems.
+//! Shared spacing constants live in [`super::geometry`] so the backends
+//! cannot drift apart.
 
 use crate::algorithms::sugiyama::config::{CycleBreaking, LayoutConfig};
 use crate::algorithms::sugiyama::crossing::{CrossingReducer, count_crossings_pair};
@@ -301,7 +303,6 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             &mut real_node_coords,
             &virtual_levels,
             &mut x_coords,
-            &node_levels,
             node_spacing,
         );
         // Waypoints must never cross node text (crossing a border renders
@@ -845,7 +846,7 @@ fn refine_x_positions(
         return;
     }
 
-    const SG_GAP: usize = 5; // gap between nodes of different subgraphs (H_PAD + SIBLING + H_PAD)
+    use crate::algorithms::sugiyama::geometry::SG_GAP;
     const ITERATIONS: usize = 8;
 
     // Helper: compute minimum gap between adjacent nodes, accounting for
@@ -853,7 +854,11 @@ fn refine_x_positions(
     let gap_between = |level: usize, left_pos: usize, right_pos: usize| -> usize {
         let left_sg = vnode_subgraph(dag, &virtual_levels[level][left_pos]);
         let right_sg = vnode_subgraph(dag, &virtual_levels[level][right_pos]);
-        if left_sg != right_sg { SG_GAP } else { node_spacing }
+        if left_sg != right_sg {
+            SG_GAP
+        } else {
+            node_spacing
+        }
     };
     // Also enforce left margin for the first node if it's inside a subgraph
     let left_margin = |level: usize| -> usize {
@@ -1049,13 +1054,17 @@ fn compact_subgraphs(
 ) {
     use crate::algorithms::sugiyama::subgraph::vnode_subgraph;
 
-    const SG_GAP: usize = 5;
+    use crate::algorithms::sugiyama::geometry::SG_GAP;
 
     // Helper: minimum gap between two adjacent positions on a level.
     let gap_between = |level: usize, left_pos: usize, right_pos: usize| -> usize {
         let left_sg = vnode_subgraph(dag, &virtual_levels[level][left_pos]);
         let right_sg = vnode_subgraph(dag, &virtual_levels[level][right_pos]);
-        if left_sg != right_sg { SG_GAP } else { node_spacing }
+        if left_sg != right_sg {
+            SG_GAP
+        } else {
+            node_spacing
+        }
     };
 
     // Cascading push: shift node at `pos` on `level` to `target_x`, and push
