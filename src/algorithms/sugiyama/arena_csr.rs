@@ -314,6 +314,16 @@ pub fn compute_layout_arena_csr<'b>(
         );
         max_width = max_width.saturating_add(extra as Coord);
 
+        // Reclaim slack the sibling shifts left behind: pull nodes toward
+        // their connected neighbors within current level bounds.
+        tighten_levels_csr(
+            graph,
+            temps.real_coords,
+            max_level as usize,
+            node_spacing_usize,
+            temps.positions,
+        );
+
         // Step 6c: Cluster-width feedback — push unaffiliated nodes clear
         // of each cluster's projected border envelope (cross-level extent
         // + label minimum). Runs after overlap repair so it sees the
@@ -1415,6 +1425,165 @@ fn gap_between_csr(
         SG_GAP
     } else {
         node_spacing
+    }
+}
+
+/// Reclaim horizontal slack on each level (post-shift tightening).
+/// CSR twin of `subgraph::tighten_levels`.
+///
+/// Sweeps each level in x order and moves every real node toward the
+/// median center of its connected neighbors, strictly bounded by its
+/// current level neighbors — so it can never widen a level, and the
+/// rightmost node may only move left. `order_scratch` holds the x-order
+/// permutation for one level (the `positions` crossing scratch fits).
+fn tighten_levels_csr(
+    graph: &CsrGraph<'_>,
+    real_coords: &mut [(usize, usize, usize, usize)], // (level, pos, x, width)
+    max_level: usize,
+    node_spacing: usize,
+    order_scratch: &mut [Idx],
+) {
+    let node_count = graph.node_count().min(real_coords.len());
+    if node_count < 2 {
+        return;
+    }
+    const SG_GAP: usize = 5;
+    // Bound the per-level insertion sort (quadratic in level size).
+    const TIGHTEN_MAX_LEVEL_SIZE: usize = 1024;
+    // Per-cluster extent snapshot lives on the stack; skip the pass for
+    // graphs with more clusters than the snapshot holds (tightening is
+    // cosmetic — skipping is always safe).
+    const TIGHTEN_MAX_SUBGRAPHS: usize = 128;
+
+    let sg_count = graph.subgraph_count();
+    if sg_count > TIGHTEN_MAX_SUBGRAPHS {
+        return;
+    }
+
+    for _sweep in 0..4 {
+        let mut moved = false;
+
+        // Snapshot each immediate cluster's member extent (min x, max right)
+        // across all levels. Members may only move within it, so no cluster
+        // bounding box can grow — growth would re-overlap sibling boxes that
+        // fix_subgraph_overlaps_csr just separated.
+        let mut extents = [(usize::MAX, 0usize); TIGHTEN_MAX_SUBGRAPHS];
+        for ni in 0..node_count {
+            if let Some(sg) = graph.node_subgraph(ni) {
+                if sg < TIGHTEN_MAX_SUBGRAPHS {
+                    let (_, _, x, w) = real_coords[ni];
+                    extents[sg].0 = extents[sg].0.min(x);
+                    extents[sg].1 = extents[sg].1.max(x + w);
+                }
+            }
+        }
+        for level in 0..=max_level {
+            // Collect this level's real nodes into the scratch.
+            let mut n = 0usize;
+            for node_idx in 0..node_count {
+                if real_coords[node_idx].0 == level {
+                    if n >= order_scratch.len() || n >= TIGHTEN_MAX_LEVEL_SIZE {
+                        n = usize::MAX;
+                        break;
+                    }
+                    order_scratch[n] = node_idx as Idx;
+                    n += 1;
+                }
+            }
+            if n == usize::MAX || n == 0 {
+                continue;
+            }
+            // Insertion sort by current x (stable).
+            for k in 1..n {
+                let mut j = k;
+                while j > 0 {
+                    let a = order_scratch[j - 1] as usize;
+                    let b = order_scratch[j] as usize;
+                    if (real_coords[a].2, order_scratch[j - 1])
+                        > (real_coords[b].2, order_scratch[j])
+                    {
+                        order_scratch.swap(j - 1, j);
+                        j -= 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            for k in 0..n {
+                let ni = order_scratch[k] as usize;
+                let (_, _, x, w) = real_coords[ni];
+
+                // Median center of connected neighbors (parents + children).
+                let mut centers = [0usize; 32];
+                let mut count = 0usize;
+                for &c in graph.children(ni) {
+                    let c = c as usize;
+                    if c < node_count && count < 32 {
+                        centers[count] = real_coords[c].2 + real_coords[c].3 / 2;
+                        count += 1;
+                    }
+                }
+                for &pa in graph.parents(ni) {
+                    let pa = pa as usize;
+                    if pa < node_count && count < 32 {
+                        centers[count] = real_coords[pa].2 + real_coords[pa].3 / 2;
+                        count += 1;
+                    }
+                }
+                if count == 0 {
+                    continue;
+                }
+                centers[..count].sort_unstable();
+                let target_center = centers[count / 2];
+                let desired = target_center.saturating_sub(w / 2);
+
+                let my_sg = graph.node_subgraph(ni);
+                let mut min_x = if k == 0 {
+                    if my_sg.is_some() { SUBGRAPH_H_PAD } else { 0 }
+                } else {
+                    let prev = order_scratch[k - 1] as usize;
+                    let prev_sg = graph.node_subgraph(prev);
+                    let gap = if prev_sg != my_sg && (prev_sg.is_some() || my_sg.is_some()) {
+                        SG_GAP
+                    } else {
+                        node_spacing
+                    };
+                    real_coords[prev].2 + real_coords[prev].3 + gap
+                };
+                let mut max_x = if k + 1 < n {
+                    let next = order_scratch[k + 1] as usize;
+                    let next_sg = graph.node_subgraph(next);
+                    let gap = if next_sg != my_sg && (next_sg.is_some() || my_sg.is_some()) {
+                        SG_GAP
+                    } else {
+                        node_spacing
+                    };
+                    real_coords[next].2.saturating_sub(gap + w)
+                } else {
+                    // Rightmost node: never move right (keeps canvas bounded).
+                    x
+                };
+                if let Some(sg) = my_sg {
+                    if sg < TIGHTEN_MAX_SUBGRAPHS {
+                        let (ext_lo, ext_hi) = extents[sg];
+                        min_x = min_x.max(ext_lo);
+                        max_x = max_x.min(ext_hi.saturating_sub(w));
+                    }
+                }
+                if max_x < min_x {
+                    continue;
+                }
+                let new_x = desired.clamp(min_x, max_x);
+                if new_x != x {
+                    real_coords[ni].2 = new_x;
+                    moved = true;
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
     }
 }
 

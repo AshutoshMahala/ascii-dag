@@ -278,6 +278,13 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             dag,
             &mut real_node_coords,
         );
+        // Reclaim slack the sibling shifts left behind: pull nodes toward
+        // their connected neighbors within current level bounds.
+        crate::algorithms::sugiyama::subgraph::tighten_levels(
+            dag,
+            &mut real_node_coords,
+            node_spacing,
+        );
         // Cluster-width feedback: push unaffiliated nodes clear of each
         // cluster's projected border envelope (cross-level extent + label
         // minimum). Runs after overlap repair so it sees the coordinates

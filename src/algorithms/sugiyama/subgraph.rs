@@ -233,6 +233,138 @@ pub(crate) fn subgraph_padding(
 /// Gap (in chars) between a cluster's drawn border and an external node.
 const ENVELOPE_CLEARANCE: usize = 1;
 
+/// Reclaim horizontal slack on each level (post-shift tightening).
+///
+/// Sibling-overlap repair moves whole clusters right, which can leave a
+/// node far from its connected neighbors (e.g. a hole where a sibling's
+/// member used to sit before its cluster was shifted away). This pass
+/// sweeps each level in x order and moves every real node toward the
+/// median center of its connected neighbors, strictly bounded by its
+/// current level neighbors — so it can never widen a level, and the
+/// rightmost node may only move left. Runs a few sweeps; each move is
+/// monotone toward the target, so it settles quickly.
+pub(crate) fn tighten_levels(
+    dag: &Graph<'_>,
+    real_node_coords: &mut [(usize, usize, usize, usize)], // (level, pos, x, width)
+    node_spacing: usize,
+) {
+    let n_nodes = real_node_coords.len();
+    if n_nodes < 2 {
+        return;
+    }
+
+    // Undirected adjacency over real nodes (edge endpoints).
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); n_nodes];
+    for &(from_id, to_id, _) in &dag.edges {
+        if let (Some(f), Some(t)) = (dag.node_index(from_id), dag.node_index(to_id)) {
+            if f != t && f < n_nodes && t < n_nodes {
+                adjacency[f].push(t);
+                adjacency[t].push(f);
+            }
+        }
+    }
+
+    // Immediate subgraph per node, for gap selection.
+    let node_sg: Vec<Option<usize>> = dag
+        .nodes
+        .iter()
+        .map(|&(nid, _)| dag.node_subgraph.get(&nid).copied())
+        .collect();
+    let sg_gap = SUBGRAPH_H_PAD * 2 + SIBLING_GAP;
+
+    // Group node indices by level.
+    let max_level = real_node_coords.iter().map(|c| c.0).max().unwrap_or(0);
+    let mut levels: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
+    for (ni, &(lvl, _, _, _)) in real_node_coords.iter().enumerate() {
+        levels[lvl].push(ni);
+    }
+
+    for _sweep in 0..4 {
+        let mut moved = false;
+
+        // Snapshot each immediate cluster's member extent (min x, max right)
+        // across all levels. Members may only move within it, so no cluster
+        // bounding box can grow — growth would re-overlap sibling boxes that
+        // fix_subgraph_overlaps just separated.
+        let mut extents: HashMap<usize, (usize, usize)> = HashMap::new();
+        for (ni, &(_, _, x, w)) in real_node_coords.iter().enumerate() {
+            if let Some(sg) = node_sg[ni] {
+                let e = extents.entry(sg).or_insert((usize::MAX, 0));
+                e.0 = e.0.min(x);
+                e.1 = e.1.max(x + w);
+            }
+        }
+
+        for level_nodes in levels.iter_mut() {
+            let n = level_nodes.len();
+            if n == 0 {
+                continue;
+            }
+            level_nodes.sort_by_key(|&ni| (real_node_coords[ni].2, ni));
+
+            for k in 0..n {
+                let ni = level_nodes[k];
+                let (_, _, x, w) = real_node_coords[ni];
+
+                // Median center of connected neighbors.
+                let mut centers: Vec<usize> = adjacency[ni]
+                    .iter()
+                    .map(|&nb| real_node_coords[nb].2 + real_node_coords[nb].3 / 2)
+                    .collect();
+                if centers.is_empty() {
+                    continue;
+                }
+                centers.sort_unstable();
+                let target_center = centers[centers.len() / 2];
+                let desired = target_center.saturating_sub(w / 2);
+
+                let mut min_x = if k == 0 {
+                    if node_sg[ni].is_some() { SUBGRAPH_H_PAD } else { 0 }
+                } else {
+                    let prev = level_nodes[k - 1];
+                    let gap = if node_sg[prev] != node_sg[ni]
+                        && (node_sg[prev].is_some() || node_sg[ni].is_some())
+                    {
+                        sg_gap
+                    } else {
+                        node_spacing
+                    };
+                    real_node_coords[prev].2 + real_node_coords[prev].3 + gap
+                };
+                let mut max_x = if k + 1 < n {
+                    let next = level_nodes[k + 1];
+                    let gap = if node_sg[next] != node_sg[ni]
+                        && (node_sg[next].is_some() || node_sg[ni].is_some())
+                    {
+                        sg_gap
+                    } else {
+                        node_spacing
+                    };
+                    real_node_coords[next].2.saturating_sub(gap + w)
+                } else {
+                    // Rightmost node: never move right (keeps canvas bounded).
+                    x
+                };
+                if let Some((ext_lo, ext_hi)) = node_sg[ni].and_then(|sg| extents.get(&sg)) {
+                    min_x = min_x.max(*ext_lo);
+                    max_x = max_x.min(ext_hi.saturating_sub(w));
+                }
+                if max_x < min_x {
+                    continue;
+                }
+                let new_x = desired.clamp(min_x, max_x);
+                if new_x != x {
+                    real_node_coords[ni].2 = new_x;
+                    moved = true;
+                }
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+}
+
 /// Push unaffiliated nodes clear of subgraph bounding-box envelopes
 /// (cluster-width feedback).
 ///

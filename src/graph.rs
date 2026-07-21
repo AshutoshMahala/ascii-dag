@@ -1368,6 +1368,195 @@ mod tests {
     }
 
     #[test]
+    fn levels_tighten_after_sibling_cluster_shifts() {
+        // Tier-2 pattern from examples/subgraph_stress.rs: crossing
+        // reduction orders Analytics between the two Core DBs; sibling
+        // overlap repair then shifts Data Pipeline right, leaving a hole.
+        // tighten_levels must reclaim it so children align with parents.
+        let mut g = Graph::new();
+        for (id, label) in [
+            (1, "LoadBalancer"),
+            (2, "CDN"),
+            (10, "WebApp"),
+            (11, "MobileAPI"),
+            (12, "SSR-Engine"),
+            (20, "AuthSvc"),
+            (21, "SessionDB"),
+            (22, "UserSvc"),
+            (23, "ProfileDB"),
+            (30, "Analytics"),
+            (31, "Warehouse"),
+            (32, "ETL"),
+        ] {
+            g.add_node(id, label);
+        }
+        for (f, t) in [
+            (1, 10),
+            (1, 11),
+            (2, 12),
+            (10, 20),
+            (11, 20),
+            (12, 22),
+            (20, 21),
+            (22, 23),
+            (20, 30),
+            (22, 30),
+            (30, 31),
+            (30, 32),
+        ] {
+            g.add_edge(f, t, None);
+        }
+        let frontend = g.add_subgraph("Frontend");
+        let backend = g.add_subgraph("Backend");
+        let core = g.add_subgraph("Core");
+        let data = g.add_subgraph("Data Pipeline");
+        g.put_nodes(&[10, 11, 12]).inside(frontend).unwrap();
+        g.put_nodes(&[20, 21, 22, 23]).inside(core).unwrap();
+        g.put_nodes(&[30, 31, 32]).inside(data).unwrap();
+        g.put_subgraphs(&[core, data]).inside(backend).unwrap();
+
+        let ir = g.compute_layout();
+        let center = |label: &str| {
+            let n = ir.nodes().iter().find(|n| n.label == label).unwrap();
+            n.x + n.width / 2
+        };
+        assert!(
+            center("SessionDB").abs_diff(center("AuthSvc")) <= 3,
+            "SessionDB (center {}) should sit under AuthSvc (center {})",
+            center("SessionDB"),
+            center("AuthSvc"),
+        );
+        assert!(
+            center("ProfileDB").abs_diff(center("UserSvc")) <= 3,
+            "ProfileDB (center {}) should sit under UserSvc (center {})",
+            center("ProfileDB"),
+            center("UserSvc"),
+        );
+    }
+
+    #[test]
+    fn tightening_never_overlaps_disjoint_boxes() {
+        // Tier-3 pattern from examples/subgraph_stress.rs: ArgoCD (CI/CD)
+        // has children deep inside eu-west-1. Tightening must not pull it
+        // out of the CI/CD envelope — that would expand the CI/CD box into
+        // the eu-west-1 box after the sibling shifts already separated them.
+        let mut g = Graph::new();
+        for (id, label) in [
+            (1, "ALB"),
+            (2, "WAF"),
+            (3, "Web-A1"),
+            (4, "App-A1"),
+            (5, "DB-A1"),
+            (6, "Web-A2"),
+            (7, "App-A2"),
+            (8, "DB-A2"),
+            (9, "Web-B1"),
+            (10, "App-B1"),
+            (11, "Redis-B1"),
+            (12, "DB-B1"),
+            (13, "Web-B2"),
+            (14, "App-B2"),
+            (15, "Redis-B2"),
+            (16, "DB-B2"),
+            (17, "RabbitMQ"),
+            (18, "S3-Bucket"),
+            (19, "Vault"),
+            (20, "Jenkins"),
+            (21, "ArgoCD"),
+            (22, "ECR"),
+            (23, "Prometheus"),
+            (24, "Grafana"),
+            (25, "Loki"),
+        ] {
+            g.add_node(id, label);
+        }
+        for (f, t) in [
+            (1, 2),
+            (2, 3),
+            (3, 4),
+            (4, 5),
+            (2, 6),
+            (6, 7),
+            (7, 8),
+            (2, 9),
+            (9, 10),
+            (10, 11),
+            (11, 12),
+            (2, 13),
+            (13, 14),
+            (14, 15),
+            (15, 16),
+            (4, 17),
+            (10, 17),
+            (17, 18),
+            (20, 22),
+            (22, 21),
+            (21, 3),
+            (21, 9),
+            (23, 24),
+            (25, 24),
+            (4, 23),
+            (10, 25),
+        ] {
+            g.add_edge(f, t, None);
+        }
+        let az_a1 = g.add_subgraph("AZ-1");
+        let az_a2 = g.add_subgraph("AZ-2");
+        let region_a = g.add_subgraph("us-east-1");
+        g.put_nodes(&[3, 4, 5]).inside(az_a1).unwrap();
+        g.put_nodes(&[6, 7, 8]).inside(az_a2).unwrap();
+        g.put_subgraphs(&[az_a1, az_a2]).inside(region_a).unwrap();
+        let az_b1 = g.add_subgraph("AZ-1");
+        let az_b2 = g.add_subgraph("AZ-2");
+        let region_b = g.add_subgraph("eu-west-1");
+        g.put_nodes(&[9, 10, 11, 12]).inside(az_b1).unwrap();
+        g.put_nodes(&[13, 14, 15, 16]).inside(az_b2).unwrap();
+        g.put_subgraphs(&[az_b1, az_b2]).inside(region_b).unwrap();
+        let shared = g.add_subgraph("Shared Services");
+        g.put_nodes(&[17, 18, 19]).inside(shared).unwrap();
+        let cicd = g.add_subgraph("CI/CD");
+        g.put_nodes(&[20, 21, 22]).inside(cicd).unwrap();
+        let obs = g.add_subgraph("Observability");
+        g.put_nodes(&[23, 24, 25]).inside(obs).unwrap();
+
+        let ir = g.compute_layout();
+        let boxes = ir.subgraphs();
+        let is_ancestor = |anc: usize, mut id: usize| -> bool {
+            loop {
+                let parent = boxes.iter().find(|s| s.id == id).and_then(|s| s.parent_id);
+                match parent {
+                    Some(p) if p == anc => return true,
+                    Some(p) => id = p,
+                    None => return false,
+                }
+            }
+        };
+        for a in boxes {
+            for b in boxes {
+                if a.id >= b.id || is_ancestor(a.id, b.id) || is_ancestor(b.id, a.id) {
+                    continue;
+                }
+                let x_overlap = a.x < b.x + b.width && b.x < a.x + a.width;
+                let y_overlap = a.y < b.y + b.height && b.y < a.y + a.height;
+                assert!(
+                    !(x_overlap && y_overlap),
+                    "boxes '{}' ({},{} {}x{}) and '{}' ({},{} {}x{}) overlap",
+                    a.label,
+                    a.x,
+                    a.y,
+                    a.width,
+                    a.height,
+                    b.label,
+                    b.x,
+                    b.y,
+                    b.width,
+                    b.height,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn book_length_subgraph_label_is_capped() {
         let long_label = "L".repeat(300);
         let mut g = Graph::new();
