@@ -897,7 +897,9 @@ pub fn compute_layout_arena_csr<'b>(
         }
     }
 
-    Ok(builder.build())
+    let mut ir = builder.build();
+    ir.set_direction(config.direction);
+    Ok(ir)
 }
 
 // Helpers for CSR layout (parallel implementation for CsrGraph)

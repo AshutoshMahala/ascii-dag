@@ -797,8 +797,14 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         }
     }
     builder.set_dimensions(canvas_width, total_height);
+    builder.set_direction(config.direction);
 
-    builder.build()
+    let mut ir = builder.build();
+    if config.direction == crate::graph::Direction::BottomUp {
+        // Physical-space contract: IR coordinates match rendered cells.
+        ir.flip_vertical();
+    }
+    ir
 }
 
 // ── Crossing reduction ───────────────────────────────────────────────────

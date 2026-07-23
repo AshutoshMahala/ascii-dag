@@ -191,6 +191,8 @@ pub struct LayoutIRArena<'a> {
     level_offsets: &'a [usize],
     /// Node indices organized by level
     level_data: &'a [usize],
+    /// Rank direction the layout was computed for (applied at render time).
+    direction: crate::graph::Direction,
 }
 
 impl<'a> LayoutIRArena<'a> {
@@ -219,7 +221,19 @@ impl<'a> LayoutIRArena<'a> {
             level_count,
             level_offsets,
             level_data,
+            direction: crate::graph::Direction::TopDown,
         }
+    }
+
+    /// Set the rank direction the layout was computed for.
+    pub(crate) fn set_direction(&mut self, direction: crate::graph::Direction) {
+        self.direction = direction;
+    }
+
+    /// Rank direction the layout was computed for.
+    #[inline]
+    pub fn direction(&self) -> crate::graph::Direction {
+        self.direction
     }
 
     /// Get the total width of the layout in character cells.

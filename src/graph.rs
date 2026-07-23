@@ -41,6 +41,58 @@ pub enum RenderMode {
     Auto,
 }
 
+/// Rank direction — the axis levels flow along.
+///
+/// Recorded on the layout IR; IR coordinates are physical (they match
+/// rendered cells). For `BottomUp`, the heap layout path flips its
+/// result into physical coordinates.
+///
+/// Parses from the conventional short forms (case-insensitive):
+/// `"TB"`/`"TD"`, `"BT"`, `"LR"`, `"RL"`.
+///
+/// The built-in renderers currently paint `TopDown` layouts only;
+/// rendering an IR with any other direction is unspecified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Direction {
+    /// Levels flow top → bottom (default; edges point down).
+    #[default]
+    TopDown,
+    /// Levels flow bottom → top (edges point up).
+    BottomUp,
+    /// Levels flow left → right (edges point right).
+    LeftRight,
+    /// Levels flow right → left (edges point left).
+    RightLeft,
+}
+
+/// Error returned when parsing a [`Direction`] from an unknown string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseDirectionError;
+
+impl core::fmt::Display for ParseDirectionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("unknown direction (expected TB/TD, BT, LR, or RL)")
+    }
+}
+
+impl core::str::FromStr for Direction {
+    type Err = ParseDirectionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("TB") || s.eq_ignore_ascii_case("TD") {
+            Ok(Direction::TopDown)
+        } else if s.eq_ignore_ascii_case("BT") {
+            Ok(Direction::BottomUp)
+        } else if s.eq_ignore_ascii_case("LR") {
+            Ok(Direction::LeftRight)
+        } else if s.eq_ignore_ascii_case("RL") {
+            Ok(Direction::RightLeft)
+        } else {
+            Err(ParseDirectionError)
+        }
+    }
+}
+
 // Everything below requires the `alloc` feature (Vec, String, HashMap).
 #[cfg(feature = "alloc")]
 use alloc::{string::String, vec, vec::Vec};
@@ -124,6 +176,7 @@ pub struct Graph<'a> {
     pub(crate) nodes: Vec<(usize, &'a str)>,
     pub(crate) edges: Vec<(usize, usize, Option<&'a str>)>,
     pub(crate) render_mode: RenderMode,
+    pub(crate) direction: Direction,
     pub(crate) auto_created: HashSet<usize>, // Track auto-created nodes for visual distinction (O(1) lookups)
     pub(crate) id_to_index: HashMap<usize, usize>, // Cache id→index mapping (O(1) lookups)
     pub(crate) node_widths: Vec<usize>,      // Cached formatted widths
@@ -171,6 +224,7 @@ impl<'a> Graph<'a> {
             nodes: nodes.to_vec(),
             edges: Vec::new(),
             render_mode: RenderMode::default(),
+            direction: Direction::default(),
             auto_created: HashSet::new(),
             id_to_index: HashMap::new(),
             node_widths: Vec::new(),
@@ -223,6 +277,7 @@ impl<'a> Graph<'a> {
             nodes: nodes.to_vec(),
             edges: Vec::new(),
             render_mode: RenderMode::default(),
+            direction: Direction::default(),
             auto_created: HashSet::new(),
             id_to_index: HashMap::new(),
             node_widths: Vec::new(),
@@ -267,6 +322,28 @@ impl<'a> Graph<'a> {
     /// ```
     pub fn set_render_mode(&mut self, mode: RenderMode) {
         self.render_mode = mode;
+    }
+
+    /// Set the rank direction (see [`Direction`]).
+    ///
+    /// Applies when computing the layout via [`render`](Self::render) or
+    /// [`compute_layout`](Self::compute_layout). When you build a
+    /// [`LayoutConfig`] yourself and call
+    /// [`compute_layout_with_config`](Self::compute_layout_with_config),
+    /// the config's `direction` wins.
+    ///
+    /// The built-in renderers currently paint `TopDown` layouts only.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ascii_dag::graph::{Direction, Graph};
+    ///
+    /// let mut dag = Graph::new();
+    /// dag.set_direction(Direction::BottomUp);
+    /// ```
+    pub fn set_direction(&mut self, direction: Direction) {
+        self.direction = direction;
     }
 
     /// Set the full Sugiyama pipeline configuration.
@@ -362,6 +439,12 @@ impl<'a> Graph<'a> {
     /// ```
     pub fn with_render_mode(mut self, mode: RenderMode) -> Self {
         self.render_mode = mode;
+        self
+    }
+
+    /// Builder method: set the rank direction (chainable).
+    pub fn with_direction(mut self, direction: Direction) -> Self {
+        self.direction = direction;
         self
     }
 
@@ -769,7 +852,8 @@ impl<'a> Graph<'a> {
     /// }
     /// ```
     pub fn compute_layout(&self) -> crate::ir::LayoutIR<'a> {
-        let config: LayoutConfig<'_> = LayoutConfig::from(&self.sugiyama_config);
+        let mut config: LayoutConfig<'_> = LayoutConfig::from(&self.sugiyama_config);
+        config.direction = self.direction;
         crate::algorithms::sugiyama::heap::compute_layout_cfg(self, &config)
     }
 

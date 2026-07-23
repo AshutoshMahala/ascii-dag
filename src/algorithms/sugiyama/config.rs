@@ -22,7 +22,7 @@
 //! ```
 
 use super::crossing::{CrossingReducer, FAST, QUALITY, STANDARD};
-use crate::graph::RenderMode;
+use crate::graph::{Direction, RenderMode};
 
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
@@ -157,6 +157,13 @@ pub struct LayoutConfig<'a> {
     /// Rendering mode (Auto, Vertical, Horizontal).
     pub render_mode: RenderMode,
 
+    /// Rank direction (default: [`Direction::TopDown`]).
+    ///
+    /// Recorded on the layout IR; for `BottomUp` the heap layout path
+    /// flips its result into physical coordinates. The built-in
+    /// renderers currently paint `TopDown` layouts only.
+    pub direction: Direction,
+
     /// Include dummy (virtual) nodes in the output IR.
     pub include_dummy_nodes: bool,
 
@@ -178,6 +185,7 @@ impl<'a> LayoutConfig<'a> {
             node_spacing: 3,
             level_spacing: 0,
             render_mode: RenderMode::Auto,
+            direction: Direction::TopDown,
             include_dummy_nodes: false,
             skip_validation: false,
         }
@@ -196,6 +204,7 @@ impl<'a> LayoutConfig<'a> {
             node_spacing: 3,
             level_spacing: 0,
             render_mode: RenderMode::Auto,
+            direction: Direction::TopDown,
             include_dummy_nodes: false,
             skip_validation: false,
         }
@@ -214,6 +223,7 @@ impl<'a> LayoutConfig<'a> {
             node_spacing: 3,
             level_spacing: 0,
             render_mode: RenderMode::Auto,
+            direction: Direction::TopDown,
             include_dummy_nodes: false,
             skip_validation: false,
         }
@@ -357,6 +367,7 @@ impl<'a> From<&'a SugiyamaConfig> for LayoutConfig<'a> {
             node_spacing: 3,
             level_spacing: 0,
             render_mode: sc.render_mode,
+            direction: Direction::TopDown,
             include_dummy_nodes: false,
             skip_validation: false,
         }
