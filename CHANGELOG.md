@@ -11,6 +11,9 @@
 - **Inter-cluster compaction**: root clusters and loose nodes are pulled back together after overlap separation, removing the empty gulfs between boxes (up to −24% canvas width on the stress tiers). Both layout paths.
 - **Edges never cross node text**: dummy waypoints are realigned when compaction moves their endpoints and nudged out of node spans; an edge that must cross something crosses a subgraph border (rendered as a junction), never a node. Both layout paths.
 
+### Added
+- **Rank direction (`Direction`) — IR groundwork**: `graph.set_direction(...)` / `LayoutConfig.direction` record the rank direction on the layout IR; parses from `"TB"`/`"TD"`/`"BT"`/`"LR"`/`"RL"`. For `BottomUp`, the heap layout path emits physical (flipped) coordinates. The built-in renderers currently paint `TopDown` layouts only.
+
 ### Internal
 - Rendered-output tests (`tests/layout_output.rs`): spacing config is now verified against the text a user sees, in both backends, plus a golden snapshot of the hero example (`cargo run --example hero` to regenerate).
 - Shared cluster-geometry constants moved to `algorithms/sugiyama/geometry.rs` — previously duplicated across the heap and CSR backends, where they could silently drift.

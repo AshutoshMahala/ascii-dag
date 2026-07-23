@@ -251,6 +251,8 @@ pub struct LayoutIR<'a> {
     pub(crate) levels: Vec<Vec<usize>>,
     /// O(1) lookup from node ID to index in nodes vec
     pub(crate) id_to_index: HashMap<usize, usize>,
+    /// Rank direction the layout was computed for.
+    pub(crate) direction: crate::graph::Direction,
     /// Spatial index for fast scanline rendering (built lazily on first access)
     y_index: OnceCell<Vec<LineOccupancy>>,
 }
@@ -267,6 +269,53 @@ impl<'a> LayoutIR<'a> {
     #[inline]
     pub fn height(&self) -> usize {
         self.height
+    }
+
+    /// Rank direction the layout was computed for.
+    ///
+    /// IR coordinates are physical — for `Direction::BottomUp` they are
+    /// already flipped so they match rendered cells.
+    #[inline]
+    pub fn direction(&self) -> crate::graph::Direction {
+        self.direction
+    }
+
+    /// Vertically mirror every coordinate in place (involutive).
+    ///
+    /// Applied once at the end of layout for `Direction::BottomUp` to turn
+    /// the top-down logical result into physical coordinates.
+    pub(crate) fn flip_vertical(&mut self) {
+        let h = self.height;
+        let flip_row = |y: usize| h.saturating_sub(1).saturating_sub(y);
+        for node in &mut self.nodes {
+            node.y = h.saturating_sub(node.y + node.height);
+            node.center_y = flip_row(node.center_y);
+        }
+        for edge in &mut self.edges {
+            edge.from_y = flip_row(edge.from_y);
+            edge.to_y = flip_row(edge.to_y);
+            if let Some((_, ly)) = &mut edge.label_position {
+                *ly = flip_row(*ly);
+            }
+            match &mut edge.path {
+                EdgePath::Corner { horizontal_y } => *horizontal_y = flip_row(*horizontal_y),
+                EdgePath::MultiSegment { waypoints, .. } => {
+                    for (_, wy) in waypoints.iter_mut() {
+                        *wy = flip_row(*wy);
+                    }
+                }
+                EdgePath::SideChannel { start_y, end_y, .. } => {
+                    let (s, e) = (flip_row(*end_y), flip_row(*start_y));
+                    *start_y = s;
+                    *end_y = e;
+                }
+                _ => {}
+            }
+        }
+        for sg in &mut self.subgraphs {
+            sg.y = h.saturating_sub(sg.y + sg.height);
+        }
+        self.y_index = OnceCell::new();
     }
 
     /// Get the number of levels (depth) in the graph.
@@ -486,6 +535,7 @@ pub struct LayoutIRBuilder<'a> {
     height: usize,
     level_count: usize,
     levels: Vec<Vec<usize>>,
+    direction: crate::graph::Direction,
 }
 
 #[cfg(feature = "alloc")]
@@ -530,6 +580,11 @@ impl<'a> LayoutIRBuilder<'a> {
         self.height = height;
     }
 
+    /// Set the rank direction the layout was computed for.
+    pub fn set_direction(&mut self, direction: crate::graph::Direction) {
+        self.direction = direction;
+    }
+
     /// Build the final LayoutIR.
     pub fn build(self) -> LayoutIR<'a> {
         // Build id-to-index map for O(1) lookups
@@ -549,6 +604,7 @@ impl<'a> LayoutIRBuilder<'a> {
             level_count: self.level_count,
             levels: self.levels,
             id_to_index,
+            direction: self.direction,
             y_index: OnceCell::new(),
         }
     }

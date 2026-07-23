@@ -176,3 +176,126 @@ fn hero_example_matches_golden() {
 }
 
 include!("../examples/shared/hero_graph.rs");
+
+// ── Direction ────────────────────────────────────────────────────────────
+
+mod direction {
+    use super::*;
+    use ascii_dag::graph::Direction;
+
+    #[test]
+    fn parses_conventional_short_forms() {
+        for (s, want) in [
+            ("TB", Direction::TopDown),
+            ("TD", Direction::TopDown),
+            ("tb", Direction::TopDown),
+            ("BT", Direction::BottomUp),
+            ("bt", Direction::BottomUp),
+            ("LR", Direction::LeftRight),
+            ("RL", Direction::RightLeft),
+        ] {
+            assert_eq!(s.parse::<Direction>().unwrap(), want, "parsing {s:?}");
+        }
+        assert!("NE".parse::<Direction>().is_err());
+        assert!("".parse::<Direction>().is_err());
+    }
+
+    fn stage_graph() -> Graph<'static> {
+        let mut g = Graph::new();
+        g.add_node(1, "Start");
+        g.add_node(2, "Middle");
+        g.add_node(3, "End");
+        g.add_edge(1, 2, Some("go"));
+        g.add_edge(2, 3, None);
+        let sg = g.add_subgraph("Stage");
+        g.put_nodes(&[2]).inside(sg).unwrap();
+        g
+    }
+
+    // NOTE: BottomUp assertions are IR-level only. The built-in renderers
+    // paint TopDown layouts exclusively until direction-aware rendering
+    // lands with the renderer rewrite — no test may render a BT IR.
+
+    #[test]
+    fn bottom_up_ir_records_direction() {
+        let mut g = stage_graph();
+        g.set_direction(Direction::BottomUp);
+        let ir = g.compute_layout();
+        assert_eq!(ir.direction(), Direction::BottomUp);
+        let td = stage_graph().compute_layout();
+        assert_eq!(td.direction(), Direction::TopDown);
+    }
+
+    #[test]
+    fn bottom_up_ir_puts_sources_at_bottom() {
+        // Physical coordinates: under BT the source sits on larger rows
+        // than the target.
+        let mut g = stage_graph();
+        g.set_direction(Direction::BottomUp);
+        let ir = g.compute_layout();
+        let start = ir.node_by_id(1).expect("Start in IR");
+        let end = ir.node_by_id(3).expect("End in IR");
+        assert!(
+            start.y > end.y,
+            "BottomUp: source row {} must be below target row {}",
+            start.y,
+            end.y,
+        );
+    }
+
+    #[test]
+    fn bottom_up_ir_is_exact_vertical_flip_of_top_down() {
+        // The physical BT IR must be the exact mirror of the TD IR:
+        // same dimensions, every y flipped, every x untouched.
+        let td = stage_graph().compute_layout();
+        let mut g = stage_graph();
+        g.set_direction(Direction::BottomUp);
+        let bt = g.compute_layout();
+
+        assert_eq!(bt.width(), td.width());
+        assert_eq!(bt.height(), td.height());
+        assert_eq!(bt.level_count(), td.level_count());
+
+        let h = td.height();
+        let flip_row = |y: usize| h - 1 - y;
+
+        for td_node in td.nodes() {
+            let bt_node = bt.node_by_id(td_node.id).expect("node in BT IR");
+            assert_eq!(bt_node.x, td_node.x, "x untouched for '{}'", td_node.label);
+            assert_eq!(bt_node.width, td_node.width);
+            assert_eq!(bt_node.height, td_node.height);
+            assert_eq!(
+                bt_node.y,
+                h - (td_node.y + td_node.height),
+                "flipped y for '{}'",
+                td_node.label,
+            );
+            assert_eq!(bt_node.center_y, flip_row(td_node.center_y));
+        }
+
+        for (td_edge, bt_edge) in td.edges().iter().zip(bt.edges()) {
+            assert_eq!(bt_edge.from_x, td_edge.from_x);
+            assert_eq!(bt_edge.to_x, td_edge.to_x);
+            assert_eq!(bt_edge.from_y, flip_row(td_edge.from_y));
+            assert_eq!(bt_edge.to_y, flip_row(td_edge.to_y));
+        }
+
+        for (td_sg, bt_sg) in td.subgraphs().iter().zip(bt.subgraphs()) {
+            assert_eq!(bt_sg.x, td_sg.x);
+            assert_eq!(bt_sg.width, td_sg.width);
+            assert_eq!(bt_sg.height, td_sg.height);
+            assert_eq!(bt_sg.y, h - (td_sg.y + td_sg.height));
+        }
+    }
+
+    #[test]
+    fn top_down_output_unchanged_by_direction_plumbing() {
+        // Explicit TopDown must be byte-identical to the default.
+        let g = stage_graph();
+        let default_out = g.compute_layout().render_scanline();
+        let mut g2 = stage_graph();
+        g2.set_direction(Direction::TopDown);
+        let explicit_out = g2.compute_layout().render_scanline();
+        assert_eq!(default_out, explicit_out);
+    }
+}
