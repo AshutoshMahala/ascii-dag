@@ -701,14 +701,12 @@ mod heap_json {
             out.push(',');
             push_key(out, "label");
             push_json_str(out, label);
-            if let Some((lx, ly)) = edge.label_position {
-                out.push(',');
-                push_key(out, "label_x");
-                push_usize(out, lx);
-                out.push(',');
-                push_key(out, "label_y");
-                push_usize(out, ly);
-            }
+            out.push(',');
+            push_key(out, "label_x");
+            push_usize(out, edge.label_x);
+            out.push(',');
+            push_key(out, "label_y");
+            push_usize(out, edge.label_y);
         }
 
         out.push('}');

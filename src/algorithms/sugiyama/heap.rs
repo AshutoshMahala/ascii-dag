@@ -786,7 +786,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             //   from_y+2: vertical connector
             //   from_y+3: label text row
             //   to_y:     [Target Node]
-            let label_position = label.map(|lbl| {
+            let (label_x, label_y) = label.map(|lbl| {
                 let label_len = lbl.chars().count() + 2; // +2 for quotes
 
                 // First row below the source level's routing block — shared
@@ -848,7 +848,8 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                     label_x
                 };
                 (clamped_x, label_y)
-            });
+            })
+            .unwrap_or((0, 0));
 
             let reversed = back_edges.get(edge_idx).copied().unwrap_or(false);
             builder.add_edge(LayoutEdge {
@@ -861,7 +862,8 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                 path,
                 edge_index: edge_idx,
                 label,
-                label_position,
+                label_x,
+                label_y,
                 directed: true,
                 reversed,
             });

@@ -104,9 +104,8 @@ impl<'a> LayoutIR<'a> {
                 // 2. Paint edge labels (same color as the edge line)
                 for &edge_idx in &occupancy.edge_indices {
                     let edge = &self.edges()[edge_idx];
-                    if let (Some(label), Some((label_x, label_y))) =
-                        (edge.label, edge.label_position)
-                    {
+                    if let Some(label) = edge.label {
+                        let (label_x, label_y) = (edge.label_x, edge.label_y);
                         if y == label_y {
                             let color_idx = edge_color_indices.get(edge_idx).copied().unwrap_or(0);
                             let color = palette_colors[color_idx % palette_colors.len()];
@@ -203,19 +202,10 @@ impl<'a> LayoutIR<'a> {
         let mut pending_labels: Vec<(usize, usize, usize, bool)> = Vec::new();
         for (edge_idx, edge) in self.edges().iter().enumerate() {
             if edge.label.is_some() {
-                // strict placement: use the pre-calculated label_y if available
+                // Strict placement: use the layout-computed label row.
                 // This prevents "stacking" labels and forces collisions to the legend,
                 // which results in a cleaner graph (preferred by user).
-                if let Some((_, label_y)) = edge.label_position {
-                    pending_labels.push((edge_idx, label_y, label_y, false));
-                } else {
-                    // Fallback for edges without pre-calculated position (shouldn't happen with valid layout)
-                    let min_y = edge.from_y.saturating_add(2);
-                    let max_y = edge.to_y.saturating_sub(2);
-                    if max_y >= min_y {
-                        pending_labels.push((edge_idx, min_y, max_y, false));
-                    }
-                }
+                pending_labels.push((edge_idx, edge.label_y, edge.label_y, false));
             }
         }
 
@@ -397,9 +387,8 @@ impl<'a> LayoutIR<'a> {
                 // 2. Paint edge labels (overwrites edge lines where needed)
                 for &edge_idx in &occupancy.edge_indices {
                     let edge = &self.edges()[edge_idx];
-                    if let (Some(label), Some((label_x, label_y))) =
-                        (edge.label, edge.label_position)
-                    {
+                    if let Some(label) = edge.label {
+                        let (label_x, label_y) = (edge.label_x, edge.label_y);
                         if y == label_y {
                             self.paint_edge_label(&mut line_buffer, label, label_x);
                         }
@@ -482,9 +471,8 @@ impl<'a> LayoutIR<'a> {
                 // 2. Paint edge labels (overwrites edge lines where needed)
                 for &edge_idx in &occupancy.edge_indices {
                     let edge = &self.edges()[edge_idx];
-                    if let (Some(label), Some((label_x, label_y))) =
-                        (edge.label, edge.label_position)
-                    {
+                    if let Some(label) = edge.label {
+                        let (label_x, label_y) = (edge.label_x, edge.label_y);
                         if y == label_y {
                             self.paint_edge_label(&mut line_buffer[..width], label, label_x);
                         }
@@ -572,9 +560,8 @@ impl<'a> LayoutIR<'a> {
                 // 2. Paint edge labels (overwrites edge lines where needed)
                 for &edge_idx in &occupancy.edge_indices {
                     let edge = &self.edges()[edge_idx];
-                    if let (Some(label), Some((label_x, label_y))) =
-                        (edge.label, edge.label_position)
-                    {
+                    if let Some(label) = edge.label {
+                        let (label_x, label_y) = (edge.label_x, edge.label_y);
                         if y == label_y {
                             self.paint_edge_label(&mut line_buffer[..width], label, label_x);
                         }

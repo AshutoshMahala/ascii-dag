@@ -16,6 +16,9 @@
 ### Added
 - **Rank direction (`Direction`) — IR groundwork**: `graph.set_direction(...)` / `LayoutConfig.direction` record the rank direction on the layout IR; parses from `"TB"`/`"TD"`/`"BT"`/`"LR"`/`"RL"`. For `BottomUp`, the heap layout path emits physical (flipped) coordinates. The built-in renderers currently paint `TopDown` layouts only.
 
+### Breaking Changes
+- **`LayoutEdge.label_position: Option<(usize, usize)>` → `label_x: usize, label_y: usize`**: the heap IR now uses the same scalar shape as `LayoutEdgeArena`, zigraph, and the JSON wire format (values are meaningful iff `label` is present; the JSON output is unchanged). Saves 8 bytes per edge.
+
 ### Internal
 - Rendered-output tests (`tests/layout_output.rs`): spacing config is now verified against the text a user sees, in both backends, plus a golden snapshot of the hero example (`cargo run --example hero` to regenerate).
 - Shared cluster-geometry constants moved to `algorithms/sugiyama/geometry.rs` — previously duplicated across the heap and CSR backends, where they could silently drift.

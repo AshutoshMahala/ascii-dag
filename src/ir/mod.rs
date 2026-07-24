@@ -192,9 +192,13 @@ pub struct LayoutEdge<'a> {
     pub edge_index: usize,
     /// Optional edge label (e.g., "depends on", "uses")
     pub label: Option<&'a str>,
-    /// Computed position for rendering the label: (x, y)
-    /// Calculated during layout as the midpoint of the edge path.
-    pub label_position: Option<(usize, usize)>,
+    /// Computed X position for rendering the label.
+    /// Meaningful **iff `label` is present** (0 otherwise) — the same
+    /// scalar shape as `LayoutEdgeArena`, zigraph, and the JSON format.
+    pub label_x: usize,
+    /// Computed Y position for rendering the label.
+    /// Meaningful **iff `label` is present** (0 otherwise).
+    pub label_y: usize,
     /// Whether this edge has an arrowhead (true for directed edges).
     /// Mirrors zigraph's `LayoutEdge.directed`.
     pub directed: bool,
@@ -294,8 +298,10 @@ impl<'a> LayoutIR<'a> {
         for edge in &mut self.edges {
             edge.from_y = flip_row(edge.from_y);
             edge.to_y = flip_row(edge.to_y);
-            if let Some((_, ly)) = &mut edge.label_position {
-                *ly = flip_row(*ly);
+            // label_y is only meaningful when a label exists; the 0-default
+            // of unlabeled edges must not turn into a bottom-row garbage value.
+            if edge.label.is_some() {
+                edge.label_y = flip_row(edge.label_y);
             }
             match &mut edge.path {
                 EdgePath::Corner { horizontal_y } => *horizontal_y = flip_row(*horizontal_y),

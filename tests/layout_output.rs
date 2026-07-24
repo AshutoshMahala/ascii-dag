@@ -294,6 +294,10 @@ mod direction {
             assert_eq!(bt_edge.to_x, td_edge.to_x);
             assert_eq!(bt_edge.from_y, flip_row(td_edge.from_y));
             assert_eq!(bt_edge.to_y, flip_row(td_edge.to_y));
+            if td_edge.label.is_some() {
+                assert_eq!(bt_edge.label_x, td_edge.label_x);
+                assert_eq!(bt_edge.label_y, flip_row(td_edge.label_y));
+            }
         }
 
         for (td_sg, bt_sg) in td.subgraphs().iter().zip(bt.subgraphs()) {
@@ -405,6 +409,34 @@ mod direction {
                     }
                 });
             });
+        }
+
+        #[test]
+        fn heap_and_csr_backends_agree_on_edge_labels() {
+            // P4 made the heap edge-label shape identical to the arena's —
+            // label positions are now comparable field-for-field.
+            let g = stage_graph();
+            for direction in [Direction::TopDown, Direction::BottomUp] {
+                let mut heap_g = stage_graph();
+                heap_g.set_direction(direction);
+                let heap_ir = heap_g.compute_layout();
+
+                with_csr_ir(&g, direction, |csr_ir| {
+                    for heap_edge in heap_ir.edges().iter().filter(|e| e.label.is_some()) {
+                        let csr_edge = csr_ir
+                            .edges()
+                            .iter()
+                            .find(|e| e.edge_index == heap_edge.edge_index)
+                            .expect("edge present in CSR IR");
+                        assert!(csr_edge.label_len > 0, "label present in both IRs");
+                        assert_eq!(
+                            (csr_edge.label_x, csr_edge.label_y),
+                            (heap_edge.label_x, heap_edge.label_y),
+                            "label position diverges between backends ({direction:?})",
+                        );
+                    }
+                });
+            }
         }
 
         #[test]
