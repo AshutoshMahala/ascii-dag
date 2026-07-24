@@ -16,13 +16,16 @@
 
 ### Added
 - **Dummy-node visualization (`LayoutConfig.include_dummy_nodes`)**: the flag existed but was never honored; it now works. When enabled, skip-level routing dummies appear in both IRs as nodes with `kind == NodeKind::Dummy`, a new `edge_index` back-link to their owning edge (zigraph parity; `None`/`usize::MAX` for real nodes), synthetic ids excluded from `node_by_id`, width 1 at the drawn waypoint column. Zero cost when disabled (default). The JSON `edge_index` field — previously always `null` — now carries the value.
-- **Rank direction (`Direction`) — IR groundwork**: `graph.set_direction(...)` / `LayoutConfig.direction` record the rank direction on the layout IR; parses from `"TB"`/`"TD"`/`"BT"`/`"LR"`/`"RL"`. For `BottomUp`, the heap layout path emits physical (flipped) coordinates. The built-in renderers currently paint `TopDown` layouts only.
+- **Rank direction (`Direction`) — IR groundwork**: `graph.set_direction(...)` / `LayoutConfig.direction` record the rank direction on the layout IR; parses from `"TB"`/`"TD"`/`"BT"`/`"LR"`/`"RL"`; re-exported from the crate root. For `BottomUp`, both layout paths emit physical (flipped) coordinates — the IR always matches rendered cells. The built-in renderers currently paint `TopDown` layouts only.
 
 ### Breaking Changes
 - **`LayoutEdge.label_position: Option<(usize, usize)>` → `label_x: usize, label_y: usize`**: the heap IR now uses the same scalar shape as `LayoutEdgeArena`, zigraph, and the JSON wire format (values are meaningful iff `label` is present; the JSON output is unchanged). Saves 8 bytes per edge.
+- **`LayoutNode` / `LayoutNodeArena` gained `edge_index`** (`Option<usize>` / `usize` with `usize::MAX` sentinel): code constructing these structs by literal must add the field. `LayoutIRArenaBuilder::add_node` takes it as a new final parameter.
 
 ### Internal
 - Rendered-output tests (`tests/layout_output.rs`): spacing config is now verified against the text a user sees, in both backends, plus a golden snapshot of the hero example (`cargo run --example hero` to regenerate).
+- Cross-backend parity suite: the same graph must produce identical node/box/label geometry in both IRs, byte-identical rendered text, and matching dummy sets; BottomUp IRs must be exact vertical mirrors of TopDown. These tests found (and now pin) several silent backend divergences.
+- Shared routing rules centralized in `geometry.rs`: `EDGE_START_ROW`, `ARROW_CELL_PAD`, `edge_label_row_offset`, `routing_overhead`, `passthrough_rows` — one definition, both backends.
 - Shared cluster-geometry constants moved to `algorithms/sugiyama/geometry.rs` — previously duplicated across the heap and CSR backends, where they could silently drift.
 - Packed vnode encoding in `arena_csr.rs` is now behind accessors (`vnode_kind`/`vnode_payload`/`vnode_set`).
 - Removed orphaned `src/layout/arena.rs` (631 lines, never included in the module tree).

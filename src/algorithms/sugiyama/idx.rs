@@ -19,6 +19,7 @@
 #[cfg(feature = "arena-idx-u8")]
 pub type Idx = u8;
 
+/// 16-bit index type (`arena-idx-u16`): up to 65,535 nodes/edges.
 #[cfg(all(feature = "arena-idx-u16", not(feature = "arena-idx-u8")))]
 pub type Idx = u16;
 

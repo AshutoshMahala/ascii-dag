@@ -7,43 +7,46 @@ This document describes the internal architecture of `ascii-dag`, a zero-depende
 ```mermaid
 graph TD
     subgraph Input["Input Layer"]
-        DAG["DAG<br/>(graph.rs)"]
-        CSR["CsrGraph<br/>(csr.rs)"]
+        GraphT["Graph<br/>(graph.rs)"]
+        CSR["CsrGraph<br/>(graph/csr.rs)"]
     end
-    
+
     subgraph Layout["Layout Engine"]
-        Sugiyama["Sugiyama Algorithm<br/>(layout.rs, layout/arena.rs)"]
-        Crossing["Crossing Reduction<br/>(median heuristic)"]
-        Virtual["Virtual Levels<br/>(dummy nodes)"]
+        Heap["Heap pipeline<br/>(algorithms/sugiyama/heap.rs)"]
+        ArenaCsr["CSR pipeline<br/>(algorithms/sugiyama/arena_csr.rs)"]
+        Shared["Shared rules<br/>(algorithms/sugiyama/geometry.rs)"]
     end
-    
+
     subgraph IR["Intermediate Representation"]
         LayoutIR["LayoutIR<br/>(ir/mod.rs)"]
         ArenaIR["LayoutIRArena<br/>(ir/arena.rs)"]
     end
-    
+
     subgraph Render["Rendering"]
-        ASCII["ASCII Renderer<br/>(render/ascii.rs)"]
-        Scanline["Scanline Renderer<br/>(render/scanline.rs)"]
+        Scanline["Scanline renderer<br/>(render/scanline.rs)"]
+        BufRender["Buffer renderer<br/>(ir/arena_render.rs)"]
+        Json["JSON<br/>(ir/json.rs)"]
     end
-    
-    subgraph Utils["Utilities"]
-        Arena["Arena Allocator<br/>(arena.rs)"]
-        Cycles["Cycle Detection<br/>(cycles/)"]
-        Generic["Generic Algorithms<br/>(layout/generic/)"]
-    end
-    
-    DAG --> Sugiyama
-    CSR --> Sugiyama
-    Sugiyama --> Crossing
-    Crossing --> Virtual
-    Virtual --> LayoutIR
-    Virtual --> ArenaIR
-    LayoutIR --> ASCII
+
+    GraphT --> Heap
+    GraphT -->|to_csr| CSR
+    CSR --> ArenaCsr
+    Shared -.-> Heap
+    Shared -.-> ArenaCsr
+    Heap --> LayoutIR
+    ArenaCsr --> ArenaIR
     LayoutIR --> Scanline
-    ArenaIR --> Scanline
-    Arena --> ArenaIR
+    LayoutIR --> Json
+    ArenaIR --> BufRender
+    ArenaIR --> Json
 ```
+
+**The parity rule:** the two layout pipelines implement the same algorithm over
+different type systems (heap `Vec`/`HashMap` vs arena slices/`Idx`). Every
+spacing or routing rule they share lives in `algorithms/sugiyama/geometry.rs` —
+defining one locally in a backend is a bug, because the copies can silently
+drift. Cross-backend tests in `tests/layout_output.rs` pin IR geometry and
+byte-identical rendered text between the two.
 
 ## Module Reference
 
@@ -51,63 +54,64 @@ graph TD
 
 | Module | Purpose | Key Types |
 |--------|---------|-----------|
-| `graph.rs` | Core DAG representation | `DAG<'a>`, `RenderMode` |
-| `csr.rs` | Compressed Sparse Row format | `CsrGraph<'a>`, `CsrBuilder` |
-| `arena.rs` | Bump allocator for no_std | `Arena<'a>`, `ArenaVec<'a, T>` |
+| `graph.rs` | Core graph representation | `Graph<'a>`, `Direction`, `RenderMode`, `Subgraph` |
+| `graph/csr.rs` | Compressed Sparse Row format | `CsrGraph<'a>`, `CsrGraphBuilder` |
+| `graph/arena.rs` | Bump allocator for no_std | `Arena<'a>` |
 
 ### Layout Pipeline
 
-| Module | Purpose | Key Functions |
-|--------|---------|---------------|
-| `layout.rs` | Sugiyama algorithm entry | `calculate_levels()`, `reduce_crossings()` |
-| `layout/arena.rs` | Arena-based layout | `compute_layout_arena()`, `compute_layout_arena_csr()` |
-| `layout/idx.rs` | Configurable index types | `Idx` (u8/u16/u32), `Coord` |
-| `layout/generic/` | Generic graph algorithms | `topological_sort_fn()`, `GraphMetrics` |
+| Module | Purpose |
+|--------|---------|
+| `algorithms/sugiyama.rs` | Level assignment, connected components |
+| `algorithms/sugiyama/heap.rs` | Heap-based pipeline (`compute_layout_cfg`) |
+| `algorithms/sugiyama/arena_csr.rs` | Arena/CSR pipeline (`compute_layout_arena_csr`) |
+| `algorithms/sugiyama/geometry.rs` | Shared spacing/routing rules for both backends |
+| `algorithms/sugiyama/config.rs` | `LayoutConfig` presets (`fast`/`standard`/`quality`) |
+| `algorithms/sugiyama/crossing.rs` | `CrossingReducer` pipeline (median, adjacent exchange) |
+| `algorithms/sugiyama/subgraph.rs` | Cluster passes (blocks, padding, bounding boxes) |
+| `algorithms/sugiyama/idx.rs` | Configurable index types (`arena` feature) |
+| `algorithms/cycles*` | Cycle detection; `algorithms/generic*`: traversal, metrics, impact |
 
 ### Intermediate Representation
 
 | Module | Purpose | Key Types |
 |--------|---------|-----------|
-| `ir/mod.rs` | Heap-based IR | `LayoutIR`, `LayoutNode`, `LayoutEdge`, `EdgePath` |
-| `ir/arena.rs` | Arena-based IR | `LayoutIRArena`, `LayoutIRArenaBuilder` |
+| `ir/mod.rs` | Heap-based IR | `LayoutIR`, `LayoutNode`, `LayoutEdge`, `EdgePath`, `SubgraphInfo` |
+| `ir/arena.rs` | Arena-based IR | `LayoutIRArena`, `LayoutNodeArena`, `LayoutEdgeArena` |
+| `ir/arena_builder.rs` | Arena IR construction | `LayoutIRArenaBuilder` |
+| `ir/json.rs` | zigraph-compatible JSON for both IRs | `to_json()`, `serialize_json()` |
 
 ### Rendering
 
 | Module | Purpose | Key Functions |
 |--------|---------|---------------|
-| `render/ascii.rs` | ASCII renderer entry point | `render()`, `render_to()` |
-| `render/scanline.rs` | Scanline renderer | `render_scanline()`, `render_scanline_with_buffer()` |
-
-### Utilities
-
-| Module | Purpose | Key Functions |
-|--------|---------|---------------|
-| `cycles.rs` | DAG cycle detection | `has_cycle()` |
-| `cycles/generic.rs` | Generic cycle detection | `detect_cycle_fn()`, `CycleDetectable` trait |
-| `cycles/generic/roots.rs` | Root finding | `find_roots_fn()` |
+| `render/scanline.rs` | Heap scanline renderer | `render_scanline*` family |
+| `ir/arena_render.rs`, `ir/arena_colored.rs` | Zero-alloc buffer renderers | `render_to_buffer()` |
+| `render/ascii.rs` | `Graph::render()` entry, cycle banner, chain shortcut | `render()`, `render_to()` |
+| `render/chars.rs`, `render/colors.rs` | Shared glyphs, junction merging, palettes | `merge_chars()`, `to_dashed()` |
 
 ---
 
 ## Data Flow
 
 ### Heap Path (default)
-```
-DAG::from_edges() → DAG
+```text
+Graph::from_edges() → Graph
     ↓
-dag.compute_layout() → LayoutIR
+graph.compute_layout() → LayoutIR        (or compute_layout_with_config)
     ↓
 layout_ir.render_scanline() → String
 ```
 
 ### Arena Path (embedded/no_std)
-```
-DAG → dag.to_csr() → CsrGraph
+```text
+Graph → graph.to_csr(&mut csr_arena) → CsrGraph
     ↓
-compute_layout_arena_csr(&graph, &mut temp_arena, &mut output_arena)
+csr.compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
     ↓
-LayoutIRArena
+Result<LayoutIRArena, GraphError>
     ↓
-ir.render_to_buffer(&mut bytes, &mut line_buffer)
+ir.render_to_buffer(&mut bytes, &mut line_buffer, &mut scratch)
     ↓
 &[u8] (zero allocations)
 ```
@@ -116,37 +120,48 @@ ir.render_to_buffer(&mut bytes, &mut line_buffer)
 
 ## Layout Algorithm (Sugiyama)
 
-The library implements a **pragmatic Sugiyama** algorithm:
+The library implements a **pragmatic Sugiyama** algorithm; both backends run
+the same stages:
 
-### 1. Cycle Detection
-- Uses DFS-based cycle detection (`cycles.rs`)
-- Cycles are visualized explicitly, not broken via edge reversal
+### 1. Cycle Breaking
+- Three-color DFS detects back edges; they are treated as reversed for
+  layering and routing, and marked `reversed: true` in the IR (rendered
+  dashed). `CycleBreaking::None` asserts acyclicity instead.
 
 ### 2. Level Assignment
-- **Algorithm**: Iterative longest-path
-- **Complexity**: O(V + E)
-- Each node's level = 1 + max(parent levels)
+- **Algorithm**: Iterative longest-path, O(V + E)
+- Each node's level = 1 + max(parent levels), back edges reversed
 
 ### 3. Dummy Node Insertion
-- Skip-level edges (A → C where C is level 2+) get dummy nodes
-- Dummy nodes are inserted at each intermediate level
-- Stored in the layout IR as node/edge records
+- Skip-level edges get a dummy at each intermediate level; dummies take part
+  in crossing reduction and x-packing. They surface in the IR only when
+  `LayoutConfig.include_dummy_nodes` is set (with an `edge_index` back-link).
 
 ### 4. Crossing Reduction
-- **Algorithm**: Median heuristic
-- **Implementation**: `order_by_median_parents()`, `order_by_median_children()`
-- **Passes**: Configurable via `set_crossing_reduction_passes()` (default: 4)
-- Down-sweep then up-sweep per pass
+- Composable `CrossingReducer` pipeline: `Median(n)` and
+  `AdjacentExchange(n)` passes, down-sweep then up-sweep each
+- Presets: `FAST`, `STANDARD`, `QUALITY` (see `config.rs`)
 
 ### 5. X-Coordinate Assignment
-- Nodes placed left-to-right with 3-char spacing
-- Per-level centering for visual balance
+- Left-to-right packing with `node_spacing` (default 3); per-level centering
+- With subgraphs: block partitioning, boundary padding, iterative median
+  refinement and cluster compaction
 
 ### 6. Edge Routing
-- **Direct**: Vertically aligned nodes
-- **Corner**: L-shaped with horizontal segment
-- **SideChannel**: Skip-level edges routed on outer edges
-- **MultiSegment**: Complex paths through waypoints
+- **Direct**: aligned nodes; **Corner**: one bend; **MultiSegment**: through
+  jogging waypoints (straight pass-throughs collapse to verticals)
+- Per-level routing rows come from shared rules in `geometry.rs`: corner
+  slots, a per-level label row (only where a labeled edge is sourced), a
+  bend row under the deepest waypoint, and *arrow-cell reservation* — a
+  reversed edge's `⇡` cell is pre-occupied in the slot allocator so no
+  horizontal run crosses an arrowhead
+
+### 7. Rank Direction
+- `Direction` (TB/BT/LR/RL) is recorded on the IR. For `BottomUp`, both
+  backends flip the finished layout in place so **IR coordinates are always
+  physical** — they match rendered cells. The built-in renderers currently
+  paint `TopDown` only; direction-aware painting arrives with the renderer
+  rework.
 
 ---
 
@@ -156,63 +171,47 @@ The library implements a **pragmatic Sugiyama** algorithm:
 ```toml
 # Choose based on max graph size:
 arena-idx-u8   # Max 255 nodes, 1 byte per index
-arena-idx-u16  # Max 65,535 nodes, 2 bytes per index  
+arena-idx-u16  # Max 65,535 nodes, 2 bytes per index
 arena-idx-u32  # Max 4B nodes, 4 bytes per index (default)
 ```
 
 ### Arena Allocator
-- Bump allocation: O(1) alloc, no free
-- No fragmentation
-- Stack-allocatable buffer support
-- Used for all temporaries in layout computation
+- Bump allocation: O(1) alloc, no free; single caller-provided block
+- Capacity comes from `estimate_*` functions **before** layout begins —
+  the reported buffer sizes are provisioned capacity, not touched bytes
+- Used for all temporaries in the CSR layout pipeline
 
-### VirtualNode Encoding
-```rust
-// 8 bytes total, uses high bit as tag
-const DUMMY_FLAG: usize = 1 << (usize::BITS - 1);
-// Real node: index (63 bits)
-// Dummy node: DUMMY_FLAG | edge_index
-```
+### Packed VNode Encoding
+- Virtual nodes (real-or-dummy) are packed into `Idx` pairs behind the
+  `vnode_kind` / `vnode_payload` / `vnode_set` accessors in `arena_csr.rs`
 
 ### BitSet for Booleans
-- 64 booleans per u64
-- 64x memory reduction vs `Vec<bool>`
-- Used in render buffers
+- 64 booleans per `u64`, used in render buffers
 
 ---
 
 ## Feature Flags
 
-| Feature | Effect | Size Impact |
-|---------|--------|-------------|
-| `std` (default) | Enable `std::collections::HashMap` | +5KB |
-| `generic` (default) | Enable generic algorithms | +10KB |
-| `arena` | Enable arena-based layout | +8KB |
-| `arena-idx-u8` | Use `u8` for arena indices | -2KB |
-| `warnings` | Debug warnings for auto-nodes | Minimal |
-
----
-
-## File Size Reference
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `render/ascii.rs` | 1874 | Main ASCII renderer (largest) |
-| `layout/arena.rs` | 1090 | Arena-based layout computation |
-| `graph.rs` | 1018 | Core DAG structure |
-| `csr.rs` | 677 | Compressed Sparse Row graph |
-| `ir/mod.rs` | 422 | Intermediate representation |
-| `ir/arena.rs` | 674 | Arena-based IR |
+| Feature | Effect |
+|---------|--------|
+| `std` (default) | `std::collections::HashMap` and friends |
+| `generic` (default) | Generic algorithms (implies `alloc`) |
+| `arena` | Arena/CSR layout path for `no_std` |
+| `arena-idx-u8/u16/u32` | Index width selection |
+| `warnings` | Debug warnings for auto-created nodes |
 
 ---
 
 ## Testing Strategy
 
-- **Unit tests**: In each module (`#[cfg(test)]`)
-- **Integration tests**: Examples act as integration tests
-- **Fuzz targets**: `fuzz/fuzz_targets/` for security testing
-- **Miri**: Memory safety validation for unsafe code
-- **cargo-careful**: Extra UB detection
+- **Unit tests**: in each module (`#[cfg(test)]`)
+- **Rendered-output tests**: `tests/layout_output.rs` asserts on the text a
+  user sees, in both backends, plus a golden snapshot of the hero example
+- **Cross-backend parity tests**: same graph ⇒ identical IR geometry and
+  byte-identical rendered text across heap and CSR; BottomUp IRs must be
+  exact vertical mirrors of TopDown
+- **Fuzz targets**: `fuzz/fuzz_targets/`; **Miri** / **cargo-careful** for
+  unsafe-code validation
 
 ---
 
@@ -220,13 +219,15 @@ const DUMMY_FLAG: usize = 1 << (usize::BITS - 1);
 
 | Operation | Complexity | Notes |
 |-----------|------------|-------|
-| Node insertion | O(1) amortized | HashMap-based lookup |
-| Edge insertion | O(1) amortized | Adjacency list storage |
-| Cycle detection | O(V + E) | Early termination on cycle |
+| Node/edge insertion | O(1) amortized | HashMap lookup / adjacency list |
+| Cycle detection | O(V + E) | Early termination |
 | Level assignment | O(V + E) | Iterative fixed-point |
-| Crossing reduction | O(L × N × log N) | L=passes, N=nodes per level |
-| Rendering | O(V + E) | Scanline-based |
+| Crossing reduction | O(passes × N log N) | Per level |
+| Self-loop flags | O(E) | Single pre-pass |
+| Rendering | O(cells painted) | Scanline with Y-index / active-edge list |
 
-**Benchmarks** (M2 Ultra, release mode):
-- 50 nodes: ~0.2ms (arena), ~0.7ms (heap) — **3.5x speedup**
-- 500 nodes: ~1.5ms (arena), ~54ms (heap) — **36x speedup**
+Run `cargo run --release --example stress_test --features arena` (and with
+`-- --csr`) for current numbers on your machine. Known hot spots, tracked
+for the renderer rework: extreme fan-in repaints heavily overlapping
+horizontal spans in the heap renderer, and the CSR path's 2-node-cycle
+detection is quadratic on graphs dominated by straight vertical edges.
