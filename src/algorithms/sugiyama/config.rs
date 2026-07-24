@@ -164,7 +164,18 @@ pub struct LayoutConfig<'a> {
     /// renderers currently paint `TopDown` layouts only.
     pub direction: Direction,
 
-    /// Include dummy (virtual) nodes in the output IR.
+    /// Include dummy (virtual) nodes in the output IR (default: `false`).
+    ///
+    /// Skip-level edges route through dummy nodes at each intermediate
+    /// level. When enabled, those appear as `LayoutNode`s with
+    /// `kind == NodeKind::Dummy`, an `edge_index` back-link to their
+    /// owning edge, a synthetic id (excluded from `node_by_id`), and
+    /// width 1 at the drawn waypoint column. Zero cost when disabled.
+    ///
+    /// Notes: the built-in text renderers paint an included dummy like
+    /// any node (an empty `[]` marker) — intended for debugging and IR
+    /// consumers. Arena users must budget the output arena for the
+    /// extra nodes (one per skip-level waypoint).
     pub include_dummy_nodes: bool,
 
     /// Skip graph validation for performance.

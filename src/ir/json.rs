@@ -306,7 +306,11 @@ fn write_node_arena(w: &mut JsonWriter<'_>, node: &LayoutNodeArena, label: &str)
     w.write_byte(b',')?;
 
     w.write_key("edge_index")?;
-    w.write_null()?;
+    if node.edge_index != usize::MAX {
+        w.write_usize(node.edge_index)?;
+    } else {
+        w.write_null()?;
+    }
 
     w.write_byte(b'}')
 }
@@ -655,7 +659,11 @@ mod heap_json {
         out.push(',');
 
         push_key(out, "edge_index");
-        out.push_str("null");
+        if let Some(ei) = node.edge_index {
+            push_usize(out, ei);
+        } else {
+            out.push_str("null");
+        }
 
         out.push('}');
     }

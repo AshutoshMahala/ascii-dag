@@ -43,6 +43,20 @@ fn stage_graph() -> Graph<'static> {
     g
 }
 
+/// Chain with a skip-level edge (A→D skips 2 levels → 2 dummy nodes).
+fn skip_graph() -> Graph<'static> {
+    let mut g = Graph::new();
+    g.add_node(1, "A");
+    g.add_node(2, "B");
+    g.add_node(3, "C");
+    g.add_node(4, "D");
+    g.add_edge(1, 2, None);
+    g.add_edge(2, 3, None);
+    g.add_edge(3, 4, None);
+    g.add_edge(1, 4, None);
+    g
+}
+
 /// Gap in columns between `[A]` and `[B]` on the line containing both.
 fn sibling_gap(rendered: &str) -> usize {
     let line = rendered
@@ -510,3 +524,177 @@ mod direction {
 
 }
 
+// ── Dummy-node emission (include_dummy_nodes) ────────────────────────────
+
+mod dummy_nodes {
+    use super::*;
+    use ascii_dag::ir::NodeKind;
+
+    fn dummy_config() -> LayoutConfig<'static> {
+        let mut config = LayoutConfig::standard();
+        config.include_dummy_nodes = true;
+        config
+    }
+
+    #[test]
+    fn disabled_by_default_and_output_unchanged() {
+        let g = skip_graph();
+        let plain = g.compute_layout();
+        assert_eq!(plain.nodes().len(), 4, "no dummies by default");
+
+        // Enabling the flag must not change the rendered text — dummies
+        // occupy the same columns the edge verticals already use.
+        let with_dummies = g.compute_layout_with_config(&dummy_config());
+        assert_eq!(with_dummies.nodes().len(), 6, "4 real + 2 dummies");
+    }
+
+    #[test]
+    fn heap_dummies_have_correct_shape() {
+        let g = skip_graph();
+        let ir = g.compute_layout_with_config(&dummy_config());
+
+        let dummies: Vec<_> = ir
+            .nodes()
+            .iter()
+            .filter(|n| matches!(n.kind, NodeKind::Dummy))
+            .collect();
+        assert_eq!(dummies.len(), 2, "A→D skips levels 1 and 2");
+
+        // The skip edge A→D is edge index 3 (insertion order).
+        let mut levels: Vec<usize> = dummies.iter().map(|d| d.level).collect();
+        levels.sort_unstable();
+        assert_eq!(levels, vec![1, 2]);
+        for d in &dummies {
+            assert_eq!(d.edge_index, Some(3), "back-link to owning edge");
+            assert_eq!(d.label, "");
+            assert_eq!(d.width, 1);
+            assert_eq!(d.height, 1);
+            assert!(
+                ir.node_by_id(d.id).is_none(),
+                "synthetic ids are excluded from node_by_id"
+            );
+        }
+
+        // Real nodes still resolve.
+        for id in 1..=4 {
+            assert!(ir.node_by_id(id).is_some());
+        }
+
+        // Dummies appear in the level lists.
+        assert!(
+            ir.nodes_at_level(1)
+                .any(|n| matches!(n.kind, NodeKind::Dummy)),
+            "level list includes the dummy"
+        );
+    }
+
+    #[test]
+    fn heap_dummy_shares_column_with_its_waypoint() {
+        // P1 invariant: the node-domain view (dummy) and the edge-domain
+        // view (waypoint) of the same routing must never drift.
+        let g = skip_graph();
+        let ir = g.compute_layout_with_config(&dummy_config());
+
+        let skip_edge = &ir.edges()[3];
+        if let ascii_dag::EdgePath::MultiSegment { waypoints, .. } = &skip_edge.path {
+            for d in ir
+                .nodes()
+                .iter()
+                .filter(|n| matches!(n.kind, NodeKind::Dummy))
+            {
+                assert!(
+                    waypoints.iter().any(|&(wx, _)| wx == d.x),
+                    "dummy at column {} has no waypoint on edge 3 ({waypoints:?})",
+                    d.x,
+                );
+            }
+        } else {
+            // Jog-aware routing may collapse a straight chain — then the
+            // dummies' columns must line up with the edge's own column.
+            for d in ir
+                .nodes()
+                .iter()
+                .filter(|n| matches!(n.kind, NodeKind::Dummy))
+            {
+                assert_eq!(d.x, skip_edge.to_x, "straight chain column");
+            }
+        }
+    }
+
+    #[test]
+    fn json_serializes_dummy_edge_index() {
+        let g = skip_graph();
+        let ir = g.compute_layout_with_config(&dummy_config());
+        let json = ir.to_json();
+        assert!(
+            json.contains("\"kind\":\"dummy\""),
+            "dummy kind serialized:\n{json}"
+        );
+        assert!(
+            json.contains("\"edge_index\":3"),
+            "dummy edge back-link serialized:\n{json}"
+        );
+    }
+
+    #[cfg(feature = "arena")]
+    mod csr {
+        use super::*;
+        use ascii_dag::graph::arena::Arena;
+        use ascii_dag::ir::arena::LayoutIRArena;
+
+        fn with_csr_ir(g: &Graph<'_>, check: impl FnOnce(&LayoutIRArena)) {
+            let config = dummy_config();
+            let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+            let mut csr_arena = Arena::new(&mut csr_buf);
+            let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+            let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+            let mut temp_buf = vec![0u8; size];
+            let mut out_buf = vec![0u8; size];
+            let mut temp_arena = Arena::new(&mut temp_buf);
+            let mut out_arena = Arena::new(&mut out_buf);
+            let ir = csr
+                .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+                .expect("CSR layout");
+            check(&ir);
+        }
+
+        #[test]
+        fn csr_dummies_match_heap() {
+            let g = skip_graph();
+            let heap_ir = g.compute_layout_with_config(&dummy_config());
+            let mut heap_dummies: Vec<(usize, usize, usize)> = heap_ir
+                .nodes()
+                .iter()
+                .filter(|n| matches!(n.kind, NodeKind::Dummy))
+                .map(|n| (n.edge_index.unwrap(), n.level, n.x))
+                .collect();
+            heap_dummies.sort_unstable();
+
+            with_csr_ir(&g, |csr_ir| {
+                let mut csr_dummies: Vec<(usize, usize, usize)> = csr_ir
+                    .nodes()
+                    .iter()
+                    .filter(|n| matches!(n.kind, NodeKind::Dummy))
+                    .map(|n| (n.edge_index, n.level, n.x))
+                    .collect();
+                csr_dummies.sort_unstable();
+                assert_eq!(
+                    csr_dummies, heap_dummies,
+                    "dummy (edge, level, column) sets diverge between backends"
+                );
+
+                // Synthetic ids excluded from lookups; real ids resolve.
+                for n in csr_ir
+                    .nodes()
+                    .iter()
+                    .filter(|n| matches!(n.kind, NodeKind::Dummy))
+                {
+                    assert!(csr_ir.node_by_id(n.id).is_none());
+                }
+                for id in 1..=4 {
+                    assert!(csr_ir.node_by_id(id).is_some());
+                }
+            });
+        }
+    }
+}

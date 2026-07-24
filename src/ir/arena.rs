@@ -58,6 +58,10 @@ pub struct LayoutNodeArena {
     pub kind: NodeKind,
     /// Whether this node has a self-loop edge (A → A)
     pub has_self_loop: bool,
+    /// For dummy nodes: the index of the edge this dummy belongs to.
+    /// `usize::MAX` = none (real node) — same sentinel convention as
+    /// `SubgraphInfoArena::parent_idx`. Mirrors zigraph.
+    pub edge_index: usize,
 }
 
 /// Edge routing type (no heap allocation version).
@@ -376,13 +380,22 @@ impl<'a> LayoutIRArena<'a> {
     }
 
     /// Find node by ID (linear search - O(n)).
+    ///
+    /// Dummy nodes carry synthetic ids and are never returned (parity
+    /// with the heap IR's `node_by_id`).
     pub fn node_by_id(&self, id: usize) -> Option<&LayoutNodeArena> {
-        self.nodes.iter().find(|n| n.id == id)
+        self.nodes
+            .iter()
+            .find(|n| n.id == id && !matches!(n.kind, NodeKind::Dummy))
     }
 
     /// Find node index by ID (linear search - O(n)).
+    ///
+    /// Dummy nodes carry synthetic ids and are never returned.
     pub fn node_index_by_id(&self, id: usize) -> Option<usize> {
-        self.nodes.iter().position(|n| n.id == id)
+        self.nodes
+            .iter()
+            .position(|n| n.id == id && !matches!(n.kind, NodeKind::Dummy))
     }
 
     /// Check if the layout is empty.

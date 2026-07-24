@@ -677,9 +677,16 @@ pub fn compute_layout_arena_csr<'b>(
     } else {
         0
     };
+    // Reserve IR capacity for dummy nodes only when they are requested
+    // (they also join the level lists, allocated from the same budget).
+    let dummy_node_capacity = if config.include_dummy_nodes {
+        temps.dummy_offsets[edge_count] as usize
+    } else {
+        0
+    };
     let mut builder = LayoutIRArenaBuilder::new_with_subgraphs(
         output_arena,
-        node_count,
+        node_count + dummy_node_capacity,
         edge_count,
         max_waypoints,
         total_label_bytes + sg_label_bytes,
@@ -712,11 +719,60 @@ pub fn compute_layout_arena_csr<'b>(
                 level as usize,
                 pos as usize,
                 crate::ir::NodeKind::Explicit,
+                usize::MAX,
             )
             .ok_or(GraphError::ArenaOom)?;
         builder
             .add_node_to_level(level as usize, idx)
             .ok_or(GraphError::ArenaOom)?;
+    }
+
+    // Emit dummy nodes into the IR (opt-in; zero cost when disabled).
+    // Mirrors the heap backend: synthetic ids counting down from
+    // usize::MAX, width 1 at the drawn waypoint column, excluded from
+    // id lookups, included in the level lists.
+    if config.include_dummy_nodes {
+        let mut synthetic = 0usize;
+        for level in 0..=(max_level as usize) {
+            let vstart = temps.vlevel_offsets[level] as usize;
+            let vend = temps.vlevel_offsets[level + 1] as usize;
+            for pos in vstart..vend {
+                if !vnode_is_dummy(temps.vnode_data, pos) {
+                    continue;
+                }
+                let edge_idx = vnode_payload(temps.vnode_data, pos) as usize;
+                // The drawn column comes from this edge's waypoint chain
+                // entry for this level (chains are level-sorted).
+                let ds = temps.dummy_offsets[edge_idx] as usize;
+                let de = (temps.dummy_offsets[edge_idx + 1] as usize).min(temps.dummy_data.len());
+                let Some(&(_, x)) = temps.dummy_data[ds..de]
+                    .iter()
+                    .find(|&&(l, _)| l as usize == level)
+                else {
+                    continue;
+                };
+                let y = temps.level_y_offsets[level];
+                let id = usize::MAX - synthetic;
+                synthetic += 1;
+                let node_idx = builder
+                    .add_node(
+                        id,
+                        "",
+                        x as usize,
+                        y,
+                        1,
+                        1,
+                        level,
+                        pos - vstart,
+                        crate::ir::NodeKind::Dummy,
+                        edge_idx,
+                    )
+                    .ok_or(GraphError::ArenaOom)?;
+                builder
+                    .add_node_to_level(level, node_idx)
+                    .ok_or(GraphError::ArenaOom)?;
+            }
+        }
     }
 
     builder.finalize_levels();

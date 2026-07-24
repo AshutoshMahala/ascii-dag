@@ -119,6 +119,10 @@ pub struct LayoutNode<'a> {
     /// Whether this node has a self-loop edge (A → A).
     /// When true, renderers paint a `↺` indicator after the node bracket.
     pub has_self_loop: bool,
+    /// For dummy nodes: the index of the edge this dummy belongs to.
+    /// `None` for real (explicit/implicit) nodes. Mirrors zigraph's
+    /// `LayoutNode.edge_index`.
+    pub edge_index: Option<usize>,
 }
 
 /// How an edge is routed between nodes.
@@ -600,11 +604,14 @@ impl<'a> LayoutIRBuilder<'a> {
 
     /// Build the final LayoutIR.
     pub fn build(self) -> LayoutIR<'a> {
-        // Build id-to-index map for O(1) lookups
+        // Build id-to-index map for O(1) lookups. Dummy nodes carry
+        // synthetic ids and are deliberately excluded — `node_by_id`
+        // never returns a dummy.
         let id_to_index: HashMap<usize, usize> = self
             .nodes
             .iter()
             .enumerate()
+            .filter(|(_, node)| !matches!(node.kind, NodeKind::Dummy))
             .map(|(idx, node)| (node.id, idx))
             .collect();
 

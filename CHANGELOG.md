@@ -15,6 +15,7 @@
 - **Edges never cross node text**: dummy waypoints are realigned when compaction moves their endpoints and nudged out of node spans; an edge that must cross something crosses a subgraph border (rendered as a junction), never a node. Both layout paths.
 
 ### Added
+- **Dummy-node visualization (`LayoutConfig.include_dummy_nodes`)**: the flag existed but was never honored; it now works. When enabled, skip-level routing dummies appear in both IRs as nodes with `kind == NodeKind::Dummy`, a new `edge_index` back-link to their owning edge (zigraph parity; `None`/`usize::MAX` for real nodes), synthetic ids excluded from `node_by_id`, width 1 at the drawn waypoint column. Zero cost when disabled (default). The JSON `edge_index` field — previously always `null` — now carries the value.
 - **Rank direction (`Direction`) — IR groundwork**: `graph.set_direction(...)` / `LayoutConfig.direction` record the rank direction on the layout IR; parses from `"TB"`/`"TD"`/`"BT"`/`"LR"`/`"RL"`. For `BottomUp`, the heap layout path emits physical (flipped) coordinates. The built-in renderers currently paint `TopDown` layouts only.
 
 ### Breaking Changes

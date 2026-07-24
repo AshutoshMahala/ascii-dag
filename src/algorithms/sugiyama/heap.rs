@@ -628,7 +628,47 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                     level_position: pos,
                     kind,
                     has_self_loop: node_has_self_loop[*idx],
+                    edge_index: None,
                 });
+            }
+        }
+    }
+
+    // Emit dummy nodes into the IR (opt-in; zero cost when disabled).
+    // Positions use the exact same computation as the waypoint chains, so
+    // a dummy node and its edge's waypoint always share a column.
+    if config.include_dummy_nodes {
+        let mut synthetic = 0usize;
+        for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
+            let level_width = level_widths[level_idx];
+            let level_offset = if center_levels && max_width > level_width {
+                (max_width - level_width) / 2
+            } else {
+                0
+            };
+            for (pos, vnode) in level_vnodes.iter().enumerate() {
+                if let VNode::Dummy { edge_idx } = vnode {
+                    let x = x_coords[level_idx][pos] + level_offset + (*edge_idx % 4);
+                    let y = level_y_offsets[level_idx];
+                    // Synthetic id, excluded from id_to_index by the builder.
+                    let id = usize::MAX - synthetic;
+                    synthetic += 1;
+                    builder.add_node(LayoutNode {
+                        id,
+                        label: "",
+                        x,
+                        y,
+                        width: 1,
+                        height: 1,
+                        center_x: x,
+                        center_y: y,
+                        level: level_idx,
+                        level_position: pos,
+                        kind: NodeKind::Dummy,
+                        has_self_loop: false,
+                        edge_index: Some(*edge_idx),
+                    });
+                }
             }
         }
     }

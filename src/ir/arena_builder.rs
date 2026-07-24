@@ -124,6 +124,10 @@ impl<'a> LayoutIRArenaBuilder<'a> {
     }
 
     /// Add a node with its label.
+    ///
+    /// `edge_index` is the owning edge for dummy nodes; pass
+    /// `usize::MAX` for real nodes (sentinel convention).
+    #[allow(clippy::too_many_arguments)]
     pub fn add_node(
         &mut self,
         id: usize,
@@ -135,6 +139,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         level: usize,
         level_position: usize,
         kind: crate::ir::NodeKind,
+        edge_index: usize,
     ) -> Option<usize> {
         if self.node_count >= self.nodes.len() {
             return None;
@@ -163,6 +168,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             level_position,
             kind,
             has_self_loop: false,
+            edge_index,
         };
 
         self.label_offset += label_bytes.len();
