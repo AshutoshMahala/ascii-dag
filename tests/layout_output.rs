@@ -298,4 +298,172 @@ mod direction {
         let explicit_out = g2.compute_layout().render_scanline();
         assert_eq!(default_out, explicit_out);
     }
+
+    // ── CSR/arena backend ────────────────────────────────────────────────
+
+    #[cfg(feature = "arena")]
+    mod csr {
+        use super::*;
+        use ascii_dag::LayoutConfig;
+        use ascii_dag::graph::arena::Arena;
+        use ascii_dag::ir::arena::LayoutIRArena;
+
+        /// Run the CSR layout and hand the borrowed IR to `check`.
+        /// (The IR borrows the arenas, so it cannot be returned.)
+        fn with_csr_ir(g: &Graph<'_>, direction: Direction, check: impl FnOnce(&LayoutIRArena)) {
+            let mut config = LayoutConfig::standard();
+            config.direction = direction;
+
+            let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+            let mut csr_arena = Arena::new(&mut csr_buf);
+            let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+
+            let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+            let mut temp_buf = vec![0u8; size];
+            let mut out_buf = vec![0u8; size];
+            let mut temp_arena = Arena::new(&mut temp_buf);
+            let mut out_arena = Arena::new(&mut out_buf);
+            let ir = csr
+                .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+                .expect("CSR layout");
+            check(&ir);
+        }
+
+        #[test]
+        fn bottom_up_ir_records_direction_csr() {
+            let g = stage_graph();
+            with_csr_ir(&g, Direction::BottomUp, |ir| {
+                assert_eq!(ir.direction(), Direction::BottomUp);
+            });
+            with_csr_ir(&g, Direction::TopDown, |ir| {
+                assert_eq!(ir.direction(), Direction::TopDown);
+            });
+        }
+
+        #[test]
+        fn bottom_up_ir_is_exact_vertical_flip_of_top_down_csr() {
+            // Same invariant as the heap test: the physical BT IR is the
+            // exact mirror of the TD IR — same dimensions, ys flipped,
+            // xs untouched — including edge row spans and label rows.
+            let g = stage_graph();
+            with_csr_ir(&g, Direction::TopDown, |td| {
+                with_csr_ir(&g, Direction::BottomUp, |bt| {
+                    assert_eq!(bt.width(), td.width());
+                    assert_eq!(bt.height(), td.height());
+                    assert_eq!(bt.level_count(), td.level_count());
+
+                    let h = td.height();
+                    let flip_row = |y: usize| h - 1 - y;
+
+                    assert_eq!(bt.node_count(), td.node_count());
+                    for td_node in td.nodes() {
+                        let bt_node = bt.node_by_id(td_node.id).expect("node in BT IR");
+                        assert_eq!(bt_node.x, td_node.x);
+                        assert_eq!(bt_node.width, td_node.width);
+                        assert_eq!(bt_node.height, td_node.height);
+                        assert_eq!(bt_node.y, h - (td_node.y + td_node.height));
+                        assert_eq!(bt_node.center_y, flip_row(td_node.center_y));
+                    }
+
+                    assert_eq!(bt.edge_count(), td.edge_count());
+                    for (td_edge, bt_edge) in td.edges().iter().zip(bt.edges()) {
+                        assert_eq!(bt_edge.from_x, td_edge.from_x);
+                        assert_eq!(bt_edge.to_x, td_edge.to_x);
+                        assert_eq!(bt_edge.from_y, flip_row(td_edge.from_y));
+                        assert_eq!(bt_edge.to_y, flip_row(td_edge.to_y));
+                        // Occupied row span mirrors: old max becomes new min.
+                        assert_eq!(bt_edge.min_y, flip_row(td_edge.max_y));
+                        assert_eq!(bt_edge.max_y, flip_row(td_edge.min_y));
+                        if td_edge.label_len > 0 {
+                            assert_eq!(bt_edge.label_x, td_edge.label_x);
+                            assert_eq!(bt_edge.label_y, flip_row(td_edge.label_y));
+                        }
+                    }
+
+                    assert_eq!(bt.subgraph_count(), td.subgraph_count());
+                    for (td_sg, bt_sg) in td.subgraphs().iter().zip(bt.subgraphs()) {
+                        assert_eq!(bt_sg.x, td_sg.x);
+                        assert_eq!(bt_sg.width, td_sg.width);
+                        assert_eq!(bt_sg.height, td_sg.height);
+                        assert_eq!(bt_sg.y, h - (td_sg.y + td_sg.height));
+                    }
+                });
+            });
+        }
+
+        #[test]
+        fn top_down_csr_output_unchanged_by_direction_plumbing() {
+            // Explicit TopDown through the CSR path must not alter the IR.
+            let g = stage_graph();
+            with_csr_ir(&g, Direction::TopDown, |td| {
+                let node_ys: Vec<usize> = td.nodes().iter().map(|n| n.y).collect();
+                let g2 = stage_graph();
+                with_csr_ir(&g2, Direction::TopDown, |td2| {
+                    let node_ys2: Vec<usize> = td2.nodes().iter().map(|n| n.y).collect();
+                    assert_eq!(node_ys, node_ys2);
+                });
+            });
+        }
+
+        #[test]
+        fn bottom_up_heap_and_csr_backends_agree_on_nodes() {
+            // Cross-backend parity (S2): the same graph laid out for the
+            // same direction must place nodes identically in both IRs.
+            // TopDown runs first so a pre-existing backend divergence is
+            // reported as such, not as a direction bug.
+            let g = stage_graph();
+            for direction in [Direction::TopDown, Direction::BottomUp] {
+                let mut heap_g = stage_graph();
+                heap_g.set_direction(direction);
+                let heap_ir = heap_g.compute_layout();
+
+                with_csr_ir(&g, direction, |csr_ir| {
+                    for heap_node in heap_ir.nodes() {
+                        let csr_node = csr_ir
+                            .node_by_id(heap_node.id)
+                            .expect("node present in CSR IR");
+                        assert_eq!(
+                            (csr_node.x, csr_node.y, csr_node.width, csr_node.height),
+                            (heap_node.x, heap_node.y, heap_node.width, heap_node.height),
+                            "node '{}' geometry diverges between backends ({direction:?})",
+                            heap_node.label,
+                        );
+                    }
+                });
+            }
+        }
+
+        // KNOWN PRE-EXISTING DIVERGENCE, found by this test on 2026-07-23
+        // (unrelated to direction; reproduces on plain TopDown): for a
+        // labeled edge entering a cluster, the CSR path budgets one more
+        // interior row than the heap path (stage_graph: heap box height 6,
+        // CSR 7; total canvas heights differ too, and the CSR render drops
+        // the "go" edge label). Nodes agree; only vertical row budgeting
+        // around the cluster differs. Un-ignore once the backends'
+        // level-height/routing-row logic is reconciled.
+        #[test]
+        #[ignore = "pre-existing heap/CSR row-budget divergence around clusters"]
+        fn heap_and_csr_backends_agree_on_subgraph_boxes() {
+            let g = stage_graph();
+            for direction in [Direction::TopDown, Direction::BottomUp] {
+                let mut heap_g = stage_graph();
+                heap_g.set_direction(direction);
+                let heap_ir = heap_g.compute_layout();
+
+                with_csr_ir(&g, direction, |csr_ir| {
+                    assert_eq!(csr_ir.height(), heap_ir.height(), "canvas height");
+                    for (heap_sg, csr_sg) in heap_ir.subgraphs().iter().zip(csr_ir.subgraphs()) {
+                        assert_eq!(
+                            (csr_sg.x, csr_sg.y, csr_sg.width, csr_sg.height),
+                            (heap_sg.x, heap_sg.y, heap_sg.width, heap_sg.height),
+                            "subgraph {} box diverges between backends ({direction:?})",
+                            heap_sg.id,
+                        );
+                    }
+                });
+            }
+        }
+    }
+
 }
+

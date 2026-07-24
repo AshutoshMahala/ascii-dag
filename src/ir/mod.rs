@@ -309,7 +309,14 @@ impl<'a> LayoutIR<'a> {
                     *start_y = s;
                     *end_y = e;
                 }
-                _ => {}
+                // Spline is never produced by the layout engine today, but
+                // the flip must be total: both backends apply the identical
+                // transform to every path variant or their IRs can drift.
+                EdgePath::Spline { cp1_y, cp2_y, .. } => {
+                    *cp1_y = flip_row(*cp1_y);
+                    *cp2_y = flip_row(*cp2_y);
+                }
+                EdgePath::Direct => {}
             }
         }
         for sg in &mut self.subgraphs {

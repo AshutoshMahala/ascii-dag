@@ -148,7 +148,7 @@ pub use errors::Diagnostic;
 pub use errors::GraphError;
 pub use graph::RenderMode;
 #[cfg(feature = "alloc")]
-pub use graph::{Graph, Subgraph};
+pub use graph::{Direction, Graph, Subgraph};
 pub use ir::NodeKind;
 #[cfg(feature = "alloc")]
 pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};

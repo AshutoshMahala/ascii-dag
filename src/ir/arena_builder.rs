@@ -1,6 +1,8 @@
 //! Builder for constructing [`LayoutIRArena`] from arena memory.
 
-use super::arena::{LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena};
+use super::arena::{
+    EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena,
+};
 use crate::graph::arena::Arena;
 
 /// Builder for constructing LayoutIRArena from arena memory.
@@ -291,6 +293,68 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         };
         self.subgraph_count += 1;
         Some(idx)
+    }
+
+    /// Vertically mirror every recorded coordinate in place (involutive).
+    ///
+    /// The arena twin of `LayoutIR::flip_vertical`, applied once for
+    /// `Direction::BottomUp` layouts so the emitted IR carries physical
+    /// coordinates (they match rendered cells). Must run **before**
+    /// [`build`](Self::build) — the slices freeze into shared references
+    /// afterwards — and after the final `set_dimensions` call, since the
+    /// mirror is computed from `self.height`.
+    ///
+    /// Both backends must apply the identical transform to every path
+    /// variant (see `LayoutIR::flip_vertical`) or their IRs can drift.
+    pub(crate) fn flip_vertical(&mut self) {
+        let h = self.height;
+        let flip_row = |y: usize| h.saturating_sub(1).saturating_sub(y);
+
+        for node in &mut self.nodes[..self.node_count] {
+            node.y = h.saturating_sub(node.y + node.height);
+            node.center_y = flip_row(node.center_y);
+        }
+
+        for edge in &mut self.edges[..self.edge_count] {
+            edge.from_y = flip_row(edge.from_y);
+            edge.to_y = flip_row(edge.to_y);
+            // label_y is only meaningful when a label exists; the 0-default
+            // of unlabeled edges must not turn into a bottom-row garbage value.
+            if edge.label_len > 0 {
+                edge.label_y = flip_row(edge.label_y);
+            }
+            match &mut edge.path {
+                EdgePathArena::Corner { horizontal_y } => *horizontal_y = flip_row(*horizontal_y),
+                EdgePathArena::SideChannel { start_y, end_y, .. } => {
+                    let (s, e) = (flip_row(*end_y), flip_row(*start_y));
+                    *start_y = s;
+                    *end_y = e;
+                }
+                EdgePathArena::MultiSegment {
+                    waypoints_start,
+                    waypoints_len,
+                    ..
+                } => {
+                    let range = *waypoints_start..*waypoints_start + *waypoints_len;
+                    for wp in &mut self.waypoints[range] {
+                        wp.1 = flip_row(wp.1);
+                    }
+                }
+                EdgePathArena::Spline { cp1_y, cp2_y, .. } => {
+                    *cp1_y = flip_row(*cp1_y);
+                    *cp2_y = flip_row(*cp2_y);
+                }
+                EdgePathArena::Direct => {}
+            }
+            // The occupied row span mirrors too: old max becomes new min.
+            let (new_min, new_max) = (flip_row(edge.max_y), flip_row(edge.min_y));
+            edge.min_y = new_min;
+            edge.max_y = new_max;
+        }
+
+        for sg in &mut self.subgraphs[..self.subgraph_count] {
+            sg.y = h.saturating_sub(sg.y + sg.height);
+        }
     }
 
     /// Build the final LayoutIRArena.

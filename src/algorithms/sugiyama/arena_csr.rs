@@ -897,6 +897,12 @@ pub fn compute_layout_arena_csr<'b>(
         }
     }
 
+    if config.direction == crate::graph::Direction::BottomUp {
+        // Physical-space contract: IR coordinates match rendered cells.
+        // Runs after the final set_dimensions — the mirror uses the height.
+        builder.flip_vertical();
+    }
+
     let mut ir = builder.build();
     ir.set_direction(config.direction);
     Ok(ir)
