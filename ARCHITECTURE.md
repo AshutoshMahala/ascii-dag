@@ -227,7 +227,7 @@ arena-idx-u32  # Max 4B nodes, 4 bytes per index (default)
 | Rendering | O(cells painted) | Scanline with Y-index / active-edge list |
 
 Run `cargo run --release --example stress_test --features arena` (and with
-`-- --csr`) for current numbers on your machine. Known hot spots, tracked
+`-- --csr`) for current numbers on your machine. Known hot spot, tracked
 for the renderer rework: extreme fan-in repaints heavily overlapping
-horizontal spans in the heap renderer, and the CSR path's 2-node-cycle
-detection is quadratic on graphs dominated by straight vertical edges.
+horizontal spans (many edges share a few slot rows), dominating render
+time on shapes like the 50k fan.

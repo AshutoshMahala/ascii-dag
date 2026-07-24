@@ -88,6 +88,55 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         CycleBreaking::None => vec![false; dag.edges.len()],
     };
 
+    // 2-node-cycle detection in O(E log E): sort edge indices by their
+    // normalized endpoint pair, then scan each run for an anti-parallel
+    // twin with the opposite back flag. Previously the CSR backend did
+    // this with an O(E) scan per straight edge (O(E²) worst case) and
+    // the heap backend lacked the feature entirely.
+    let edge_in_two_cycle = {
+        let mut flags = vec![false; dag.edges.len()];
+        let pair_key = |ei: usize| {
+            let (f, t, _) = dag.edges[ei];
+            if f <= t { (f, t) } else { (t, f) }
+        };
+        let mut order: Vec<usize> = (0..dag.edges.len()).collect();
+        order.sort_unstable_by_key(|&ei| pair_key(ei));
+
+        let mut run_start = 0;
+        while run_start < order.len() {
+            let mut run_end = run_start + 1;
+            while run_end < order.len() && pair_key(order[run_end]) == pair_key(order[run_start]) {
+                run_end += 1;
+            }
+            // Bucket the run by (direction, back-flag); an edge is in a
+            // 2-node cycle iff an opposite-direction, opposite-flag twin
+            // exists (matches the CSR predicate exactly).
+            let mut counts = [[0usize; 2]; 2];
+            for &ei in &order[run_start..run_end] {
+                let (f, t, _) = dag.edges[ei];
+                if f == t {
+                    continue; // self-loop
+                }
+                let dir = usize::from(f > t);
+                let back = usize::from(back_edges.get(ei).copied().unwrap_or(false));
+                counts[dir][back] += 1;
+            }
+            for &ei in &order[run_start..run_end] {
+                let (f, t, _) = dag.edges[ei];
+                if f == t {
+                    continue;
+                }
+                let dir = usize::from(f > t);
+                let back = usize::from(back_edges.get(ei).copied().unwrap_or(false));
+                if counts[1 - dir][1 - back] > 0 {
+                    flags[ei] = true;
+                }
+            }
+            run_start = run_end;
+        }
+        flags
+    };
+
     // Step 1: Calculate levels, treating back edges as reversed
     let level_data = dag.calculate_levels_with_back_edges(&back_edges);
     let max_level = level_data.iter().map(|(_, l)| *l).max().unwrap_or(0);
@@ -709,6 +758,22 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
 
             let from_x = src_x_base + src_width / 2;
             let to_x = dst_x_base + dst_width / 2;
+            // 2-node cycle sharing a column: offset the forward edge left
+            // and the back edge right so the anti-parallel pair renders
+            // side by side (↓ next to ⇡) instead of overlapping. Matches
+            // the CSR backend.
+            let (from_x, to_x) = if from_x == to_x
+                && from_id != to_id
+                && edge_in_two_cycle.get(edge_idx).copied().unwrap_or(false)
+            {
+                if is_back {
+                    (from_x + 1, to_x + 1)
+                } else {
+                    (from_x.saturating_sub(1), to_x.saturating_sub(1))
+                }
+            } else {
+                (from_x, to_x)
+            };
             // from_y = bottom row of source node (so edges start below it)
             let from_y =
                 level_y_offsets[layout_from_level] + max_node_height[layout_from_level] - 1;

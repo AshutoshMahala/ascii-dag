@@ -178,6 +178,28 @@ mod csr {
         );
     }
 
+    /// A 2-node cycle must render byte-identically in both backends.
+    /// Before 0.10.0 the heap path lacked the ±1 column offset for
+    /// anti-parallel pairs entirely (and the CSR check was O(E²)).
+    #[test]
+    fn two_node_cycle_renders_identically_in_both_backends() {
+        let config = LayoutConfig::standard();
+        let mut g = Graph::new();
+        g.add_node(1, "Ping");
+        g.add_node(2, "Pong");
+        g.add_edge(1, 2, None);
+        g.add_edge(2, 1, None);
+        let heap_out = render_heap(&g, &config);
+        let csr_out = render_csr(&g, &config);
+        assert_eq!(
+            heap_out, csr_out,
+            "2-node-cycle output diverges:\n=== heap ===\n{heap_out}\n=== csr ===\n{csr_out}"
+        );
+        // The pair renders side by side: solid down-arrow next to the
+        // dashed up-arrow, not overlapping in one column.
+        assert!(heap_out.contains('↓') && heap_out.contains('⇡'), "{heap_out}");
+    }
+
     /// Strongest backend-parity assertion: the same graph renders to
     /// byte-identical text through both layout paths (TopDown).
     #[test]

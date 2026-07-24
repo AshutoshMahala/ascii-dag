@@ -99,6 +99,12 @@ pub(crate) struct LayoutTemps<'a> {
     /// Per-level flag: 1 if a labeled edge is sourced at this level
     /// (its label row is budgeted only in that level's band).
     pub(crate) level_labeled_src: &'a mut [Idx],
+    /// Scratch for 2-node-cycle detection: edge indices sorted by
+    /// normalized endpoint pair.
+    pub(crate) two_cycle_order: &'a mut [Idx],
+    /// Per-edge flag: this edge has an anti-parallel twin with the
+    /// opposite back flag (a 2-node cycle).
+    pub(crate) edge_in_two_cycle: &'a mut [bool],
     pub(crate) waypoint_scratch: &'a mut [(usize, usize)],
     pub(crate) level_vdummy_counts: &'a mut [Idx],
 
@@ -180,6 +186,58 @@ pub fn compute_layout_arena_csr<'b>(
     let sg_count = graph.subgraph_count();
     let mut temps = alloc_layout_temps_csr(temp_arena, node_count, edge_count, sg_count)
         .ok_or(GraphError::ArenaOom)?;
+
+    // 2-node-cycle detection in O(E log E): sort edge indices by their
+    // normalized endpoint pair, then scan each run for an anti-parallel
+    // twin with the opposite back flag. Replaces an O(E) scan per
+    // straight edge in emission (O(E²) worst case — ~6 s of the 50k
+    // diamond's layout time). Mirrors the heap backend exactly.
+    {
+        temps.edge_in_two_cycle.fill(false);
+        let pair_key = |ei: usize| {
+            let (f, t) = graph.edge(ei);
+            if f <= t { (f, t) } else { (t, f) }
+        };
+        for (i, slot) in temps.two_cycle_order.iter_mut().enumerate() {
+            *slot = i as Idx;
+        }
+        temps
+            .two_cycle_order
+            .sort_unstable_by_key(|&ei| pair_key(ei as usize));
+
+        let order = &*temps.two_cycle_order;
+        let mut run_start = 0;
+        while run_start < order.len() {
+            let mut run_end = run_start + 1;
+            while run_end < order.len()
+                && pair_key(order[run_end] as usize) == pair_key(order[run_start] as usize)
+            {
+                run_end += 1;
+            }
+            let mut counts = [[0usize; 2]; 2];
+            for &ei in &order[run_start..run_end] {
+                let (f, t) = graph.edge(ei as usize);
+                if f == t {
+                    continue; // self-loop
+                }
+                let dir = usize::from(f > t);
+                let back = usize::from(back_edges.get(ei as usize).copied().unwrap_or(false));
+                counts[dir][back] += 1;
+            }
+            for &ei in &order[run_start..run_end] {
+                let (f, t) = graph.edge(ei as usize);
+                if f == t {
+                    continue;
+                }
+                let dir = usize::from(f > t);
+                let back = usize::from(back_edges.get(ei as usize).copied().unwrap_or(false));
+                if counts[1 - dir][1 - back] > 0 {
+                    temps.edge_in_two_cycle[ei as usize] = true;
+                }
+            }
+            run_start = run_end;
+        }
+    }
 
     // Step 3: Calculate levels (back edges have direction flipped)
     let max_level = calculate_levels_csr(graph, temps.node_levels, back_edges);
@@ -836,20 +894,11 @@ pub fn compute_layout_arena_csr<'b>(
         // reservation in the slot allocator, not by shifting corners.
         let edge_start_row = EDGE_START_ROW;
 
-        // Detect 2-node cycle: A→B (forward) + B→A (reversed) sharing the same column.
-        // Offset forward edge left by 1 and back-edge right by 1 from center.
-        let in_two_node_cycle = from_x == to_x && from_idx != to_idx && {
-            let edge_count = graph.edge_count();
-            (0..edge_count).any(|ej| {
-                if ej == edge_idx {
-                    return false;
-                }
-                let (f, t) = graph.edge(ej);
-                f == to_idx
-                    && t == from_idx
-                    && back_edges.get(ej).copied().unwrap_or(false) != is_back
-            })
-        };
+        // 2-node cycle: A→B (forward) + B→A (reversed) sharing the same
+        // column. Offset forward edge left by 1 and back edge right by 1
+        // from center. Membership is precomputed in O(E log E) above.
+        let in_two_node_cycle =
+            from_x == to_x && from_idx != to_idx && temps.edge_in_two_cycle[edge_idx];
 
         let (eff_from_x, eff_to_x) = if in_two_node_cycle {
             if is_back {
@@ -1118,6 +1167,8 @@ fn alloc_layout_temps_csr<'b>(
     let (slot_bounds_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(slot_bounds_size)?;
     let (level_dummy_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (level_labeled_src_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+    let (two_cycle_order_ptr, _) = arena.alloc_raw_uninit::<Idx>(edge_count)?;
+    let (edge_in_two_cycle_ptr, _) = arena.alloc_raw_uninit::<bool>(edge_count)?;
     let (waypoint_scratch_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(max_levels + 1)?;
     let (level_vdummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (level_routing_floor_ptr, _) = arena.alloc_raw_uninit::<usize>(max_levels + 1)?;
@@ -1166,6 +1217,11 @@ fn alloc_layout_temps_csr<'b>(
             level_labeled_src: core::slice::from_raw_parts_mut(
                 level_labeled_src_ptr,
                 max_levels + 1,
+            ),
+            two_cycle_order: core::slice::from_raw_parts_mut(two_cycle_order_ptr, edge_count),
+            edge_in_two_cycle: core::slice::from_raw_parts_mut(
+                edge_in_two_cycle_ptr,
+                edge_count,
             ),
             slot_bounds: core::slice::from_raw_parts_mut(slot_bounds_ptr, slot_bounds_size),
             level_dummy_next: core::slice::from_raw_parts_mut(level_dummy_next_ptr, max_levels + 1),
@@ -4344,6 +4400,8 @@ impl<'a> Graph<'a> {
             + node_count * core::mem::size_of::<usize>()                  // node_slots
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_slot_next
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_labeled_src
+            + edge_count * core::mem::size_of::<Idx>()                    // two_cycle_order
+            + edge_count * core::mem::size_of::<bool>()                   // edge_in_two_cycle
             + (max_levels + 1) * MAX_SLOTS_PER_LEVEL * core::mem::size_of::<(usize, usize)>() // slot_bounds
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_dummy_next
             + (max_levels + 1) * core::mem::size_of::<(usize, usize)>()   // waypoint_scratch
