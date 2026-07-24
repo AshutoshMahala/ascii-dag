@@ -590,6 +590,17 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
     // plus trailing extra for subgraphs closing after the last level
     let total_height = current_offset + sg_trailing_extra;
 
+    // Self-loop flags in one O(E) pass (was a full edge scan per node —
+    // O(N·E), the dominant cost on large fan-in graphs).
+    let mut node_has_self_loop = vec![false; dag.nodes.len()];
+    for &(f, t, _) in &dag.edges {
+        if f == t {
+            if let Some(idx) = dag.node_index(f) {
+                node_has_self_loop[idx] = true;
+            }
+        }
+    }
+
     // Add real nodes to IR
     for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
         for vnode in level_vnodes {
@@ -616,7 +627,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                     level: level_idx,
                     level_position: pos,
                     kind,
-                    has_self_loop: dag.edges.iter().any(|&(f, t, _)| f == id && t == id),
+                    has_self_loop: node_has_self_loop[*idx],
                 });
             }
         }
