@@ -11,8 +11,9 @@ use crate::graph::csr::CsrGraph;
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
 
 use super::geometry::{
-    DUMMY_WIDTH, ENVELOPE_CLEARANCE, SIBLING_GAP, SUBGRAPH_H_PAD, SUBGRAPH_V_PAD_BOTTOM,
-    SUBGRAPH_V_PAD_TOP, label_min_width as sg_label_min_width,
+    ARROW_CELL_PAD, DUMMY_WIDTH, EDGE_START_ROW, ENVELOPE_CLEARANCE, SIBLING_GAP, SUBGRAPH_H_PAD,
+    SUBGRAPH_V_PAD_BOTTOM, SUBGRAPH_V_PAD_TOP, edge_label_row_offset,
+    label_min_width as sg_label_min_width,
 };
 
 // ── Packed vnode encoding accessors ──────────────────────────────────────
@@ -95,6 +96,9 @@ pub(crate) struct LayoutTemps<'a> {
     pub(crate) level_slot_next: &'a mut [Idx],
     pub(crate) slot_bounds: &'a mut [(usize, usize)],
     pub(crate) level_dummy_next: &'a mut [Idx],
+    /// Per-level flag: 1 if a labeled edge is sourced at this level
+    /// (its label row is budgeted only in that level's band).
+    pub(crate) level_labeled_src: &'a mut [Idx],
     pub(crate) waypoint_scratch: &'a mut [(usize, usize)],
     pub(crate) level_vdummy_counts: &'a mut [Idx],
 
@@ -418,6 +422,37 @@ pub fn compute_layout_arena_csr<'b>(
         *sb = (usize::MAX, 0);
     }
 
+    // Arrow-cell reservation: a reversed edge paints ⇡ on the first
+    // routing row, directly below its layout-source. Pre-occupy that
+    // cell (± ARROW_CELL_PAD) on slot 0 so any horizontal span that
+    // would run through the arrowhead is pushed to a deeper slot by
+    // the collision scan below. Mirrored in the heap allocator — the
+    // two must not drift.
+    for (ei, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
+        if from_idx == to_idx || !back_edges.get(ei).copied().unwrap_or(false) {
+            continue;
+        }
+        let src_idx = to_idx; // back edge: layout flow is to → from
+        if src_idx >= temps.real_coords.len() {
+            continue;
+        }
+        let (src_level, _, x, w) = temps.real_coords[src_idx];
+        let lvl = src_level;
+        if lvl >= alloc_size {
+            continue;
+        }
+        let ax = x + w / 2;
+        let base = lvl * MAX_SLOTS_PER_LEVEL;
+        if base < temps.slot_bounds.len() {
+            let (ref mut bmin, ref mut bmax) = temps.slot_bounds[base];
+            *bmin = (*bmin).min(ax.saturating_sub(ARROW_CELL_PAD));
+            *bmax = (*bmax).max(ax + ARROW_CELL_PAD + 1);
+            if temps.level_slot_next[lvl] == 0 {
+                temps.level_slot_next[lvl] = 1;
+            }
+        }
+    }
+
     // 2. Assign slots by scanning edges (same iteration order as Step 9)
     for (ei, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
         if from_idx == to_idx {
@@ -515,13 +550,57 @@ pub fn compute_layout_arena_csr<'b>(
         }
     }
 
-    // 3. Count dummy nodes per level
+    // 3. Count jogging waypoints per level — only a waypoint whose column
+    // differs from the NEXT chain column (next waypoint, or the layout-
+    // target center) claims a routing row; straight pass-throughs are pure
+    // verticals. Must match the emission filter in Step 9 and the heap
+    // backend's jog rule exactly.
     temps.dummy_counts.fill(0);
-    let total_dummy_waypoints = temps.dummy_offsets[edge_count] as usize;
-    for &(level, _) in &temps.dummy_data[..total_dummy_waypoints] {
-        let lvl = level as usize;
-        if lvl < alloc_size {
-            temps.dummy_counts[lvl] += 1;
+    for (ei, (f_idx, t_idx)) in graph.edges_iter().enumerate() {
+        if f_idx == t_idx {
+            continue;
+        }
+        let ds = temps.dummy_offsets[ei] as usize;
+        let de = (temps.dummy_offsets[ei + 1] as usize).min(temps.dummy_data.len());
+        if de <= ds {
+            continue;
+        }
+        let is_back = back_edges.get(ei).copied().unwrap_or(false);
+        let layout_dst = if is_back { f_idx } else { t_idx };
+        if layout_dst >= temps.real_coords.len() {
+            continue;
+        }
+        let (_, _, dx, dw) = temps.real_coords[layout_dst];
+        let target_x = (dx + dw / 2) as usize;
+        for i in ds..de {
+            let (level, x) = temps.dummy_data[i];
+            let next_x = if i + 1 < de {
+                temps.dummy_data[i + 1].1 as usize
+            } else {
+                target_x
+            };
+            let lvl = level as usize;
+            if x as usize != next_x && lvl < alloc_size {
+                temps.dummy_counts[lvl] += 1;
+            }
+        }
+    }
+
+    // Per-level label-source flags: the label row is budgeted only in the
+    // bands of levels that actually source a labeled edge. Mirrors the
+    // heap backend.
+    temps.level_labeled_src.fill(0);
+    for (ei, (f_idx, t_idx)) in graph.edges_iter().enumerate() {
+        if f_idx == t_idx || graph.edge_label(ei).is_empty() {
+            continue;
+        }
+        let is_back = back_edges.get(ei).copied().unwrap_or(false);
+        let layout_src = if is_back { t_idx } else { f_idx };
+        if layout_src < temps.real_coords.len() {
+            let lvl = temps.real_coords[layout_src].0 as usize;
+            if lvl < alloc_size {
+                temps.level_labeled_src[lvl] = 1;
+            }
         }
     }
 
@@ -540,7 +619,6 @@ pub fn compute_layout_arena_csr<'b>(
     }
 
     temps.level_y_offsets.fill(0);
-    let routing_overhead: usize = if has_labeled_edges { 4 } else { 2 };
     let level_spacing: usize = config.level_spacing;
 
     // Compute subgraph Y extras (vertical border space)
@@ -564,7 +642,14 @@ pub fn compute_layout_arena_csr<'b>(
         let node_height = max_node_heights[level] as usize;
         // Use actual geometry-aware slot count (not naive source count)
         let slot_count = temps.level_slot_next[level] as usize;
-        let diff = slot_count.max(temps.dummy_counts[level] as usize);
+        // Jog rows plus the bend row below the deepest jog (shared rule
+        // with the heap backend).
+        let diff = slot_count
+            .max(super::geometry::passthrough_rows(temps.dummy_counts[level] as usize));
+        // Per-level overhead: the label row is budgeted only where a
+        // labeled edge is sourced (shared rule with the heap backend).
+        let routing_overhead =
+            super::geometry::routing_overhead(temps.level_labeled_src[level] != 0);
         let height = node_height + routing_overhead + diff.saturating_sub(1);
         current_offset += height;
         // Extra vertical gap between levels only — not after the last one,
@@ -649,6 +734,7 @@ pub fn compute_layout_arena_csr<'b>(
     let waypoint_scratch = &mut temps.waypoint_scratch;
     let level_y_offsets = &temps.level_y_offsets;
     let max_node_heights = &temps.level_vdummy_counts;
+    let level_labeled_src = &temps.level_labeled_src;
     let level_routing_floor = &mut temps.level_routing_floor;
 
     // Add edges
@@ -689,7 +775,10 @@ pub fn compute_layout_arena_csr<'b>(
             0
         };
 
-        let edge_start_row = 1 + if has_labeled_edges { 1 } else { 0 };
+        // Edge routing starts one row below the source node. Reversed
+        // edges' arrowheads on that row are protected by the arrow-cell
+        // reservation in the slot allocator, not by shifting corners.
+        let edge_start_row = EDGE_START_ROW;
 
         // Detect 2-node cycle: A→B (forward) + B→A (reversed) sharing the same column.
         // Offset forward edge left by 1 and back-edge right by 1 from center.
@@ -735,10 +824,24 @@ pub fn compute_layout_arena_csr<'b>(
             if dummy_count > 0 && dummy_start < temps.dummy_data.len() {
                 // Limit to scratch size
                 let available = temps.dummy_data.len().saturating_sub(dummy_start);
-                let waypoint_count = dummy_count.min(waypoint_scratch.len()).min(available);
+                let raw_count = dummy_count.min(waypoint_scratch.len()).min(available);
 
-                for i in 0..waypoint_count {
+                // Jog-aware: keep only waypoints whose column differs from
+                // the next chain column (the bend to a new column paints
+                // right below the kept row); straight pass-throughs are
+                // longer verticals. Must match the row-counting pass in
+                // Step 3 and the heap backend exactly.
+                let mut waypoint_count = 0usize;
+                for i in 0..raw_count {
                     let (level, x) = temps.dummy_data[dummy_start + i];
+                    let next_x = if i + 1 < raw_count {
+                        temps.dummy_data[dummy_start + i + 1].1 as usize
+                    } else {
+                        to_x
+                    };
+                    if x as usize == next_x {
+                        continue;
+                    }
                     let lvl_idx = level as usize;
 
                     // Assign a unique vertical slot for this edge at this level
@@ -754,15 +857,37 @@ pub fn compute_layout_arena_csr<'b>(
                     let y_base = level_y_offsets[lvl_idx]
                         + max_node_heights.get(lvl_idx).copied().unwrap_or(1) as usize
                         - 1;
-                    let wp_y = y_base + edge_start_row + dummy_slot as usize;
-                    waypoint_scratch[i] = (x as usize, wp_y);
-                    // Track routing floor
+                    // Waypoint rows budget the label offset only on levels
+                    // that source a labeled edge — matches the heap path.
+                    let wp_y = y_base
+                        + edge_start_row
+                        + usize::from(level_labeled_src[lvl_idx] != 0)
+                        + dummy_slot as usize;
+                    waypoint_scratch[waypoint_count] = (x as usize, wp_y);
+                    waypoint_count += 1;
+                    // Track routing floor: the row itself and the bend row
+                    // right below it (every kept waypoint bends).
                     if lvl_idx < level_routing_floor.len() {
-                        level_routing_floor[lvl_idx] = level_routing_floor[lvl_idx].max(wp_y);
+                        level_routing_floor[lvl_idx] =
+                            level_routing_floor[lvl_idx].max(wp_y + 1);
                     }
                 }
 
-                if let Some((start, len)) =
+                if waypoint_count == 0 {
+                    // Fully straight chain: the reserved dummy columns line
+                    // up with the target — plain vertical, or one bend in
+                    // the source band. Matches the heap backend.
+                    if eff_from_x == eff_to_x {
+                        EdgePathArena::Direct
+                    } else {
+                        let hy = from_y + edge_start_row + slot;
+                        let src_lvl = src_level as usize;
+                        if src_lvl < level_routing_floor.len() {
+                            level_routing_floor[src_lvl] = level_routing_floor[src_lvl].max(hy);
+                        }
+                        EdgePathArena::Corner { horizontal_y: hy }
+                    }
+                } else if let Some((start, len)) =
                     builder.add_waypoints(&waypoint_scratch[..waypoint_count])
                 {
                     let start_y_offset = (edge_start_row + slot).saturating_sub(1);
@@ -773,35 +898,6 @@ pub fn compute_layout_arena_csr<'b>(
                     if src_lvl < level_routing_floor.len() {
                         level_routing_floor[src_lvl] =
                             level_routing_floor[src_lvl].max(initial_corner_y);
-                    }
-
-                    // Record intermediate corner Ys: the paint code draws
-                    // horizontal segments at waypoint_y + 1 between consecutive
-                    // waypoints when they differ in X.
-                    for wi in 0..waypoint_count.saturating_sub(1) {
-                        let (this_x, this_y) = waypoint_scratch[wi];
-                        let (next_x, _) = waypoint_scratch[wi + 1];
-                        if this_x != next_x {
-                            let inter_corner_y = this_y + 1;
-                            let wp_level = temps.dummy_data[dummy_start + wi].0 as usize;
-                            if wp_level < level_routing_floor.len() {
-                                level_routing_floor[wp_level] =
-                                    level_routing_floor[wp_level].max(inter_corner_y);
-                            }
-                        }
-                    }
-                    // Also between last waypoint and target
-                    if waypoint_count > 0 {
-                        let (last_wp_x, last_wp_y) = waypoint_scratch[waypoint_count - 1];
-                        if last_wp_x != eff_to_x {
-                            let inter_corner_y = last_wp_y + 1;
-                            let last_level =
-                                temps.dummy_data[dummy_start + waypoint_count - 1].0 as usize;
-                            if last_level < level_routing_floor.len() {
-                                level_routing_floor[last_level] =
-                                    level_routing_floor[last_level].max(inter_corner_y);
-                            }
-                        }
                     }
 
                     EdgePathArena::MultiSegment {
@@ -833,7 +929,12 @@ pub fn compute_layout_arena_csr<'b>(
         let edge_label_text = graph.edge_label(edge_idx);
         let (e_label_offset, e_label_len, e_label_x, e_label_y) = if !edge_label_text.is_empty() {
             if let Some((offset, len)) = builder.add_edge_label(edge_label_text) {
-                let l_y = from_y + 2;
+                // First row below the source level's routing block — shared
+                // with the heap backend so label rows cannot drift. (A label
+                // on a routing row collides with `─` and is skipped by the
+                // renderer's collision check.)
+                let l_y = from_y
+                    + edge_label_row_offset(temps.level_slot_next[src_level as usize] as usize);
                 let edge_x_at_label = match &path {
                     EdgePathArena::Direct => eff_from_x,
                     EdgePathArena::Corner { horizontal_y } => {
@@ -847,8 +948,15 @@ pub fn compute_layout_arena_csr<'b>(
                     // SideChannel / Spline: fall back to source X
                     _ => eff_from_x,
                 };
-                let label_len_with_quotes = len + 2;
+                // Center on displayed width (chars, not bytes — parity with
+                // the heap backend for non-ASCII labels), clamp to canvas.
+                let label_len_with_quotes = edge_label_text.chars().count() + 2;
                 let l_x = edge_x_at_label.saturating_sub(label_len_with_quotes / 2);
+                let l_x = if l_x + label_len_with_quotes > canvas_width {
+                    canvas_width.saturating_sub(label_len_with_quotes)
+                } else {
+                    l_x
+                };
                 (offset, len, l_x, l_y)
             } else {
                 (0, 0, 0, 0)
@@ -953,6 +1061,7 @@ fn alloc_layout_temps_csr<'b>(
     let slot_bounds_size = (max_levels + 1) * MAX_SLOTS_PER_LEVEL;
     let (slot_bounds_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(slot_bounds_size)?;
     let (level_dummy_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+    let (level_labeled_src_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (waypoint_scratch_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(max_levels + 1)?;
     let (level_vdummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (level_routing_floor_ptr, _) = arena.alloc_raw_uninit::<usize>(max_levels + 1)?;
@@ -998,6 +1107,10 @@ fn alloc_layout_temps_csr<'b>(
             level_y_offsets: core::slice::from_raw_parts_mut(level_y_offsets_ptr, max_levels + 2),
             node_slots: core::slice::from_raw_parts_mut(node_slots_ptr, node_count),
             level_slot_next: core::slice::from_raw_parts_mut(level_slot_next_ptr, max_levels + 1),
+            level_labeled_src: core::slice::from_raw_parts_mut(
+                level_labeled_src_ptr,
+                max_levels + 1,
+            ),
             slot_bounds: core::slice::from_raw_parts_mut(slot_bounds_ptr, slot_bounds_size),
             level_dummy_next: core::slice::from_raw_parts_mut(level_dummy_next_ptr, max_levels + 1),
             waypoint_scratch: core::slice::from_raw_parts_mut(waypoint_scratch_ptr, max_levels + 1),
@@ -4174,6 +4287,7 @@ impl<'a> Graph<'a> {
             + (max_levels + 2) * core::mem::size_of::<usize>()            // level_y_offsets
             + node_count * core::mem::size_of::<usize>()                  // node_slots
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_slot_next
+            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_labeled_src
             + (max_levels + 1) * MAX_SLOTS_PER_LEVEL * core::mem::size_of::<(usize, usize)>() // slot_bounds
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_dummy_next
             + (max_levels + 1) * core::mem::size_of::<(usize, usize)>()   // waypoint_scratch

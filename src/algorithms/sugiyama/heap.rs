@@ -327,15 +327,48 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
     // and graceful degradation (shared rows) for extreme fan-in.
     const MAX_SLOTS_PER_LEVEL: usize = 8;
 
-    // 1. Assign slots greedy
+    // Arrow-cell reservation: a reversed edge paints ⇡ on the first
+    // routing row, directly below its layout-source. Pre-occupy that
+    // cell (± ARROW_CELL_PAD) on slot 0 so any horizontal span that
+    // would run through the arrowhead is pushed to a deeper slot by
+    // the normal interval-collision logic below. Mirrored in the CSR
+    // allocator — the two must not drift.
+    for (ei, &(from_id, to_id, _)) in dag.edges.iter().enumerate() {
+        if from_id == to_id || !back_edges.get(ei).copied().unwrap_or(false) {
+            continue;
+        }
+        if let (Some(_), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id)) {
+            let layout_src = to_idx; // back edge: layout flow is to → from
+            let (_, _, x, w) = real_node_coords[layout_src];
+            let ax = x + w / 2;
+            use crate::algorithms::sugiyama::geometry::ARROW_CELL_PAD;
+            let level = node_levels[layout_src];
+            let slots = &mut level_occupied_slots[level];
+            if slots.is_empty() {
+                slots.push(Vec::new());
+            }
+            slots[0].push((ax.saturating_sub(ARROW_CELL_PAD), ax + ARROW_CELL_PAD));
+        }
+    }
+
+    // 1. Assign slots greedy — in layout direction, so back edges
+    // participate: their own horizontal always covers their own arrow
+    // column, so the seeded cell forces them below the arrow row.
+    // (Matches the CSR allocator, which already worked in layout space.)
     for (i, &(from_id, to_id, _)) in dag.edges.iter().enumerate() {
         if let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id)) {
-            let from_level = node_levels[from_idx];
-            let to_level = node_levels[to_idx];
+            let is_back = back_edges.get(i).copied().unwrap_or(false);
+            let (ls_idx, ld_idx) = if is_back {
+                (to_idx, from_idx)
+            } else {
+                (from_idx, to_idx)
+            };
+            let from_level = node_levels[ls_idx];
+            let to_level = node_levels[ld_idx];
 
             // Get coordinates to determine geometry
-            let (_, _, from_x, from_w) = real_node_coords[from_idx];
-            let (_, _, to_x, to_w) = real_node_coords[to_idx];
+            let (_, _, from_x, from_w) = real_node_coords[ls_idx];
+            let (_, _, to_x, to_w) = real_node_coords[ld_idx];
 
             // Calculate interval required for this edge
             let start_x = from_x + from_w / 2;
@@ -355,9 +388,9 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                 if is_vertical {
                     edge_slots[i] = usize::MAX;
                 } else {
-                    if node_slots[from_idx] != usize::MAX {
+                    if node_slots[ls_idx] != usize::MAX {
                         // Reuse existing slot for this source node
-                        let slot = node_slots[from_idx];
+                        let slot = node_slots[ls_idx];
                         edge_slots[i] = slot;
 
                         // Mark interval as occupied (Merge)
@@ -410,16 +443,95 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                             0
                         };
 
-                        node_slots[from_idx] = slot;
+                        node_slots[ls_idx] = slot;
                     }
-                    edge_slots[i] = node_slots[from_idx];
+                    edge_slots[i] = node_slots[ls_idx];
                 }
             }
         }
     }
 
+    // Collect dummy node X positions for skip-level edge routing
+    let mut dummy_positions: Vec<Vec<(usize, usize)>> = vec![Vec::new(); dag.edges.len()];
+    for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
+        let level_width = level_widths[level_idx];
+        // Apply the same centering policy as real nodes: skip when subgraphs
+        // are present to avoid misalignment between real and dummy positions.
+        let level_offset = if center_levels && max_width > level_width {
+            (max_width - level_width) / 2
+        } else {
+            0
+        };
+
+        for (pos, vnode) in level_vnodes.iter().enumerate() {
+            if let VNode::Dummy { edge_idx } = vnode {
+                // Get the actual x-coordinate from the layout, including centering offset
+                let base_x = x_coords[level_idx][pos] + level_offset;
+                // Add bounded offset for visual separation between skip-level edges
+                // This keeps convergent edges from merging visually
+                let edge_offset = (*edge_idx % 4) as usize; // 0, 1, 2, or 3 chars
+                let x = base_x + edge_offset;
+                dummy_positions[*edge_idx].push((level_idx, x));
+            }
+        }
+    }
+
+    // Sort dummy positions by level for each edge (they should already be in order, but ensure it)
+    for positions in &mut dummy_positions {
+        positions.sort_by_key(|(level, _)| *level);
+    }
+
+    // Jog-aware dummy rows: a waypoint claims a routing row only where the
+    // edge actually changes column — its x differs from the NEXT chain x
+    // (next waypoint, or the layout-target center), because the bend to a
+    // new column is painted right below the kept row. Straight pass-through
+    // dummies keep their reserved column in the level packing but need no
+    // routing row of their own. Mirrored in the CSR backend.
+    let mut kept_wps: Vec<Vec<bool>> = Vec::with_capacity(dag.edges.len());
+    let mut level_jog_count = vec![0usize; max_level + 1];
+    for (edge_idx, chain) in dummy_positions.iter().enumerate() {
+        let mut kept = vec![false; chain.len()];
+        if !chain.is_empty() {
+            let &(from_id, to_id, _) = &dag.edges[edge_idx];
+            let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
+            if let (Some(from_idx), Some(to_idx)) =
+                (dag.node_index(from_id), dag.node_index(to_id))
+            {
+                let layout_dst = if is_back { from_idx } else { to_idx };
+                let (_, _, dx, dw) = real_node_coords[layout_dst];
+                let target_x = dx + dw / 2;
+                for i in 0..chain.len() {
+                    let next_x = if i + 1 < chain.len() {
+                        chain[i + 1].1
+                    } else {
+                        target_x
+                    };
+                    if chain[i].1 != next_x {
+                        kept[i] = true;
+                        level_jog_count[chain[i].0] += 1;
+                    }
+                }
+            }
+        }
+        kept_wps.push(kept);
+    }
+
+    // Per-level label-source flags: the label row is budgeted only in the
+    // bands of levels that actually source a labeled edge (labels paint in
+    // the layout-source's band). Mirrored in the CSR backend.
+    let mut level_labeled_src = vec![false; max_level + 1];
+    for (ei, &(from_id, to_id, label)) in dag.edges.iter().enumerate() {
+        if label.is_none() || from_id == to_id {
+            continue;
+        }
+        if let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id)) {
+            let is_back = back_edges.get(ei).copied().unwrap_or(false);
+            let layout_src = if is_back { to_idx } else { from_idx };
+            level_labeled_src[node_levels[layout_src]] = true;
+        }
+    }
+
     // Calculate per-level heights: node height + routing overhead + extra rows for slot separation
-    let routing_overhead = if has_labeled_edges { 4 } else { 2 };
     // Compute max node height per level from actual node heights
     let mut max_node_height: Vec<usize> = vec![1; max_level + 1];
     for (level, level_vnodes) in virtual_levels.iter().enumerate() {
@@ -449,20 +561,21 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         // 1. Slots for edges originating at this level (adjacent or skip)
         let adjacent_slots = level_occupied_slots[level].len();
 
-        // 2. Slots for edges passing through (dummy nodes)
-        let skip_slots = if level < virtual_levels.len() {
-            virtual_levels[level]
-                .iter()
-                .filter(|v| matches!(v, VNode::Dummy { .. }))
-                .count()
-        } else {
-            0
-        };
+        // 2. Rows for edges passing through: only jogging waypoints claim
+        // a row (straight pass-throughs are pure verticals), plus the
+        // bend row below the deepest jog (shared rule with CSR).
+        let skip_slots = crate::algorithms::sugiyama::geometry::passthrough_rows(
+            level_jog_count[level],
+        );
 
         // Determine max slots needed for this specific level
         let slots_needed = adjacent_slots.max(skip_slots);
         let extra_lines = slots_needed.saturating_sub(1);
 
+        // Per-level overhead: the label row is budgeted only where a
+        // labeled edge is sourced (shared rule with the CSR backend).
+        let routing_overhead =
+            crate::algorithms::sugiyama::geometry::routing_overhead(level_labeled_src[level]);
         let height =
             max_node_height[level] + routing_overhead + extra_lines + sg_boundary_extras[level];
         current_offset += height;
@@ -509,36 +622,6 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
         }
     }
 
-    // Collect dummy node X positions for skip-level edge routing
-    let mut dummy_positions: Vec<Vec<(usize, usize)>> = vec![Vec::new(); dag.edges.len()];
-    for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
-        let level_width = level_widths[level_idx];
-        // Apply the same centering policy as real nodes: skip when subgraphs
-        // are present to avoid misalignment between real and dummy positions.
-        let level_offset = if center_levels && max_width > level_width {
-            (max_width - level_width) / 2
-        } else {
-            0
-        };
-
-        for (pos, vnode) in level_vnodes.iter().enumerate() {
-            if let VNode::Dummy { edge_idx } = vnode {
-                // Get the actual x-coordinate from the layout, including centering offset
-                let base_x = x_coords[level_idx][pos] + level_offset;
-                // Add bounded offset for visual separation between skip-level edges
-                // This keeps convergent edges from merging visually
-                let edge_offset = (*edge_idx % 4) as usize; // 0, 1, 2, or 3 chars
-                let x = base_x + edge_offset;
-                dummy_positions[*edge_idx].push((level_idx, x));
-            }
-        }
-    }
-
-    // Sort dummy positions by level for each edge (they should already be in order, but ensure it)
-    for positions in &mut dummy_positions {
-        positions.sort_by_key(|(level, _)| *level);
-    }
-
     let mut level_edge_next = vec![0usize; max_level + 1];
 
     // Collect all horizontal Y values used by edge routing segments.
@@ -580,9 +663,10 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                 level_y_offsets[layout_from_level] + max_node_height[layout_from_level] - 1;
             let to_y = level_y_offsets[layout_to_level];
 
-            // Edge routing starts 1 row below the bottom of the source node
-            // (from_y already accounts for node height)
-            let edge_start_row: usize = 1;
+            // Edge routing starts one row below the source node. Reversed
+            // edges' arrowheads on that row are protected by the arrow-cell
+            // reservation in the slot allocator, not by shifting corners.
+            let edge_start_row = crate::algorithms::sugiyama::geometry::EDGE_START_ROW;
 
             let path = if layout_to_level == layout_from_level + 1 {
                 // Adjacent levels - direct or corner connection
@@ -622,75 +706,76 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                     }
                     EdgePath::Corner { horizontal_y: hy }
                 } else {
-                    // Build waypoints through dummy nodes with Y slot separation
+                    // Build waypoints through the jogging dummies only —
+                    // straight pass-throughs paint as part of a longer
+                    // vertical segment and need no waypoint row.
+                    let kept = &kept_wps[edge_idx];
                     let mut waypoints = Vec::with_capacity(dummies.len());
-                    for &(level, x) in dummies {
+                    for (i, &(level, x)) in dummies.iter().enumerate() {
+                        if !kept[i] {
+                            continue;
+                        }
                         // Assign a unique vertical slot for this edge at this level
                         let slot = level_edge_next[level];
                         level_edge_next[level] += 1;
 
                         let wp_edge_start_row =
-                            max_node_height[level] + if has_labeled_edges { 1 } else { 0 };
+                            max_node_height[level] + usize::from(level_labeled_src[level]);
                         let wp_y = level_y_offsets[level] + wp_edge_start_row + slot;
                         edge_routing_ys.insert(wp_y);
-                        level_routing_floor[level] = level_routing_floor[level].max(wp_y);
+                        // Every kept waypoint bends right below its row (its
+                        // x differs from the next column by construction).
+                        let inter_corner_y = wp_y + 1;
+                        edge_routing_ys.insert(inter_corner_y);
+                        level_routing_floor[level] =
+                            level_routing_floor[level].max(inter_corner_y);
                         waypoints.push((x, wp_y));
                     }
 
-                    let slot = if node_slots[layout_src_idx] != usize::MAX {
-                        node_slots[layout_src_idx]
+                    if waypoints.is_empty() {
+                        // Fully straight chain: the reserved dummy columns
+                        // line up with the target, so the edge is a plain
+                        // vertical — or a single bend in the source band.
+                        if from_x == to_x {
+                            EdgePath::Direct
+                        } else {
+                            let slot = if node_slots[layout_src_idx] != usize::MAX {
+                                node_slots[layout_src_idx]
+                            } else {
+                                0
+                            };
+                            let hy = from_y + edge_start_row + slot;
+                            edge_routing_ys.insert(hy);
+                            if layout_from_level < level_routing_floor.len() {
+                                level_routing_floor[layout_from_level] =
+                                    level_routing_floor[layout_from_level].max(hy);
+                            }
+                            EdgePath::Corner { horizontal_y: hy }
+                        }
                     } else {
-                        0
-                    };
+                        let slot = if node_slots[layout_src_idx] != usize::MAX {
+                            node_slots[layout_src_idx]
+                        } else {
+                            0
+                        };
 
-                    // Calculate offset from (y+1)
-                    let start_y_offset = (edge_start_row + slot).saturating_sub(1);
+                        // Calculate offset from (y+1)
+                        let start_y_offset = (edge_start_row + slot).saturating_sub(1);
 
-                    // Record the INITIAL corner Y (first segment routing) — the paint
-                    // code draws a horizontal segment at from_y + 1 + start_y_offset,
-                    // which is NOT a waypoint Y but still occupies a row.
-                    let initial_corner_y = from_y + 1 + start_y_offset;
-                    edge_routing_ys.insert(initial_corner_y);
-                    if layout_from_level < level_routing_floor.len() {
-                        level_routing_floor[layout_from_level] =
-                            level_routing_floor[layout_from_level].max(initial_corner_y);
-                    }
-
-                    // Also record intermediate corner Ys: the paint code draws
-                    // horizontal segments at waypoint_y + 1 between consecutive
-                    // waypoints when they differ in X.
-                    for (wi, window) in waypoints.windows(2).enumerate() {
-                        let wp_y = window[0].1;
-                        let next_x = window[1].0;
-                        let this_x = window[0].0;
-                        if this_x != next_x {
-                            let inter_corner_y = wp_y + 1;
-                            edge_routing_ys.insert(inter_corner_y);
-                            // Update routing floor for the level this waypoint belongs to
-                            let wp_level = dummies[wi].0;
-                            if wp_level < level_routing_floor.len() {
-                                level_routing_floor[wp_level] =
-                                    level_routing_floor[wp_level].max(inter_corner_y);
-                            }
+                        // Record the INITIAL corner Y (first segment routing) — the paint
+                        // code draws a horizontal segment at from_y + 1 + start_y_offset,
+                        // which is NOT a waypoint Y but still occupies a row.
+                        let initial_corner_y = from_y + 1 + start_y_offset;
+                        edge_routing_ys.insert(initial_corner_y);
+                        if layout_from_level < level_routing_floor.len() {
+                            level_routing_floor[layout_from_level] =
+                                level_routing_floor[layout_from_level].max(initial_corner_y);
                         }
-                    }
-                    // Also between last waypoint and target
-                    if let Some(&(last_wp_x, last_wp_y)) = waypoints.last() {
-                        if last_wp_x != to_x {
-                            let inter_corner_y = last_wp_y + 1;
-                            edge_routing_ys.insert(inter_corner_y);
-                            if let Some(&(last_level, _)) = dummies.last() {
-                                if last_level < level_routing_floor.len() {
-                                    level_routing_floor[last_level] =
-                                        level_routing_floor[last_level].max(inter_corner_y);
-                                }
-                            }
-                        }
-                    }
 
-                    EdgePath::MultiSegment {
-                        waypoints,
-                        start_y_offset,
+                        EdgePath::MultiSegment {
+                            waypoints,
+                            start_y_offset,
+                        }
                     }
                 }
             };
@@ -704,7 +789,12 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
             let label_position = label.map(|lbl| {
                 let label_len = lbl.chars().count() + 2; // +2 for quotes
 
-                let label_y = from_y + 3;
+                // First row below the source level's routing block — shared
+                // with the CSR backend so label rows cannot drift.
+                let label_y = from_y
+                    + crate::algorithms::sugiyama::geometry::edge_label_row_offset(
+                        level_occupied_slots[layout_from_level].len(),
+                    );
 
                 // Find the edge's X position at the label row
                 let edge_x_at_label = match &path {

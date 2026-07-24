@@ -29,6 +29,20 @@ fn chain_graph() -> Graph<'static> {
     g
 }
 
+/// Labeled edge entering a one-node cluster — the shape that exposed the
+/// heap/CSR row-budget divergence (see direction::csr parity tests).
+fn stage_graph() -> Graph<'static> {
+    let mut g = Graph::new();
+    g.add_node(1, "Start");
+    g.add_node(2, "Middle");
+    g.add_node(3, "End");
+    g.add_edge(1, 2, Some("go"));
+    g.add_edge(2, 3, None);
+    let sg = g.add_subgraph("Stage");
+    g.put_nodes(&[2]).inside(sg).unwrap();
+    g
+}
+
 /// Gap in columns between `[A]` and `[B]` on the line containing both.
 fn sibling_gap(rendered: &str) -> usize {
     let line = rendered
@@ -149,6 +163,20 @@ mod csr {
             "level_spacing=4 should add exactly 4 rows between levels (CSR)"
         );
     }
+
+    /// Strongest backend-parity assertion: the same graph renders to
+    /// byte-identical text through both layout paths (TopDown).
+    #[test]
+    fn stage_graph_renders_identically_in_both_backends() {
+        let config = LayoutConfig::standard();
+        let g = stage_graph();
+        let heap_out = render_heap(&g, &config);
+        let csr_out = render_csr(&g, &config);
+        assert_eq!(
+            heap_out, csr_out,
+            "heap and CSR rendered output diverge:\n=== heap ===\n{heap_out}\n=== csr ===\n{csr_out}"
+        );
+    }
 }
 
 // ── Golden snapshot ──────────────────────────────────────────────────────
@@ -198,18 +226,6 @@ mod direction {
         }
         assert!("NE".parse::<Direction>().is_err());
         assert!("".parse::<Direction>().is_err());
-    }
-
-    fn stage_graph() -> Graph<'static> {
-        let mut g = Graph::new();
-        g.add_node(1, "Start");
-        g.add_node(2, "Middle");
-        g.add_node(3, "End");
-        g.add_edge(1, 2, Some("go"));
-        g.add_edge(2, 3, None);
-        let sg = g.add_subgraph("Stage");
-        g.put_nodes(&[2]).inside(sg).unwrap();
-        g
     }
 
     // NOTE: BottomUp assertions are IR-level only. The built-in renderers
@@ -433,16 +449,11 @@ mod direction {
             }
         }
 
-        // KNOWN PRE-EXISTING DIVERGENCE, found by this test on 2026-07-23
-        // (unrelated to direction; reproduces on plain TopDown): for a
-        // labeled edge entering a cluster, the CSR path budgets one more
-        // interior row than the heap path (stage_graph: heap box height 6,
-        // CSR 7; total canvas heights differ too, and the CSR render drops
-        // the "go" edge label). Nodes agree; only vertical row budgeting
-        // around the cluster differs. Un-ignore once the backends'
-        // level-height/routing-row logic is reconciled.
+        // This test found a real pre-existing divergence on 2026-07-23:
+        // the heap path skipped the vertical stub row below labeled-edge
+        // sources (corner one row too early). Fixed by sharing
+        // geometry::edge_start_row between the backends.
         #[test]
-        #[ignore = "pre-existing heap/CSR row-budget divergence around clusters"]
         fn heap_and_csr_backends_agree_on_subgraph_boxes() {
             let g = stage_graph();
             for direction in [Direction::TopDown, Direction::BottomUp] {
