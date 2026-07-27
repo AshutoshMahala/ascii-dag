@@ -1441,11 +1441,10 @@ pub(crate) fn compute_bounding_boxes<'a>(
         }));
     }
 
-    // Pass 2: propagate child bounding boxes to parents (bottom-up)
-    // The child bbox already includes its own SUBGRAPH_H_PAD. The parent only
-    // needs enough extra to draw its own border without touching the child's
-    // border — 1 char for the border line + 1 char gap.
-    const PARENT_CHILD_H_GAP: usize = 1;
+    // Pass 2: propagate child bounding boxes to parents (bottom-up).
+    // The child bbox already includes its own SUBGRAPH_H_PAD; the parent
+    // adds only its border column (shared rule with the CSR backend).
+    use crate::algorithms::sugiyama::geometry::PARENT_CHILD_H_GAP;
     for &sg_idx in &order {
         let sg = &dag.subgraphs[sg_idx];
         if let Some(parent_id) = sg.parent_id {

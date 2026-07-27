@@ -11,7 +11,8 @@ use crate::graph::csr::CsrGraph;
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
 
 use super::geometry::{
-    ARROW_CELL_PAD, DUMMY_WIDTH, EDGE_START_ROW, ENVELOPE_CLEARANCE, SIBLING_GAP, SUBGRAPH_H_PAD,
+    ARROW_CELL_PAD, DUMMY_WIDTH, EDGE_START_ROW, ENVELOPE_CLEARANCE, PARENT_CHILD_H_GAP,
+    SIBLING_GAP, SUBGRAPH_H_PAD,
     SUBGRAPH_V_PAD_BOTTOM, SUBGRAPH_V_PAD_TOP, edge_label_row_offset,
     label_min_width as sg_label_min_width,
 };
@@ -94,7 +95,14 @@ pub(crate) struct LayoutTemps<'a> {
     pub(crate) level_y_offsets: &'a mut [usize],
     pub(crate) node_slots: &'a mut [usize],
     pub(crate) level_slot_next: &'a mut [Idx],
-    pub(crate) slot_bounds: &'a mut [(usize, usize)],
+    /// Interval pool for slot allocation: (min_x, max_x, next) linked
+    /// lists — the same per-slot interval-list structure the heap
+    /// allocator uses, so both backends make identical slot decisions.
+    pub(crate) slot_pool: &'a mut [(usize, usize, usize)],
+    /// Head pool-index per (level, slot); `usize::MAX` = empty.
+    pub(crate) slot_heads: &'a mut [usize],
+    /// Tail pool-index per (level, slot); `usize::MAX` = empty.
+    pub(crate) slot_tails: &'a mut [usize],
     pub(crate) level_dummy_next: &'a mut [Idx],
     /// Per-level flag: 1 if a labeled edge is sourced at this level
     /// (its label row is budgeted only in that level's band).
@@ -125,6 +133,57 @@ pub(crate) struct LayoutTemps<'a> {
 }
 
 // ── Subgraph layout constants ────────────────────────────────────────────
+/// Append an interval to a (level, slot) linked list in the slot pool.
+/// Full pool degrades by dropping the interval (allocation still works;
+/// only sharing precision is lost — same spirit as the slot cap).
+#[inline]
+fn slot_push(
+    pool: &mut [(usize, usize, usize)],
+    pool_len: &mut usize,
+    heads: &mut [usize],
+    tails: &mut [usize],
+    base: usize,
+    min_x: usize,
+    max_x: usize,
+) {
+    if *pool_len >= pool.len() || base >= heads.len() {
+        return;
+    }
+    let idx = *pool_len;
+    pool[idx] = (min_x, max_x, usize::MAX);
+    if tails[base] == usize::MAX {
+        heads[base] = idx;
+    } else {
+        pool[tails[base]].2 = idx;
+    }
+    tails[base] = idx;
+    *pool_len += 1;
+}
+
+/// Does `[min_x, max_x]` overlap any interval in the (level, slot) list?
+/// (`s < max_x && e > min_x` — the heap allocator's collide test.)
+#[inline]
+fn slot_collides(
+    pool: &[(usize, usize, usize)],
+    heads: &[usize],
+    base: usize,
+    min_x: usize,
+    max_x: usize,
+) -> bool {
+    if base >= heads.len() {
+        return false;
+    }
+    let mut cur = heads[base];
+    while cur != usize::MAX {
+        let (s0, e0, next) = pool[cur];
+        if s0 < max_x && e0 > min_x {
+            return true;
+        }
+        cur = next;
+    }
+    false
+}
+
 /// Compute layout using arena allocation for temporaries, specialized for CsrGraph.
 ///
 /// This avoids all heap allocations and HashMap lookups by using the CSR indices directly.
@@ -472,13 +531,14 @@ pub fn compute_layout_arena_csr<'b>(
     // This matches the heap path's interval-based slot allocator.
     let alloc_size = max_level as usize + 1;
 
-    // 1. Initialize geometry-aware slot tracking
+    // 1. Initialize geometry-aware slot tracking. Each (level, slot)
+    // holds a linked interval list in the pool — the heap allocator's
+    // structure, so both backends make identical placement decisions.
     temps.node_slots.fill(usize::MAX); // usize::MAX = unassigned sentinel
     temps.level_slot_next.fill(0);
-    // Initialize slot bounding boxes to empty: (usize::MAX, 0) means no intervals
-    for sb in temps.slot_bounds.iter_mut() {
-        *sb = (usize::MAX, 0);
-    }
+    temps.slot_heads.fill(usize::MAX);
+    temps.slot_tails.fill(usize::MAX);
+    let mut slot_pool_len = 0usize;
 
     // Arrow-cell reservation: a reversed edge paints ⇡ on the first
     // routing row, directly below its layout-source. Pre-occupy that
@@ -500,15 +560,18 @@ pub fn compute_layout_arena_csr<'b>(
             continue;
         }
         let ax = x + w / 2;
-        let base = lvl * MAX_SLOTS_PER_LEVEL;
-        if base < temps.slot_bounds.len() {
-            let (ref mut bmin, ref mut bmax) = temps.slot_bounds[base];
-            *bmin = (*bmin).min(ax.saturating_sub(ARROW_CELL_PAD));
-            *bmax = (*bmax).max(ax + ARROW_CELL_PAD + 1);
-            if temps.level_slot_next[lvl] == 0 {
-                temps.level_slot_next[lvl] = 1;
-            }
+        if temps.level_slot_next[lvl] == 0 {
+            temps.level_slot_next[lvl] = 1;
         }
+        slot_push(
+            temps.slot_pool,
+            &mut slot_pool_len,
+            temps.slot_heads,
+            temps.slot_tails,
+            lvl * MAX_SLOTS_PER_LEVEL,
+            ax.saturating_sub(ARROW_CELL_PAD),
+            ax + ARROW_CELL_PAD,
+        );
     }
 
     // 2. Assign slots by scanning edges (same iteration order as Step 9)
@@ -539,10 +602,11 @@ pub fn compute_layout_arena_csr<'b>(
             continue;
         }
 
+        // Inclusive center-to-center interval — the heap convention.
         let (min_x, max_x) = if src_x_center < dst_x_center {
-            (src_x_center, dst_x_center + 1)
+            (src_x_center, dst_x_center)
         } else {
-            (dst_x_center, src_x_center + 1)
+            (dst_x_center, src_x_center)
         };
 
         let lvl = src_level;
@@ -551,56 +615,101 @@ pub fn compute_layout_arena_csr<'b>(
         }
 
         if temps.node_slots[src_idx] != usize::MAX {
-            // Source already has a slot — merge interval into its bounding box
+            // Reuse the source's slot: merge into the tail interval when
+            // overlapping, else append (heap rule).
             let slot = temps.node_slots[src_idx];
             let base = lvl * MAX_SLOTS_PER_LEVEL + slot;
-            if base < temps.slot_bounds.len() {
-                let (ref mut bmin, ref mut bmax) = temps.slot_bounds[base];
-                if min_x < *bmin {
-                    *bmin = min_x;
+            if slot < temps.level_slot_next[lvl] as usize && base < temps.slot_tails.len() {
+                let tail = temps.slot_tails[base];
+                let mut merged = false;
+                if tail != usize::MAX {
+                    let (ts, te, _) = temps.slot_pool[tail];
+                    if min_x <= te && max_x >= ts {
+                        temps.slot_pool[tail].0 = ts.min(min_x);
+                        temps.slot_pool[tail].1 = te.max(max_x);
+                        merged = true;
+                    }
                 }
-                if max_x > *bmax {
-                    *bmax = max_x;
+                if !merged {
+                    slot_push(
+                        temps.slot_pool,
+                        &mut slot_pool_len,
+                        temps.slot_heads,
+                        temps.slot_tails,
+                        base,
+                        min_x,
+                        max_x,
+                    );
                 }
             }
         } else {
-            // New source — find a conflict-free slot via greedy first-fit scan
+            // New source — greedy first-fit over the interval lists
+            // (tail fast-path, then full collide scan; heap rule).
             let slots_used = temps.level_slot_next[lvl] as usize;
             let mut chosen = None;
 
             for s in 0..slots_used {
                 let base = lvl * MAX_SLOTS_PER_LEVEL + s;
-                if base < temps.slot_bounds.len() {
-                    let (bmin, bmax) = temps.slot_bounds[base];
-                    // No overlap: new range is entirely before or after existing bounding box
-                    if max_x <= bmin || min_x >= bmax {
-                        // Share this slot — merge bounding box
-                        let (ref mut sbmin, ref mut sbmax) = temps.slot_bounds[base];
-                        if min_x < *sbmin {
-                            *sbmin = min_x;
-                        }
-                        if max_x > *sbmax {
-                            *sbmax = max_x;
-                        }
-                        chosen = Some(s);
-                        break;
-                    }
+                let tail = if base < temps.slot_tails.len() {
+                    temps.slot_tails[base]
+                } else {
+                    usize::MAX
+                };
+                if tail != usize::MAX && min_x >= temps.slot_pool[tail].1 {
+                    slot_push(
+                        temps.slot_pool,
+                        &mut slot_pool_len,
+                        temps.slot_heads,
+                        temps.slot_tails,
+                        base,
+                        min_x,
+                        max_x,
+                    );
+                    chosen = Some(s);
+                    break;
+                }
+                if !slot_collides(temps.slot_pool, temps.slot_heads, base, min_x, max_x) {
+                    slot_push(
+                        temps.slot_pool,
+                        &mut slot_pool_len,
+                        temps.slot_heads,
+                        temps.slot_tails,
+                        base,
+                        min_x,
+                        max_x,
+                    );
+                    chosen = Some(s);
+                    break;
                 }
             }
 
             let slot = if let Some(s) = chosen {
                 s
             } else if slots_used < MAX_SLOTS_PER_LEVEL {
-                // Allocate new slot
                 let s = slots_used;
-                let base = lvl * MAX_SLOTS_PER_LEVEL + s;
-                if base < temps.slot_bounds.len() {
-                    temps.slot_bounds[base] = (min_x, max_x);
-                }
+                slot_push(
+                    temps.slot_pool,
+                    &mut slot_pool_len,
+                    temps.slot_heads,
+                    temps.slot_tails,
+                    lvl * MAX_SLOTS_PER_LEVEL + s,
+                    min_x,
+                    max_x,
+                );
                 temps.level_slot_next[lvl] += 1;
                 s
             } else {
-                // Cap reached — degrade to slot 0
+                // Cap reached — degrade to slot 0 (heap pushes the
+                // interval there too, keeping later decisions aligned).
+                slot_push(
+                    temps.slot_pool,
+                    &mut slot_pool_len,
+                    temps.slot_heads,
+                    temps.slot_tails,
+                    lvl * MAX_SLOTS_PER_LEVEL,
+                    min_x,
+                    max_x,
+                );
                 0
             };
 
@@ -1164,9 +1273,12 @@ fn alloc_layout_temps_csr<'b>(
     let (node_slots_ptr, _) = arena.alloc_raw_uninit::<usize>(node_count)?;
     // Next slot counters
     let (level_slot_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
-    // Slot bounding boxes: (min_x, max_x) per (level, slot) for geometry-aware allocation
-    let slot_bounds_size = (max_levels + 1) * MAX_SLOTS_PER_LEVEL;
-    let (slot_bounds_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(slot_bounds_size)?;
+    // Slot interval pool + per-(level, slot) list heads/tails
+    let slot_pool_size = 2 * edge_count + 1;
+    let slot_list_size = (max_levels + 1) * MAX_SLOTS_PER_LEVEL;
+    let (slot_pool_ptr, _) = arena.alloc_raw_uninit::<(usize, usize, usize)>(slot_pool_size)?;
+    let (slot_heads_ptr, _) = arena.alloc_raw_uninit::<usize>(slot_list_size)?;
+    let (slot_tails_ptr, _) = arena.alloc_raw_uninit::<usize>(slot_list_size)?;
     let (level_dummy_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (level_labeled_src_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (two_cycle_order_ptr, _) = arena.alloc_raw_uninit::<Idx>(edge_count)?;
@@ -1225,7 +1337,9 @@ fn alloc_layout_temps_csr<'b>(
                 edge_in_two_cycle_ptr,
                 edge_count,
             ),
-            slot_bounds: core::slice::from_raw_parts_mut(slot_bounds_ptr, slot_bounds_size),
+            slot_pool: core::slice::from_raw_parts_mut(slot_pool_ptr, slot_pool_size),
+            slot_heads: core::slice::from_raw_parts_mut(slot_heads_ptr, slot_list_size),
+            slot_tails: core::slice::from_raw_parts_mut(slot_tails_ptr, slot_list_size),
             level_dummy_next: core::slice::from_raw_parts_mut(level_dummy_next_ptr, max_levels + 1),
             waypoint_scratch: core::slice::from_raw_parts_mut(waypoint_scratch_ptr, max_levels + 1),
             level_vdummy_counts: core::slice::from_raw_parts_mut(
@@ -3443,10 +3557,13 @@ fn compute_sg_bounding_boxes(
             if cx == usize::MAX {
                 continue;
             }
+            // The child box already includes its own SUBGRAPH_H_PAD; the
+            // parent adds only its border column (shared rule with heap —
+            // using H_PAD here made CSR parents one column wider per side).
             let expanded = (
-                cx.saturating_sub(SUBGRAPH_H_PAD),
+                cx.saturating_sub(PARENT_CHILD_H_GAP),
                 cy.saturating_sub(SUBGRAPH_V_PAD_TOP),
-                cr + SUBGRAPH_H_PAD,
+                cr + PARENT_CHILD_H_GAP,
                 cb + SUBGRAPH_V_PAD_BOTTOM,
             );
             let (ref mut px, ref mut py, ref mut pr, ref mut pb) = sg_envelopes[parent_idx];
@@ -4404,7 +4521,8 @@ impl<'a> Graph<'a> {
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_labeled_src
             + edge_count * core::mem::size_of::<Idx>()                    // two_cycle_order
             + edge_count * core::mem::size_of::<bool>()                   // edge_in_two_cycle
-            + (max_levels + 1) * MAX_SLOTS_PER_LEVEL * core::mem::size_of::<(usize, usize)>() // slot_bounds
+            + (2 * edge_count + 1) * 3 * core::mem::size_of::<usize>()  // slot_pool
+            + 2 * (max_levels + 1) * MAX_SLOTS_PER_LEVEL * core::mem::size_of::<usize>() // slot heads+tails
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_dummy_next
             + (max_levels + 1) * core::mem::size_of::<(usize, usize)>()   // waypoint_scratch
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_vdummy_counts

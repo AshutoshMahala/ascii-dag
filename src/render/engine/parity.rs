@@ -301,24 +301,16 @@ fn parity_implicit_nodes_heap() {
 /// where the legacy renderers disagreed among themselves.
 #[test]
 fn engine_self_parity_across_backends() {
-    // `fan` is excluded: see `engine_self_parity_fan` below — the two
-    // LAYOUT backends produce different routing geometry for fan-in
-    // (heap slot allocator keeps per-slot interval lists and can share
-    // a routing row between disjoint spans; the CSR allocator keeps one
-    // bounding box per slot and cannot). A layout-level divergence, not
-    // a render one — the engine faithfully renders each IR.
-    // `nested_boxes` is likewise excluded (see `engine_self_parity_nested`):
-    // the outer cluster's box is one column wider in the CSR IR than in
-    // the heap IR — a layout-level bounding-box divergence on *nested*
-    // clusters (the cross-backend box tests only covered single boxes).
-    let corpus: [CorpusEntry; 8] = [
+    let corpus: [CorpusEntry; 10] = [
         ("chain", chain),
+        ("fan", fan),
         ("stage", stage),
         ("skip", skip),
         ("back_edges", back_edges),
         ("two_cycle", two_cycle),
         ("self_loop", self_loop),
         ("colliding_labels", colliding_labels),
+        ("nested_boxes", nested_boxes),
         ("implicit_nodes", implicit_nodes),
     ];
     for (tag, build) in corpus {
@@ -328,34 +320,6 @@ fn engine_self_parity_across_backends() {
         let (_, csr_out) = csr_legacy_and_engine(&g, &RenderOptions::plain());
         assert_same(&format!("{tag} (engine heap vs engine csr)"), &heap_out, &csr_out);
     }
-}
-
-// LAYOUT DIVERGENCE (ruling pending): heap vs CSR slot allocation on
-// fan-in — interval lists vs bounding boxes assign different corner
-// rows. Surfaced by the engine self-parity invariant; needs a decision
-// on which allocator behavior is canonical before either backend moves.
-#[test]
-#[ignore = "layout-level slot-allocation divergence heap vs CSR on fan-in — ruling pending"]
-fn engine_self_parity_fan() {
-    let g = fan();
-    let ir = g.compute_layout();
-    let heap_out = render_plain(&ir, &RenderOptions::plain());
-    let (_, csr_out) = csr_legacy_and_engine(&g, &RenderOptions::plain());
-    assert_same("fan (engine heap vs engine csr)", &heap_out, &csr_out);
-}
-
-// LAYOUT DIVERGENCE (ruling pending): nested-cluster bounding boxes —
-// the CSR path computes the outer box one column wider than the heap
-// path for the same graph. Surfaced by the engine self-parity
-// invariant; needs a decision on the canonical width computation.
-#[test]
-#[ignore = "layout-level nested-box width divergence heap vs CSR — ruling pending"]
-fn engine_self_parity_nested() {
-    let g = nested_boxes();
-    let ir = g.compute_layout();
-    let heap_out = render_plain(&ir, &RenderOptions::plain());
-    let (_, csr_out) = csr_legacy_and_engine(&g, &RenderOptions::plain());
-    assert_same("nested_boxes (engine heap vs engine csr)", &heap_out, &csr_out);
 }
 
 /// Canonical spot checks for the ruled divergence classes: the corrected

@@ -22,6 +22,11 @@ pub(crate) const SUBGRAPH_V_PAD_BOTTOM: usize = 2; // ║     ║ + ╚═══
 /// Minimum gap between the bounding boxes of sibling subgraphs.
 pub(crate) const SIBLING_GAP: usize = 1;
 
+/// Horizontal expansion of a parent cluster's envelope around a child
+/// cluster's box: the child box already includes its own
+/// `SUBGRAPH_H_PAD`, so the parent needs only its border column.
+pub(crate) const PARENT_CHILD_H_GAP: usize = 1;
+
 /// Gap between adjacent nodes belonging to different clusters:
 /// both nodes' border padding plus the sibling gap between the boxes.
 pub(crate) const SG_GAP: usize = SUBGRAPH_H_PAD * 2 + SIBLING_GAP;
