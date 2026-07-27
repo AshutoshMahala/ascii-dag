@@ -115,6 +115,33 @@ pub(crate) fn render_colored<V: view::LayoutView>(
     out
 }
 
+/// Preview entry point for examples: plain engine render of a heap IR.
+///
+/// Hidden and unstable by design — the streaming-primary public surface
+/// (RW6) replaces this shim, at which point it is removed.
+#[doc(hidden)]
+#[cfg(feature = "alloc")]
+pub fn preview_render_plain(
+    ir: &crate::ir::LayoutIR<'_>,
+    options: &config::RenderOptions,
+) -> alloc::string::String {
+    render_plain(ir, options)
+}
+
+/// Preview entry point for examples: colored engine render of a heap IR
+/// (legend included when `options.legend` is set).
+///
+/// Hidden and unstable by design — removed at RW6. See
+/// [`preview_render_plain`].
+#[doc(hidden)]
+#[cfg(feature = "alloc")]
+pub fn preview_render_colored(
+    ir: &crate::ir::LayoutIR<'_>,
+    options: &config::RenderOptions,
+) -> alloc::string::String {
+    render_colored(ir, options)
+}
+
 pub use charset::Charset;
 pub use color::{CellColor, ColorMode};
 pub use config::{DEFAULT_BAND_ROWS, RenderOptions};

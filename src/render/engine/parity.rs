@@ -483,3 +483,166 @@ fn parity_hero_and_golden() {
 // The shared hero fixture refers to the crate by its external name.
 use crate as ascii_dag;
 include!("../../../examples/shared/hero_graph.rs");
+
+// ── BottomUp rendering (RW5) ─────────────────────────────────────────────
+//
+// The first direction-aware output: the geometry-driven primitives
+// paint the physical BT IR with no direction-specific code paths. No
+// legacy comparisons exist here (the legacy renderers never painted
+// BT); the invariants are cross-backend byte-identity, D4 semantics,
+// and render-vs-IR physical consistency.
+
+mod bt {
+    use super::*;
+    use crate::graph::Direction;
+
+    fn bt_heap_ir(g: fn() -> Graph<'static>) -> crate::ir::LayoutIR<'static> {
+        let mut graph = g();
+        graph.set_direction(Direction::BottomUp);
+        graph.compute_layout()
+    }
+
+    fn bt_csr_render(g: &Graph<'_>, options: &RenderOptions) -> String {
+        let mut config = LayoutConfig::standard();
+        config.direction = Direction::BottomUp;
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+            .expect("CSR layout");
+        render_plain(&ir, options)
+    }
+
+    /// BT output must be byte-identical from both IRs, plain and colored.
+    #[test]
+    fn bt_engine_self_parity_across_backends() {
+        let corpus: [CorpusEntry; 10] = [
+            ("chain", chain),
+            ("fan", fan),
+            ("stage", stage),
+            ("skip", skip),
+            ("back_edges", back_edges),
+            ("two_cycle", two_cycle),
+            ("self_loop", self_loop),
+            ("colliding_labels", colliding_labels),
+            ("nested_boxes", nested_boxes),
+            ("implicit_nodes", implicit_nodes),
+        ];
+        for (tag, build) in corpus {
+            let heap_ir = bt_heap_ir(build);
+            let heap_out = render_plain(&heap_ir, &RenderOptions::plain());
+            let csr_out = bt_csr_render(&build(), &RenderOptions::plain());
+            assert_same(&format!("{tag} (BT heap vs csr)"), &heap_out, &csr_out);
+
+            let mut colored = RenderOptions::colored(Palette::Ansi);
+            colored.legend = false;
+            let heap_col = render_colored(&heap_ir, &colored);
+            let mut config = LayoutConfig::standard();
+            config.direction = Direction::BottomUp;
+            let g = build();
+            let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+            let mut csr_arena = Arena::new(&mut csr_buf);
+            let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+            let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+            let mut temp_buf = vec![0u8; size];
+            let mut out_buf = vec![0u8; size];
+            let mut temp_arena = Arena::new(&mut temp_buf);
+            let mut out_arena = Arena::new(&mut out_buf);
+            let csr_ir = csr
+                .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+                .expect("CSR layout");
+            let csr_col = render_colored(&csr_ir, &colored);
+            assert_same(&format!("{tag} (BT colored heap vs csr)"), &heap_col, &csr_col);
+        }
+    }
+
+    /// D4 semantics: growth flips, content does not. Sources render at
+    /// the bottom, forward arrows point up, the box label stays at the
+    /// physical top of its box.
+    #[test]
+    fn bt_stage_semantics() {
+        let ir = bt_heap_ir(stage);
+        let out = render_plain(&ir, &RenderOptions::plain());
+        let lines: Vec<&str> = out.lines().collect();
+
+        let row_of = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap();
+        assert!(
+            row_of("[Start]") > row_of("[End]"),
+            "BT: source must render below target:\n{out}"
+        );
+        assert!(out.contains('↑'), "forward arrows point up:\n{out}");
+        assert!(!out.contains('↓'), "no downward arrows in BT:\n{out}");
+
+        // Box label at the physical top of the box (content atomicity).
+        let sg = &ir.subgraphs()[0];
+        assert_eq!(row_of("Stage"), sg.y + 1, "box label just below top border:\n{out}");
+        assert!(lines[sg.y].contains('╔'), "top border row:\n{out}");
+
+        // The edge label renders too (its row is IR-physical).
+        assert!(out.contains("\"go\""), "edge label present:\n{out}");
+    }
+
+    /// Reversed (back) edges mirror: their dashed arrow points down,
+    /// painted above the layout-source.
+    #[test]
+    fn bt_back_edges_semantics() {
+        let out = render_plain(&bt_heap_ir(back_edges), &RenderOptions::plain());
+        assert!(out.contains('⇣'), "reversed arrow points down in BT:\n{out}");
+        assert!(!out.contains('⇡'), "no upward dashed arrows in BT:\n{out}");
+        assert!(out.contains('↑'), "forward arrows point up:\n{out}");
+    }
+
+    /// Render-vs-IR physical consistency: every real node's label paints
+    /// exactly on its IR row (the physical-coordinate contract, S3).
+    #[test]
+    fn bt_nodes_render_on_their_ir_rows() {
+        let corpus: [CorpusEntry; 5] = [
+            ("chain", chain),
+            ("fan", fan),
+            ("stage", stage),
+            ("skip", skip),
+            ("two_cycle", two_cycle),
+        ];
+        for (tag, build) in corpus {
+            let ir = bt_heap_ir(build);
+            let out = render_plain(&ir, &RenderOptions::plain());
+            let lines: Vec<&str> = out.lines().collect();
+            for node in ir.nodes() {
+                if matches!(node.kind, crate::ir::NodeKind::Dummy) {
+                    continue;
+                }
+                let row = lines.get(node.y).copied().unwrap_or("");
+                assert!(
+                    row.contains(node.label),
+                    "{tag}: node '{}' missing from its IR row {}:\n{out}",
+                    node.label,
+                    node.y,
+                );
+            }
+        }
+    }
+
+    /// The hero graph, upside down — the full-feature BT smoke test.
+    #[test]
+    fn bt_hero_renders() {
+        let ir = bt_heap_ir(hero_graph);
+        let out = render_plain(&ir, &RenderOptions::plain());
+        assert!(out.contains('↑') && !out.contains('↓'), "{out}");
+        // All box labels present.
+        for label in ["Services", "Data", "Async"] {
+            assert!(out.contains(label), "box label {label} present:\n{out}");
+        }
+        let lines: Vec<&str> = out.lines().collect();
+        let row_of = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap();
+        assert!(
+            row_of("[Client]") > row_of("[Dash]"),
+            "hero BT: Client at bottom:\n{out}"
+        );
+    }
+}

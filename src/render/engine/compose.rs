@@ -195,6 +195,12 @@ pub(crate) fn composite_band<V: LayoutView>(
 
 // ── Edges ────────────────────────────────────────────────────────────────
 
+/// Rows strictly between two anchors, in either order.
+#[inline]
+fn between(a: usize, b: usize) -> core::ops::Range<usize> {
+    (a.min(b) + 1)..a.max(b)
+}
+
 fn paint_edge<V: LayoutView>(
     view: &V,
     plan: &RenderPlan,
@@ -206,32 +212,48 @@ fn paint_edge<V: LayoutView>(
     let paint = Paint::Color(plan.edge_plan(edge_index).color);
     let rev = e.reversed;
 
+    // Flow derives from the geometry (M4): +1 when the target sits below
+    // the source (TopDown layouts), −1 when above (BottomUp layouts).
+    // The Direction enum is never consulted here.
+    let dir: isize = if e.to_y >= e.from_y { 1 } else { -1 };
+    let off = |y: usize, k: isize| (y as isize + k * dir) as usize;
+    let fwd = if dir > 0 { Dir::Down } else { Dir::Up };
+    let bwd = if dir > 0 { Dir::Up } else { Dir::Down };
+
     match e.path {
         PathRef::Direct | PathRef::Spline { .. } => {
-            vertical_run(canvas, e.from_x, e.from_y, e.to_y, w, rev, paint);
-        }
-        PathRef::Corner { horizontal_y } => {
-            if horizontal_y > e.from_y {
-                for y in (e.from_y + 1)..horizontal_y {
-                    if rev && y == e.from_y + 1 {
-                        canvas.marker(e.from_x, y, MarkerKind::Arrow, Dir::Up, true, paint);
-                    } else {
-                        canvas.stroke(e.from_x, y, w, w, Weight::None, Weight::None, paint);
-                    }
+            for y in between(e.from_y, e.to_y) {
+                if !rev && y == off(e.to_y, -1) {
+                    canvas.marker(e.from_x, y, MarkerKind::Arrow, fwd, false, paint);
+                } else if rev && y == off(e.from_y, 1) {
+                    canvas.marker(e.from_x, y, MarkerKind::Arrow, bwd, true, paint);
+                } else {
+                    canvas.stroke(e.from_x, y, w, w, Weight::None, Weight::None, paint);
                 }
             }
+        }
+        PathRef::Corner { horizontal_y } => {
+            for y in between(e.from_y, horizontal_y) {
+                if rev && y == off(e.from_y, 1) {
+                    canvas.marker(e.from_x, y, MarkerKind::Arrow, bwd, true, paint);
+                } else {
+                    canvas.stroke(e.from_x, y, w, w, Weight::None, Weight::None, paint);
+                }
+            }
+            let bend_adjacent = (horizontal_y as isize - e.from_y as isize) * dir <= 1;
             h_run_with_corners(
                 canvas,
                 horizontal_y,
                 e.from_x,
                 e.to_x,
                 w,
-                rev && horizontal_y <= e.from_y + 1,
+                rev && bend_adjacent,
                 paint,
+                dir,
             );
-            for y in (horizontal_y + 1)..e.to_y {
-                if !rev && y == e.to_y - 1 {
-                    canvas.marker(e.to_x, y, MarkerKind::Arrow, Dir::Down, false, paint);
+            for y in between(horizontal_y, e.to_y) {
+                if !rev && y == off(e.to_y, -1) {
+                    canvas.marker(e.to_x, y, MarkerKind::Arrow, fwd, false, paint);
                 } else {
                     canvas.stroke(e.to_x, y, w, w, Weight::None, Weight::None, paint);
                 }
@@ -242,14 +264,14 @@ fn paint_edge<V: LayoutView>(
             start_y,
             end_y,
         } => {
-            h_run_with_corners(canvas, start_y, e.from_x, channel_x, w, false, paint);
-            for y in (start_y + 1)..end_y {
+            h_run_with_corners(canvas, start_y, e.from_x, channel_x, w, false, paint, dir);
+            for y in between(start_y, end_y) {
                 canvas.stroke(channel_x, y, w, w, Weight::None, Weight::None, paint);
             }
-            h_run_with_corners(canvas, end_y, channel_x, e.to_x, w, false, paint);
-            for y in (end_y + 1)..e.to_y {
-                if !rev && y == e.to_y - 1 {
-                    canvas.marker(e.to_x, y, MarkerKind::Arrow, Dir::Down, false, paint);
+            h_run_with_corners(canvas, end_y, channel_x, e.to_x, w, false, paint, dir);
+            for y in between(end_y, e.to_y) {
+                if !rev && y == off(e.to_y, -1) {
+                    canvas.marker(e.to_x, y, MarkerKind::Arrow, fwd, false, paint);
                 } else {
                     canvas.stroke(e.to_x, y, w, w, Weight::None, Weight::None, paint);
                 }
@@ -270,44 +292,48 @@ fn paint_edge<V: LayoutView>(
                 };
                 let last = i == waypoints.len();
                 if px == nx {
-                    let start = if first { py + 1 } else { py };
-                    for y in start..ny {
-                        if first && rev && y == py + 1 {
-                            canvas.marker(px, y, MarkerKind::Arrow, Dir::Up, true, paint);
-                        } else if last && !rev && y == ny - 1 {
-                            canvas.marker(px, y, MarkerKind::Arrow, Dir::Down, false, paint);
+                    for y in between(py, ny) {
+                        if first && rev && y == off(py, 1) {
+                            canvas.marker(px, y, MarkerKind::Arrow, bwd, true, paint);
+                        } else if last && !rev && y == off(ny, -1) {
+                            canvas.marker(px, y, MarkerKind::Arrow, fwd, false, paint);
                         } else {
                             canvas.stroke(px, y, w, w, Weight::None, Weight::None, paint);
                         }
                     }
+                    // The waypoint row itself carries the vertical for
+                    // non-first segments (legacy gap fill).
+                    if !first {
+                        canvas.stroke(px, py, w, w, Weight::None, Weight::None, paint);
+                    }
                 } else {
-                    let corner_y = py + 1 + if first { start_y_offset } else { 0 };
+                    let corner_y = off(py, 1 + if first { start_y_offset as isize } else { 0 });
                     if first && start_y_offset > 0 {
-                        for y in (py + 1)..corner_y {
-                            if rev && y == py + 1 {
-                                canvas.marker(px, y, MarkerKind::Arrow, Dir::Up, true, paint);
+                        for y in between(py, corner_y) {
+                            if rev && y == off(py, 1) {
+                                canvas.marker(px, y, MarkerKind::Arrow, bwd, true, paint);
                             } else {
                                 canvas.stroke(px, y, w, w, Weight::None, Weight::None, paint);
                             }
                         }
                     }
-                    // Waypoint-row gap fill (legacy: non-first segments
-                    // draw a vertical through their own waypoint row).
                     if !first {
                         canvas.stroke(px, py, w, w, Weight::None, Weight::None, paint);
                     }
+                    let bend_adjacent = (corner_y as isize - py as isize) * dir <= 1;
                     h_run_with_corners(
                         canvas,
                         corner_y,
                         px,
                         nx,
                         w,
-                        first && rev && corner_y <= py + 1,
+                        first && rev && bend_adjacent,
                         paint,
+                        dir,
                     );
-                    for y in (corner_y + 1)..ny {
-                        if last && !rev && y == ny - 1 {
-                            canvas.marker(nx, y, MarkerKind::Arrow, Dir::Down, false, paint);
+                    for y in between(corner_y, ny) {
+                        if last && !rev && y == off(ny, -1) {
+                            canvas.marker(nx, y, MarkerKind::Arrow, fwd, false, paint);
                         } else {
                             canvas.stroke(nx, y, w, w, Weight::None, Weight::None, paint);
                         }
@@ -321,34 +347,11 @@ fn paint_edge<V: LayoutView>(
     }
 }
 
-/// Vertical run between two node anchors with endpoint markers
-/// (geometry-driven: works for either y ordering).
-fn vertical_run(
-    canvas: &mut BandCanvas<'_>,
-    x: usize,
-    from_y: usize,
-    to_y: usize,
-    w: Weight,
-    reversed: bool,
-    paint: Paint,
-) {
-    let (lo, hi) = (from_y.min(to_y), from_y.max(to_y));
-    for y in (lo + 1)..hi {
-        let at_target_arrow = !reversed && y == to_y.wrapping_sub(1) && to_y > from_y;
-        let at_source_arrow = reversed && y == from_y + 1;
-        if at_target_arrow {
-            canvas.marker(x, y, MarkerKind::Arrow, Dir::Down, false, paint);
-        } else if at_source_arrow {
-            canvas.marker(x, y, MarkerKind::Arrow, Dir::Up, true, paint);
-        } else {
-            canvas.stroke(x, y, w, w, Weight::None, Weight::None, paint);
-        }
-    }
-}
-
-/// Horizontal run with corner arms at both ends. `reversed_hack` paints
-/// the legacy "no room for ⇡, put it at the corner" marker at the start
-/// end instead of a corner.
+/// Horizontal run with corner arms at both ends. The start end's
+/// vertical arm points back toward the source (against the flow), the
+/// far end's arm continues with the flow toward the target.
+/// `reversed_hack` paints the legacy "no room for the reversed arrow,
+/// put it at the corner" marker at the start end instead of a corner.
 #[allow(clippy::too_many_arguments)]
 fn h_run_with_corners(
     canvas: &mut BandCanvas<'_>,
@@ -358,27 +361,32 @@ fn h_run_with_corners(
     w: Weight,
     reversed_hack: bool,
     paint: Paint,
+    dir: isize,
 ) {
     if x_start == x_end {
         return;
     }
+    let n = Weight::None;
     let (lo, hi) = (x_start.min(x_end), x_start.max(x_end));
     for x in (lo + 1)..hi {
-        canvas.stroke(x, row, Weight::None, Weight::None, w, w, paint);
+        canvas.stroke(x, row, n, n, w, w, paint);
     }
-    // Start end: the edge arrives from above (up arm) and turns toward
-    // the run; far end: the edge continues downward (down arm).
+    // Vertical arms: anti-flow at the start (toward the source), flow at
+    // the end (toward the target).
+    let (src_up, src_down) = if dir > 0 { (w, n) } else { (n, w) };
+    let (tgt_up, tgt_down) = if dir > 0 { (n, w) } else { (w, n) };
     if reversed_hack {
-        canvas.marker(x_start, row, MarkerKind::Arrow, Dir::Up, true, paint);
+        let bwd = if dir > 0 { Dir::Up } else { Dir::Down };
+        canvas.marker(x_start, row, MarkerKind::Arrow, bwd, true, paint);
     } else if x_start < x_end {
-        canvas.stroke(x_start, row, w, Weight::None, Weight::None, w, paint);
+        canvas.stroke(x_start, row, src_up, src_down, n, w, paint);
     } else {
-        canvas.stroke(x_start, row, w, Weight::None, w, Weight::None, paint);
+        canvas.stroke(x_start, row, src_up, src_down, w, n, paint);
     }
     if x_start < x_end {
-        canvas.stroke(x_end, row, Weight::None, w, w, Weight::None, paint);
+        canvas.stroke(x_end, row, tgt_up, tgt_down, w, n, paint);
     } else {
-        canvas.stroke(x_end, row, Weight::None, w, Weight::None, w, paint);
+        canvas.stroke(x_end, row, tgt_up, tgt_down, n, w, paint);
     }
 }
 

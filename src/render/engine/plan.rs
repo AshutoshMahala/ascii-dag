@@ -15,9 +15,9 @@
 //! geometry the painter uses. The RW3/RW4 dual-run harness arbitrates
 //! any residual mismatch byte-precisely.
 //!
-//! Direction note: placement geometry is computed for `TopDown` layouts
-//! in this phase; BottomUp compositing (RW5) extends the bend-row
-//! formulas to physical BT coordinates.
+//! Placement geometry is direction-generic: bend rows and vertical
+//! spans derive their flow sign from each edge's own coordinates,
+//! mirroring the compositor (M4).
 
 use super::color::CellColor;
 use super::config::RenderOptions;
@@ -451,6 +451,8 @@ fn h_runs_at(
             waypoints,
             start_y_offset,
         } => {
+            // Flow sign from geometry (mirrors the compositor exactly).
+            let dir: isize = if to_y >= from_y { 1 } else { -1 };
             let mut px = from_x;
             let mut py = from_y;
             let mut first = true;
@@ -461,7 +463,8 @@ fn h_runs_at(
                     (to_x, to_y)
                 };
                 if px != nx && py != ny {
-                    let corner_y = py + 1 + if first { start_y_offset } else { 0 };
+                    let step = 1 + if first { start_y_offset as isize } else { 0 };
+                    let corner_y = (py as isize + dir * step) as usize;
                     if row == corner_y {
                         push(px, nx);
                     }
@@ -504,17 +507,19 @@ fn v_cols_at(
             n += 1;
         }
     };
+    // Order-free strictly-between test (works for either flow).
+    let betw = |a: usize, b: usize, r: usize| r > a.min(b) && r < a.max(b);
     match *path {
         PathRef::Direct | PathRef::Spline { .. } => {
-            if row > from_y && row < to_y {
+            if betw(from_y, to_y, row) {
                 push(from_x);
             }
         }
         PathRef::Corner { horizontal_y } => {
-            if row > from_y && row < horizontal_y {
+            if betw(from_y, horizontal_y, row) {
                 push(from_x);
             }
-            if row > horizontal_y && row < to_y {
+            if betw(horizontal_y, to_y, row) {
                 push(to_x);
             }
         }
@@ -523,10 +528,10 @@ fn v_cols_at(
             start_y,
             end_y,
         } => {
-            if row > start_y && row < end_y {
+            if betw(start_y, end_y, row) {
                 push(channel_x);
             }
-            if row > end_y && row < to_y {
+            if betw(end_y, to_y, row) {
                 push(to_x);
             }
         }
@@ -534,6 +539,7 @@ fn v_cols_at(
             waypoints,
             start_y_offset,
         } => {
+            let dir: isize = if to_y >= from_y { 1 } else { -1 };
             let mut px = from_x;
             let mut py = from_y;
             let mut first = true;
@@ -544,15 +550,16 @@ fn v_cols_at(
                     (to_x, to_y)
                 };
                 if px == nx {
-                    if row > py && row < ny {
+                    if betw(py, ny, row) {
                         push(px);
                     }
                 } else if py != ny {
-                    let corner_y = py + 1 + if first { start_y_offset } else { 0 };
-                    if row > py && row < corner_y {
+                    let step = 1 + if first { start_y_offset as isize } else { 0 };
+                    let corner_y = (py as isize + dir * step) as usize;
+                    if betw(py, corner_y, row) {
                         push(px);
                     }
-                    if row > corner_y && row < ny {
+                    if betw(corner_y, ny, row) {
                         push(nx);
                     }
                 }
