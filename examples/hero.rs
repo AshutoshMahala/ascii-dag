@@ -10,15 +10,18 @@
 //! - Self-cycle (node loops back to itself)
 //! - Reversed edge (back-edge, renders with dashed lines)
 //! - BottomUp direction (graph grows upward, arrows point up)
+//! - ASCII charset (pure-ASCII glyph projection of the same canvas)
 //!
 //! Run:
 //!   cargo run --example hero              # plain
 //!   cargo run --example hero -- --color   # ANSI colors + legend
 //!   cargo run --example hero -- --bt      # BottomUp (flags combine)
+//!   cargo run --example hero -- --ascii   # ASCII glyphs (flags combine)
 //!
-//! TopDown renders through the legacy scanline renderers (they are the
-//! golden-snapshot authority until RW8); --bt renders through the new
-//! engine, the only direction-aware paint path.
+//! The unflagged and --color-only paths render through the legacy
+//! scanline renderers (they are the golden-snapshot authority until
+//! RW8); --bt and --ascii render through the new engine — the only
+//! paint path with direction and charset support.
 
 use ascii_dag::render::colors::Palette;
 use ascii_dag::render::engine;
@@ -33,6 +36,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let use_color = args.iter().any(|a| a == "--color" || a == "-c");
     let bottom_up = args.iter().any(|a| a == "--bt");
+    let ascii = args.iter().any(|a| a == "--ascii" || a == "-a");
 
     if bottom_up {
         g.set_direction(Direction::BottomUp);
@@ -40,13 +44,25 @@ fn main() {
 
     let ir = g.compute_layout();
 
-    let output = match (bottom_up, use_color) {
-        (true, true) => {
-            engine::preview_render_colored(&ir, &engine::RenderOptions::colored(Palette::Ansi))
+    let output = if bottom_up || ascii {
+        // Engine path: the only renderer with direction/charset support.
+        let mut opts = if use_color {
+            engine::RenderOptions::colored(Palette::Ansi)
+        } else {
+            engine::RenderOptions::plain()
+        };
+        if ascii {
+            opts.charset = engine::Charset::Ascii;
         }
-        (true, false) => engine::preview_render_plain(&ir, &engine::RenderOptions::plain()),
-        (false, true) => ir.render_scanline_colored_with_legend(Palette::Ansi),
-        (false, false) => ir.render_scanline(),
+        if use_color {
+            engine::preview_render_colored(&ir, &opts)
+        } else {
+            engine::preview_render_plain(&ir, &opts)
+        }
+    } else if use_color {
+        ir.render_scanline_colored_with_legend(Palette::Ansi)
+    } else {
+        ir.render_scanline()
     };
     println!("{}", output);
 
