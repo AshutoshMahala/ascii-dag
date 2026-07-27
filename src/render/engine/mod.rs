@@ -30,11 +30,35 @@
 pub(crate) mod cell;
 pub(crate) mod charset;
 pub(crate) mod color;
+#[cfg(feature = "alloc")]
+pub(crate) mod compose;
 pub(crate) mod config;
+#[cfg(feature = "alloc")]
+pub(crate) mod emit;
+#[cfg(all(test, feature = "std", feature = "arena"))]
+mod parity;
 #[cfg(feature = "alloc")]
 pub(crate) mod plan;
 pub(crate) mod style;
 pub(crate) mod view;
+
+/// Render a laid-out view as plain text (single full-height band —
+/// banding and the public streaming surface arrive at RW6).
+#[cfg(feature = "alloc")]
+pub(crate) fn render_plain<V: view::LayoutView>(
+    view_ref: &V,
+    options: &config::RenderOptions,
+) -> alloc::string::String {
+    use alloc::string::String;
+    let plan = plan::RenderPlan::build(view_ref, options);
+    let mut cells = alloc::vec![cell::Cell::EMPTY; plan.width() * plan.height().max(1)];
+    let mut canvas =
+        compose::BandCanvas::new(&mut cells, plan.width(), 0, plan.height());
+    compose::composite_band(view_ref, &plan, options, &mut canvas);
+    let mut out = String::with_capacity(plan.width() * plan.height());
+    let _ = emit::emit_plain_band(&canvas, options.charset, &mut out);
+    out
+}
 
 pub use charset::Charset;
 pub use color::{CellColor, ColorMode};

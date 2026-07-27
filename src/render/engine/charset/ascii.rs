@@ -1,6 +1,6 @@
 //! ASCII decode table — semantic cells → plain-ASCII glyphs.
 //!
-//! An equal projection of the composed canvas (Ash's charset ruling):
+//! An equal projection of the composed canvas (the charset ruling):
 //! ASCII output never passes through Unicode glyphs first. Semantics
 //! match zigraph's `toAscii` so both libraries produce identical ASCII:
 //!
