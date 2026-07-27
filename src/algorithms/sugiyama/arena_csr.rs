@@ -753,9 +753,11 @@ pub fn compute_layout_arena_csr<'b>(
     )
     .ok_or(GraphError::BuilderFailed)?;
 
-    // Add buffer for edge routing (+4) plus label margin
-    let label_margin = if has_labeled_edges { 8 } else { 0 };
-    let canvas_width = max_width as usize + 4 + label_margin;
+    // max_width already includes the routing buffer and label/subgraph
+    // margins (see its computation after refinement) — adding them again
+    // here double-counted 12 columns vs the heap backend, caught by the
+    // LayoutView equivalence tests.
+    let canvas_width = max_width as usize;
     builder.set_dimensions(canvas_width, total_height);
     builder.set_level_count(max_level as usize + 1);
 

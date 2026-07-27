@@ -30,6 +30,7 @@
 pub(crate) mod cell;
 pub(crate) mod charset;
 pub(crate) mod color;
+pub(crate) mod view;
 
 pub use charset::Charset;
 pub use color::{CellColor, ColorMode};
