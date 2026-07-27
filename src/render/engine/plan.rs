@@ -132,8 +132,11 @@ impl RenderPlan {
                 let color = if style.color.is_set() {
                     style.color
                 } else if use_color && !palette.is_empty() {
-                    // Legacy default: palette modulo by edge index.
-                    CellColor::ansi256(colors::get_custom(palette, e.edge_index))
+                    // Legacy default: palette modulo by the IR edge-list
+                    // index (NOT the original edge_index — self-loops are
+                    // absent from the list, so positions shift; the legacy
+                    // colored renderer keys by list position).
+                    CellColor::ansi256(colors::get_custom(palette, i))
                 } else {
                     CellColor::DEFAULT
                 };

@@ -122,15 +122,16 @@ fn decode_stroke(up: Weight, down: Weight, left: Weight, right: Weight) -> char 
         // Double + light on the same axis after a partial merge — treat
         // the light arm as absorbed (closest pure-double glyph).
         (a, b, c, d) => {
+            // No exact glyph exists for this mix (e.g. a box corner with
+            // a light stroke passing through). Decode the double-arm
+            // subset only — borders visually dominate, and the stroke
+            // resumes on the neighboring cells (the legacy corner look).
             let fold = |k: u8| -> Weight {
                 match k {
-                    0 => W::None,
-                    _ => W::Double,
+                    2 => W::Double,
+                    _ => W::None,
                 }
             };
-            // All-double interpretation of the remaining pattern; the
-            // match above is exhaustive for every pattern the compositor
-            // can produce, so this fallback only guards degenerate mixes.
             decode_double_fallback(fold(a), fold(b), fold(c), fold(d))
         }
     }
@@ -138,13 +139,27 @@ fn decode_stroke(up: Weight, down: Weight, left: Weight, right: Weight) -> char 
 
 fn decode_double_fallback(up: Weight, down: Weight, left: Weight, right: Weight) -> char {
     use Weight as W;
-    let v = up == W::Double || down == W::Double;
-    let h = left == W::Double || right == W::Double;
-    match (v, h) {
-        (true, true) => '╬',
-        (true, false) => '║',
-        (false, true) => '═',
-        (false, false) => ' ',
+    // No exact glyph exists for this mix. Decode the double-arm subset
+    // only — borders visually dominate a light stroke passing through
+    // (e.g. a box corner crossed by an edge decodes as the corner, the
+    // stroke resuming on the next row — the legacy renderers' look).
+    let keep = |w: W| if w == W::Double { W::Double } else { W::None };
+    let (u, d2, l, r) = (keep(up), keep(down), keep(left), keep(right));
+    match (u, d2, l, r) {
+        (W::Double, W::None, W::None, W::None) | (W::None, W::Double, W::None, W::None) => '║',
+        (W::None, W::None, W::Double, W::None) | (W::None, W::None, W::None, W::Double) => '═',
+        (W::Double, W::Double, W::None, W::None) => '║',
+        (W::None, W::None, W::Double, W::Double) => '═',
+        (W::None, W::Double, W::None, W::Double) => '╔',
+        (W::None, W::Double, W::Double, W::None) => '╗',
+        (W::Double, W::None, W::None, W::Double) => '╚',
+        (W::Double, W::None, W::Double, W::None) => '╝',
+        (W::None, W::Double, W::Double, W::Double) => '╦',
+        (W::Double, W::None, W::Double, W::Double) => '╩',
+        (W::Double, W::Double, W::None, W::Double) => '╠',
+        (W::Double, W::Double, W::Double, W::None) => '╣',
+        (W::Double, W::Double, W::Double, W::Double) => '╬',
+        _ => ' ',
     }
 }
 

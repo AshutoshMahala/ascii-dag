@@ -53,10 +53,65 @@ pub(crate) fn render_plain<V: view::LayoutView>(
     let plan = plan::RenderPlan::build(view_ref, options);
     let mut cells = alloc::vec![cell::Cell::EMPTY; plan.width() * plan.height().max(1)];
     let mut canvas =
-        compose::BandCanvas::new(&mut cells, plan.width(), 0, plan.height());
+        compose::BandCanvas::new(&mut cells, None, plan.width(), 0, plan.height());
     compose::composite_band(view_ref, &plan, options, &mut canvas);
     let mut out = String::with_capacity(plan.width() * plan.height());
     let _ = emit::emit_plain_band(&canvas, options.charset, &mut out);
+    out
+}
+
+/// Render a laid-out view with ANSI colors (and, when `options.legend`
+/// is set, the skipped-label legend — the legacy
+/// `render_scanline_colored_with_legend` shape).
+#[cfg(feature = "alloc")]
+pub(crate) fn render_colored<V: view::LayoutView>(
+    view_ref: &V,
+    options: &config::RenderOptions,
+) -> alloc::string::String {
+    use alloc::string::String;
+    use core::fmt::Write as _;
+    let plan = plan::RenderPlan::build(view_ref, options);
+    let area = plan.width() * plan.height().max(1);
+    let mut cells = alloc::vec![cell::Cell::EMPTY; area];
+    let mut color_cells = alloc::vec![color::CellColor::DEFAULT; area];
+    let mut canvas = compose::BandCanvas::new(
+        &mut cells,
+        Some(&mut color_cells),
+        plan.width(),
+        0,
+        plan.height(),
+    );
+    compose::composite_band(view_ref, &plan, options, &mut canvas);
+    let mut out = String::with_capacity(area * 2);
+    let _ = emit::emit_colored_band(&canvas, options.charset, options.color_mode, &mut out);
+
+    // Legend for labels that could not be placed (legacy format).
+    if options.legend && !plan.legend_entries().is_empty() {
+        out.push_str("\nEdge labels:\n");
+        for &ei in plan.legend_entries() {
+            let e = view_ref.edge(ei);
+            let Some(label) = e.label else { continue };
+            let find_label = |id: usize| -> Option<alloc::string::String> {
+                (0..view_ref.node_count())
+                    .map(|i| view_ref.node(i))
+                    .find(|n| n.id == id && !matches!(n.kind, crate::ir::NodeKind::Dummy))
+                    .map(|n| alloc::string::String::from(n.label))
+            };
+            // Legacy lists an entry only when both endpoints resolve.
+            let (Some(from), Some(to)) = (find_label(e.from_id), find_label(e.to_id)) else {
+                continue;
+            };
+            let color = plan
+                .edge_plan(ei)
+                .color
+                .as_ansi256()
+                .unwrap_or(0);
+            let _ = writeln!(
+                out,
+                "  \x1b[38;5;{color}m{from} \u{2192} {to}: \"{label}\"\x1b[0m"
+            );
+        }
+    }
     out
 }
 

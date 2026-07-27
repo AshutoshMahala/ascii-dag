@@ -8,7 +8,8 @@
 #![cfg(all(test, feature = "std", feature = "arena"))]
 
 use super::config::RenderOptions;
-use super::render_plain;
+use super::{render_colored, render_plain};
+use crate::render::colors::Palette;
 use crate::algorithms::sugiyama::config::LayoutConfig;
 use crate::graph::Graph;
 use crate::graph::arena::Arena;
@@ -85,6 +86,25 @@ fn check(tag: &str, g: &Graph<'_>) {
 
 /// A corpus entry: fixture name + builder.
 type CorpusEntry = (&'static str, fn() -> Graph<'static>);
+
+fn check_heap_colored(tag: &str, g: &Graph<'_>) {
+    let ir = g.compute_layout();
+    // Without legend: legacy places labels geometrically (no row veto).
+    let legacy = ir.render_scanline_colored(Palette::Ansi);
+    let mut options = RenderOptions::colored(Palette::Ansi);
+    options.legend = false;
+    let engine = render_colored(&ir, &options);
+    assert_same(&format!("{tag} (heap colored)"), &legacy, &engine);
+
+    // With legend: the row-veto placement path plus the legend block.
+    let legacy_legend = ir.render_scanline_colored_with_legend(Palette::Ansi);
+    let engine_legend = render_colored(&ir, &RenderOptions::colored(Palette::Ansi));
+    assert_same(
+        &format!("{tag} (heap colored+legend)"),
+        &legacy_legend,
+        &engine_legend,
+    );
+}
 
 // ── Corpus ───────────────────────────────────────────────────────────────
 
@@ -294,6 +314,106 @@ fn parity_implicit_nodes_csr() {
 #[ignore = "class C divergence resolved by ruling: IR-width node painting is canonical; retires at RW8"]
 fn parity_implicit_nodes_heap() {
     check_heap("implicit_nodes", &implicit_nodes());
+}
+
+#[test]
+fn parity_colored_chain() {
+    check_heap_colored("chain", &chain());
+}
+
+#[test]
+fn parity_colored_stage() {
+    check_heap_colored("stage", &stage());
+}
+
+#[test]
+fn parity_colored_two_cycle() {
+    check_heap_colored("two_cycle", &two_cycle());
+}
+
+#[test]
+fn parity_colored_self_loop() {
+    check_heap_colored("self_loop", &self_loop());
+}
+
+#[test]
+fn parity_colored_colliding_labels() {
+    check_heap_colored("colliding_labels", &colliding_labels());
+}
+
+// The colored legacy path merges junctions (`merge_chars`), so the
+// class-A fixtures are expected to byte-match the engine here even
+// though their plain outputs diverged.
+#[test]
+fn parity_colored_fan() {
+    check_heap_colored("fan", &fan());
+}
+
+#[test]
+fn parity_colored_skip() {
+    check_heap_colored("skip", &skip());
+}
+
+#[test]
+fn parity_colored_back_edges() {
+    check_heap_colored("back_edges", &back_edges());
+}
+
+#[test]
+fn parity_colored_hero() {
+    check_heap_colored("hero", &hero_graph());
+}
+
+// Class C (implicit node width) and class B (overlapping nested
+// borders) apply to the colored legacy path too — same rulings.
+#[test]
+#[ignore = "class C divergence resolved by ruling: IR-width node painting is canonical; retires at RW8"]
+fn parity_colored_implicit_nodes() {
+    check_heap_colored("implicit_nodes", &implicit_nodes());
+}
+
+#[test]
+#[ignore = "class B divergence resolved by ruling: merged border junctions are canonical; retires at RW8"]
+fn parity_colored_nested_boxes() {
+    check_heap_colored("nested_boxes", &nested_boxes());
+}
+
+/// Colored engine output must also be identical from both IRs.
+#[test]
+fn engine_colored_self_parity_across_backends() {
+    let corpus: [CorpusEntry; 10] = [
+        ("chain", chain),
+        ("fan", fan),
+        ("stage", stage),
+        ("skip", skip),
+        ("back_edges", back_edges),
+        ("two_cycle", two_cycle),
+        ("self_loop", self_loop),
+        ("colliding_labels", colliding_labels),
+        ("nested_boxes", nested_boxes),
+        ("implicit_nodes", implicit_nodes),
+    ];
+    let options = RenderOptions::colored(Palette::Ansi);
+    for (tag, build) in corpus {
+        let g = build();
+        let ir = g.compute_layout();
+        let heap_out = render_colored(&ir, &options);
+
+        let config = LayoutConfig::standard();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let csr_ir = csr
+            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+            .expect("CSR layout");
+        let csr_out = render_colored(&csr_ir, &options);
+        assert_same(&format!("{tag} (colored heap vs csr)"), &heap_out, &csr_out);
+    }
 }
 
 /// The legacy-free invariant (N1): the engine renders byte-identical

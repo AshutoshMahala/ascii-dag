@@ -7,23 +7,41 @@
 //! a junction), then edge labels, nodes, and subgraph labels (text, in
 //! z-order).
 //!
+//! Colors follow the legacy colored renderer's semantics exactly: the
+//! last element to touch a cell owns its color (even where glyph
+//! precedence keeps the older glyph — an arrow crossed by a later edge
+//! keeps its shape but takes the newer color); subgraph borders and box
+//! labels never write colors (junction cells keep the crossing edge's
+//! color); node text explicitly resets to the terminal default.
+//!
 //! Fidelity note: stroke overlaps merge semantically (per-arm max) —
 //! the behavior of the legacy *colored* path (`merge_chars`), which the
 //! RW0 tests pin exhaustively. The legacy *plain* path was lossier in a
-//! few overlap cases (it overwrote corners with plain verticals); where
-//! the two legacy paths disagreed with each other, the engine renders
-//! the junction-preserving variant. The dual-run harness quantifies
-//! every such cell.
+//! few overlap cases; where the two legacy paths disagreed with each
+//! other, the engine renders the junction-preserving variant (ruled
+//! canonical for 0.10.0).
 
 use super::cell::{Cell, Dir, MarkerKind, Weight};
+use super::color::{CellColor, ColorMode};
 use super::config::RenderOptions;
 use super::plan::{LabelPlan, RenderPlan};
 use super::view::{LayoutView, PathRef};
 use crate::ir::NodeKind;
 
-/// A band-sized semantic canvas over caller-provided cells.
+/// Color effect of a paint op on a cell.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Paint {
+    /// Set the cell's color (legacy: `colors[x] = color`).
+    Color(CellColor),
+    /// Leave the cell's color untouched (legacy border/box-label ops).
+    KeepColor,
+}
+
+/// A band-sized semantic canvas over caller-provided cells, with an
+/// optional parallel color plane (present iff colors are enabled).
 pub(crate) struct BandCanvas<'a> {
     cells: &'a mut [Cell],
+    colors: Option<&'a mut [CellColor]>,
     width: usize,
     /// First global row of this band.
     y0: usize,
@@ -32,14 +50,29 @@ pub(crate) struct BandCanvas<'a> {
 
 impl<'a> BandCanvas<'a> {
     /// Wrap `cells` (must hold `width × rows`) as a band starting at
-    /// global row `y0`. Cells are cleared here.
-    pub(crate) fn new(cells: &'a mut [Cell], width: usize, y0: usize, rows: usize) -> Self {
-        debug_assert!(cells.len() >= width * rows);
+    /// global row `y0`. Both planes are cleared here.
+    pub(crate) fn new(
+        cells: &'a mut [Cell],
+        colors: Option<&'a mut [CellColor]>,
+        width: usize,
+        y0: usize,
+        rows: usize,
+    ) -> Self {
         for c in cells[..width * rows].iter_mut() {
             *c = Cell::EMPTY;
         }
+        if let Some(plane) = &colors {
+            debug_assert!(plane.len() >= width * rows);
+        }
+        let mut colors = colors;
+        if let Some(p) = &mut colors {
+            for c in p[..width * rows].iter_mut() {
+                *c = CellColor::DEFAULT;
+            }
+        }
         Self {
             cells,
+            colors,
             width,
             y0,
             rows,
@@ -55,45 +88,70 @@ impl<'a> BandCanvas<'a> {
         }
     }
 
-    /// The cell at global (x, y); `EMPTY` outside the band (free clip).
     #[inline]
-    pub(crate) fn get(&self, x: usize, y: usize) -> Cell {
-        self.idx(x, y).map_or(Cell::EMPTY, |i| self.cells[i])
+    fn apply_paint(&mut self, i: usize, paint: Paint) {
+        if let (Paint::Color(c), Some(plane)) = (paint, &mut self.colors) {
+            plane[i] = c;
+        }
     }
 
     #[inline]
-    pub(crate) fn stroke(&mut self, x: usize, y: usize, up: Weight, down: Weight, left: Weight, right: Weight) {
+    pub(crate) fn stroke(
+        &mut self,
+        x: usize,
+        y: usize,
+        up: Weight,
+        down: Weight,
+        left: Weight,
+        right: Weight,
+        paint: Paint,
+    ) {
         if let Some(i) = self.idx(x, y) {
             self.cells[i] = self.cells[i].painted_stroke(up, down, left, right);
+            self.apply_paint(i, paint);
         }
     }
 
     #[inline]
-    pub(crate) fn marker(&mut self, x: usize, y: usize, kind: MarkerKind, dir: Dir, dashed: bool) {
+    pub(crate) fn marker(
+        &mut self,
+        x: usize,
+        y: usize,
+        kind: MarkerKind,
+        dir: Dir,
+        dashed: bool,
+        paint: Paint,
+    ) {
         if let Some(i) = self.idx(x, y) {
             self.cells[i] = self.cells[i].painted_marker(kind, dir, dashed);
+            self.apply_paint(i, paint);
         }
     }
 
     #[inline]
-    pub(crate) fn text(&mut self, x: usize, y: usize, ch: char) {
+    pub(crate) fn text(&mut self, x: usize, y: usize, ch: char, paint: Paint) {
         if let Some(i) = self.idx(x, y) {
             self.cells[i] = self.cells[i].painted_text(ch);
+            self.apply_paint(i, paint);
         }
     }
 
-    /// One decoded row of the band (local row index).
+    /// One row of cells (local row index).
     pub(crate) fn row(&self, local_row: usize) -> &[Cell] {
         let start = local_row * self.width;
         &self.cells[start..start + self.width]
     }
 
-    pub(crate) fn rows(&self) -> usize {
-        self.rows
+    /// One row of the color plane, if colors are enabled.
+    pub(crate) fn color_row(&self, local_row: usize) -> Option<&[CellColor]> {
+        self.colors.as_ref().map(|p| {
+            let start = local_row * self.width;
+            &p[start..start + self.width]
+        })
     }
 
-    pub(crate) fn y0(&self) -> usize {
-        self.y0
+    pub(crate) fn rows(&self) -> usize {
+        self.rows
     }
 }
 
@@ -111,18 +169,25 @@ pub(crate) fn composite_band<V: LayoutView>(
     for i in 0..view.edge_count() {
         paint_edge(view, plan, i, canvas);
     }
-    // Z2: edge labels (plain-path decision; colored applies its stricter
-    // rule in the colored emitter, RW4).
+    // Z2: edge labels. Placement gate mirrors the three legacy paths:
+    // plain and colored-without-legend place geometrically; only the
+    // colored-with-legend path additionally vetoes rows hosting nodes.
+    let colored = !matches!(options.color_mode, ColorMode::None);
     for label in plan.labels() {
-        if label.placeable {
-            paint_edge_label(view, label, canvas);
+        let place = if colored && options.legend {
+            label.placed_colored()
+        } else {
+            label.placeable
+        };
+        if place {
+            paint_edge_label(view, plan, label, canvas);
         }
     }
     // Z3: nodes.
     for i in 0..view.node_count() {
         paint_node(view, i, options, canvas);
     }
-    // Z4: subgraph labels (always readable).
+    // Z4: subgraph labels (always readable; colors untouched).
     for i in 0..view.subgraph_count() {
         paint_subgraph_label(view, plan, i, canvas);
     }
@@ -138,27 +203,23 @@ fn paint_edge<V: LayoutView>(
 ) {
     let e = view.edge(edge_index);
     let w = plan.edge_plan(edge_index).weight.arm();
+    let paint = Paint::Color(plan.edge_plan(edge_index).color);
     let rev = e.reversed;
 
     match e.path {
         PathRef::Direct | PathRef::Spline { .. } => {
-            // Vertical from below the source to above the target;
-            // forward arrow above the target, reversed arrow below the
-            // source (legacy Direct semantics).
-            vertical_run(canvas, e.from_x, e.from_y, e.to_y, w, rev, true, true);
+            vertical_run(canvas, e.from_x, e.from_y, e.to_y, w, rev, paint);
         }
         PathRef::Corner { horizontal_y } => {
-            // Vertical from source down to the bend…
             if horizontal_y > e.from_y {
                 for y in (e.from_y + 1)..horizontal_y {
                     if rev && y == e.from_y + 1 {
-                        canvas.marker(e.from_x, y, MarkerKind::Arrow, Dir::Up, true);
+                        canvas.marker(e.from_x, y, MarkerKind::Arrow, Dir::Up, true, paint);
                     } else {
-                        canvas.stroke(e.from_x, y, w, w, Weight::None, Weight::None);
+                        canvas.stroke(e.from_x, y, w, w, Weight::None, Weight::None, paint);
                     }
                 }
             }
-            // …the bend row…
             h_run_with_corners(
                 canvas,
                 horizontal_y,
@@ -166,13 +227,13 @@ fn paint_edge<V: LayoutView>(
                 e.to_x,
                 w,
                 rev && horizontal_y <= e.from_y + 1,
+                paint,
             );
-            // …vertical from the bend to the target.
             for y in (horizontal_y + 1)..e.to_y {
                 if !rev && y == e.to_y - 1 {
-                    canvas.marker(e.to_x, y, MarkerKind::Arrow, Dir::Down, false);
+                    canvas.marker(e.to_x, y, MarkerKind::Arrow, Dir::Down, false, paint);
                 } else {
-                    canvas.stroke(e.to_x, y, w, w, Weight::None, Weight::None);
+                    canvas.stroke(e.to_x, y, w, w, Weight::None, Weight::None, paint);
                 }
             }
         }
@@ -181,16 +242,16 @@ fn paint_edge<V: LayoutView>(
             start_y,
             end_y,
         } => {
-            h_run_with_corners(canvas, start_y, e.from_x, channel_x, w, false);
+            h_run_with_corners(canvas, start_y, e.from_x, channel_x, w, false, paint);
             for y in (start_y + 1)..end_y {
-                canvas.stroke(channel_x, y, w, w, Weight::None, Weight::None);
+                canvas.stroke(channel_x, y, w, w, Weight::None, Weight::None, paint);
             }
-            h_run_with_corners(canvas, end_y, channel_x, e.to_x, w, false);
+            h_run_with_corners(canvas, end_y, channel_x, e.to_x, w, false, paint);
             for y in (end_y + 1)..e.to_y {
                 if !rev && y == e.to_y - 1 {
-                    canvas.marker(e.to_x, y, MarkerKind::Arrow, Dir::Down, false);
+                    canvas.marker(e.to_x, y, MarkerKind::Arrow, Dir::Down, false, paint);
                 } else {
-                    canvas.stroke(e.to_x, y, w, w, Weight::None, Weight::None);
+                    canvas.stroke(e.to_x, y, w, w, Weight::None, Weight::None, paint);
                 }
             }
         }
@@ -209,34 +270,31 @@ fn paint_edge<V: LayoutView>(
                 };
                 let last = i == waypoints.len();
                 if px == nx {
-                    // Pure vertical segment.
                     let start = if first { py + 1 } else { py };
                     for y in start..ny {
                         if first && rev && y == py + 1 {
-                            canvas.marker(px, y, MarkerKind::Arrow, Dir::Up, true);
+                            canvas.marker(px, y, MarkerKind::Arrow, Dir::Up, true, paint);
                         } else if last && !rev && y == ny - 1 {
-                            canvas.marker(px, y, MarkerKind::Arrow, Dir::Down, false);
+                            canvas.marker(px, y, MarkerKind::Arrow, Dir::Down, false, paint);
                         } else {
-                            canvas.stroke(px, y, w, w, Weight::None, Weight::None);
+                            canvas.stroke(px, y, w, w, Weight::None, Weight::None, paint);
                         }
                     }
                 } else {
-                    // Bend: vertical to the corner row, horizontal run,
-                    // vertical down to the next stop.
                     let corner_y = py + 1 + if first { start_y_offset } else { 0 };
                     if first && start_y_offset > 0 {
                         for y in (py + 1)..corner_y {
                             if rev && y == py + 1 {
-                                canvas.marker(px, y, MarkerKind::Arrow, Dir::Up, true);
+                                canvas.marker(px, y, MarkerKind::Arrow, Dir::Up, true, paint);
                             } else {
-                                canvas.stroke(px, y, w, w, Weight::None, Weight::None);
+                                canvas.stroke(px, y, w, w, Weight::None, Weight::None, paint);
                             }
                         }
                     }
                     // Waypoint-row gap fill (legacy: non-first segments
                     // draw a vertical through their own waypoint row).
                     if !first {
-                        canvas.stroke(px, py, w, w, Weight::None, Weight::None);
+                        canvas.stroke(px, py, w, w, Weight::None, Weight::None, paint);
                     }
                     h_run_with_corners(
                         canvas,
@@ -245,12 +303,13 @@ fn paint_edge<V: LayoutView>(
                         nx,
                         w,
                         first && rev && corner_y <= py + 1,
+                        paint,
                     );
                     for y in (corner_y + 1)..ny {
                         if last && !rev && y == ny - 1 {
-                            canvas.marker(nx, y, MarkerKind::Arrow, Dir::Down, false);
+                            canvas.marker(nx, y, MarkerKind::Arrow, Dir::Down, false, paint);
                         } else {
-                            canvas.stroke(nx, y, w, w, Weight::None, Weight::None);
+                            canvas.stroke(nx, y, w, w, Weight::None, Weight::None, paint);
                         }
                     }
                 }
@@ -264,7 +323,6 @@ fn paint_edge<V: LayoutView>(
 
 /// Vertical run between two node anchors with endpoint markers
 /// (geometry-driven: works for either y ordering).
-#[allow(clippy::too_many_arguments)]
 fn vertical_run(
     canvas: &mut BandCanvas<'_>,
     x: usize,
@@ -272,19 +330,18 @@ fn vertical_run(
     to_y: usize,
     w: Weight,
     reversed: bool,
-    arrow_at_target: bool,
-    arrow_at_source: bool,
+    paint: Paint,
 ) {
     let (lo, hi) = (from_y.min(to_y), from_y.max(to_y));
     for y in (lo + 1)..hi {
-        let at_target_arrow = arrow_at_target && !reversed && y == to_y.wrapping_sub(1) && to_y > from_y;
-        let at_source_arrow = arrow_at_source && reversed && y == from_y + 1;
+        let at_target_arrow = !reversed && y == to_y.wrapping_sub(1) && to_y > from_y;
+        let at_source_arrow = reversed && y == from_y + 1;
         if at_target_arrow {
-            canvas.marker(x, y, MarkerKind::Arrow, Dir::Down, false);
+            canvas.marker(x, y, MarkerKind::Arrow, Dir::Down, false, paint);
         } else if at_source_arrow {
-            canvas.marker(x, y, MarkerKind::Arrow, Dir::Up, true);
+            canvas.marker(x, y, MarkerKind::Arrow, Dir::Up, true, paint);
         } else {
-            canvas.stroke(x, y, w, w, Weight::None, Weight::None);
+            canvas.stroke(x, y, w, w, Weight::None, Weight::None, paint);
         }
     }
 }
@@ -292,6 +349,7 @@ fn vertical_run(
 /// Horizontal run with corner arms at both ends. `reversed_hack` paints
 /// the legacy "no room for ⇡, put it at the corner" marker at the start
 /// end instead of a corner.
+#[allow(clippy::too_many_arguments)]
 fn h_run_with_corners(
     canvas: &mut BandCanvas<'_>,
     row: usize,
@@ -299,27 +357,28 @@ fn h_run_with_corners(
     x_end: usize,
     w: Weight,
     reversed_hack: bool,
+    paint: Paint,
 ) {
     if x_start == x_end {
         return;
     }
     let (lo, hi) = (x_start.min(x_end), x_start.max(x_end));
     for x in (lo + 1)..hi {
-        canvas.stroke(x, row, Weight::None, Weight::None, w, w);
+        canvas.stroke(x, row, Weight::None, Weight::None, w, w, paint);
     }
     // Start end: the edge arrives from above (up arm) and turns toward
     // the run; far end: the edge continues downward (down arm).
     if reversed_hack {
-        canvas.marker(x_start, row, MarkerKind::Arrow, Dir::Up, true);
+        canvas.marker(x_start, row, MarkerKind::Arrow, Dir::Up, true, paint);
     } else if x_start < x_end {
-        canvas.stroke(x_start, row, w, Weight::None, Weight::None, w);
+        canvas.stroke(x_start, row, w, Weight::None, Weight::None, w, paint);
     } else {
-        canvas.stroke(x_start, row, w, Weight::None, w, Weight::None);
+        canvas.stroke(x_start, row, w, Weight::None, w, Weight::None, paint);
     }
     if x_start < x_end {
-        canvas.stroke(x_end, row, Weight::None, w, w, Weight::None);
+        canvas.stroke(x_end, row, Weight::None, w, w, Weight::None, paint);
     } else {
-        canvas.stroke(x_end, row, Weight::None, w, Weight::None, w);
+        canvas.stroke(x_end, row, Weight::None, w, Weight::None, w, paint);
     }
 }
 
@@ -332,22 +391,23 @@ fn paint_subgraph_border<V: LayoutView>(view: &V, index: usize, canvas: &mut Ban
     }
     let d = Weight::Double;
     let n = Weight::None;
+    let k = Paint::KeepColor;
     let top = sg.y;
     let bottom = sg.y + sg.height - 1;
     let left = sg.x;
     let right = sg.x + sg.width - 1;
 
-    canvas.stroke(left, top, n, d, n, d);
-    canvas.stroke(right, top, n, d, d, n);
-    canvas.stroke(left, bottom, d, n, n, d);
-    canvas.stroke(right, bottom, d, n, d, n);
+    canvas.stroke(left, top, n, d, n, d, k);
+    canvas.stroke(right, top, n, d, d, n, k);
+    canvas.stroke(left, bottom, d, n, n, d, k);
+    canvas.stroke(right, bottom, d, n, d, n, k);
     for x in (left + 1)..right {
-        canvas.stroke(x, top, n, n, d, d);
-        canvas.stroke(x, bottom, n, n, d, d);
+        canvas.stroke(x, top, n, n, d, d, k);
+        canvas.stroke(x, bottom, n, n, d, d, k);
     }
     for y in (top + 1)..bottom {
-        canvas.stroke(left, y, d, d, n, n);
-        canvas.stroke(right, y, d, d, n, n);
+        canvas.stroke(left, y, d, d, n, n, k);
+        canvas.stroke(right, y, d, d, n, n, k);
     }
 }
 
@@ -368,7 +428,7 @@ fn paint_subgraph_label<V: LayoutView>(
     let max_len = sg.width.saturating_sub(4);
     let mut x = sg.x + 2;
     for ch in sg.label.chars().take(max_len) {
-        canvas.text(x, label_y, ch);
+        canvas.text(x, label_y, ch, Paint::KeepColor);
         x += 1;
     }
 }
@@ -382,45 +442,52 @@ fn paint_node<V: LayoutView>(
     canvas: &mut BandCanvas<'_>,
 ) {
     let n = view.node(index);
+    let default = Paint::Color(CellColor::DEFAULT);
     if matches!(n.kind, NodeKind::Dummy) {
         if options.show_dummy_nodes {
-            canvas.marker(n.x, n.y, MarkerKind::Dummy, Dir::Up, false);
+            canvas.marker(n.x, n.y, MarkerKind::Dummy, Dir::Up, false, default);
         }
         return;
     }
     // Bracket row at the node's top row (content atomicity, D4). The
     // closing bracket sits at the node's declared width (arena widths
-    // can exceed label+2 — the legacy arena renderer pads; heap widths
-    // are always exactly label+2, so both agree). Cells between the
-    // label and the bracket are left untouched, like both legacy paths.
+    // can exceed label+2 — the padded interior cells are left
+    // untouched, like the legacy renderers). Node text explicitly
+    // resets colors to the terminal default (legacy colored behavior).
     let close_x = n.x + n.width.saturating_sub(1);
     let mut x = n.x;
-    canvas.text(x, n.y, '[');
+    canvas.text(x, n.y, '[', default);
     x += 1;
     for ch in n.label.chars() {
         if x >= close_x {
             break;
         }
-        canvas.text(x, n.y, ch);
+        canvas.text(x, n.y, ch, default);
         x += 1;
     }
     if n.width >= 2 {
-        canvas.text(close_x, n.y, ']');
+        canvas.text(close_x, n.y, ']', default);
     }
     if n.has_self_loop {
-        canvas.marker(close_x + 1, n.y, MarkerKind::SelfLoop, Dir::Up, false);
+        canvas.marker(close_x + 1, n.y, MarkerKind::SelfLoop, Dir::Up, false, default);
     }
 }
 
-fn paint_edge_label<V: LayoutView>(view: &V, label: &LabelPlan, canvas: &mut BandCanvas<'_>) {
+fn paint_edge_label<V: LayoutView>(
+    view: &V,
+    plan: &RenderPlan,
+    label: &LabelPlan,
+    canvas: &mut BandCanvas<'_>,
+) {
     let e = view.edge(label.edge_index);
     let Some(text) = e.label else { return };
+    let paint = Paint::Color(plan.edge_plan(label.edge_index).label_color);
     let mut x = label.x;
-    canvas.text(x, label.y, '"');
+    canvas.text(x, label.y, '"', paint);
     x += 1;
     for ch in text.chars() {
-        canvas.text(x, label.y, ch);
+        canvas.text(x, label.y, ch, paint);
         x += 1;
     }
-    canvas.text(x, label.y, '"');
+    canvas.text(x, label.y, '"', paint);
 }
