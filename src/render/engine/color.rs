@@ -27,7 +27,7 @@ const TAG_ANSI: u32 = 1;
 const TAG_RGB: u32 = 2;
 
 /// One packed color value. All-zero = terminal default (no escape).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct CellColor(u32);
 
 impl CellColor {

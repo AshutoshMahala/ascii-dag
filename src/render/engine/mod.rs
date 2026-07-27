@@ -30,7 +30,16 @@
 pub(crate) mod cell;
 pub(crate) mod charset;
 pub(crate) mod color;
+pub(crate) mod config;
+#[cfg(feature = "alloc")]
+pub(crate) mod plan;
+pub(crate) mod style;
 pub(crate) mod view;
 
 pub use charset::Charset;
 pub use color::{CellColor, ColorMode};
+pub use config::{DEFAULT_BAND_ROWS, RenderOptions};
+pub use style::{
+    EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPlacement, LabelPosition, LineWeight,
+    MarkerShape, NodeBorder, NodeStyle, NodeStyleCtx, SubgraphStyle, SubgraphStyleCtx,
+};
