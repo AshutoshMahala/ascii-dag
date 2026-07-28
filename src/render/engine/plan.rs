@@ -4,9 +4,10 @@
 //! Built once per (view, options) in O(N + E + S): per-element styles
 //! (the only place style fns run — Q4), a spatial index of elements
 //! sorted by row range (band queries, hit-testing), edge-label
-//! placement decisions, and the band partition. The plan holds plain
-//! owned data — no borrows — so it is reusable across renders of the
-//! same IR (R5.2).
+//! placement decisions, and the band partition. Storage is heap-owned
+//! or arena-carved (`PlanBuf`); either way the plan borrows nothing
+//! from the view, so it is reusable across renders of the same IR
+//! (R5.2).
 //!
 //! Label placement reproduces the legacy renderers' semantics
 //! **geometrically** (no cell buffer): a label may occupy empty cells or
@@ -21,21 +22,48 @@
 
 use super::color::CellColor;
 use super::config::RenderOptions;
+use super::mem::PlanBuf;
 use super::style::{EdgeStyle, EdgeStyleCtx, LabelPosition, LineWeight, SubgraphStyleCtx};
 use super::view::{LayoutView, PathRef};
+use crate::graph::arena::Arena;
 use crate::render::colors;
-use alloc::vec::Vec;
+use crate::GraphError;
+
+/// Where plan storage comes from: the heap (std/alloc convenience) or a
+/// caller-provided arena (the no-alloc surface, N2).
+pub(crate) enum PlanMem<'m, 'buf> {
+    /// Heap-backed buffers.
+    #[cfg(feature = "alloc")]
+    Heap,
+    /// Carve every buffer from this arena.
+    Arena(&'m Arena<'buf>),
+}
+
+impl<'m, 'buf> PlanMem<'m, 'buf> {
+    fn buf<T: Copy + Default>(
+        &self,
+        capacity: usize,
+        on_oom: GraphError,
+    ) -> Result<PlanBuf<'buf, T>, GraphError> {
+        match self {
+            #[cfg(feature = "alloc")]
+            PlanMem::Heap => Ok(PlanBuf::heap(capacity)),
+            PlanMem::Arena(a) => PlanBuf::carve(a, capacity, on_oom),
+        }
+    }
+}
 
 /// What kind of element a spatial-index entry points at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ElementKind {
+    #[default]
     Node,
     Edge,
     Subgraph,
 }
 
 /// Spatial-index entry: one element and the rows it can touch.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PlanElement {
     pub kind: ElementKind,
     pub index: usize,
@@ -57,28 +85,27 @@ pub enum HitResult {
 }
 
 /// Resolved per-edge style.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct EdgePlan {
     pub color: CellColor,
     pub weight: LineWeight,
     pub label_color: CellColor,
 }
 
-/// Resolved per-subgraph style.
-#[derive(Debug, Clone, Copy)]
+/// Resolved per-subgraph style. (Border color joins at RW7 when the
+/// styling surface exposes colored subgraph borders; legacy borders
+/// never write color.)
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SubgraphPlan {
-    pub color: CellColor,
     pub label_pos: LabelPosition,
 }
 
 /// One edge label and its placement decision.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct LabelPlan {
     pub edge_index: usize,
     pub x: usize,
     pub y: usize,
-    /// Span length in cells (label chars + 2 quotes).
-    pub len: usize,
     /// Geometrically placeable (plain-path decision).
     pub placeable: bool,
     /// The label row hosts at least one node (colored-path veto: the
@@ -94,91 +121,124 @@ impl LabelPlan {
 }
 
 /// The render plan. Public read-only queries; internals private (R5).
-pub struct RenderPlan {
+/// Storage is heap- or arena-backed behind [`PlanBuf`] — one build
+/// path serves std and no-alloc callers alike.
+pub struct RenderPlan<'buf> {
     width: usize,
     height: usize,
-    band_ranges: Vec<(usize, usize)>,
-    edge_plans: Vec<EdgePlan>,
-    subgraph_plans: Vec<SubgraphPlan>,
-    labels: Vec<LabelPlan>,
-    index: Vec<PlanElement>,
+    band_ranges: PlanBuf<'buf, (usize, usize)>,
+    edge_plans: PlanBuf<'buf, EdgePlan>,
+    subgraph_plans: PlanBuf<'buf, SubgraphPlan>,
+    labels: PlanBuf<'buf, LabelPlan>,
+    index: PlanBuf<'buf, PlanElement>,
     /// Edge indices whose labels go to the legend (colored semantics).
-    legend: Vec<usize>,
+    legend: PlanBuf<'buf, usize>,
+    /// Exact count of h-run interiors across all edge paths — sizes the
+    /// compositor's run scratch.
+    run_capacity: usize,
 }
 
-impl RenderPlan {
-    /// Build a plan for `view` under `options`. O(N + E + S) plus the
-    /// label-occupancy checks (O(labels × blockers)).
-    pub(crate) fn build<V: LayoutView>(view: &V, options: &RenderOptions) -> RenderPlan {
+impl<'buf> RenderPlan<'buf> {
+    /// Build a heap-backed plan (std/alloc convenience). Heap pushes
+    /// cannot fail, so this surface stays infallible.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn build<V: LayoutView>(view: &V, options: &RenderOptions) -> RenderPlan<'static> {
+        match RenderPlan::<'static>::build_impl(view, options, PlanMem::Heap) {
+            Ok(plan) => plan,
+            // Heap-backed building has no failing carve.
+            Err(_) => unreachable!(),
+        }
+    }
+
+    /// Build a plan whose storage is carved from `arena` (the no-alloc
+    /// surface, N2). Exhaustion maps to `E.Render.Plan.026` — size the
+    /// arena with `estimate_render_arena_size`.
+    pub(crate) fn build_in<V: LayoutView>(
+        view: &V,
+        options: &RenderOptions,
+        arena: &Arena<'buf>,
+    ) -> Result<RenderPlan<'buf>, GraphError> {
+        Self::build_impl(view, options, PlanMem::Arena(arena))
+    }
+
+    /// The one build path. O(N + E + S) plus the label-occupancy checks
+    /// (O(labels × blockers)); every buffer's capacity is computed
+    /// exactly before it is created.
+    fn build_impl<V: LayoutView>(
+        view: &V,
+        options: &RenderOptions,
+        mem: PlanMem<'_, 'buf>,
+    ) -> Result<RenderPlan<'buf>, GraphError> {
         let width = view.width();
         let height = view.height();
+        let oom = || GraphError::RenderPlanOom;
 
         // ── Resolved styles (the only place style fns run — Q4) ────────
         let palette = options.palette.colors();
         let use_color = !matches!(options.color_mode, super::color::ColorMode::None);
-        let edge_plans: Vec<EdgePlan> = (0..view.edge_count())
-            .map(|i| {
-                let e = view.edge(i);
-                let ctx = EdgeStyleCtx {
-                    edge_index: e.edge_index,
-                    from_id: e.from_id,
-                    to_id: e.to_id,
-                    label: e.label,
-                    directed: e.directed,
-                    reversed: e.reversed,
-                    total_edges: view.edge_count(),
-                };
-                let style: EdgeStyle = (options.edge_style_fn)(ctx);
-                let color = if style.color.is_set() {
-                    style.color
-                } else if use_color && !palette.is_empty() {
-                    // Legacy default: palette modulo by the IR edge-list
-                    // index (NOT the original edge_index — self-loops are
-                    // absent from the list, so positions shift; the legacy
-                    // colored renderer keys by list position).
-                    CellColor::ansi256(colors::get_custom(palette, i))
-                } else {
-                    CellColor::DEFAULT
-                };
-                let weight = style.weight.unwrap_or(if e.reversed {
-                    LineWeight::Dashed
-                } else {
-                    LineWeight::Light
-                });
-                let label_style = (options.edge_label_style_fn)(ctx);
-                let label_color = if label_style.color.is_set() {
-                    label_style.color
-                } else {
-                    color
-                };
-                EdgePlan {
-                    color,
-                    weight,
-                    label_color,
-                }
-            })
-            .collect();
+        let mut edge_plans: PlanBuf<'buf, EdgePlan> = mem.buf(view.edge_count(), oom())?;
+        for i in 0..view.edge_count() {
+            let e = view.edge(i);
+            let ctx = EdgeStyleCtx {
+                edge_index: e.edge_index,
+                from_id: e.from_id,
+                to_id: e.to_id,
+                label: e.label,
+                directed: e.directed,
+                reversed: e.reversed,
+                total_edges: view.edge_count(),
+            };
+            let style: EdgeStyle = (options.edge_style_fn)(ctx);
+            let color = if style.color.is_set() {
+                style.color
+            } else if use_color && !palette.is_empty() {
+                // Legacy default: palette modulo by the IR edge-list
+                // index (NOT the original edge_index — self-loops are
+                // absent from the list, so positions shift; the legacy
+                // colored renderer keys by list position).
+                CellColor::ansi256(colors::get_custom(palette, i))
+            } else {
+                CellColor::DEFAULT
+            };
+            let weight = style.weight.unwrap_or(if e.reversed {
+                LineWeight::Dashed
+            } else {
+                LineWeight::Light
+            });
+            let label_style = (options.edge_label_style_fn)(ctx);
+            let label_color = if label_style.color.is_set() {
+                label_style.color
+            } else {
+                color
+            };
+            edge_plans.push(EdgePlan {
+                color,
+                weight,
+                label_color,
+            });
+        }
 
-        let subgraph_plans: Vec<SubgraphPlan> = (0..view.subgraph_count())
-            .map(|i| {
-                let sg = view.subgraph(i);
-                let ctx = SubgraphStyleCtx {
-                    subgraph_id: sg.id,
-                    label: sg.label,
-                    has_parent: sg.parent.is_some(),
-                };
-                let style = (options.subgraph_style_fn)(ctx);
-                SubgraphPlan {
-                    color: style.color,
-                    label_pos: style.label_pos,
-                }
-            })
-            .collect();
+        let mut subgraph_plans: PlanBuf<'buf, SubgraphPlan> =
+            mem.buf(view.subgraph_count(), oom())?;
+        for i in 0..view.subgraph_count() {
+            let sg = view.subgraph(i);
+            let ctx = SubgraphStyleCtx {
+                subgraph_id: sg.id,
+                label: sg.label,
+                has_parent: sg.parent.is_some(),
+            };
+            let style = (options.subgraph_style_fn)(ctx);
+            subgraph_plans.push(SubgraphPlan {
+                label_pos: style.label_pos,
+            });
+        }
 
-        // ── Spatial index ──────────────────────────────────────────────
-        let mut index: Vec<PlanElement> = Vec::with_capacity(
+        // ── Spatial index + run capacity ───────────────────────────────
+        let mut index: PlanBuf<'buf, PlanElement> = mem.buf(
             view.node_count() + view.edge_count() + view.subgraph_count(),
-        );
+            oom(),
+        )?;
+        let mut run_capacity = 0usize;
         for i in 0..view.node_count() {
             let n = view.node(i);
             index.push(PlanElement {
@@ -190,11 +250,13 @@ impl RenderPlan {
         }
         for i in 0..view.edge_count() {
             let e = view.edge(i);
+            let (y_min, y_max) = edge_row_span(&e.path, e.from_y, e.to_y);
+            run_capacity += count_h_runs(&e.path, e.from_x, e.to_x);
             index.push(PlanElement {
                 kind: ElementKind::Edge,
                 index: i,
-                y_min: e.from_y.min(e.to_y),
-                y_max: e.from_y.max(e.to_y),
+                y_min,
+                y_max,
             });
         }
         for i in 0..view.subgraph_count() {
@@ -206,13 +268,18 @@ impl RenderPlan {
                 y_max: sg.y + sg.height.saturating_sub(1),
             });
         }
-        index.sort_by_key(|e| (e.y_min, e.y_max, e.index));
+        index
+            .as_mut_slice()
+            .sort_unstable_by_key(|e| (e.y_min, e.y_max, e.index));
 
         // ── Label placement (legacy semantics, geometric) ──────────────
-        let mut labels: Vec<LabelPlan> = Vec::new();
-        let mut legend: Vec<usize> = Vec::new();
+        let labeled = (0..view.edge_count())
+            .filter(|&i| view.edge(i).label.is_some())
+            .count();
+        let mut labels: PlanBuf<'buf, LabelPlan> = mem.buf(labeled, oom())?;
+        let mut legend: PlanBuf<'buf, usize> = mem.buf(labeled, oom())?;
         // Spans already claimed by earlier labels, per row.
-        let mut claimed: Vec<(usize, usize, usize)> = Vec::new();
+        let mut claimed: PlanBuf<'buf, (usize, usize, usize)> = mem.buf(labeled, oom())?;
 
         for i in 0..view.edge_count() {
             let e = view.edge(i);
@@ -226,7 +293,7 @@ impl RenderPlan {
             });
 
             let placeable = x + len <= width
-                && !span_blocked(view, i, y, x, x + len, &claimed)
+                && !span_blocked(view, i, y, x, x + len, claimed.as_slice())
                 && y < height;
 
             if placeable {
@@ -236,7 +303,6 @@ impl RenderPlan {
                 edge_index: i,
                 x,
                 y,
-                len,
                 placeable,
                 row_has_node,
             };
@@ -246,11 +312,26 @@ impl RenderPlan {
             labels.push(plan);
         }
 
-        // ── Band partition (single full-height band until RW6) ─────────
-        let band_ranges = alloc::vec![(0usize, height)];
-        let _ = options.band_cap();
+        // ── Band partition (Q1: level-aligned, capped) ─────────────────
+        // Boundaries prefer level tops (distinct node rows) so bands
+        // don't split levels; a level chunk taller than the cap is
+        // hard-cut at the cap. Elements spanning a boundary are simply
+        // replayed in every band they intersect — canvas clipping makes
+        // out-of-band writes no-ops. The partition runs twice: a count
+        // pass sizes the buffer exactly, then a fill pass stores it.
+        let cap = options.band_cap();
+        let mut tops: PlanBuf<'buf, usize> = mem.buf(view.node_count(), oom())?;
+        for i in 0..view.node_count() {
+            tops.push(view.node(i).y);
+        }
+        tops.as_mut_slice().sort_unstable();
+        let tops = dedup_in_place(&mut tops);
+        let mut band_count = 0usize;
+        partition_bands(height, cap, tops, |_, _| band_count += 1);
+        let mut band_ranges: PlanBuf<'buf, (usize, usize)> = mem.buf(band_count, oom())?;
+        partition_bands(height, cap, tops, |y0, rows| band_ranges.push((y0, rows)));
 
-        RenderPlan {
+        Ok(RenderPlan {
             width,
             height,
             band_ranges,
@@ -259,7 +340,8 @@ impl RenderPlan {
             labels,
             index,
             legend,
-        }
+            run_capacity,
+        })
     }
 
     // ── Public read-only queries (R5) ──────────────────────────────────
@@ -282,7 +364,7 @@ impl RenderPlan {
     /// Edge indices whose labels go to the legend under colored
     /// rendering (in edge order).
     pub fn legend_entries(&self) -> &[usize] {
-        &self.legend
+        self.legend.as_slice()
     }
 
     /// What occupies the cell at (x, y)? Nodes win over edges, edges
@@ -291,7 +373,12 @@ impl RenderPlan {
     pub(crate) fn element_at<V: LayoutView>(&self, view: &V, x: usize, y: usize) -> HitResult {
         let mut hit_subgraph = HitResult::None;
         let mut hit_edge = HitResult::None;
-        for el in self.index.iter().filter(|el| y >= el.y_min && y <= el.y_max) {
+        for el in self
+            .index
+            .as_slice()
+            .iter()
+            .filter(|el| y >= el.y_min && y <= el.y_max)
+        {
             match el.kind {
                 ElementKind::Node => {
                     let n = view.node(el.index);
@@ -330,23 +417,197 @@ impl RenderPlan {
     // ── Internal accessors (compositor, RW3+) ──────────────────────────
 
     pub(crate) fn edge_plan(&self, edge_index: usize) -> &EdgePlan {
-        &self.edge_plans[edge_index]
+        &self.edge_plans.as_slice()[edge_index]
     }
 
     pub(crate) fn subgraph_plan(&self, index: usize) -> &SubgraphPlan {
-        &self.subgraph_plans[index]
+        &self.subgraph_plans.as_slice()[index]
     }
 
     pub(crate) fn labels(&self) -> &[LabelPlan] {
-        &self.labels
+        self.labels.as_slice()
     }
 
+    #[cfg(test)]
     pub(crate) fn elements(&self) -> &[PlanElement] {
-        &self.index
+        self.index.as_slice()
     }
 
+    /// Elements whose row range intersects `[y0, y0 + rows)`. The index
+    /// is sorted by `y_min`, so entries past the band are cut off by
+    /// binary search; the prefix is filtered on `y_max`.
+    pub(crate) fn elements_in_band(
+        &self,
+        y0: usize,
+        rows: usize,
+    ) -> impl Iterator<Item = &PlanElement> {
+        let last = y0 + rows.saturating_sub(1);
+        let slice = self.index.as_slice();
+        let ub = slice.partition_point(|el| el.y_min <= last);
+        slice[..ub].iter().filter(move |el| el.y_max >= y0)
+    }
+
+    /// Band list as `(first_row, rows)` pairs covering `0..height`.
     pub(crate) fn band_ranges(&self) -> &[(usize, usize)] {
-        &self.band_ranges
+        self.band_ranges.as_slice()
+    }
+
+    /// Rows of the tallest band — the reusable band buffer's height.
+    pub(crate) fn max_band_rows(&self) -> usize {
+        self.band_ranges.as_slice().iter().map(|b| b.1).max().unwrap_or(0)
+    }
+
+    /// Exact h-run interior count — sizes the compositor's run scratch.
+    pub(crate) fn run_capacity(&self) -> usize {
+        self.run_capacity
+    }
+}
+
+/// Emit the level-aligned band partition as `(y0, rows)` pairs.
+fn partition_bands(height: usize, cap: usize, tops: &[usize], mut emit: impl FnMut(usize, usize)) {
+    if height <= cap {
+        emit(0, height);
+        return;
+    }
+    let mut start = 0usize;
+    while start < height {
+        let cap_end = start + cap;
+        if cap_end >= height {
+            emit(start, height - start);
+            break;
+        }
+        let ub = tops.partition_point(|&t| t <= cap_end);
+        let boundary = tops[..ub]
+            .iter()
+            .rev()
+            .find(|&&t| t > start)
+            .copied()
+            .unwrap_or(cap_end);
+        emit(start, boundary - start);
+        start = boundary;
+    }
+}
+
+/// Dedup a sorted `PlanBuf` in place, returning the deduped prefix.
+fn dedup_in_place<'a, 'buf>(buf: &'a mut PlanBuf<'buf, usize>) -> &'a [usize] {
+    let s = buf.as_mut_slice();
+    let mut w = 0usize;
+    for r in 0..s.len() {
+        if w == 0 || s[r] != s[w - 1] {
+            s[w] = s[r];
+            w += 1;
+        }
+    }
+    &buf.as_slice()[..w]
+}
+
+/// The rows a path can paint, from the same formulas the painter uses
+/// (bend rows included — a band must replay every edge that touches it).
+fn edge_row_span(path: &PathRef<'_>, from_y: usize, to_y: usize) -> (usize, usize) {
+    let mut lo = from_y.min(to_y);
+    let mut hi = from_y.max(to_y);
+    let mut take = |y: usize| {
+        lo = lo.min(y);
+        hi = hi.max(y);
+    };
+    match *path {
+        PathRef::Direct | PathRef::Spline { .. } => {}
+        PathRef::Corner { horizontal_y } => take(horizontal_y),
+        PathRef::SideChannel { start_y, end_y, .. } => {
+            take(start_y);
+            take(end_y);
+        }
+        PathRef::MultiSegment {
+            waypoints,
+            start_y_offset,
+        } => {
+            for &(_, wy) in waypoints {
+                take(wy);
+            }
+            // The first bend row can sit below the source row block.
+            let dir: isize = if to_y >= from_y { 1 } else { -1 };
+            let first_bend = (from_y as isize + dir * (1 + start_y_offset as isize)) as usize;
+            take(first_bend);
+        }
+    }
+    (lo, hi)
+}
+
+/// Bytes of arena [`RenderPlan::build_in`] plus the compositor's carve
+/// calls need for this view and options — plan storage, paint scratch,
+/// and the band canvas planes, with alignment slack (N2).
+///
+/// The band-list term uses a proven bound instead of a dry run: a band
+/// shorter than the cap always ends on a level top with no further top
+/// in its window, forcing the next advance toward the cap — so at most
+/// two bands fit per cap window, plus edge slack.
+pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptions) -> usize {
+    use core::mem::size_of;
+    let n = view.node_count();
+    let e = view.edge_count();
+    let s = view.subgraph_count();
+    let width = view.width();
+    let height = view.height();
+    let cap = options.band_cap();
+    let colored = !matches!(options.color_mode, super::color::ColorMode::None);
+    let labeled = (0..e).filter(|&i| view.edge(i).label.is_some()).count();
+    let mut run_capacity = 0usize;
+    for i in 0..e {
+        let ed = view.edge(i);
+        run_capacity += count_h_runs(&ed.path, ed.from_x, ed.to_x);
+    }
+    let bands = 2 * height.div_ceil(cap) + 2;
+    let band_rows = cap.min(height).max(1);
+    let area = width * band_rows;
+
+    let plan_bytes = e * size_of::<EdgePlan>()
+        + s * size_of::<SubgraphPlan>()
+        + (n + e + s) * size_of::<PlanElement>()
+        + labeled * (size_of::<LabelPlan>() + size_of::<usize>() + size_of::<(usize, usize, usize)>())
+        + n * size_of::<usize>()
+        + bands * size_of::<(usize, usize)>();
+    let scratch_bytes = super::compose::PaintScratch::estimate_bytes(
+        run_capacity,
+        s,
+        e,
+        n,
+        colored,
+        width,
+        band_rows,
+    );
+    let canvas_bytes = area * size_of::<super::cell::Cell>()
+        + if colored {
+            area * size_of::<CellColor>()
+        } else {
+            0
+        };
+    // Per-allocation alignment slack (≤ 8 bytes × ~14 carves) + margin.
+    plan_bytes + scratch_bytes + canvas_bytes + 14 * 8 + 64
+}
+
+/// Structural count of horizontal-run interiors a path paints — the
+/// same segments `h_run_with_corners` collects, counted without cells.
+fn count_h_runs(path: &PathRef<'_>, from_x: usize, to_x: usize) -> usize {
+    match *path {
+        PathRef::Direct | PathRef::Spline { .. } => 0,
+        PathRef::Corner { .. } => 1,
+        PathRef::SideChannel { .. } => 2,
+        PathRef::MultiSegment { waypoints, .. } => {
+            let mut count = 0usize;
+            let mut px = from_x;
+            for i in 0..=waypoints.len() {
+                let nx = if i < waypoints.len() {
+                    waypoints[i].0
+                } else {
+                    to_x
+                };
+                if px != nx {
+                    count += 1;
+                }
+                px = nx;
+            }
+            count
+        }
     }
 }
 

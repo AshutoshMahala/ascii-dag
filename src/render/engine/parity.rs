@@ -646,3 +646,232 @@ mod bt {
         );
     }
 }
+
+// ── Banding (RW6) ────────────────────────────────────────────────────────
+//
+// The band partition is invisible in the output by construction:
+// boundary-spanning elements replay in every band they intersect and
+// the canvas clips. These tests sweep the cap through degenerate and
+// typical values and demand byte-identity with the single-band render.
+
+mod bands {
+    use super::*;
+    use crate::graph::Direction;
+
+    const CAPS: [usize; 6] = [1, 2, 3, 5, 7, 1000];
+
+    fn with_cap(mut options: RenderOptions, cap: usize) -> RenderOptions {
+        options.band_rows_cap = cap;
+        options
+    }
+
+    /// Plain and colored output must not depend on the cap, TD and BT.
+    #[test]
+    fn band_cap_never_changes_output() {
+        let corpus: [CorpusEntry; 6] = [
+            ("chain", chain),
+            ("fan", fan),
+            ("stage", stage),
+            ("skip", skip),
+            ("back_edges", back_edges),
+            ("nested_boxes", nested_boxes),
+        ];
+        for (tag, build) in corpus {
+            for direction in [Direction::TopDown, Direction::BottomUp] {
+                let mut g = build();
+                g.set_direction(direction);
+                let ir = g.compute_layout();
+                let plain_ref = render_plain(&ir, &RenderOptions::plain());
+                let colored_ref = render_colored(&ir, &RenderOptions::colored(Palette::Ansi));
+                for cap in CAPS {
+                    let plain = render_plain(&ir, &with_cap(RenderOptions::plain(), cap));
+                    assert_same(&format!("{tag} {direction:?} plain cap={cap}"), &plain_ref, &plain);
+                    let colored =
+                        render_colored(&ir, &with_cap(RenderOptions::colored(Palette::Ansi), cap));
+                    assert_same(
+                        &format!("{tag} {direction:?} colored cap={cap}"),
+                        &colored_ref,
+                        &colored,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Small caps really do split the render into multiple bands.
+    #[test]
+    fn small_caps_produce_multiple_bands() {
+        let ir = hero_graph().compute_layout();
+        let plan =
+            crate::render::engine::plan::RenderPlan::build(&ir, &with_cap(RenderOptions::plain(), 5));
+        assert!(plan.band_count() > 1, "hero at cap 5 must band");
+        // Bands tile the height exactly, in order, no gaps.
+        let mut next = 0usize;
+        for &(y0, rows) in plan.band_ranges() {
+            assert_eq!(y0, next, "bands must be contiguous");
+            assert!(rows >= 1);
+            next = y0 + rows;
+        }
+        assert_eq!(next, plan.height(), "bands must cover the full height");
+        // Level-aligned: with a workable cap, every boundary is a node row.
+        let plan64 = crate::render::engine::plan::RenderPlan::build(
+            &ir,
+            &with_cap(RenderOptions::plain(), 10),
+        );
+        let tops: alloc::vec::Vec<usize> = ir.nodes().iter().map(|n| n.y).collect();
+        let mut prev = 0usize;
+        for &(y0, _) in plan64.band_ranges().iter().skip(1) {
+            // A boundary is either level-aligned or a hard cut forced by
+            // a level chunk taller than the cap (no top in the window).
+            assert!(
+                tops.contains(&y0) || tops.iter().all(|&t| t <= prev || t > y0),
+                "cap-10 boundary {y0} is neither a level top nor a forced cut"
+            );
+            prev = y0;
+        }
+    }
+
+    /// A boxed corpus graph across both IRs at a tiny cap — banding
+    /// composes with backend self-parity. (The hero graph is excluded:
+    /// its heap and CSR *layouts* diverge — a pre-existing till-IR
+    /// defect tracked separately — so it cannot witness render parity.)
+    #[test]
+    fn banded_self_parity_across_backends() {
+        let heap_out = render_plain(
+            &nested_boxes().compute_layout(),
+            &with_cap(RenderOptions::plain(), 3),
+        );
+        let g = nested_boxes();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let config = LayoutConfig::standard();
+        let ir = csr
+            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+            .expect("CSR layout");
+        let csr_out = render_plain(&ir, &with_cap(RenderOptions::plain(), 3));
+        assert_same("nested_boxes banded cap=3 (heap vs csr)", &heap_out, &csr_out);
+    }
+}
+
+// ── Zero-allocation byte surface (RW6, N2/R4.3) ──────────────────────────
+
+mod no_alloc {
+    use super::*;
+    use crate::graph::Direction;
+    use crate::render::engine::color::ColorMode;
+    use crate::render::engine::{
+        estimate_render_arena_size, estimate_render_output_size, render_to_bytes,
+    };
+    use crate::GraphError;
+
+    /// The byte surface must match the String surface exactly — plain
+    /// and colored, TD and BT, banded and not — using estimate-sized
+    /// buffers (which doubles as the estimate-sufficiency proof).
+    #[test]
+    fn bytes_match_string_surface() {
+        let corpus: [CorpusEntry; 5] = [
+            ("stage", stage),
+            ("fan", fan),
+            ("back_edges", back_edges),
+            ("nested_boxes", nested_boxes),
+            ("self_loop", self_loop),
+        ];
+        for (tag, build) in corpus {
+            for direction in [Direction::TopDown, Direction::BottomUp] {
+                for cap in [3usize, 64] {
+                    let mut plain = RenderOptions::plain();
+                    plain.band_rows_cap = cap;
+                    let mut colored = RenderOptions::colored(Palette::Ansi);
+                    colored.band_rows_cap = cap;
+                    for options in [plain, colored] {
+                        let mut g = build();
+                        g.set_direction(direction);
+                        let ir = g.compute_layout();
+                        let want = if matches!(options.color_mode, ColorMode::None) {
+                            render_plain(&ir, &options)
+                        } else {
+                            render_colored(&ir, &options)
+                        };
+                        let arena_size = estimate_render_arena_size(&ir, &options);
+                        let out_size = estimate_render_output_size(&ir, &options);
+                        let mut backing = vec![0u8; arena_size];
+                        let arena = Arena::new(&mut backing);
+                        let mut out = vec![0u8; out_size];
+                        let written = render_to_bytes(&ir, &options, &arena, &mut out)
+                            .unwrap_or_else(|e| {
+                                panic!("{tag} {direction:?} cap={cap}: {e}")
+                            });
+                        let got = core::str::from_utf8(&out[..written]).unwrap();
+                        assert_same(
+                            &format!("{tag} {direction:?} cap={cap} (bytes vs string)"),
+                            &want,
+                            got,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Growing the arena from nothing hits Plan exhaustion first, then
+    /// Canvas, then succeeds — never a panic, always the right domain.
+    #[test]
+    fn undersized_arena_walks_the_error_ladder() {
+        let ir = hero_graph().compute_layout();
+        let options = RenderOptions::colored(Palette::Ansi);
+        let full = estimate_render_arena_size(&ir, &options);
+        let mut out = vec![0u8; estimate_render_output_size(&ir, &options)];
+
+        let mut seen_plan = false;
+        let mut seen_canvas = false;
+        let mut succeeded = false;
+        let mut size = 16usize;
+        while size <= full {
+            let mut backing = vec![0u8; size];
+            let arena = Arena::new(&mut backing);
+            match render_to_bytes(&ir, &options, &arena, &mut out) {
+                Err(GraphError::RenderPlanOom) => {
+                    assert!(!seen_canvas && !succeeded, "Plan must fail before Canvas");
+                    seen_plan = true;
+                }
+                Err(GraphError::RenderCanvasTooSmall { needed, got }) => {
+                    assert!(needed > got, "needed {needed} vs got {got}");
+                    seen_canvas = true;
+                }
+                Err(e) => panic!("unexpected error at {size}B: {e}"),
+                Ok(_) => {
+                    succeeded = true;
+                    break;
+                }
+            }
+            size *= 2;
+        }
+        // The final doubling may overshoot `full`; the estimate itself
+        // must succeed regardless.
+        let mut backing = vec![0u8; full];
+        let arena = Arena::new(&mut backing);
+        assert!(render_to_bytes(&ir, &options, &arena, &mut out).is_ok());
+        assert!(seen_plan, "never saw E.Render.Plan.026");
+        assert!(seen_canvas || succeeded, "never got past plan building");
+    }
+
+    /// A too-small output buffer reports the Sink domain, not a panic.
+    #[test]
+    fn undersized_output_reports_sink_exhaustion() {
+        let ir = hero_graph().compute_layout();
+        let options = RenderOptions::plain();
+        let mut backing = vec![0u8; estimate_render_arena_size(&ir, &options)];
+        let arena = Arena::new(&mut backing);
+        let mut out = [0u8; 8];
+        assert!(matches!(
+            render_to_bytes(&ir, &options, &arena, &mut out),
+            Err(GraphError::RenderOutputTooSmall)
+        ));
+    }
+}

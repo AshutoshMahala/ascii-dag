@@ -24,7 +24,7 @@
 //! paint path with direction and charset support.
 
 use ascii_dag::render::colors::Palette;
-use ascii_dag::render::engine;
+use ascii_dag::render::engine::{Charset, RenderOptions};
 use ascii_dag::Direction;
 
 include!("shared/hero_graph.rs");
@@ -47,18 +47,14 @@ fn main() {
     let output = if bottom_up || ascii {
         // Engine path: the only renderer with direction/charset support.
         let mut opts = if use_color {
-            engine::RenderOptions::colored(Palette::Ansi)
+            RenderOptions::colored(Palette::Ansi)
         } else {
-            engine::RenderOptions::plain()
+            RenderOptions::plain()
         };
         if ascii {
-            opts.charset = engine::Charset::Ascii;
+            opts.charset = Charset::Ascii;
         }
-        if use_color {
-            engine::preview_render_colored(&ir, &opts)
-        } else {
-            engine::preview_render_plain(&ir, &opts)
-        }
+        ir.render_string(&opts)
     } else if use_color {
         ir.render_scanline_colored_with_legend(Palette::Ansi)
     } else {

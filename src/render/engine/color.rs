@@ -50,6 +50,18 @@ impl CellColor {
         self.0 != 0
     }
 
+    /// The packed value — for storage in ordered containers.
+    #[inline]
+    pub(crate) fn raw(self) -> u32 {
+        self.0
+    }
+
+    /// Rebuild from a value produced by [`CellColor::raw`].
+    #[inline]
+    pub(crate) fn from_raw(raw: u32) -> CellColor {
+        CellColor(raw)
+    }
+
     #[inline]
     pub(crate) fn is_ansi(self) -> bool {
         self.0 >> TAG_SHIFT == TAG_ANSI

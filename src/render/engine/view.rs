@@ -15,6 +15,10 @@ use crate::ir::NodeKind;
 
 /// A node as the engine sees it.
 #[derive(Debug, Clone, Copy)]
+// Parity-by-construction (N1): every IR field is mirrored here and
+// checked by the equivalence tests, whether or not the paint path reads
+// it yet — adding an IR field without wiring the view must stay a
+// compile error. Fields awaiting their consumer carry an allow.
 pub(crate) struct NodeRef<'a> {
     pub id: usize,
     pub label: &'a str,
@@ -22,13 +26,18 @@ pub(crate) struct NodeRef<'a> {
     pub y: usize,
     pub width: usize,
     pub height: usize,
+    #[allow(dead_code)] // no paint consumer yet (parity contract, N1)
     pub center_x: usize,
+    #[allow(dead_code)] // no paint consumer yet (parity contract, N1)
     pub center_y: usize,
+    #[allow(dead_code)] // no paint consumer yet (parity contract, N1)
     pub level: usize,
+    #[allow(dead_code)] // no paint consumer yet (parity contract, N1)
     pub level_position: usize,
     pub kind: NodeKind,
     pub has_self_loop: bool,
     /// Owning edge for dummy nodes; `None` for real nodes.
+    #[allow(dead_code)] // consumer lands with RW7 dummy introspection
     pub edge_index: Option<usize>,
 }
 
@@ -96,7 +105,11 @@ pub(crate) struct SubgraphRef<'a> {
 pub(crate) trait LayoutView {
     fn width(&self) -> usize;
     fn height(&self) -> usize;
+    #[allow(dead_code)] // no paint consumer yet (parity contract, N1)
     fn level_count(&self) -> usize;
+    /// Never consulted by paint code (M4 — flow derives from
+    /// coordinates); exposed for introspection consumers.
+    #[allow(dead_code)]
     fn direction(&self) -> Direction;
     fn node_count(&self) -> usize;
     fn node(&self, index: usize) -> NodeRef<'_>;

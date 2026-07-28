@@ -28,10 +28,11 @@
 /// semantic: a dashed stroke loses to a solid one (`┊` crossed by `─`
 /// renders `┼`, matching the legacy tables), and anything loses to a
 /// double-line cluster border. `Heavy` is reserved for a future weight.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[repr(u32)]
 pub(crate) enum Weight {
     /// No arm in this direction.
+    #[default]
     None = 0,
     /// Dashed stroke (reversed back-edges).
     Dashed = 1,
@@ -98,7 +99,7 @@ const MARKER_DIR_SHIFT: u32 = 4;
 const MARKER_DASHED_BIT: u32 = 1 << 6;
 
 /// One semantic canvas cell. See module docs for the packing.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct Cell(u32);
 
 impl Cell {
@@ -198,7 +199,10 @@ impl Cell {
     }
 
     /// A stroke with vertical arms only (edge labels may replace these).
-    #[inline]
+    /// Test-only since RW6: the planner replicates this rule
+    /// geometrically (plan.rs `span_blocked`); the tests below keep the
+    /// cell-level statement of R1.8 pinned.
+    #[cfg(test)]
     pub(crate) fn is_pure_vertical(self) -> bool {
         if !self.is_stroke() {
             return false;
@@ -211,7 +215,7 @@ impl Cell {
 
     /// Whether an edge label may occupy this cell — empty, or the edge's
     /// own vertical line (the legacy `can_place_label` rule, R1.8).
-    #[inline]
+    #[cfg(test)]
     pub(crate) fn accepts_label(self) -> bool {
         self.is_empty() || self.is_pure_vertical()
     }
