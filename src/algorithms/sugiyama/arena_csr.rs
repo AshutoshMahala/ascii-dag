@@ -128,6 +128,11 @@ pub(crate) struct LayoutTemps<'a> {
     pub(crate) sg_envelopes: &'a mut [(usize, usize, usize, usize)],
     /// Per-level boundary extras for subgraph borders
     pub(crate) sg_y_extras: &'a mut [usize],
+    /// Per-level frontier scratch for cluster passes (depth-sized;
+    /// empty when the graph has no subgraphs)
+    pub(crate) sg_frontier_a: &'a mut [usize],
+    /// Second per-level frontier scratch for cluster passes
+    pub(crate) sg_frontier_b: &'a mut [usize],
 }
 
 // ── Subgraph layout constants ────────────────────────────────────────────
@@ -248,7 +253,7 @@ pub fn compute_layout_arena_csr<'b>(
         let (ptr, _) = temp_arena
             .alloc_raw_uninit::<Idx>(node_count)
             .ok_or(GraphError::ArenaOom)?;
-        // Safety: freshly allocated for node_count entries; initialized
+        // SAFETY: freshly allocated for node_count entries; initialized
         // by calculate_levels_csr before any read.
         unsafe { core::slice::from_raw_parts_mut(ptr, node_count) }
     };
@@ -485,6 +490,7 @@ pub fn compute_layout_arena_csr<'b>(
 
         // Reclaim slack the sibling shifts left behind: pull nodes toward
         // their connected neighbors within current level bounds.
+
         tighten_levels_csr(
             graph,
             temps.real_coords,
@@ -492,6 +498,7 @@ pub fn compute_layout_arena_csr<'b>(
             node_spacing_usize,
             temps.positions,
         );
+
 
         // Step 6c: Cluster-width feedback — push unaffiliated nodes clear
         // of each cluster's projected border envelope (cross-level extent
@@ -505,7 +512,10 @@ pub fn compute_layout_arena_csr<'b>(
             temps.sg_envelopes,
             temps.sg_depths,
             temps.positions,
+            temps.sg_frontier_a,
+            temps.sg_frontier_b,
         );
+
         max_width = max_width.saturating_add(pushed as Coord);
 
         // Pull whole root clusters (and loose nodes) back together after
@@ -520,7 +530,10 @@ pub fn compute_layout_arena_csr<'b>(
             temps.vlevel_offsets,
             temps.vnode_data,
             temps.x_coords,
+            temps.sg_frontier_a,
+            temps.sg_frontier_b,
         );
+
         max_width = max_width.saturating_sub(reclaimed as Coord);
 
         // Waypoints must never cross node text (crossing a border renders
@@ -533,6 +546,7 @@ pub fn compute_layout_arena_csr<'b>(
             temps.x_coords,
             max_level as usize,
         );
+
     }
 
     // Step 7: Build dummy positions using actual virtual level positions
@@ -992,6 +1006,9 @@ pub fn compute_layout_arena_csr<'b>(
 
     // Add edges
     for (edge_idx, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
+        // First kept waypoint's x — the label anchor for skip-level
+        // paths (mirrors the heap backend's `waypoints[0].0`).
+        let mut first_wp_x: Option<usize> = None;
         // Self-loops: mark the node and skip edge routing
         if from_idx == to_idx {
             builder.set_self_loop(from_idx);
@@ -1134,6 +1151,7 @@ pub fn compute_layout_arena_csr<'b>(
                 } else if let Some((start, len)) =
                     builder.add_waypoints(&waypoint_scratch[..waypoint_count])
                 {
+                    first_wp_x = Some(waypoint_scratch[0].0);
                     let start_y_offset = (edge_start_row + slot).saturating_sub(1);
 
                     // Record the initial corner Y (first segment routing)
@@ -1188,8 +1206,25 @@ pub fn compute_layout_arena_csr<'b>(
                             eff_to_x
                         }
                     }
-                    EdgePathArena::MultiSegment { .. } => eff_from_x,
-                    // SideChannel / Spline: fall back to source X
+                    EdgePathArena::MultiSegment { start_y_offset, .. } => {
+                        // Anchor on the first waypoint once the label row
+                        // is past the first bend (heap-backend rule).
+                        let horizontal_y = from_y + 1 + *start_y_offset;
+                        match first_wp_x {
+                            Some(wx) if l_y > horizontal_y => wx,
+                            _ => eff_from_x,
+                        }
+                    }
+                    EdgePathArena::SideChannel {
+                        channel_x, start_y, ..
+                    } => {
+                        if l_y < *start_y {
+                            eff_from_x
+                        } else {
+                            *channel_x
+                        }
+                    }
+                    // Spline: fall back to source X
                     _ => eff_from_x,
                 };
                 // Center on displayed width (chars, not bytes — parity with
@@ -1339,6 +1374,16 @@ fn alloc_layout_temps_csr<'b>(
     } else {
         (core::ptr::null_mut(), 0)
     };
+    let (sg_frontier_a_ptr, _) = if sg_count > 0 {
+        arena.alloc_raw_uninit::<usize>(max_levels + 2)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (sg_frontier_b_ptr, _) = if sg_count > 0 {
+        arena.alloc_raw_uninit::<usize>(max_levels + 2)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
 
     unsafe {
         Some(LayoutTemps {
@@ -1400,6 +1445,16 @@ fn alloc_layout_temps_csr<'b>(
             },
             sg_y_extras: if sg_count > 0 {
                 core::slice::from_raw_parts_mut(sg_y_extras_ptr, max_levels + 1)
+            } else {
+                &mut []
+            },
+            sg_frontier_a: if sg_count > 0 {
+                core::slice::from_raw_parts_mut(sg_frontier_a_ptr, max_levels + 2)
+            } else {
+                &mut []
+            },
+            sg_frontier_b: if sg_count > 0 {
+                core::slice::from_raw_parts_mut(sg_frontier_b_ptr, max_levels + 2)
             } else {
                 &mut []
             },
@@ -2096,8 +2151,13 @@ fn project_sg_envelopes_csr(
                 if pi >= sg_count {
                     continue;
                 }
-                let exp_l = cl.saturating_sub(SUBGRAPH_H_PAD);
-                let exp_r = cr + SUBGRAPH_H_PAD;
+                // Shared parent-gap rule (geometry.rs): the child bbox
+                // already carries its own H_PAD; the parent adds only
+                // its border column. (This projection previously used
+                // SUBGRAPH_H_PAD and silently disagreed with the heap
+                // twin by one column per nesting level.)
+                let exp_l = cl.saturating_sub(PARENT_CHILD_H_GAP);
+                let exp_r = cr + PARENT_CHILD_H_GAP;
                 let p = &mut sg_envelopes[pi];
                 if p.0 == usize::MAX {
                     p.0 = exp_l;
@@ -2136,8 +2196,10 @@ fn project_sg_envelopes_csr(
 /// as a singleton body, sweeps bodies left-to-right, and shifts each as
 /// far left as the per-level frontier allows (envelope↔envelope keeps
 /// `SIBLING_GAP`, envelope↔node 1, node↔node `node_spacing`).
-/// Shift-left only. Body count is capped by a fixed stack table; larger
-/// graphs skip the pass (it is cosmetic, so skipping is always safe).
+/// Shift-left only. Per-level frontiers use depth-sized caller scratch
+/// (no level cap). Body count is capped by a fixed stack table; graphs
+/// with more bodies keep the first `MAX_BODIES` and skip the rest (the
+/// pass is cosmetic, so partial application is always safe).
 ///
 /// Returns the reclaimed canvas width (conservative minimum of node- and
 /// envelope-extent reductions).
@@ -2152,21 +2214,19 @@ fn compact_clusters_csr(
     vlevel_offsets: &[Idx],
     vnode_data: &[Idx],
     x_coords: &mut [Coord],
+    frontier_env: &mut [usize],
+    frontier_node: &mut [usize],
 ) -> usize {
     let sg_count = graph.subgraph_count();
     if sg_count == 0 || sg_count > sg_envelopes.len() || sg_count > sg_depths.len() {
         return 0;
     }
     let node_count = graph.node_count().min(real_coords.len());
-    if node_count == 0 {
+    if node_count == 0 || frontier_env.len() <= max_level || frontier_node.len() <= max_level {
         return 0;
     }
 
-    const MAX_LEVEL_SLOTS: usize = 257;
     const MAX_BODIES: usize = 512;
-    if max_level >= MAX_LEVEL_SLOTS {
-        return 0;
-    }
 
     for i in 0..sg_count {
         sg_depths[i] = graph.sg_chain_depth(Some(i));
@@ -2284,9 +2344,11 @@ fn compact_clusters_csr(
         }
     }
 
-    // Per-level frontiers (usize::MAX = none yet).
-    let mut env_right = [usize::MAX; MAX_LEVEL_SLOTS];
-    let mut node_right = [usize::MAX; MAX_LEVEL_SLOTS];
+    // Per-level frontiers (usize::MAX = none yet), depth-sized scratch.
+    let env_right: &mut [usize] = frontier_env;
+    let node_right: &mut [usize] = frontier_node;
+    env_right.fill(usize::MAX);
+    node_right.fill(usize::MAX);
 
     for &(env_left, env_r, tag, a, b) in bodies[..n_bodies].iter() {
         match tag {
@@ -2342,7 +2404,7 @@ fn compact_clusters_csr(
             }
             1 => {
                 let (lvl, _, x, w) = real_coords[a];
-                if lvl >= MAX_LEVEL_SLOTS {
+                if lvl >= env_right.len() {
                     continue;
                 }
                 let mut allowed = 0usize;
@@ -2490,19 +2552,18 @@ fn clear_external_overlaps_csr(
     sg_envelopes: &mut [(usize, usize, usize, usize)],
     sg_depths: &mut [usize],
     order_scratch: &mut [Idx],
+    frontier_touched: &mut [usize],
+    frontier_cursors: &mut [usize],
 ) -> usize {
     let sg_count = graph.subgraph_count();
     if sg_count == 0 || sg_count > sg_envelopes.len() || sg_count > sg_depths.len() {
         return 0;
     }
     let node_count = graph.node_count().min(real_coords.len());
-    if node_count == 0 {
-        return 0;
-    }
-
-    // Per-level buffers are sized from the graph's real depth.
-    const MAX_LEVEL_SLOTS: usize = 257;
-    if max_level >= MAX_LEVEL_SLOTS {
+    if node_count == 0
+        || frontier_touched.len() <= max_level
+        || frontier_cursors.len() <= max_level
+    {
         return 0;
     }
     use crate::algorithms::sugiyama::geometry::SG_GAP;
@@ -2531,13 +2592,15 @@ fn clear_external_overlaps_csr(
 
         // ── Push overlapping unaffiliated nodes right of each envelope ──
         let mut moved = false;
-        let mut touched = [false; MAX_LEVEL_SLOTS];
+        // Depth-sized scratch: 0 = untouched, 1 = touched.
+        let touched: &mut [usize] = frontier_touched;
+        touched.fill(0);
         for si in 0..sg_count {
             let (left, right, first, last) = sg_envelopes[si];
             if left == usize::MAX || first == usize::MAX {
                 continue;
             }
-            let mut cursors = [0usize; MAX_LEVEL_SLOTS];
+            let cursors: &mut [usize] = frontier_cursors;
             for c in cursors[first..=last.min(max_level)].iter_mut() {
                 *c = right + ENVELOPE_CLEARANCE;
             }
@@ -2546,14 +2609,14 @@ fn clear_external_overlaps_csr(
                     continue;
                 }
                 let (level, _, x, w) = real_coords[node_idx];
-                if level < first || level > last || level >= MAX_LEVEL_SLOTS {
+                if level < first || level > last || level >= cursors.len() {
                     continue;
                 }
                 if x < right && x + w > left {
                     real_coords[node_idx].2 = cursors[level];
                     cursors[level] += w + node_spacing;
                     moved = true;
-                    touched[level] = true;
+                    touched[level] = 1;
                 }
             }
         }
@@ -2566,7 +2629,7 @@ fn clear_external_overlaps_csr(
         // width it may run on; realistic subgraph levels are far smaller.
         const GAP_SWEEP_MAX_LEVEL_SIZE: usize = 1024;
         for level in 0..=max_level {
-            if !touched[level] {
+            if touched[level] == 0 {
                 continue;
             }
             // Collect this level's real nodes into the scratch.
@@ -4557,6 +4620,7 @@ impl<'a> Graph<'a> {
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_dummy_next
             + (max_levels + 1) * core::mem::size_of::<(usize, usize)>()   // waypoint_scratch
             + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_vdummy_counts
+            + 2 * (max_levels + 2) * core::mem::size_of::<usize>()        // sg frontier scratch
             + 4096; // alignment padding buffer
 
         let max_ir_waypoints = max_dummy_waypoints;

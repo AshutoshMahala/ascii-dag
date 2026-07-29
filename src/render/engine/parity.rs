@@ -273,6 +273,27 @@ fn ruled_classes_render_canonically() {
     assert_eq!(collide.matches('"').count() % 2, 0, "{collide}");
 }
 
+/// The hero graph across both backends — plain and colored, byte
+/// identical. Hero was excluded from cross-backend suites for months
+/// and silently diverged (a projection-pass parent-gap mismatch);
+/// never again.
+#[test]
+fn hero_self_parity_across_backends() {
+    let ir = hero_graph().compute_layout();
+    let plain = render_plain(&ir, &RenderOptions::plain());
+    assert_same(
+        "hero (engine heap vs engine csr)",
+        &plain,
+        &csr_engine(&hero_graph(), &RenderOptions::plain()),
+    );
+    let colored = RenderOptions::colored(Palette::Ansi);
+    assert_same(
+        "hero colored (heap vs csr)",
+        &render_colored(&ir, &colored),
+        &csr_engine(&hero_graph(), &colored),
+    );
+}
+
 /// The hero example against the golden snapshot (regenerated at RW8
 /// when the engine became the output of record).
 #[test]
@@ -533,12 +554,23 @@ mod bands {
         }
     }
 
-    /// A boxed corpus graph across both IRs at a tiny cap — banding
-    /// composes with backend self-parity. (The hero graph is excluded:
-    /// its heap and CSR *layouts* diverge — a pre-existing till-IR
-    /// defect tracked separately — so it cannot witness render parity.)
+    /// Boxed corpus graphs across both IRs at a tiny cap — banding
+    /// composes with backend self-parity (hero included, now that the
+    /// projection parent-gap divergence is fixed).
     #[test]
     fn banded_self_parity_across_backends() {
+        for build in [nested_boxes as fn() -> Graph<'static>, hero_graph] {
+            let heap_out =
+                render_plain(&build().compute_layout(), &with_cap(RenderOptions::plain(), 3));
+            let mut opts = RenderOptions::plain();
+            opts.band_rows_cap = 3;
+            let csr_out = csr_engine(&build(), &opts);
+            assert_same("banded cap=3 (heap vs csr)", &heap_out, &csr_out);
+        }
+    }
+
+    #[test]
+    fn banded_self_parity_nested_boxes_explicit_buffers() {
         let heap_out = render_plain(
             &nested_boxes().compute_layout(),
             &with_cap(RenderOptions::plain(), 3),
@@ -1039,5 +1071,176 @@ mod wrapper_compat {
             core::str::from_utf8(&cbuffer[..n]).unwrap(),
             render_colored(&ir, &RenderOptions::colored(Palette::Ansi))
         );
+    }
+}
+
+// ── Review fixes (RF1): estimates + hit-testing pinned ───────────────────
+
+mod review_fixes {
+    use super::*;
+    use crate::render::engine::HitResult;
+    use crate::render::engine::style::{EdgeStyle, EdgeStyleCtx};
+    use crate::render::engine::CellColor;
+
+    /// Long Unicode endpoint + edge labels forced into the legend: an
+    /// exactly estimate-sized output buffer must still suffice.
+    #[test]
+    fn legend_estimate_covers_long_unicode_labels() {
+        let mut g = Graph::new();
+        g.add_node(1, "Ünïcödé-Nödé-With-A-Very-Long-Näme-Indeed-Ø");
+        g.add_node(2, "Ζεύς-Годзилла-ノード-with-more-than-32-bytes");
+        g.add_node(3, "C");
+        g.add_node(4, "D");
+        // Colliding long labels force the legend.
+        g.add_edge(1, 3, Some("ein-sehr-länges-Ünïcödé-label-囲碁-☂☃☄"));
+        g.add_edge(2, 4, Some("another-very-long-label-Ω≈ç√∫-ラベル"));
+        let ir = g.compute_layout();
+        let options = RenderOptions::colored(Palette::Ansi);
+        let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+        let arena = Arena::new(&mut arena_buf);
+        let mut out = vec![0u8; ir.estimate_render_output_size(&options)];
+        let n = ir
+            .render_to_bytes(&options, &arena, &mut out)
+            .expect("estimate-sized output buffer must fit the legend");
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(text.contains("Edge labels:"), "legend present:\n{text}");
+        assert!(text.contains("Ünïcödé-Nödé"), "endpoint label in full:\n{text}");
+    }
+
+    /// Property: hit-testing agrees with the painted canvas. Every cell
+    /// showing an edge glyph hits something; every blank cell outside
+    /// all boxes hits nothing.
+    #[test]
+    fn hit_test_agrees_with_painted_output() {
+        const EDGE_GLYPHS: &str = "─│┈┊┌┐└┘├┤┬┴┼╪╫↓↑→←⇡⇣⇠⇢";
+        let corpus: [CorpusEntry; 5] = [
+            ("chain", chain),
+            ("fan", fan),
+            ("skip", skip),
+            ("back_edges", back_edges),
+            ("self_loop", self_loop),
+        ];
+        for (tag, build) in corpus {
+            let ir = build().compute_layout();
+            let options = RenderOptions::plain();
+            let out = render_plain(&ir, &options);
+            let plan = ir.render_plan(&options);
+            for (y, line) in out.lines().enumerate() {
+                for (x, ch) in line.chars().enumerate() {
+                    let hit = ir.hit_test(&plan, x, y);
+                    if EDGE_GLYPHS.contains(ch) {
+                        assert_ne!(
+                            hit,
+                            HitResult::None,
+                            "{tag}: painted edge glyph {ch:?} at ({x},{y}) must hit:\n{out}"
+                        );
+                    } else if ch == ' ' {
+                        // Blank cells may only hit a box interior.
+                        assert!(
+                            matches!(hit, HitResult::None | HitResult::Subgraph(_)),
+                            "{tag}: blank cell at ({x},{y}) hit {hit:?}:\n{out}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hidden dummies never hit; shown dummies hit only their own cell.
+    #[test]
+    fn dummy_hits_follow_visibility() {
+        let mut config = LayoutConfig::standard();
+        config.include_dummy_nodes = true;
+        let g = skip();
+        let ir = g.compute_layout_with_config(&config);
+        let dummy = ir
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.kind, crate::ir::NodeKind::Dummy))
+            .expect("skip graph produces a dummy");
+
+        let hidden = ir.render_plan(&RenderOptions::plain());
+        assert!(
+            !matches!(ir.hit_test(&hidden, dummy.x, dummy.y), HitResult::Node(id) if id == dummy.id),
+            "hidden dummy must not hit"
+        );
+
+        let mut options = RenderOptions::plain();
+        options.show_dummy_nodes = true;
+        let shown = ir.render_plan(&options);
+        assert_eq!(
+            ir.hit_test(&shown, dummy.x, dummy.y),
+            HitResult::Node(dummy.id),
+            "shown dummy hits its marker cell"
+        );
+    }
+
+    /// A borderless subgraph paints no box, so its interior hits nothing.
+    #[test]
+    fn borderless_subgraph_does_not_hit() {
+        fn no_border(
+            _: crate::render::engine::SubgraphStyleCtx<'_>,
+        ) -> crate::render::engine::SubgraphStyle {
+            crate::render::engine::SubgraphStyle {
+                border: crate::render::engine::SubgraphBorder::None,
+                ..Default::default()
+            }
+        }
+        let ir = stage().compute_layout();
+        let sg = &ir.subgraphs()[0];
+        let mut options = RenderOptions::plain();
+        options.subgraph_style_fn = no_border;
+        let plan = ir.render_plan(&options);
+        assert_eq!(
+            ir.hit_test(&plan, sg.x, sg.y),
+            HitResult::None,
+            "borderless box corner is empty canvas"
+        );
+        // With the default border the same cell hits the box.
+        let bordered = ir.render_plan(&RenderOptions::plain());
+        assert_eq!(ir.hit_test(&bordered, sg.x, sg.y), HitResult::Subgraph(sg.id));
+    }
+
+    /// TrueColor renders emit 24-bit escapes in the legend too — never
+    /// quantized back to ANSI-256.
+    #[test]
+    fn truecolor_legend_uses_rgb_escapes() {
+        fn rgb_edges(_: EdgeStyleCtx<'_>) -> EdgeStyle {
+            EdgeStyle {
+                color: CellColor::rgb(200, 100, 50),
+                ..EdgeStyle::default()
+            }
+        }
+        let ir = colliding_labels().compute_layout();
+        let mut options = RenderOptions::colored(Palette::Ansi);
+        options.color_mode = crate::render::engine::ColorMode::TrueColor;
+        options.edge_style_fn = rgb_edges;
+        let out = render_colored(&ir, &options);
+        let legend = out.split("Edge labels:").nth(1).expect("legend present");
+        assert!(
+            legend.contains("\x1b[38;2;200;100;50m"),
+            "legend uses 24-bit escapes:\n{legend:?}"
+        );
+        assert!(
+            !legend.contains("\x1b[38;5;"),
+            "no quantized escapes in a TrueColor legend:\n{legend:?}"
+        );
+    }
+
+    /// Hit-test and legend share one index convention: the IR-list index.
+    #[test]
+    fn edge_indices_are_ir_list_indices() {
+        let ir = colliding_labels().compute_layout();
+        let options = RenderOptions::colored(Palette::Ansi);
+        let plan = ir.render_plan(&options);
+        for &ei in plan.legend_entries() {
+            assert!(ei < ir.edges().len(), "legend index {ei} is a list index");
+        }
+        // A hit on an edge's own vertical resolves to its list index.
+        let e = &ir.edges()[0];
+        let probe_y = e.from_y + 1;
+        if let HitResult::Edge(idx) = ir.hit_test(&plan, e.from_x, probe_y) {
+            assert!(idx < ir.edges().len());
+        }
     }
 }

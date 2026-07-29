@@ -554,7 +554,7 @@ fn project_envelopes(
     }
 
     // Child → parent expansion, then label recheck (mirrors pass 2).
-    const PARENT_CHILD_H_GAP: usize = 1;
+    use crate::algorithms::sugiyama::geometry::PARENT_CHILD_H_GAP;
     for &si in order {
         if let (Some((cl, cr)), Some(pi)) = (bbox[si], parent_idx[si]) {
             let exp = (

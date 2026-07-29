@@ -11,6 +11,7 @@ use super::color::CellColor;
 
 /// Stroke weight for an edge, resolved to cell arms by the compositor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum LineWeight {
     /// Light strokes (`─ │`) — the default.
     #[default]
@@ -34,6 +35,7 @@ impl LineWeight {
 
 /// Marker shape at an edge endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum MarkerShape {
     /// No marker.
     None,
@@ -44,6 +46,7 @@ pub enum MarkerShape {
 
 /// Node border style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum NodeBorder {
     /// `[label]` — the default (legacy for explicit and implicit nodes).
     #[default]
@@ -54,6 +57,7 @@ pub enum NodeBorder {
 
 /// Subgraph (cluster) box border style.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum SubgraphBorder {
     /// Double strokes (`═ ║`) — the default (legacy).
     #[default]
@@ -81,6 +85,7 @@ impl SubgraphBorder {
 
 /// Subgraph label position (zigraph naming; D7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum LabelPosition {
     /// One row below the top border, left-aligned (legacy).
     #[default]
@@ -91,6 +96,7 @@ pub enum LabelPosition {
 
 /// Edge label placement strategy (zigraph naming).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum LabelPlacement {
     /// The layout-computed position (legacy).
     #[default]
@@ -216,8 +222,17 @@ pub type SubgraphStyleFn = fn(SubgraphStyleCtx<'_>) -> SubgraphStyle;
 pub type EdgeLabelStyleFn = fn(EdgeStyleCtx<'_>) -> EdgeLabelStyle;
 
 /// Default edge style: engine defaults everywhere (legacy output).
-pub fn default_edge_style(_ctx: EdgeStyleCtx<'_>) -> EdgeStyle {
-    EdgeStyle::default()
+/// The arrowhead honors the IR's `directed` flag — undirected edges
+/// paint as plain lines.
+pub fn default_edge_style(ctx: EdgeStyleCtx<'_>) -> EdgeStyle {
+    EdgeStyle {
+        marker_end: if ctx.directed {
+            MarkerShape::Arrow
+        } else {
+            MarkerShape::None
+        },
+        ..EdgeStyle::default()
+    }
 }
 
 /// Default node style: bracket border, terminal default color.

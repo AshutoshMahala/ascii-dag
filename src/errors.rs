@@ -316,6 +316,7 @@ pub const RENDER_OUTPUT_TOO_SMALL: &str = wdp!(E.Render.Sink.EXHAUSTED);
 /// assert!(!err.hint().is_empty());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GraphError {
     /// The graph has no nodes.
     ///
@@ -378,7 +379,7 @@ pub enum GraphError {
     ///
     /// **WDP:** `E.Render.Plan.026` (EXHAUSTED)
     ///
-    /// Use `estimate_render_plan_size()` to compute the required size.
+    /// Use `estimate_render_arena_size()` to compute the required size.
     RenderPlanOom,
 
     /// The caller-provided band buffer holds fewer than
@@ -443,7 +444,7 @@ impl GraphError {
                 "Reduce chain depth or use a different layout strategy"
             }
             Self::RenderPlanOom => {
-                "Increase the plan buffer; use estimate_render_plan_size()"
+                "Increase the render arena; use estimate_render_arena_size()"
             }
             Self::RenderCanvasTooSmall { .. } => {
                 "Provide at least width × band_rows cells; lower band_rows_cap to shrink bands"

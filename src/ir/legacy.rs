@@ -17,7 +17,7 @@ use crate::render::engine::RenderOptions;
 /// is NOT true of `char`/`bool` buffers — those are never reused here.)
 fn scratch_as_bytes(scratch: &mut [usize]) -> &mut [u8] {
     let len = core::mem::size_of_val(scratch);
-    // Safety: same allocation, alignment 8 ≥ 1, len covers the slice
+    // SAFETY: same allocation, alignment 8 ≥ 1, len covers the slice
     // exactly, and u8 has no validity constraints.
     unsafe { core::slice::from_raw_parts_mut(scratch.as_mut_ptr().cast::<u8>(), len) }
 }
@@ -106,13 +106,22 @@ impl LayoutIRArena<'_> {
     pub fn render_to_buffer_colored(
         &self,
         buffer: &mut [u8],
-        _line_buffer: &mut [char],
-        _color_buffer: &mut [u8],
-        _edge_colors: &[usize],
+        line_buffer: &mut [char],
+        color_buffer: &mut [u8],
+        edge_colors: &[usize],
         palette: &[u8],
     ) -> Option<usize> {
         if self.is_empty() {
             return Some(0);
+        }
+        // Legacy contract: undersized work buffers are rejected up
+        // front (the buffers themselves are no longer written — the
+        // engine renders; see the deprecation note).
+        if line_buffer.len() < self.width()
+            || color_buffer.len() < self.width()
+            || edge_colors.len() < self.edge_count()
+        {
+            return None;
         }
         let mut options = RenderOptions::colored(palette_from_slice(palette));
         options.legend = false;
@@ -131,14 +140,22 @@ impl LayoutIRArena<'_> {
     pub fn render_to_buffer_colored_with_legend(
         &self,
         buffer: &mut [u8],
-        _line_buffer: &mut [char],
-        _color_buffer: &mut [u8],
-        _edge_colors: &[usize],
+        line_buffer: &mut [char],
+        color_buffer: &mut [u8],
+        edge_colors: &[usize],
         palette: &[u8],
-        _skipped_buffer: &mut [bool],
+        skipped_buffer: &mut [bool],
     ) -> Option<usize> {
         if self.is_empty() {
             return Some(0);
+        }
+        // Legacy contract: undersized work buffers are rejected up front.
+        if line_buffer.len() < self.width()
+            || color_buffer.len() < self.width()
+            || edge_colors.len() < self.edge_count()
+            || skipped_buffer.len() < self.edge_count()
+        {
+            return None;
         }
         let options = RenderOptions::colored(palette_from_slice(palette));
         let mut sink = crate::render::engine::emit::ByteSink::new(buffer);

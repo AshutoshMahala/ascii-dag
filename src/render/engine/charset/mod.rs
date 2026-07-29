@@ -11,6 +11,7 @@ use super::cell::Cell;
 
 /// Output character set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Charset {
     /// Unicode box-drawing glyphs (default).
     #[default]

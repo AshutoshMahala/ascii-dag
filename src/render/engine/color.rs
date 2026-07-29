@@ -12,6 +12,7 @@
 
 /// Output color encoding mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum ColorMode {
     /// No color output (no color plane is allocated at all).
     None,

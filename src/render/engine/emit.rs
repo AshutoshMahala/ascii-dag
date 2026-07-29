@@ -61,31 +61,57 @@ pub(crate) fn emit_legend<V: LayoutView, W: core::fmt::Write>(
     view: &V,
     plan: &RenderPlan<'_>,
     charset: Charset,
+    mode: super::color::ColorMode,
     out: &mut W,
 ) -> core::fmt::Result {
     if plan.legend_entries().is_empty() {
         return Ok(());
     }
     out.write_str("\nEdge labels:\n")?;
-    for &ei in plan.legend_entries() {
-        let e = view.edge(ei);
-        let Some(label) = e.label else { continue };
-        let find_label = |id: usize| {
+
+    // Endpoint labels resolve by node id. Under alloc, one pass builds
+    // a sorted id→label table so the legend is O((N + E) log N) instead
+    // of scanning every node per entry; the no-alloc byte path keeps
+    // the linear scan (legends are small and memory is the constraint).
+    #[cfg(feature = "alloc")]
+    let table: alloc::vec::Vec<(usize, &str)> = {
+        let mut t: alloc::vec::Vec<(usize, &str)> = (0..view.node_count())
+            .map(|i| view.node(i))
+            .filter(|n| !matches!(n.kind, crate::ir::NodeKind::Dummy))
+            .map(|n| (n.id, n.label))
+            .collect();
+        t.sort_unstable_by_key(|&(id, _)| id);
+        t
+    };
+    let find_label = |id: usize| -> Option<&str> {
+        #[cfg(feature = "alloc")]
+        {
+            table
+                .binary_search_by_key(&id, |&(nid, _)| nid)
+                .ok()
+                .map(|i| table[i].1)
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
             (0..view.node_count())
                 .map(|i| view.node(i))
                 .find(|n| n.id == id && !matches!(n.kind, crate::ir::NodeKind::Dummy))
                 .map(|n| n.label)
-        };
+        }
+    };
+
+    for &ei in plan.legend_entries() {
+        let e = view.edge(ei);
+        let Some(label) = e.label else { continue };
         // Legacy lists an entry only when both endpoints resolve.
         let (Some(from), Some(to)) = (find_label(e.from_id), find_label(e.to_id)) else {
             continue;
         };
-        let color = plan.edge_plan(ei).color.as_ansi256().unwrap_or(0);
         let arrow = charset.legend_arrow();
-        writeln!(
-            out,
-            "  \x1b[38;5;{color}m{from} {arrow} {to}: \"{label}\"\x1b[0m"
-        )?;
+        write_fg(out, plan.edge_plan(ei).color, mode)?;
+        write!(out, "{from} {arrow} {to}: \"{label}\"")?;
+        out.write_str("\x1b[0m")?;
+        out.write_char('\n')?;
     }
     Ok(())
 }
@@ -103,10 +129,16 @@ pub(crate) fn estimate_output_size<V: LayoutView>(
     let per_cell = if colored { 4 + 19 } else { 4 };
     let mut size = view.height() * (view.width() * per_cell + 8);
     if legend {
+        // Endpoint labels print in full — bound by the widest node
+        // label (computed once), never a fixed guess.
+        let max_node_label = (0..view.node_count())
+            .map(|i| view.node(i).label.len())
+            .max()
+            .unwrap_or(0);
         for i in 0..view.edge_count() {
             let label_len = view.edge(i).label.map_or(0, |l| l.len());
-            // escape + two node labels + arrow + quotes + reset + slack.
-            size += label_len + 2 * 32 + 32;
+            // escape + two endpoint labels + arrow + quotes + reset + slack.
+            size += label_len + 2 * max_node_label + 32;
         }
         size += 16; // header
     }

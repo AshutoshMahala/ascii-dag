@@ -435,7 +435,9 @@ use ascii_dag::Graph;
 use ascii_dag::graph::csr::CsrGraphBuilder;
 use ascii_dag::algorithms::sugiyama::arena_csr::compute_layout_arena_csr;
 use ascii_dag::graph::arena::Arena;
-// Build, layout, render — all on caller-provided buffers.
+// Build → compute_layout_arena → ir.render_to_bytes(&options, &arena, &mut out)
+// — all on caller-provided buffers, sized by ir.estimate_render_arena_size /
+// ir.estimate_render_output_size.
 ```
 
 See [Feature Flags](#feature-flags) for the exact `Cargo.toml` lines.

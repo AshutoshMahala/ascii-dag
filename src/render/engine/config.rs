@@ -13,8 +13,8 @@ use super::style::{
 };
 use crate::render::colors::Palette;
 
-/// Default cap on band height in rows (Q1: level-aligned bands split
-/// when they would exceed this). Typical bands are 3–15 rows, so the
+/// Default cap on band height in rows (level-aligned bands split when
+/// they would exceed this). Typical bands are 3–15 rows, so the
 /// default never splits a level except pathological ones; embedded
 /// callers lower it to bound canvas memory (`width × cap` cells).
 pub const DEFAULT_BAND_ROWS: usize = 64;
@@ -48,7 +48,7 @@ pub struct RenderOptions {
 
 impl RenderOptions {
     /// Every-field default: plain Unicode, no colors, default band cap,
-    /// default style fns. Named presets live in `presets.rs` (R3.1).
+    /// default style fns. Named presets live in `presets.rs`.
     pub(crate) const fn defaults() -> Self {
         Self {
             color_mode: ColorMode::None,

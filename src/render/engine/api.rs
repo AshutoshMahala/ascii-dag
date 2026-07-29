@@ -7,9 +7,9 @@
 //! the same methods — the engine underneath is one paint path, so the
 //! render layer has no "backends" (N1).
 //!
-//! `Renderer` (M8) is the external-backend seam: anything that can turn
-//! a laid-out IR into text implements it; [`EngineRenderer`] is the
-//! built-in implementation wrapping [`RenderOptions`].
+//! An external-backend trait (the design's M8 "Renderer" seam) is
+//! deliberately not part of 0.10: it returns when a real consumer
+//! defines its shape.
 
 use super::config::RenderOptions;
 use super::plan::{HitResult, RenderPlan};
@@ -104,60 +104,3 @@ macro_rules! render_surface {
 #[cfg(feature = "alloc")]
 render_surface!(LayoutIR<'_>);
 render_surface!(LayoutIRArena<'_>);
-
-/// An external render backend (M8): turns a laid-out IR into text on a
-/// writer. Implement this to plug a custom renderer (HTML, SVG-ish,
-/// alternative text styles) in wherever the engine renderer is
-/// accepted; the engine's own implementation is [`EngineRenderer`].
-pub trait Renderer {
-    /// Render the heap IR into `out`.
-    #[cfg(feature = "alloc")]
-    fn render_ir<W: core::fmt::Write>(
-        &self,
-        ir: &LayoutIR<'_>,
-        out: &mut W,
-    ) -> core::fmt::Result;
-
-    /// Render the arena IR into `out`.
-    #[cfg(feature = "alloc")]
-    fn render_ir_arena<W: core::fmt::Write>(
-        &self,
-        ir: &LayoutIRArena<'_>,
-        out: &mut W,
-    ) -> core::fmt::Result;
-}
-
-/// The built-in [`Renderer`]: the unified engine driven by a
-/// [`RenderOptions`].
-#[derive(Clone, Copy, Default)]
-pub struct EngineRenderer {
-    /// Options applied to every render.
-    pub options: RenderOptions,
-}
-
-impl EngineRenderer {
-    /// A renderer with the given options.
-    pub const fn new(options: RenderOptions) -> Self {
-        Self { options }
-    }
-}
-
-impl Renderer for EngineRenderer {
-    #[cfg(feature = "alloc")]
-    fn render_ir<W: core::fmt::Write>(
-        &self,
-        ir: &LayoutIR<'_>,
-        out: &mut W,
-    ) -> core::fmt::Result {
-        ir.render_with(&self.options, out)
-    }
-
-    #[cfg(feature = "alloc")]
-    fn render_ir_arena<W: core::fmt::Write>(
-        &self,
-        ir: &LayoutIRArena<'_>,
-        out: &mut W,
-    ) -> core::fmt::Result {
-        ir.render_with(&self.options, out)
-    }
-}

@@ -76,10 +76,12 @@ pub(crate) struct PlanElement {
 
 /// Result of a hit-test query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HitResult {
     /// A node (by id).
     Node(usize),
-    /// An edge (by edge index).
+    /// An edge, by its IR-list index (the position in the layout's
+    /// edge list — the same convention as `legend_entries`).
     Edge(usize),
     /// A subgraph box (by subgraph id).
     Subgraph(usize),
@@ -136,7 +138,7 @@ impl LabelPlan {
     }
 }
 
-/// The render plan. Public read-only queries; internals private (R5).
+/// The render plan. Public read-only queries; internals private.
 /// Storage is heap- or arena-backed behind [`PlanBuf`] — one build
 /// path serves std and no-alloc callers alike.
 pub struct RenderPlan<'buf> {
@@ -153,6 +155,8 @@ pub struct RenderPlan<'buf> {
     /// Exact count of h-run interiors across all edge paths — sizes the
     /// compositor's run scratch.
     run_capacity: usize,
+    /// Whether dummy nodes paint (hit-testing must agree with the render).
+    show_dummy_nodes: bool,
 }
 
 impl<'buf> RenderPlan<'buf> {
@@ -386,6 +390,7 @@ impl<'buf> RenderPlan<'buf> {
             index,
             legend,
             run_capacity,
+            show_dummy_nodes: options.show_dummy_nodes,
         })
     }
 
@@ -413,8 +418,13 @@ impl<'buf> RenderPlan<'buf> {
     }
 
     /// What occupies the cell at (x, y)? Nodes win over edges, edges
-    /// over subgraph boxes (matching visual z-order). Exposed publicly
-    /// at RW3 integration behind per-IR wrappers (R5).
+    /// over subgraph boxes (matching visual z-order). Geometry follows
+    /// the painter exactly: edge hits use the same run/column formulas
+    /// the compositor paints, hidden dummy nodes never hit, and a
+    /// subgraph styled `SubgraphBorder::None` has no box to hit.
+    /// Edges are reported by their **IR-list index** (the position in
+    /// the layout's edge list — the same convention as
+    /// [`RenderPlan::legend_entries`]).
     pub(crate) fn element_at<V: LayoutView>(&self, view: &V, x: usize, y: usize) -> HitResult {
         let mut hit_subgraph = HitResult::None;
         let mut hit_edge = HitResult::None;
@@ -427,23 +437,39 @@ impl<'buf> RenderPlan<'buf> {
             match el.kind {
                 ElementKind::Node => {
                     let n = view.node(el.index);
-                    if x >= n.x && x < n.x + n.width {
+                    if matches!(n.kind, crate::ir::NodeKind::Dummy) {
+                        // A dummy is a single marker cell, and only
+                        // when the render shows it.
+                        if self.show_dummy_nodes && x == n.x && y == n.y {
+                            return HitResult::Node(n.id);
+                        }
+                        continue;
+                    }
+                    if y == n.y && x >= n.x && x < n.x + n.width {
                         return HitResult::Node(n.id);
                     }
                 }
                 ElementKind::Edge => {
                     if hit_edge == HitResult::None {
                         let e = view.edge(el.index);
-                        let on_vertical = x == e.from_x || x == e.to_x;
+                        let mut cols = [usize::MAX; 8];
+                        let count =
+                            v_cols_at(&e.path, e.from_x, e.from_y, e.to_x, e.to_y, y, &mut cols);
+                        let on_vertical = cols[..count].contains(&x);
                         let on_run = h_runs_at(&e.path, e.from_x, e.from_y, e.to_x, e.to_y, y)
                             .any(|(x0, x1)| x >= x0 && x <= x1);
                         if on_vertical || on_run {
-                            hit_edge = HitResult::Edge(e.edge_index);
+                            hit_edge = HitResult::Edge(el.index);
                         }
                     }
                 }
                 ElementKind::Subgraph => {
-                    if hit_subgraph == HitResult::None {
+                    if hit_subgraph == HitResult::None
+                        && !matches!(
+                            self.subgraph_plan(el.index).border,
+                            super::style::SubgraphBorder::None
+                        )
+                    {
                         let sg = view.subgraph(el.index);
                         if x >= sg.x && x < sg.x + sg.width {
                             hit_subgraph = HitResult::Subgraph(sg.id);
@@ -573,7 +599,7 @@ fn edge_row_span(path: &PathRef<'_>, from_y: usize, to_y: usize) -> (usize, usiz
 
 /// Bytes of arena [`RenderPlan::build_in`] plus the compositor's carve
 /// calls need for this view and options — plan storage, paint scratch,
-/// and the band canvas planes, with alignment slack (N2).
+/// and the band canvas planes, with alignment slack.
 ///
 /// The band-list term uses a proven bound instead of a dry run: a band
 /// shorter than the cap always ends on a level top with no further top
@@ -651,6 +677,11 @@ fn count_h_runs(path: &PathRef<'_>, from_x: usize, to_x: usize) -> usize {
 }
 
 // ── Blocker geometry (mirrors the painter's row formulas) ────────────────
+//
+// Deliberate bound: placement checks every label span against every
+// blocker — O(labels × (edges + subgraphs)) worst case (quadratic when
+// most edges are labeled). Fine at realistic label counts; if profiling
+// ever shows otherwise, bucket blockers by row before this pass.
 
 /// Is any cell of `[x0, x1)` at `row` occupied by something a label may
 /// not overwrite? Allowed: empty cells and solid verticals. Blockers:
@@ -849,6 +880,11 @@ fn v_cols_at(
                 } else {
                     (to_x, to_y)
                 };
+                // Non-first segments carry a vertical on the waypoint
+                // row itself (the painter's gap fill).
+                if !first && row == py {
+                    push(px);
+                }
                 if px == nx {
                     if betw(py, ny, row) {
                         push(px);

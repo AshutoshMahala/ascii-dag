@@ -800,6 +800,56 @@ mod deep_chain {
         }
     }
 
+    /// Deep AND clustered: the subgraph overlap-repair and cluster
+    /// compaction passes used fixed 257-level scratch and silently
+    /// skipped deeper graphs, breaking heap/CSR parity exactly there.
+    /// Now depth-sized: a 300-level chain with clusters and loose
+    /// nodes must render byte-identically from both backends.
+    #[test]
+    #[cfg(not(feature = "arena-idx-u8"))]
+    fn deep_clustered_chain_renders_identically_csr() {
+        let mut g = Graph::new();
+        for i in 0..300usize {
+            g.add_node(i, "N");
+            if i > 0 {
+                g.add_edge(i - 1, i, None);
+            }
+        }
+        // A cluster deep in the chain plus loose siblings around it.
+        let sg = g.add_subgraph("Deep");
+        g.put_nodes(&[280, 281, 282]).inside(sg).unwrap();
+        g.add_node(1000, "Loose");
+        g.add_edge(279, 1000, None);
+        g.add_edge(1000, 283, None);
+
+        let heap_out = render_heap(&g, &LayoutConfig::standard());
+        assert!(heap_out.contains("Deep"), "cluster renders:\n…");
+
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = g.estimate_layout_arena_size();
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut out_arena)
+            .expect("deep clustered CSR layout succeeds");
+        let options = ascii_dag::render::engine::RenderOptions::plain();
+        let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+        let render_arena = Arena::new(&mut arena_buf);
+        let mut render_buf = vec![0u8; ir.estimate_render_output_size(&options)];
+        let bytes = ir
+            .render_to_bytes(&options, &render_arena, &mut render_buf)
+            .expect("render");
+        let csr_out = String::from_utf8_lossy(&render_buf[..bytes]);
+        assert_eq!(
+            heap_out, csr_out,
+            "deep clustered backends must render identically"
+        );
+    }
+
     /// Under arena-idx-u8 the node-count check bounds depth naturally.
     #[test]
     #[cfg(feature = "arena-idx-u8")]

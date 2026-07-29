@@ -1,4 +1,4 @@
-//! Unified render engine (temp/05 requirements, temp/06 design).
+//! Unified render engine.
 //!
 //! One paint path serving both IRs — the render layer has no "backends".
 //! The engine composes **semantic cells** (what a cell means, not which
@@ -6,28 +6,22 @@
 //! emission, so Unicode and ASCII are equal outputs of one canvas.
 //!
 //! ```text
-//! LayoutView (both IRs)                            [RW1]
+//! Layout IR (heap or arena)
 //!       ↓
-//! RenderPlan  — styles, spatial index, labels      [RW2]
+//! RenderPlan  — styles, spatial index, labels
 //!       ↓
-//! Band compositor — semantic cells, Z-order        [RW3+]
+//! Band compositor — semantic cells, Z-order
 //!       ↓
-//! Emission — charset decode, colors, writer        [RW3+]
+//! Emission — charset decode, colors, writer
 //! ```
-//!
-//! # Organization rules (temp/05 N6b)
-//!
-//! One concern per file; growth by addition (a new charset is a new file
-//! in `charset/`); internals are `pub(crate)`; the public surface is
-//! exported only from this module; soft guardrail ~600 lines per file.
 //!
 //! # Public surface
 //!
-//! The streaming writer is primary (R4.1): `render_with` on both IR
-//! types feeds any `core::fmt::Write`; `render_string` is the owned
+//! The streaming writer is primary: `render_with` on both IR types
+//! feeds any `core::fmt::Write`; `render_string` is the owned
 //! convenience; `render_to_bytes` is the zero-allocation byte surface
-//! with caller arena + buffer (R4.2/R4.3). `RenderPlan` is the public
-//! introspection type (R5); `Renderer` hosts external backends (M8).
+//! with a caller arena + buffer. `RenderPlan` is the public
+//! introspection type (dimensions, bands, legend, hit-testing).
 
 pub(crate) mod api;
 pub(crate) mod cell;
@@ -78,7 +72,7 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
         }
     }
     if colored && options.legend {
-        emit::emit_legend(view_ref, &plan, options.charset, out)?;
+        emit::emit_legend(view_ref, &plan, options.charset, options.color_mode, out)?;
     }
     Ok(())
 }
@@ -162,7 +156,7 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
             }
         }
         if colored && options.legend {
-            emit::emit_legend(view_ref, &plan, options.charset, &mut sink)?;
+            emit::emit_legend(view_ref, &plan, options.charset, options.color_mode, &mut sink)?;
         }
         Ok(())
     };
@@ -197,7 +191,6 @@ pub(crate) fn estimate_render_output_size<V: view::LayoutView>(
     emit::estimate_output_size(view_ref, colored, colored && options.legend)
 }
 
-pub use api::{EngineRenderer, Renderer};
 pub use charset::Charset;
 pub use color::{CellColor, ColorMode};
 pub use config::{DEFAULT_BAND_ROWS, RenderOptions};

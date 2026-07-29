@@ -175,9 +175,10 @@ the same stages:
 ### 7. Rank Direction
 - `Direction` (TB/BT/LR/RL) is recorded on the IR. For `BottomUp`, both
   backends flip the finished layout in place so **IR coordinates are always
-  physical** — they match rendered cells. The built-in renderers currently
-  paint `TopDown` only; direction-aware painting arrives with the renderer
-  rework.
+  physical** — they match rendered cells. The render engine paints
+  `TopDown` and `BottomUp` through the same geometry-driven primitives
+  (flow derives from coordinates, never from the enum). `LeftRight` /
+  `RightLeft` are parsed and recorded but not yet laid out.
 
 ---
 

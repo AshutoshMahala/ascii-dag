@@ -28,8 +28,10 @@ impl RenderOptions {
         }
     }
 
-    /// Pure-ASCII plain output: the same semantic canvas projected
-    /// through the ASCII decode table (`| - = + v ^ > < @ o`).
+    /// ASCII-charset plain output: the same semantic canvas projected
+    /// through the ASCII decode table (`| - = + v ^ > < @ o`). Note
+    /// user-provided label text passes through unchanged — the charset
+    /// governs the engine's own glyphs, not your content.
     pub const fn ascii() -> Self {
         Self {
             charset: Charset::Ascii,
@@ -37,7 +39,7 @@ impl RenderOptions {
         }
     }
 
-    /// Pure-ASCII colored output with a legend (the legend arrow
+    /// ASCII-charset colored output with a legend (the legend arrow
     /// follows the charset: `->`).
     pub const fn ascii_colored(palette: Palette) -> Self {
         Self {
