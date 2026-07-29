@@ -792,10 +792,12 @@ let mut temp_arena = Arena::new(&mut temp_buffer);
 let mut output_arena = Arena::new(&mut output_buffer);
 
 if let Ok(ir) = graph.compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut output_arena) {
-    let mut render_buffer = [0u8; 4096];
-    let mut line_buffer = [' '; 256];
-    let mut scratch_buffer = [0usize; 256];
-    if let Some(bytes) = ir.render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer) {
+    let options = RenderOptions::plain();
+    // Size the render arena and output buffer from the estimates.
+    let mut render_arena_buf = [0u8; 8192]; // ≥ ir.estimate_render_arena_size(&options)
+    let render_arena = Arena::new(&mut render_arena_buf);
+    let mut render_buffer = [0u8; 4096]; // ≥ ir.estimate_render_output_size(&options)
+    if let Ok(bytes) = ir.render_to_bytes(&options, &render_arena, &mut render_buffer) {
         // render_buffer[..bytes] contains the UTF-8 output
     }
 }

@@ -92,7 +92,7 @@ pub(crate) fn render_plain<V: view::LayoutView>(
 /// Owned-`String` render of colored-mode `options` (parity-suite
 /// helper; the legacy `render_scanline_colored_with_legend` shape when
 /// `options.legend` is set).
-#[cfg(all(test, feature = "std", feature = "arena"))]
+#[cfg(all(test, feature = "std"))]
 pub(crate) fn render_colored<V: view::LayoutView>(
     view_ref: &V,
     options: &config::RenderOptions,

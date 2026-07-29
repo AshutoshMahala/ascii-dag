@@ -124,6 +124,8 @@ pub(crate) struct LabelPlan {
     pub edge_index: usize,
     pub x: usize,
     pub y: usize,
+    /// Span length in cells (label chars + 2 quotes).
+    pub len: usize,
     /// Geometrically placeable (plain-path decision).
     pub placeable: bool,
     /// The label row hosts at least one node (colored-path veto: the
@@ -141,6 +143,12 @@ impl LabelPlan {
 /// The render plan. Public read-only queries; internals private.
 /// Storage is heap- or arena-backed behind [`PlanBuf`] — one build
 /// path serves std and no-alloc callers alike.
+///
+/// A plan is a snapshot for **introspection** (dimensions, bands,
+/// legend, hit-testing) of the layout and options it was built from;
+/// the render entry points build their own plan internally. Queries
+/// must be paired with the same layout the plan was built from —
+/// out-of-canvas queries return `HitResult::None`.
 pub struct RenderPlan<'buf> {
     width: usize,
     height: usize,
@@ -157,6 +165,9 @@ pub struct RenderPlan<'buf> {
     run_capacity: usize,
     /// Whether dummy nodes paint (hit-testing must agree with the render).
     show_dummy_nodes: bool,
+    /// Whether label placement uses the colored-with-legend gate
+    /// (hit-testing must agree with the compositor).
+    labels_colored_gate: bool,
 }
 
 impl<'buf> RenderPlan<'buf> {
@@ -351,6 +362,7 @@ impl<'buf> RenderPlan<'buf> {
                 edge_index: i,
                 x,
                 y,
+                len,
                 placeable,
                 row_has_node,
             };
@@ -394,6 +406,7 @@ impl<'buf> RenderPlan<'buf> {
             legend,
             run_capacity,
             show_dummy_nodes: options.show_dummy_nodes,
+            labels_colored_gate: use_color && options.legend,
         })
     }
 
@@ -438,8 +451,26 @@ impl<'buf> RenderPlan<'buf> {
     /// the layout's edge list — the same convention as
     /// [`RenderPlan::legend_entries`]).
     pub(crate) fn element_at<V: LayoutView>(&self, view: &V, x: usize, y: usize) -> HitResult {
+        // A plan answers only for the layout it was built from; a query
+        // outside this plan's canvas (including any query against a
+        // *different* layout's larger canvas) is `None`, never a panic.
+        if x >= self.width || y >= self.height {
+            return HitResult::None;
+        }
         let mut hit_subgraph = HitResult::None;
         let mut hit_edge = HitResult::None;
+        // Painted edge labels belong to their edge (they render above
+        // edge ink). The same placement gate the compositor uses.
+        for label in self.labels.as_slice() {
+            let placed = if self.labels_colored_gate {
+                label.placed_colored()
+            } else {
+                label.placeable
+            };
+            if placed && y == label.y && x >= label.x && x < label.x + label.len {
+                return HitResult::Edge(label.edge_index);
+            }
+        }
         for el in self
             .index
             .as_slice()
@@ -457,7 +488,10 @@ impl<'buf> RenderPlan<'buf> {
                         }
                         continue;
                     }
-                    if y == n.y && x >= n.x && x < n.x + n.width {
+                    // The self-loop marker (`↺`) paints one cell past
+                    // the node's declared width and belongs to it.
+                    let span = n.width + usize::from(n.has_self_loop);
+                    if y == n.y && x >= n.x && x < n.x + span {
                         return HitResult::Node(n.id);
                     }
                 }
@@ -483,14 +517,25 @@ impl<'buf> RenderPlan<'buf> {
                     }
                 }
                 ElementKind::Subgraph => {
-                    if hit_subgraph == HitResult::None
-                        && !matches!(
-                            self.subgraph_plan(el.index).border,
-                            super::style::SubgraphBorder::None
-                        )
-                    {
+                    if hit_subgraph == HitResult::None {
                         let sg = view.subgraph(el.index);
-                        if x >= sg.x && x < sg.x + sg.width {
+                        let sp = self.subgraph_plan(el.index);
+                        if matches!(sp.border, super::style::SubgraphBorder::None) {
+                            // No box ink — but the label still paints
+                            // and belongs to the cluster.
+                            if sg.width >= 4 && sg.height >= 3 && !sg.label.is_empty() {
+                                let label_y = match sp.label_pos {
+                                    super::style::LabelPosition::InsideTop => sg.y + 1,
+                                    super::style::LabelPosition::InsideBottom => {
+                                        (sg.y + sg.height).saturating_sub(2)
+                                    }
+                                };
+                                let len = sg.label.chars().count().min(sg.width - 4);
+                                if y == label_y && x >= sg.x + 2 && x < sg.x + 2 + len {
+                                    hit_subgraph = HitResult::Subgraph(sg.id);
+                                }
+                            }
+                        } else if x >= sg.x && x < sg.x + sg.width {
                             hit_subgraph = HitResult::Subgraph(sg.id);
                         }
                     }
@@ -639,9 +684,9 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
         let ed = view.edge(i);
         run_capacity += count_h_runs(&ed.path, ed.from_x, ed.to_x);
     }
-    let bands = 2 * height.div_ceil(cap) + 2;
+    let bands = 2usize.saturating_mul(height.div_ceil(cap)).saturating_add(2);
     let band_rows = cap.min(height).max(1);
-    let area = width * band_rows;
+    let area = width.saturating_mul(band_rows);
 
     let plan_bytes = e * size_of::<EdgePlan>()
         + s * size_of::<SubgraphPlan>()

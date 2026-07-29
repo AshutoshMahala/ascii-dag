@@ -227,7 +227,7 @@ pub fn compute_layout_arena_csr<'b>(
         let (be_ptr, _) = temp_arena
             .alloc_raw::<bool>(be_size)
             .ok_or(GraphError::ArenaOom)?;
-        // Safety: alloc_raw zeroes memory, so all false
+        // SAFETY: alloc_raw zeroes memory, so all false
         unsafe { core::slice::from_raw_parts_mut(be_ptr, be_size) }
     };
     match config.cycle_breaking() {
@@ -1389,7 +1389,9 @@ fn alloc_layout_temps_csr<'b>(
     let (positions_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_positions_size)?;
 
     // Optimize allocs: boolean array
-    let (node_is_source_ptr, _) = arena.alloc_raw_uninit::<bool>(node_count)?;
+    // `bool` demands 0/1 bytes — allocate zeroed so the typed slice is
+    // valid from the moment it exists (arena backing is arbitrary bytes).
+    let (node_is_source_ptr, _) = arena.alloc_raw::<bool>(node_count)?;
     // Counters per level
     let (source_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (dummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
@@ -1407,7 +1409,7 @@ fn alloc_layout_temps_csr<'b>(
     let (level_dummy_next_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (level_labeled_src_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (two_cycle_order_ptr, _) = arena.alloc_raw_uninit::<Idx>(edge_count)?;
-    let (edge_in_two_cycle_ptr, _) = arena.alloc_raw_uninit::<bool>(edge_count)?;
+    let (edge_in_two_cycle_ptr, _) = arena.alloc_raw::<bool>(edge_count)?;
     let (waypoint_scratch_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(max_levels + 1)?;
     let (level_vdummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (level_routing_floor_ptr, _) = arena.alloc_raw_uninit::<usize>(max_levels + 1)?;
@@ -4576,14 +4578,41 @@ use alloc::vec;
 
 #[cfg(feature = "alloc")]
 impl<'a> Graph<'a> {
-    /// Estimate the arena buffer size needed for `compute_layout_arena()`.
-    ///
-    /// Performs a cheap O(N+E) level computation to measure the actual dummy
-    /// count, then sums all temporary and IR buffer requirements.
+    /// Estimate the arena buffer size needed for `compute_layout_arena()`
+    /// under [`LayoutConfig::standard()`]. Use
+    /// [`Self::estimate_layout_arena_size_with`] when rendering with a
+    /// non-default configuration (notably `include_dummy_nodes`, which
+    /// grows the IR output).
     pub fn estimate_layout_arena_size(&self) -> usize {
+        self.estimate_layout_arena_size_with(
+            &crate::algorithms::sugiyama::config::LayoutConfig::standard(),
+        )
+    }
+
+    /// Estimate the arena buffer size needed for `compute_layout_arena()`
+    /// under the given configuration.
+    ///
+    /// Performs a cheap O(N+E) level computation to measure the actual
+    /// dummy count, then sums the full allocation manifest of the layout
+    /// pass: every temp buffer, the IR output (including subgraphs, all
+    /// label storage, and — when `include_dummy_nodes` is set — the
+    /// emitted dummy nodes). All arithmetic saturates.
+    pub fn estimate_layout_arena_size_with(
+        &self,
+        config: &crate::algorithms::sugiyama::config::LayoutConfig<'_>,
+    ) -> usize {
         let node_count = self.nodes.len();
         let edge_count = self.edges.len();
-        let label_bytes: usize = self.nodes.iter().map(|(_, l)| l.len()).sum();
+        let sg_count = self.subgraphs.len();
+        // Every label the layout copies into the output arena: node,
+        // edge, and subgraph labels alike.
+        let label_bytes: usize = self
+            .nodes
+            .iter()
+            .map(|(_, l)| l.len())
+            .chain(self.edges.iter().map(|&(_, _, l)| l.map_or(0, |t| t.len())))
+            .chain(self.subgraphs.iter().map(|sg| sg.label.len()))
+            .fold(0usize, |a, b| a.saturating_add(b));
         // ── Cheap level relaxation: exact dummy count AND exact depth ──
         // If this (unflipped) relaxation converges, the graph has no
         // directed cycle, so cycle breaking is a no-op and the depth
@@ -4642,44 +4671,80 @@ impl<'a> Graph<'a> {
         let max_level_size = max_vnodes;
         let max_dummy_waypoints = (actual_dummies + 16).min(MAX_NODES);
 
-        let temps_size = node_count * core::mem::size_of::<Idx>()                      // node_levels
-            + edge_count * core::mem::size_of::<(Idx, Idx)>()                          // edge_indices
-            + (max_levels + 2) * core::mem::size_of::<Idx>()              // vlevel_offsets
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_counts
-            + max_vnodes * 2 * core::mem::size_of::<Idx>()                // vnode_data
-            + max_vnodes * core::mem::size_of::<Coord>()                  // x_coords
-            + max_vnodes * core::mem::size_of::<Coord>()                  // widths
-            + node_count * core::mem::size_of::<(usize, usize, usize, usize)>() // real_coords
-            + (edge_count + 1) * core::mem::size_of::<Idx>()              // dummy_offsets
-            + max_dummy_waypoints * core::mem::size_of::<(Idx, Coord)>()  // dummy_data
-            + max_level_size * core::mem::size_of::<(Idx, u32)>()         // medians
-            + max_level_size * core::mem::size_of::<Idx>()                // positions
-            + node_count * core::mem::size_of::<bool>()                   // node_is_source
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // source_counts
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // dummy_counts
-            + (max_levels + 2) * core::mem::size_of::<usize>()            // level_y_offsets
-            + node_count * core::mem::size_of::<usize>()                  // node_slots
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_slot_next
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_labeled_src
-            + edge_count * core::mem::size_of::<Idx>()                    // two_cycle_order
-            + edge_count * core::mem::size_of::<bool>()                   // edge_in_two_cycle
-            + (2 * edge_count + 1) * 3 * core::mem::size_of::<usize>()  // slot_pool
-            + 2 * (max_levels + 1) * MAX_SLOTS_PER_LEVEL * core::mem::size_of::<usize>() // slot heads+tails
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_dummy_next
-            + (max_levels + 1) * core::mem::size_of::<(usize, usize)>()   // waypoint_scratch
-            + (max_levels + 1) * core::mem::size_of::<Idx>()              // level_vdummy_counts
-            + 2 * (max_levels + 2) * core::mem::size_of::<usize>()        // sg frontier scratch
-            + 4096; // alignment padding buffer
+        // The full temp-arena allocation manifest, in the order the
+        // layout pass carves it (saturating throughout).
+        let item = |count: usize, size: usize| count.saturating_mul(size);
+        let temps_size = [
+            item(edge_count.max(1), core::mem::size_of::<bool>()), // back_edges
+            item(node_count, core::mem::size_of::<Idx>()),         // node_levels
+            item(2 * max_levels.saturating_add(2), core::mem::size_of::<usize>()), // level_real + level_dummy
+            item(edge_count, core::mem::size_of::<(Idx, Idx)>()),  // edge_indices
+            item(max_levels.saturating_add(2), core::mem::size_of::<Idx>()), // vlevel_offsets
+            item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // level_counts
+            item(max_vnodes.saturating_mul(2), core::mem::size_of::<Idx>()), // vnode_data
+            item(max_vnodes, core::mem::size_of::<Coord>()),       // x_coords
+            item(max_vnodes, core::mem::size_of::<Coord>()),       // widths
+            item(node_count, core::mem::size_of::<(usize, usize, usize, usize)>()), // real_coords
+            item(edge_count.saturating_add(1), core::mem::size_of::<Idx>()), // dummy_offsets
+            item(max_dummy_waypoints, core::mem::size_of::<(Idx, Coord)>()), // dummy_data
+            item(max_level_size, core::mem::size_of::<(Idx, u32)>()), // medians
+            item(node_count.max(1), core::mem::size_of::<Idx>()),  // positions
+            item(node_count, core::mem::size_of::<bool>()),        // node_is_source
+            item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // source_counts
+            item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // dummy_counts
+            item(max_levels.saturating_add(2), core::mem::size_of::<usize>()), // level_y_offsets
+            item(node_count, core::mem::size_of::<usize>()),       // node_slots
+            item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // level_slot_next
+            item(
+                2 * edge_count.saturating_add(1),
+                3 * core::mem::size_of::<usize>(),
+            ), // slot_pool
+            item(
+                2 * max_levels.saturating_add(1).saturating_mul(MAX_SLOTS_PER_LEVEL),
+                core::mem::size_of::<usize>(),
+            ), // slot heads + tails
+            item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // level_dummy_next
+            item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // level_labeled_src
+            item(edge_count, core::mem::size_of::<Idx>()),         // two_cycle_order
+            item(edge_count, core::mem::size_of::<bool>()),        // edge_in_two_cycle
+            item(
+                max_levels.saturating_add(1),
+                core::mem::size_of::<(usize, usize)>(),
+            ), // waypoint_scratch
+            item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // level_vdummy_counts
+            item(max_levels.saturating_add(1), core::mem::size_of::<usize>()), // level_routing_floor
+            // Subgraph temporaries (allocated only when clustered, but
+            // an estimate must cover the clustered case).
+            item(sg_count, core::mem::size_of::<(usize, usize)>()), // sg_ranges
+            item(sg_count, core::mem::size_of::<usize>()),          // sg_depths
+            item(sg_count, core::mem::size_of::<(usize, usize, usize, usize)>()), // sg_envelopes
+            item(max_levels.saturating_add(1), core::mem::size_of::<usize>()), // sg_y_extras
+            item(
+                2 * max_levels.saturating_add(2),
+                core::mem::size_of::<usize>(),
+            ), // sg frontier scratch
+            4096, // per-allocation alignment slack + margin
+        ]
+        .into_iter()
+        .fold(0usize, |a, b| a.saturating_add(b));
 
+        // IR output: with dummy emission enabled, dummies become real
+        // IR nodes (and level-list entries) in the output arena.
+        let ir_nodes = if config.include_dummy_nodes {
+            node_count.saturating_add(actual_dummies)
+        } else {
+            node_count
+        };
         let max_ir_waypoints = max_dummy_waypoints;
-        let ir_size = crate::ir::arena::estimate_layout_arena_size(
-            node_count,
+        let ir_size = crate::ir::arena::estimate_layout_arena_size_with_subgraphs(
+            ir_nodes,
             edge_count,
             label_bytes,
             max_ir_waypoints,
+            sg_count,
         );
 
-        temps_size + ir_size
+        temps_size.saturating_add(ir_size)
     }
 }
 

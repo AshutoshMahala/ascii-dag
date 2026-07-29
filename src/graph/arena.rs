@@ -120,15 +120,18 @@ impl<'a> Arena<'a> {
             return Some((core::ptr::NonNull::<T>::dangling().as_ptr(), 0));
         }
 
-        let size = size_of::<T>() * count;
+        // Checked arithmetic throughout: an adversarial `count` must
+        // produce `None`, never a wrapped-around (too small) size that
+        // safe callers would then write past.
+        let size = size_of::<T>().checked_mul(count)?;
         let align = align_of::<T>();
 
         // Current pointer
         let current = self.ptr.get() as usize;
 
         // Align the pointer
-        let aligned_ptr = (current + align - 1) & !(align - 1);
-        let new_ptr = aligned_ptr + size;
+        let aligned_ptr = current.checked_add(align - 1)? & !(align - 1);
+        let new_ptr = aligned_ptr.checked_add(size)?;
 
         // Check bounds
         if new_ptr > self.end as usize {
@@ -194,7 +197,7 @@ impl<'a> Arena<'a> {
 
         let (ptr, _size) = self.alloc_raw_inner::<T>(count, zero)?;
 
-        // Safety: we've allocated valid memory and bound it to lifetime 'a
+        // SAFETY: we've allocated valid memory and bound it to lifetime 'a
         // The bump pointer ensures disjointness from future allocations.
         // We rely on the borrow checker to ensure the arena itself outlives 'a (which is true since we borrow 'a mut [u8])
         Some(unsafe { core::slice::from_raw_parts_mut(ptr, count) })
@@ -276,8 +279,6 @@ impl<'a> Arena<'a> {
     /// Restore the allocation pointer to a previously saved position.
     ///
     /// All allocations made *after* the saved position are invalidated.
-    ///
-    /// # Safety
     ///
     /// # Safety
     ///

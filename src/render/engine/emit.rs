@@ -127,7 +127,9 @@ pub(crate) fn estimate_output_size<V: LayoutView>(
     legend: bool,
 ) -> usize {
     let per_cell = if colored { 4 + 19 } else { 4 };
-    let mut size = view.height() * (view.width() * per_cell + 8);
+    let mut size = view
+        .height()
+        .saturating_mul(view.width().saturating_mul(per_cell).saturating_add(8));
     if legend {
         // Endpoint labels print in full — bound by the widest node
         // label (computed once), never a fixed guess.

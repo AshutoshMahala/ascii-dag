@@ -947,6 +947,51 @@ mod deep_chain {
         String::from_utf8_lossy(&render_buf[..bytes]).into_owned()
     }
 
+    /// The config-aware estimate must suffice EXACTLY (no slack
+    /// factor) for the demanding combination: long labels on nodes and
+    /// edges, nested clusters, and dummy emission enabled.
+    #[test]
+    #[cfg(not(feature = "arena-idx-u8"))]
+    fn config_aware_estimate_is_sufficient_exactly() {
+        let mut config = LayoutConfig::standard();
+        config.include_dummy_nodes = true;
+
+        let mut g = Graph::new();
+        for i in 0..40usize {
+            g.add_node(i, "a-rather-long-node-label-with-ünïcödé");
+            if i > 0 {
+                g.add_edge(i - 1, i, Some("labeled-edge-with-detail"));
+            }
+        }
+        // Skip edges create dummies; clusters exercise sg storage.
+        for k in 0..10usize {
+            g.add_edge(k, k + 20, Some("skip-label"));
+        }
+        let sg = g.add_subgraph("A-Cluster-With-A-Long-Label");
+        g.put_nodes(&[5, 6, 7]).inside(sg).unwrap();
+        let inner = g.add_subgraph("Inner");
+        g.put_nodes(&[6]).inside(inner).unwrap();
+        g.put_subgraphs(&[inner]).inside(sg).unwrap();
+
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = g.estimate_layout_arena_size_with(&config);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+            .expect("exactly estimate-sized arenas must suffice");
+        assert!(
+            ir.nodes()
+                .iter()
+                .any(|n| matches!(n.kind, ascii_dag::ir::NodeKind::Dummy)),
+            "dummy emission was exercised"
+        );
+    }
+
     /// Under arena-idx-u8 the node-count check bounds depth naturally.
     #[test]
     #[cfg(feature = "arena-idx-u8")]

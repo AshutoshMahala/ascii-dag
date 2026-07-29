@@ -47,6 +47,15 @@ defining one locally in a backend is a bug, because the copies can silently
 drift. Cross-backend tests in `tests/layout_output.rs` pin IR geometry and
 byte-identical rendered text between the two.
 
+**Known bounded exception (0.10):** under extreme interleaved skip-edge
+pressure (dozens of mutually crossing multi-level dummy chains), the two
+backends' crossing-reduction heuristics can order dummy runs differently,
+producing different — individually valid — routings. The shape is pinned
+by the `#[ignore]`d `extreme_interleaved_skips_parity_frontier` test in
+`tests/layout_output.rs`; parity holds everywhere else, including deep
+chains, clustered deep graphs, 500+-edge late-skip graphs, and
+1,000+-dummy waypoint chains.
+
 ## Module Reference
 
 ### Core Data Structures

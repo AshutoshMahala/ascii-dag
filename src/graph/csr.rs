@@ -171,7 +171,7 @@ impl<'a> CsrGraph<'a> {
         let ptr = self.nodes[index * NODE_STRIDE + NODE_LABEL_PTR];
         let len = self.nodes[index * NODE_STRIDE + NODE_LABEL_LEN];
 
-        // Safety: we store valid UTF-8 label offsets
+        // SAFETY: we store valid UTF-8 label offsets
         let bytes = &self.labels[ptr..ptr + len];
         core::str::from_utf8(bytes).unwrap_or("")
     }
@@ -554,10 +554,12 @@ impl<'a> CsrGraphBuilder<'a> {
         max_edges: usize,
         max_label_bytes: usize,
     ) -> Option<Self> {
-        // Allocate all memory from arena using raw pointers
-        let (nodes_ptr, _) = arena.alloc_raw::<usize>(max_nodes * NODE_STRIDE)?;
-        let (edges_ptr, _) = arena.alloc_raw::<u32>(max_edges * EDGE_STRIDE)?;
-        let (children_offsets_ptr, _) = arena.alloc_raw::<u32>(max_nodes + 1)?;
+        // Allocate all memory from arena using raw pointers. Counts are
+        // pre-multiplied with checked arithmetic — adversarial sizes
+        // fail the allocation instead of wrapping.
+        let (nodes_ptr, _) = arena.alloc_raw::<usize>(max_nodes.checked_mul(NODE_STRIDE)?)?;
+        let (edges_ptr, _) = arena.alloc_raw::<u32>(max_edges.checked_mul(EDGE_STRIDE)?)?;
+        let (children_offsets_ptr, _) = arena.alloc_raw::<u32>(max_nodes.checked_add(1)?)?;
         let (children_data_ptr, _) = arena.alloc_raw::<u32>(max_edges)?;
         let (parents_offsets_ptr, _) = arena.alloc_raw::<u32>(max_nodes + 1)?;
         let (parents_data_ptr, _) = arena.alloc_raw::<u32>(max_edges)?;
@@ -1009,7 +1011,7 @@ impl<'a> super::Graph<'a> {
         };
 
         // Convert raw pointers to slices
-        // Safety: alloc_raw has validated the allocations and zeroed the memory
+        // SAFETY: alloc_raw has validated the allocations and zeroed the memory
         let (nodes, edges, children_offsets, children_data, parents_offsets, parents_data, labels) = unsafe {
             (
                 core::slice::from_raw_parts_mut(nodes_ptr, node_count * NODE_STRIDE),
