@@ -48,6 +48,35 @@ pub enum NodeBorder {
     /// `[label]` — the default (legacy for explicit and implicit nodes).
     #[default]
     Bracket,
+    /// `<label>` — e.g. to visually mark implicit (auto-created) nodes.
+    Angle,
+}
+
+/// Subgraph (cluster) box border style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubgraphBorder {
+    /// Double strokes (`═ ║`) — the default (legacy).
+    #[default]
+    Double,
+    /// Light strokes (`─ │`).
+    Light,
+    /// Dashed strokes (`┈ ┊`).
+    Dashed,
+    /// No border — the cluster groups its nodes without ink (its label
+    /// still paints when it fits).
+    None,
+}
+
+impl SubgraphBorder {
+    /// The cell-arm weight for this border, `None` when invisible.
+    pub(crate) fn arm(self) -> Option<Weight> {
+        match self {
+            SubgraphBorder::Double => Some(Weight::Double),
+            SubgraphBorder::Light => Some(Weight::Light),
+            SubgraphBorder::Dashed => Some(Weight::Dashed),
+            SubgraphBorder::None => Option::None,
+        }
+    }
 }
 
 /// Subgraph label position (zigraph naming; D7).
@@ -71,17 +100,33 @@ pub enum LabelPlacement {
 // ── Style structs (what a style fn returns) ─────────────────────────────
 
 /// Resolved style for one edge.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct EdgeStyle {
     /// `CellColor::DEFAULT` = engine default (palette modulo when colors
     /// are enabled, plain otherwise).
     pub color: CellColor,
     /// `None` = engine default (light; dashed for back edges).
     pub weight: Option<LineWeight>,
-    /// Marker at the target end.
+    /// Marker at the logical target end (the arrowhead — legacy always
+    /// paints this).
     pub marker_end: MarkerShape,
-    /// Marker at the source end.
+    /// Marker at the logical source end (legacy never paints one, so
+    /// the default is `MarkerShape::None`; `Arrow` points back at the
+    /// source, giving double-headed edges).
     pub marker_start: MarkerShape,
+}
+
+// Manual impl: a derived Default would give `marker_start` the enum's
+// default (`Arrow`) and paint tail arrowheads legacy never had.
+impl Default for EdgeStyle {
+    fn default() -> Self {
+        Self {
+            color: CellColor::DEFAULT,
+            weight: None,
+            marker_end: MarkerShape::Arrow,
+            marker_start: MarkerShape::None,
+        }
+    }
 }
 
 /// Resolved style for one node.
@@ -96,7 +141,10 @@ pub struct NodeStyle {
 /// Resolved style for one subgraph.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SubgraphStyle {
-    /// Border / label color (`DEFAULT` = terminal default).
+    /// Box border form (`Double` = legacy default; `None` = invisible).
+    pub border: SubgraphBorder,
+    /// Border color (`DEFAULT` = terminal default — legacy borders
+    /// never write color).
     pub color: CellColor,
     /// Label position within the box.
     pub label_pos: LabelPosition,

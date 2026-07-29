@@ -1,9 +1,9 @@
 //! `RenderOptions` — the engine's render configuration (temp/06 §8, M5).
 //!
-//! `Copy`, `const`-constructible, `no_std`-safe. Presets reproduce the
-//! legacy entry points' behavior: [`RenderOptions::plain`] matches
-//! `render_scanline()`, [`RenderOptions::colored`] matches
-//! `render_scanline_colored(palette)`.
+//! `Copy`, `const`-constructible, `no_std`-safe. The named presets
+//! (`plain`, `colored`, `ascii`, `ascii_colored`) live in `presets.rs`
+//! per the growth-by-addition rule (a new preset is a new entry there,
+//! never an edit here).
 
 use super::charset::Charset;
 use super::color::ColorMode;
@@ -47,8 +47,9 @@ pub struct RenderOptions {
 }
 
 impl RenderOptions {
-    /// Plain text output — matches the legacy `render_scanline()` family.
-    pub const fn plain() -> Self {
+    /// Every-field default: plain Unicode, no colors, default band cap,
+    /// default style fns. Named presets live in `presets.rs` (R3.1).
+    pub(crate) const fn defaults() -> Self {
         Self {
             color_mode: ColorMode::None,
             charset: Charset::Unicode,
@@ -60,17 +61,6 @@ impl RenderOptions {
             node_style_fn: default_node_style,
             subgraph_style_fn: default_subgraph_style,
             edge_label_style_fn: default_edge_label_style,
-        }
-    }
-
-    /// ANSI-colored output with a legend — matches the legacy
-    /// `render_scanline_colored_with_legend(palette)`.
-    pub const fn colored(palette: Palette) -> Self {
-        Self {
-            color_mode: ColorMode::Ansi256,
-            legend: true,
-            palette,
-            ..Self::plain()
         }
     }
 

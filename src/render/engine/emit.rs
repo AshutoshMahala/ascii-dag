@@ -60,6 +60,7 @@ impl core::fmt::Write for ByteSink<'_> {
 pub(crate) fn emit_legend<V: LayoutView, W: core::fmt::Write>(
     view: &V,
     plan: &RenderPlan<'_>,
+    charset: Charset,
     out: &mut W,
 ) -> core::fmt::Result {
     if plan.legend_entries().is_empty() {
@@ -80,9 +81,10 @@ pub(crate) fn emit_legend<V: LayoutView, W: core::fmt::Write>(
             continue;
         };
         let color = plan.edge_plan(ei).color.as_ansi256().unwrap_or(0);
+        let arrow = charset.legend_arrow();
         writeln!(
             out,
-            "  \x1b[38;5;{color}m{from} \u{2192} {to}: \"{label}\"\x1b[0m"
+            "  \x1b[38;5;{color}m{from} {arrow} {to}: \"{label}\"\x1b[0m"
         )?;
     }
     Ok(())

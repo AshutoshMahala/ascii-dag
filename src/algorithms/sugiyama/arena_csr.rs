@@ -887,7 +887,11 @@ pub fn compute_layout_arena_csr<'b>(
                 graph.node_height(idx),
                 level as usize,
                 pos as usize,
-                crate::ir::NodeKind::Explicit,
+                if graph.node_is_implicit(idx) {
+                    crate::ir::NodeKind::Implicit
+                } else {
+                    crate::ir::NodeKind::Explicit
+                },
                 usize::MAX,
             )
             .ok_or(GraphError::ArenaOom)?;

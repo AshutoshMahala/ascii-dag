@@ -40,6 +40,7 @@ pub(crate) mod mem;
 #[cfg(all(test, feature = "std", feature = "arena"))]
 mod parity;
 pub(crate) mod plan;
+pub(crate) mod presets;
 pub(crate) mod style;
 pub(crate) mod view;
 
@@ -77,7 +78,7 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
         }
     }
     if colored && options.legend {
-        emit::emit_legend(view_ref, &plan, out)?;
+        emit::emit_legend(view_ref, &plan, options.charset, out)?;
     }
     Ok(())
 }
@@ -161,7 +162,7 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
             }
         }
         if colored && options.legend {
-            emit::emit_legend(view_ref, &plan, &mut sink)?;
+            emit::emit_legend(view_ref, &plan, options.charset, &mut sink)?;
         }
         Ok(())
     };
@@ -203,5 +204,6 @@ pub use config::{DEFAULT_BAND_ROWS, RenderOptions};
 pub use plan::{HitResult, RenderPlan};
 pub use style::{
     EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPlacement, LabelPosition, LineWeight,
-    MarkerShape, NodeBorder, NodeStyle, NodeStyleCtx, SubgraphStyle, SubgraphStyleCtx,
+    MarkerShape, NodeBorder, NodeStyle, NodeStyleCtx, SubgraphBorder, SubgraphStyle,
+    SubgraphStyleCtx,
 };

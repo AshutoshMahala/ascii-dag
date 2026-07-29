@@ -23,7 +23,10 @@
 use super::color::CellColor;
 use super::config::RenderOptions;
 use super::mem::PlanBuf;
-use super::style::{EdgeStyle, EdgeStyleCtx, LabelPosition, LineWeight, SubgraphStyleCtx};
+use super::style::{
+    EdgeStyle, EdgeStyleCtx, LabelPosition, LineWeight, MarkerShape, NodeBorder, NodeStyleCtx,
+    SubgraphBorder, SubgraphStyleCtx,
+};
 use super::view::{LayoutView, PathRef};
 use crate::graph::arena::Arena;
 use crate::render::colors;
@@ -90,13 +93,26 @@ pub(crate) struct EdgePlan {
     pub color: CellColor,
     pub weight: LineWeight,
     pub label_color: CellColor,
+    /// Marker at the logical target end (legacy: always an arrowhead).
+    pub marker_end: MarkerShape,
+    /// Marker at the logical source end (legacy: never painted).
+    pub marker_start: MarkerShape,
 }
 
-/// Resolved per-subgraph style. (Border color joins at RW7 when the
-/// styling surface exposes colored subgraph borders; legacy borders
-/// never write color.)
+/// Resolved per-node style.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct NodePlan {
+    pub border: NodeBorder,
+    pub text_color: CellColor,
+}
+
+/// Resolved per-subgraph style.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SubgraphPlan {
+    pub border: SubgraphBorder,
+    /// Border color; `DEFAULT` keeps legacy behavior (borders never
+    /// write the color plane).
+    pub color: CellColor,
     pub label_pos: LabelPosition,
 }
 
@@ -129,6 +145,7 @@ pub struct RenderPlan<'buf> {
     band_ranges: PlanBuf<'buf, (usize, usize)>,
     edge_plans: PlanBuf<'buf, EdgePlan>,
     subgraph_plans: PlanBuf<'buf, SubgraphPlan>,
+    node_plans: PlanBuf<'buf, NodePlan>,
     labels: PlanBuf<'buf, LabelPlan>,
     index: PlanBuf<'buf, PlanElement>,
     /// Edge indices whose labels go to the legend (colored semantics).
@@ -215,6 +232,8 @@ impl<'buf> RenderPlan<'buf> {
                 color,
                 weight,
                 label_color,
+                marker_end: style.marker_end,
+                marker_start: style.marker_start,
             });
         }
 
@@ -229,7 +248,32 @@ impl<'buf> RenderPlan<'buf> {
             };
             let style = (options.subgraph_style_fn)(ctx);
             subgraph_plans.push(SubgraphPlan {
+                border: style.border,
+                color: style.color,
                 label_pos: style.label_pos,
+            });
+        }
+
+        let mut node_plans: PlanBuf<'buf, NodePlan> = mem.buf(view.node_count(), oom())?;
+        for i in 0..view.node_count() {
+            let n = view.node(i);
+            // Dummies are markers, not styleable nodes — the style fn
+            // never sees them.
+            if matches!(n.kind, crate::ir::NodeKind::Dummy) {
+                node_plans.push(NodePlan::default());
+                continue;
+            }
+            let ctx = NodeStyleCtx {
+                node_id: n.id,
+                label: n.label,
+                is_implicit: matches!(n.kind, crate::ir::NodeKind::Implicit),
+                has_self_loop: n.has_self_loop,
+                total_nodes: view.node_count(),
+            };
+            let style = (options.node_style_fn)(ctx);
+            node_plans.push(NodePlan {
+                border: style.border,
+                text_color: style.text_color,
             });
         }
 
@@ -337,6 +381,7 @@ impl<'buf> RenderPlan<'buf> {
             band_ranges,
             edge_plans,
             subgraph_plans,
+            node_plans,
             labels,
             index,
             legend,
@@ -422,6 +467,10 @@ impl<'buf> RenderPlan<'buf> {
 
     pub(crate) fn subgraph_plan(&self, index: usize) -> &SubgraphPlan {
         &self.subgraph_plans.as_slice()[index]
+    }
+
+    pub(crate) fn node_plan(&self, index: usize) -> &NodePlan {
+        &self.node_plans.as_slice()[index]
     }
 
     pub(crate) fn labels(&self) -> &[LabelPlan] {
@@ -562,6 +611,7 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
 
     let plan_bytes = e * size_of::<EdgePlan>()
         + s * size_of::<SubgraphPlan>()
+        + n * size_of::<NodePlan>()
         + (n + e + s) * size_of::<PlanElement>()
         + labeled * (size_of::<LabelPlan>() + size_of::<usize>() + size_of::<(usize, usize, usize)>())
         + n * size_of::<usize>()
@@ -581,8 +631,8 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
         } else {
             0
         };
-    // Per-allocation alignment slack (≤ 8 bytes × ~14 carves) + margin.
-    plan_bytes + scratch_bytes + canvas_bytes + 14 * 8 + 64
+    // Per-allocation alignment slack (≤ 8 bytes × ~16 carves) + margin.
+    plan_bytes + scratch_bytes + canvas_bytes + 16 * 8 + 64
 }
 
 /// Structural count of horizontal-run interiors a path paints — the

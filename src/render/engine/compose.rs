@@ -479,7 +479,7 @@ pub(crate) fn composite_band<V: LayoutView>(
     scratch.nodes.as_mut_slice().sort_unstable();
     // Z0+Z1: strokes — subgraph borders and edges (commutative merges).
     for i in 0..scratch.sgs.len() {
-        paint_subgraph_border(view, scratch.sgs.as_slice()[i], canvas);
+        paint_subgraph_border(view, plan, scratch.sgs.as_slice()[i], canvas);
     }
     let mut painter = EdgePainter::new(canvas, scratch);
     for pos in 0.. {
@@ -511,7 +511,7 @@ pub(crate) fn composite_band<V: LayoutView>(
     }
     // Z3: nodes.
     for i in 0..scratch.nodes.len() {
-        paint_node(view, scratch.nodes.as_slice()[i], options, canvas);
+        paint_node(view, plan, scratch.nodes.as_slice()[i], options, canvas);
     }
     // Z4: subgraph labels (always readable; colors untouched).
     for i in 0..scratch.sgs.len() {
@@ -534,8 +534,21 @@ fn paint_edge<V: LayoutView>(
     p: &mut EdgePainter<'_, '_, '_, '_>,
 ) {
     let e = view.edge(edge_index);
-    let w = plan.edge_plan(edge_index).weight.arm();
+    let ep = plan.edge_plan(edge_index);
+    let w = ep.weight.arm();
     let rev = e.reversed;
+    // Which style marker each geometric side carries: reversal swaps
+    // the logical ends. `marker_end` is the arrowhead legacy always
+    // paints; `marker_start` is the (legacy-off) tail marker.
+    use super::style::MarkerShape;
+    let to_m = !matches!(
+        if rev { ep.marker_start } else { ep.marker_end },
+        MarkerShape::None
+    );
+    let from_m = !matches!(
+        if rev { ep.marker_end } else { ep.marker_start },
+        MarkerShape::None
+    );
 
     // Flow derives from the geometry (M4): +1 when the target sits below
     // the source (TopDown layouts), −1 when above (BottomUp layouts).
@@ -548,10 +561,10 @@ fn paint_edge<V: LayoutView>(
     match e.path {
         PathRef::Direct | PathRef::Spline { .. } => {
             for y in between(e.from_y, e.to_y) {
-                if !rev && y == off(e.to_y, -1) {
-                    p.marker(e.from_x, y, MarkerKind::Arrow, fwd, false);
-                } else if rev && y == off(e.from_y, 1) {
-                    p.marker(e.from_x, y, MarkerKind::Arrow, bwd, true);
+                if to_m && y == off(e.to_y, -1) {
+                    p.marker(e.from_x, y, MarkerKind::Arrow, fwd, rev);
+                } else if from_m && y == off(e.from_y, 1) {
+                    p.marker(e.from_x, y, MarkerKind::Arrow, bwd, rev);
                 } else {
                     p.stroke(e.from_x, y, w, w, Weight::None, Weight::None);
                 }
@@ -559,8 +572,8 @@ fn paint_edge<V: LayoutView>(
         }
         PathRef::Corner { horizontal_y } => {
             for y in between(e.from_y, horizontal_y) {
-                if rev && y == off(e.from_y, 1) {
-                    p.marker(e.from_x, y, MarkerKind::Arrow, bwd, true);
+                if from_m && y == off(e.from_y, 1) {
+                    p.marker(e.from_x, y, MarkerKind::Arrow, bwd, rev);
                 } else {
                     p.stroke(e.from_x, y, w, w, Weight::None, Weight::None);
                 }
@@ -572,12 +585,13 @@ fn paint_edge<V: LayoutView>(
                 e.from_x,
                 e.to_x,
                 w,
-                rev && bend_adjacent,
+                from_m && bend_adjacent,
+                rev,
                 dir,
             );
             for y in between(horizontal_y, e.to_y) {
-                if !rev && y == off(e.to_y, -1) {
-                    p.marker(e.to_x, y, MarkerKind::Arrow, fwd, false);
+                if to_m && y == off(e.to_y, -1) {
+                    p.marker(e.to_x, y, MarkerKind::Arrow, fwd, rev);
                 } else {
                     p.stroke(e.to_x, y, w, w, Weight::None, Weight::None);
                 }
@@ -588,14 +602,14 @@ fn paint_edge<V: LayoutView>(
             start_y,
             end_y,
         } => {
-            h_run_with_corners(p, start_y, e.from_x, channel_x, w, false, dir);
+            h_run_with_corners(p, start_y, e.from_x, channel_x, w, false, rev, dir);
             for y in between(start_y, end_y) {
                 p.stroke(channel_x, y, w, w, Weight::None, Weight::None);
             }
-            h_run_with_corners(p, end_y, channel_x, e.to_x, w, false, dir);
+            h_run_with_corners(p, end_y, channel_x, e.to_x, w, false, rev, dir);
             for y in between(end_y, e.to_y) {
-                if !rev && y == off(e.to_y, -1) {
-                    p.marker(e.to_x, y, MarkerKind::Arrow, fwd, false);
+                if to_m && y == off(e.to_y, -1) {
+                    p.marker(e.to_x, y, MarkerKind::Arrow, fwd, rev);
                 } else {
                     p.stroke(e.to_x, y, w, w, Weight::None, Weight::None);
                 }
@@ -617,10 +631,10 @@ fn paint_edge<V: LayoutView>(
                 let last = i == waypoints.len();
                 if px == nx {
                     for y in between(py, ny) {
-                        if first && rev && y == off(py, 1) {
-                            p.marker(px, y, MarkerKind::Arrow, bwd, true);
-                        } else if last && !rev && y == off(ny, -1) {
-                            p.marker(px, y, MarkerKind::Arrow, fwd, false);
+                        if first && from_m && y == off(py, 1) {
+                            p.marker(px, y, MarkerKind::Arrow, bwd, rev);
+                        } else if last && to_m && y == off(ny, -1) {
+                            p.marker(px, y, MarkerKind::Arrow, fwd, rev);
                         } else {
                             p.stroke(px, y, w, w, Weight::None, Weight::None);
                         }
@@ -634,8 +648,8 @@ fn paint_edge<V: LayoutView>(
                     let corner_y = off(py, 1 + if first { start_y_offset as isize } else { 0 });
                     if first && start_y_offset > 0 {
                         for y in between(py, corner_y) {
-                            if rev && y == off(py, 1) {
-                                p.marker(px, y, MarkerKind::Arrow, bwd, true);
+                            if from_m && y == off(py, 1) {
+                                p.marker(px, y, MarkerKind::Arrow, bwd, rev);
                             } else {
                                 p.stroke(px, y, w, w, Weight::None, Weight::None);
                             }
@@ -651,12 +665,13 @@ fn paint_edge<V: LayoutView>(
                         px,
                         nx,
                         w,
-                        first && rev && bend_adjacent,
+                        first && from_m && bend_adjacent,
+                        rev,
                         dir,
                     );
                     for y in between(corner_y, ny) {
-                        if last && !rev && y == off(ny, -1) {
-                            p.marker(nx, y, MarkerKind::Arrow, fwd, false);
+                        if last && to_m && y == off(ny, -1) {
+                            p.marker(nx, y, MarkerKind::Arrow, fwd, rev);
                         } else {
                             p.stroke(nx, y, w, w, Weight::None, Weight::None);
                         }
@@ -682,7 +697,8 @@ fn h_run_with_corners(
     x_start: usize,
     x_end: usize,
     w: Weight,
-    reversed_hack: bool,
+    marker_hack: bool,
+    dashed: bool,
     dir: isize,
 ) {
     if x_start == x_end {
@@ -697,9 +713,9 @@ fn h_run_with_corners(
     // the end (toward the target).
     let (src_up, src_down) = if dir > 0 { (w, n) } else { (n, w) };
     let (tgt_up, tgt_down) = if dir > 0 { (n, w) } else { (w, n) };
-    if reversed_hack {
+    if marker_hack {
         let bwd = if dir > 0 { Dir::Up } else { Dir::Down };
-        p.marker(x_start, row, MarkerKind::Arrow, bwd, true);
+        p.marker(x_start, row, MarkerKind::Arrow, bwd, dashed);
     } else if x_start < x_end {
         p.stroke(x_start, row, src_up, src_down, n, w);
     } else {
@@ -714,14 +730,26 @@ fn h_run_with_corners(
 
 // ── Subgraphs ────────────────────────────────────────────────────────────
 
-fn paint_subgraph_border<V: LayoutView>(view: &V, index: usize, canvas: &mut BandCanvas<'_>) {
+fn paint_subgraph_border<V: LayoutView>(
+    view: &V,
+    plan: &RenderPlan<'_>,
+    index: usize,
+    canvas: &mut BandCanvas<'_>,
+) {
     let sg = view.subgraph(index);
     if sg.width < 2 || sg.height < 2 {
         return;
     }
-    let d = Weight::Double;
+    let sp = plan.subgraph_plan(index);
+    // `SubgraphBorder::None` groups without ink.
+    let Some(d) = sp.border.arm() else { return };
     let n = Weight::None;
-    let k = Paint::KeepColor;
+    // Legacy borders never write color; an explicit style color does.
+    let k = if sp.color.is_set() {
+        Paint::Color(sp.color)
+    } else {
+        Paint::KeepColor
+    };
     let top = sg.y;
     let bottom = sg.y + sg.height - 1;
     let left = sg.x;
@@ -767,39 +795,47 @@ fn paint_subgraph_label<V: LayoutView>(
 
 fn paint_node<V: LayoutView>(
     view: &V,
+    plan: &RenderPlan<'_>,
     index: usize,
     options: &RenderOptions,
     canvas: &mut BandCanvas<'_>,
 ) {
     let n = view.node(index);
-    let default = Paint::Color(CellColor::DEFAULT);
     if matches!(n.kind, NodeKind::Dummy) {
         if options.show_dummy_nodes {
+            let default = Paint::Color(CellColor::DEFAULT);
             canvas.marker(n.x, n.y, MarkerKind::Dummy, Dir::Up, false, default);
         }
         return;
     }
-    // Bracket row at the node's top row (content atomicity, D4). The
-    // closing bracket sits at the node's declared width (arena widths
+    let np = plan.node_plan(index);
+    // Node ink writes its style color; the default (`DEFAULT`) is the
+    // legacy behavior of explicitly resetting to the terminal default.
+    let paint = Paint::Color(np.text_color);
+    let (open, close) = match np.border {
+        super::style::NodeBorder::Bracket => ('[', ']'),
+        super::style::NodeBorder::Angle => ('<', '>'),
+    };
+    // Border row at the node's top row (content atomicity, D4). The
+    // closing delimiter sits at the node's declared width (arena widths
     // can exceed label+2 — the padded interior cells are left
-    // untouched, like the legacy renderers). Node text explicitly
-    // resets colors to the terminal default (legacy colored behavior).
+    // untouched, like the legacy renderers).
     let close_x = n.x + n.width.saturating_sub(1);
     let mut x = n.x;
-    canvas.text(x, n.y, '[', default);
+    canvas.text(x, n.y, open, paint);
     x += 1;
     for ch in n.label.chars() {
         if x >= close_x {
             break;
         }
-        canvas.text(x, n.y, ch, default);
+        canvas.text(x, n.y, ch, paint);
         x += 1;
     }
     if n.width >= 2 {
-        canvas.text(close_x, n.y, ']', default);
+        canvas.text(close_x, n.y, close, paint);
     }
     if n.has_self_loop {
-        canvas.marker(close_x + 1, n.y, MarkerKind::SelfLoop, Dir::Up, false, default);
+        canvas.marker(close_x + 1, n.y, MarkerKind::SelfLoop, Dir::Up, false, paint);
     }
 }
 

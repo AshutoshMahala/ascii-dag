@@ -875,3 +875,223 @@ mod no_alloc {
         ));
     }
 }
+
+// ── Styling surface v1 (RW7, acceptance #6) ──────────────────────────────
+//
+// End-to-end: override one knob through a style fn, render through the
+// public option surface, assert the output changed exactly as the knob
+// promises — on both IRs where geometry allows. Defaults changing
+// nothing is enforced by the whole harness above (every parity test
+// runs the default style fns).
+
+mod styles {
+    use super::*;
+    use crate::graph::Direction;
+    use crate::render::engine::style::{
+        EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPosition, MarkerShape, NodeBorder,
+        NodeStyle, NodeStyleCtx, SubgraphBorder, SubgraphStyle, SubgraphStyleCtx,
+    };
+    use crate::render::engine::CellColor;
+
+    // Style fns are plain `fn` items — the no_std-safe callback shape.
+    fn no_arrowheads(_: EdgeStyleCtx<'_>) -> EdgeStyle {
+        EdgeStyle {
+            marker_end: MarkerShape::None,
+            ..EdgeStyle::default()
+        }
+    }
+    fn double_headed(_: EdgeStyleCtx<'_>) -> EdgeStyle {
+        EdgeStyle {
+            marker_start: MarkerShape::Arrow,
+            ..EdgeStyle::default()
+        }
+    }
+    fn angle_implicit(ctx: NodeStyleCtx<'_>) -> NodeStyle {
+        NodeStyle {
+            border: if ctx.is_implicit {
+                NodeBorder::Angle
+            } else {
+                NodeBorder::Bracket
+            },
+            ..NodeStyle::default()
+        }
+    }
+    fn red_nodes(_: NodeStyleCtx<'_>) -> NodeStyle {
+        NodeStyle {
+            text_color: CellColor::ansi256(196),
+            ..NodeStyle::default()
+        }
+    }
+    fn light_boxes(_: SubgraphStyleCtx<'_>) -> SubgraphStyle {
+        SubgraphStyle {
+            border: SubgraphBorder::Light,
+            ..SubgraphStyle::default()
+        }
+    }
+    fn dashed_boxes(_: SubgraphStyleCtx<'_>) -> SubgraphStyle {
+        SubgraphStyle {
+            border: SubgraphBorder::Dashed,
+            ..SubgraphStyle::default()
+        }
+    }
+    fn invisible_boxes(_: SubgraphStyleCtx<'_>) -> SubgraphStyle {
+        SubgraphStyle {
+            border: SubgraphBorder::None,
+            ..SubgraphStyle::default()
+        }
+    }
+    fn green_boxes(_: SubgraphStyleCtx<'_>) -> SubgraphStyle {
+        SubgraphStyle {
+            color: CellColor::ansi256(42),
+            ..SubgraphStyle::default()
+        }
+    }
+    fn bottom_labels(_: SubgraphStyleCtx<'_>) -> SubgraphStyle {
+        SubgraphStyle {
+            label_pos: LabelPosition::InsideBottom,
+            ..SubgraphStyle::default()
+        }
+    }
+    fn magenta_labels(_: EdgeStyleCtx<'_>) -> EdgeLabelStyle {
+        EdgeLabelStyle {
+            color: CellColor::ansi256(201),
+            ..EdgeLabelStyle::default()
+        }
+    }
+
+    // Presets stay const-constructible (R3.1).
+    const _ASCII: RenderOptions = RenderOptions::ascii();
+    const _ASCII_COLORED: RenderOptions = RenderOptions::ascii_colored(Palette::Ansi);
+
+    #[test]
+    fn marker_end_none_suppresses_every_arrowhead() {
+        for direction in [Direction::TopDown, Direction::BottomUp] {
+            let mut g = back_edges();
+            g.set_direction(direction);
+            let ir = g.compute_layout();
+            let mut options = RenderOptions::plain();
+            options.edge_style_fn = no_arrowheads;
+            let out = render_plain(&ir, &options);
+            for arrow in ['\u{2193}', '\u{2191}', '\u{21E1}', '\u{21E3}'] {
+                assert!(
+                    !out.contains(arrow),
+                    "{direction:?}: {arrow} should be suppressed:\n{out}"
+                );
+            }
+            // The stroke replaces the marker — columns stay connected.
+            assert!(out.contains('\u{2502}'), "verticals remain:\n{out}");
+        }
+    }
+
+    #[test]
+    fn marker_start_arrow_gives_double_heads() {
+        let ir = chain().compute_layout();
+        let mut options = RenderOptions::plain();
+        options.edge_style_fn = double_headed;
+        let out = render_plain(&ir, &options);
+        // TD forward edges gain an up-arrow tail beneath the source.
+        assert!(out.contains('\u{2191}'), "tail arrowheads appear:\n{out}");
+        assert!(out.contains('\u{2193}'), "head arrowheads remain:\n{out}");
+    }
+
+    #[test]
+    fn angle_border_marks_implicit_nodes_only() {
+        let ir = implicit_nodes().compute_layout();
+        let mut options = RenderOptions::plain();
+        options.node_style_fn = angle_implicit;
+        let out = render_plain(&ir, &options);
+        assert!(out.contains("[Root]"), "explicit keeps brackets:\n{out}");
+        assert!(out.contains('<') && out.contains('>'), "implicit gets angles:\n{out}");
+        // And the arena IR agrees byte-for-byte.
+        let g = implicit_nodes();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let config = LayoutConfig::standard();
+        let csr_ir = csr
+            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+            .expect("CSR layout");
+        assert_same("angle borders (heap vs csr)", &out, &render_plain(&csr_ir, &options));
+    }
+
+    #[test]
+    fn subgraph_border_styles_restyle_the_box() {
+        let ir = nested_boxes().compute_layout();
+
+        let mut light = RenderOptions::plain();
+        light.subgraph_style_fn = light_boxes;
+        let out = render_plain(&ir, &light);
+        assert!(out.contains('\u{250c}'), "light corner:\n{out}");
+        assert!(!out.contains('\u{2554}'), "no double corner:\n{out}");
+
+        let mut dashed = RenderOptions::plain();
+        dashed.subgraph_style_fn = dashed_boxes;
+        let out = render_plain(&ir, &dashed);
+        assert!(out.contains('\u{2508}'), "dashed horizontal:\n{out}");
+        assert!(!out.contains('\u{2550}'), "no double horizontal:\n{out}");
+
+        let mut none = RenderOptions::plain();
+        none.subgraph_style_fn = invisible_boxes;
+        let out = render_plain(&ir, &none);
+        // Only double strokes are box ink here — light corners belong
+        // to edge routing and must survive.
+        for border in ['\u{2554}', '\u{2550}', '\u{2551}', '\u{255a}'] {
+            assert!(!out.contains(border), "no box ink:\n{out}");
+        }
+        assert!(out.contains("Outer") && out.contains("Inner"), "labels stay:\n{out}");
+        assert!(out.contains("[Work]"), "content stays:\n{out}");
+    }
+
+    #[test]
+    fn subgraph_and_node_colors_reach_the_escape_stream() {
+        let ir = stage_graph_for_styles().compute_layout();
+        let mut options = RenderOptions::colored(Palette::Ansi);
+        options.subgraph_style_fn = green_boxes;
+        options.node_style_fn = red_nodes;
+        options.edge_label_style_fn = magenta_labels;
+        let out = render_colored(&ir, &options);
+        assert!(out.contains("\x1b[38;5;42m"), "border color escapes:\n{out:?}");
+        assert!(out.contains("\x1b[38;5;196m"), "node text color escapes:\n{out:?}");
+        assert!(out.contains("\x1b[38;5;201m"), "label color escapes:\n{out:?}");
+    }
+
+    #[test]
+    fn label_position_inside_bottom_moves_the_box_label() {
+        let ir = stage_graph_for_styles().compute_layout();
+        let mut options = RenderOptions::plain();
+        options.subgraph_style_fn = bottom_labels;
+        let out = render_plain(&ir, &options);
+        let sg = &ir.subgraphs()[0];
+        let lines: alloc::vec::Vec<&str> = out.lines().collect();
+        let label_row = lines
+            .iter()
+            .position(|l| l.contains("Stage"))
+            .expect("label present");
+        assert_eq!(label_row, sg.y + sg.height - 2, "label at box bottom:\n{out}");
+    }
+
+    #[test]
+    fn ascii_presets_project_and_legend_follows_charset() {
+        let ir = stage_graph_for_styles().compute_layout();
+        let out = render_plain(&ir, &RenderOptions::ascii());
+        assert!(out.contains('v') && !out.contains('\u{2193}'), "{out}");
+        assert!(out.contains('+') && !out.contains('\u{2554}'), "{out}");
+
+        // Legend arrow: '->' under Ascii, '→' under Unicode.
+        let ir = colliding_labels().compute_layout();
+        let unicode = render_colored(&ir, &RenderOptions::colored(Palette::Ansi));
+        let ascii = render_colored(&ir, &RenderOptions::ascii_colored(Palette::Ansi));
+        assert!(unicode.contains(" \u{2192} "), "unicode legend arrow:\n{unicode:?}");
+        assert!(ascii.contains(" -> "), "ascii legend arrow:\n{ascii:?}");
+        assert!(!ascii.contains('\u{2192}'), "no unicode arrow in ascii legend:\n{ascii:?}");
+    }
+
+    fn stage_graph_for_styles() -> Graph<'static> {
+        stage()
+    }
+}

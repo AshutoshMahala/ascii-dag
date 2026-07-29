@@ -28,6 +28,14 @@ impl Charset {
             Charset::Ascii => ascii::decode(cell),
         }
     }
+
+    /// The legend's "from → to" arrow in this charset.
+    pub(crate) fn legend_arrow(self) -> &'static str {
+        match self {
+            Charset::Unicode => "\u{2192}",
+            Charset::Ascii => "->",
+        }
+    }
 }
 
 #[cfg(test)]

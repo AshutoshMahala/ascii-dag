@@ -24,13 +24,18 @@
 use crate::graph::arena::Arena;
 
 /// Node data stride: fields per node
-const NODE_STRIDE: usize = 5;
+const NODE_STRIDE: usize = 6;
 /// Node field offsets
 const NODE_ID: usize = 0;
 const NODE_LABEL_PTR: usize = 1;
 const NODE_LABEL_LEN: usize = 2;
 const NODE_WIDTH: usize = 3;
 const NODE_HEIGHT: usize = 4;
+const NODE_FLAGS: usize = 5;
+
+/// `NODE_FLAGS` bit: the node was auto-created by an edge reference
+/// (`NodeKind::Implicit` in the layout IR — heap parity).
+const NODE_FLAG_IMPLICIT: usize = 1;
 
 /// Edge data stride: fields per edge
 const EDGE_STRIDE: usize = 4;
@@ -175,6 +180,13 @@ impl<'a> CsrGraph<'a> {
     #[inline]
     pub fn node_height(&self, index: usize) -> usize {
         self.nodes[index * NODE_STRIDE + NODE_HEIGHT]
+    }
+
+    /// Whether the node was auto-created by an edge reference (renders
+    /// as `NodeKind::Implicit`, matching the heap pipeline).
+    #[inline]
+    pub fn node_is_implicit(&self, index: usize) -> bool {
+        self.nodes[index * NODE_STRIDE + NODE_FLAGS] & NODE_FLAG_IMPLICIT != 0
     }
 
     /// Get children of a node by index.
@@ -690,6 +702,8 @@ impl<'a> CsrGraphBuilder<'a> {
         self.nodes[idx * NODE_STRIDE + NODE_LABEL_LEN] = label_len;
         self.nodes[idx * NODE_STRIDE + NODE_WIDTH] = width;
         self.nodes[idx * NODE_STRIDE + NODE_HEIGHT] = height;
+        // Direct-built CSR graphs declare every node — none is implicit.
+        self.nodes[idx * NODE_STRIDE + NODE_FLAGS] = 0;
 
         // Store label bytes
         self.labels[self.current_label_offset..self.current_label_offset + label_len]
@@ -1010,6 +1024,11 @@ impl<'a> super::Graph<'a> {
             nodes[idx * NODE_STRIDE + NODE_LABEL_LEN] = label.len();
             nodes[idx * NODE_STRIDE + NODE_WIDTH] = self.get_node_width(idx);
             nodes[idx * NODE_STRIDE + NODE_HEIGHT] = self.get_node_height(idx);
+            nodes[idx * NODE_STRIDE + NODE_FLAGS] = if self.auto_created.contains(&id) {
+                NODE_FLAG_IMPLICIT
+            } else {
+                0
+            };
 
             // Copy label bytes
             labels[label_offset..label_offset + label.len()].copy_from_slice(label.as_bytes());
