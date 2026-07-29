@@ -1337,7 +1337,7 @@ mod tests {
         g.put_nodes(&[1, 2]).inside(sg).unwrap();
         // Should not panic (scanline renderer has border support)
         let ir = g.compute_layout();
-        let output = ir.render_scanline();
+        let output = ir.render_string(&crate::render::engine::RenderOptions::plain());
         assert!(!output.is_empty());
         // Border characters should appear (double-line style)
         assert!(output.contains('╔'));
@@ -1351,7 +1351,7 @@ mod tests {
         let sg = g.add_subgraph("MyCluster");
         g.put_nodes(&[1]).inside(sg).unwrap();
         let ir = g.compute_layout();
-        let output = ir.render_scanline();
+        let output = ir.render_string(&crate::render::engine::RenderOptions::plain());
         assert!(
             output.contains("MyCluster"),
             "label not found in output:\n{output}",
@@ -2084,7 +2084,7 @@ mod tests {
             ir.width(),
         );
         // Renderer truncates the label to the box interior.
-        let out = ir.render_scanline();
+        let out = ir.render_string(&crate::render::engine::RenderOptions::plain());
         assert!(out.lines().all(|l| l.chars().count() <= ir.width()));
     }
 

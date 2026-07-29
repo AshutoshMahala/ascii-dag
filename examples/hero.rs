@@ -56,9 +56,9 @@ fn main() {
         }
         ir.render_string(&opts)
     } else if use_color {
-        ir.render_scanline_colored_with_legend(Palette::Ansi)
+        ir.render_string(&RenderOptions::colored(Palette::Ansi))
     } else {
-        ir.render_scanline()
+        ir.render_string(&RenderOptions::plain())
     };
     println!("{}", output);
 

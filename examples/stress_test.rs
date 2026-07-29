@@ -5,6 +5,7 @@ use std::time::Instant;
 
 #[cfg(feature = "arena")]
 use ascii_dag::graph::arena::Arena;
+use ascii_dag::render::engine::RenderOptions;
 
 // Simple Linear Congruential Generator to avoid adding 'rand' dependency
 struct SimpleRng {
@@ -116,9 +117,9 @@ fn run_heap_test(name: &str, dag: &Graph, preset_name: Option<&str>) {
     let ir = dag.compute_layout_with_config(&config);
 
     let output = if use_color {
-        ir.render_scanline_colored_with_legend(Palette::Ansi)
+        ir.render_string(&RenderOptions::colored(Palette::Ansi))
     } else {
-        ir.render_scanline()
+        ir.render_string(&RenderOptions::plain())
     };
     let duration = start.elapsed();
 
@@ -190,15 +191,13 @@ fn run_csr_test(name: &str, dag: &Graph) {
                     0
                 } else {
                     // Step 5: Render to buffer (no-alloc rendering)
-                    let (render_est, scratch_len) = layout.estimate_render_size();
-                    let render_size = render_est + 65536;
-                    let line_buffer_size = (layout.width() + 1024).max(1024);
-                    let mut render_buffer = vec![0u8; render_size];
-                    let mut line_buffer = vec![' '; line_buffer_size];
-                    let mut scratch_buffer = vec![0usize; scratch_len + 1024];
-
+                    let options = RenderOptions::plain();
+                    let mut arena_buf = vec![0u8; layout.estimate_render_arena_size(&options)];
+                    let render_arena = ascii_dag::graph::arena::Arena::new(&mut arena_buf);
+                    let mut render_buffer =
+                        vec![0u8; layout.estimate_render_output_size(&options)];
                     let bytes_written = layout
-                        .render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
+                        .render_to_bytes(&options, &render_arena, &mut render_buffer)
                         .unwrap_or(0);
 
                     if !name.contains("Massive") {

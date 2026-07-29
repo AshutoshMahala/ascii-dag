@@ -76,7 +76,8 @@ fn rows_between(rendered: &str) -> usize {
 }
 
 fn render_heap(g: &Graph<'_>, config: &LayoutConfig<'_>) -> String {
-    g.compute_layout_with_config(config).render_scanline()
+    g.compute_layout_with_config(config)
+        .render_string(&ascii_dag::render::engine::RenderOptions::plain())
 }
 
 // ── Heap backend ─────────────────────────────────────────────────────────
@@ -135,12 +136,12 @@ mod csr {
             .compute_layout_arena(config, &mut temp_arena, &mut out_arena)
             .expect("CSR layout");
 
-        let (render_bytes, _) = ir.estimate_render_size();
-        let mut render_buf = vec![0u8; render_bytes * 4 + 8192];
-        let mut line_buf = vec![' '; ir.width().max(1) + 32];
-        let mut scratch = vec![0usize; (ir.height() + ir.edge_count() * 2).max(1) + 64];
+        let options = ascii_dag::render::engine::RenderOptions::plain();
+        let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+        let render_arena = Arena::new(&mut arena_buf);
+        let mut render_buf = vec![0u8; ir.estimate_render_output_size(&options)];
         let bytes = ir
-            .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
+            .render_to_bytes(&options, &render_arena, &mut render_buf)
             .expect("render");
         String::from_utf8_lossy(&render_buf[..bytes]).into_owned()
     }
@@ -227,7 +228,9 @@ mod csr {
 #[test]
 fn hero_example_matches_golden() {
     let g = hero_graph();
-    let rendered = g.compute_layout().render_scanline();
+    let rendered = g
+        .compute_layout()
+        .render_string(&ascii_dag::render::engine::RenderOptions::plain());
     let golden = include_str!("golden/hero.txt");
     assert_eq!(
         rendered.trim_end(),
@@ -348,10 +351,14 @@ mod direction {
     fn top_down_output_unchanged_by_direction_plumbing() {
         // Explicit TopDown must be byte-identical to the default.
         let g = stage_graph();
-        let default_out = g.compute_layout().render_scanline();
+        let default_out = g
+            .compute_layout()
+            .render_string(&ascii_dag::render::engine::RenderOptions::plain());
         let mut g2 = stage_graph();
         g2.set_direction(Direction::TopDown);
-        let explicit_out = g2.compute_layout().render_scanline();
+        let explicit_out = g2
+            .compute_layout()
+            .render_string(&ascii_dag::render::engine::RenderOptions::plain());
         assert_eq!(default_out, explicit_out);
     }
 
@@ -781,12 +788,12 @@ mod deep_chain {
                 .compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut out_arena)
                 .unwrap_or_else(|e| panic!("n={n}: CSR layout must succeed, got {e}"));
 
-            let (render_bytes, _) = ir.estimate_render_size();
-            let mut render_buf = vec![0u8; render_bytes * 4 + 8192];
-            let mut line_buf = vec![' '; ir.width().max(1) + 32];
-            let mut scratch = vec![0usize; (ir.height() + ir.edge_count() * 2).max(1) + 64];
+            let options = ascii_dag::render::engine::RenderOptions::plain();
+            let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+            let render_arena = Arena::new(&mut arena_buf);
+            let mut render_buf = vec![0u8; ir.estimate_render_output_size(&options)];
             let bytes = ir
-                .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
+                .render_to_bytes(&options, &render_arena, &mut render_buf)
                 .expect("arena render");
             let csr_out = String::from_utf8_lossy(&render_buf[..bytes]);
             assert_eq!(heap_out, csr_out, "n={n}: backends must render identically");

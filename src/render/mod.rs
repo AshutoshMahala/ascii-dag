@@ -9,4 +9,4 @@ pub mod chars;
 pub mod colors;
 pub mod engine;
 #[cfg(feature = "alloc")]
-pub mod scanline;
+mod legacy;

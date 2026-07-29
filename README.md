@@ -168,6 +168,7 @@ padding and border rendering.
 
 ```rust
 use ascii_dag::Graph;
+use ascii_dag::RenderOptions;
 
 let mut g = Graph::new();
 g.add_node(1, "Web");
@@ -187,7 +188,7 @@ let backend = g.add_subgraph("Backend");
 g.put_nodes(&[2, 3, 4]).inside(backend).unwrap();
 
 let ir = g.compute_layout();
-println!("{}", ir.render_scanline());
+println!("{}", ir.render_string(&RenderOptions::plain()));
 ```
 
 Features:
@@ -245,6 +246,7 @@ Render edges with distinct colors to visualize different dependency types:
 ```rust
 use ascii_dag::Graph;
 use ascii_dag::render::colors::Palette;
+use ascii_dag::RenderOptions;
 
 let dag = Graph::from_edges(
     &[(1, "Root"), (2, "A"), (3, "B"), (4, "C"), (5, "End")],
@@ -252,7 +254,7 @@ let dag = Graph::from_edges(
 );
 
 let ir = dag.compute_layout();
-let output = ir.render_scanline_colored(Palette::Ansi);
+let output = ir.render_string(&RenderOptions::colored(Palette::Ansi));
 println!("{}", output);
 ```
 
@@ -263,6 +265,7 @@ Add labels to edges to describe relationships:
 ```rust
 use ascii_dag::Graph;
 use ascii_dag::render::colors::Palette;
+use ascii_dag::RenderOptions;
 
 let mut dag = Graph::new();
 dag.add_node(1, "Parser");
@@ -274,7 +277,7 @@ dag.add_edge(1, 3, Some("produces"));
 dag.add_edge(2, 3, None);
 
 let ir = dag.compute_layout();
-let output = ir.render_scanline_colored_with_legend(Palette::Ansi);
+let output = ir.render_string(&RenderOptions::colored(Palette::Ansi));
 println!("{}", output);
 ```
 
@@ -286,6 +289,7 @@ in the output IR:
 
 ```rust
 use ascii_dag::Graph;
+use ascii_dag::RenderOptions;
 
 let mut dag = Graph::new();
 dag.add_node(1, "A");
@@ -301,7 +305,7 @@ assert!(dag.has_cycle());
 
 // But layout still works — cycles are broken automatically
 let ir = dag.compute_layout();
-println!("{}", ir.render_scanline());
+println!("{}", ir.render_string(&RenderOptions::plain()));
 ```
 
 ### Generic Cycle Detection for Custom Types

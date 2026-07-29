@@ -2,6 +2,7 @@ use ascii_dag::algorithms::sugiyama::config::LayoutConfig;
 use ascii_dag::graph::Graph;
 use ascii_dag::graph::arena::Arena;
 use ascii_dag::graph::csr::CsrGraphBuilder;
+use ascii_dag::render::engine::RenderOptions;
 use std::io::{self, Write};
 use std::time::Instant;
 
@@ -107,7 +108,7 @@ fn run_comparison(topology: Topology, count: usize) {
         // 3. Render
         let render_start = Instant::now();
         let mut output = String::with_capacity(count * 100);
-        ir.render_scanline_to(&mut output);
+        let _ = ir.render_with(&RenderOptions::plain(), &mut output);
         heap_render_us = render_start.elapsed().as_micros();
 
         heap_total_us = start.elapsed().as_micros();
@@ -160,12 +161,11 @@ fn run_comparison(topology: Topology, count: usize) {
 
         // 3. Render
         let render_start = Instant::now();
-        let estimated_render = dag.estimate_size();
-        let mut render_buf = vec![0u8; estimated_render + 65536];
-        let mut line_buf = vec![' '; (estimated_render as f64).sqrt() as usize + 1024];
-        let (_, scratch_len) = layout.estimate_render_size();
-        let mut scratch_buf = vec![0usize; scratch_len + 1024];
-        let _ = layout.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf);
+        let options = RenderOptions::plain();
+        let mut arena_buf = vec![0u8; layout.estimate_render_arena_size(&options)];
+        let render_arena = ascii_dag::graph::arena::Arena::new(&mut arena_buf);
+        let mut render_buf = vec![0u8; layout.estimate_render_output_size(&options)];
+        let _ = layout.render_to_bytes(&options, &render_arena, &mut render_buf);
         arena_render_us = render_start.elapsed().as_micros();
 
         arena_total_us = start.elapsed().as_micros();

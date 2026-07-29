@@ -14,6 +14,7 @@ use std::time::Instant;
 use ascii_dag::LayoutConfig;
 #[cfg(feature = "arena")]
 use ascii_dag::graph::arena::Arena;
+use ascii_dag::render::engine::RenderOptions;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -76,7 +77,7 @@ fn main() {
 fn render_heap(dag: &Graph, sgs: usize) {
     let start = Instant::now();
     let ir = dag.compute_layout();
-    let output = ir.render_scanline();
+    let output = ir.render_string(&RenderOptions::plain());
     let elapsed = start.elapsed();
 
     let lines = output.lines().count();
@@ -126,14 +127,12 @@ fn render_csr(dag: &Graph, sgs: usize) {
         }
     };
 
-    let (render_bytes, _) = ir.estimate_render_size();
-    let rsize = render_bytes * 4 + 8192;
-    let mut render_buf = vec![0u8; rsize];
-    let mut line_buf = vec![' '; ir.width().max(1) + 32];
-    let mut scratch = vec![0usize; (ir.height() + ir.edge_count() * 2).max(1) + 64];
-
+    let options = RenderOptions::plain();
+    let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+    let render_arena = ascii_dag::graph::arena::Arena::new(&mut arena_buf);
+    let mut render_buf = vec![0u8; ir.estimate_render_output_size(&options)];
     let bytes = ir
-        .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
+        .render_to_bytes(&options, &render_arena, &mut render_buf)
         .unwrap_or(0);
     let elapsed = start.elapsed();
 

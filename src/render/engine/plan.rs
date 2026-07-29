@@ -904,10 +904,11 @@ mod tests {
         g
     }
 
-    fn legacy_legend_count(g: &Graph<'_>) -> usize {
-        let out = g
-            .compute_layout()
-            .render_scanline_colored_with_legend(Palette::Ansi);
+    fn legend_line_count(g: &Graph<'_>) -> usize {
+        let out = crate::render::engine::render_colored(
+            &g.compute_layout(),
+            &RenderOptions::colored(Palette::Ansi),
+        );
         match out.split("Edge labels:").nth(1) {
             Some(rest) => rest.lines().filter(|l| !l.trim().is_empty()).count(),
             None => 0,
@@ -921,7 +922,7 @@ mod tests {
         let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi));
         assert_eq!(
             plan.legend_entries().len(),
-            legacy_legend_count(&g),
+            legend_line_count(&g),
             "stage graph: label places cleanly in legacy → plan agrees"
         );
         assert_eq!(plan.labels().len(), 1);
@@ -933,7 +934,7 @@ mod tests {
         let g = colliding_graph();
         let ir = g.compute_layout();
         let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi));
-        let legacy = legacy_legend_count(&g);
+        let legacy = legend_line_count(&g);
         assert_eq!(
             plan.legend_entries().len(),
             legacy,

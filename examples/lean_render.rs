@@ -75,15 +75,15 @@ fn main() {
 
         let render_buffer = temp_mem;
         // We also need a small line buffer for the renderer logic
-        let mut line_chars = [' '; 1024]; // Used by renderer
 
         println!("> Reusing Temp Buffer for Rendering...");
 
-        let (_, scratch_size) = layout.estimate_render_size();
+        let options = ascii_dag::render::engine::RenderOptions::plain();
         {
-            let mut scratch_buffer = vec![0usize; scratch_size + 1024];
-            if let Some(bytes) =
-                layout.render_to_buffer(render_buffer, &mut line_chars, &mut scratch_buffer)
+            let mut scratch_buffer = vec![0u8; layout.estimate_render_arena_size(&options)];
+            let render_arena = ascii_dag::graph::arena::Arena::new(&mut scratch_buffer);
+            if let Ok(bytes) =
+                layout.render_to_bytes(&options, &render_arena, render_buffer)
             {
                 if let Ok(s) = core::str::from_utf8(&render_buffer[..bytes]) {
                     println!("\n{}", s);

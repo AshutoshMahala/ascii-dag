@@ -1,9 +1,13 @@
-//! Dual-run byte-parity harness (RW3 exit criteria, R6.2).
+//! Engine invariants suite.
 //!
-//! Every corpus graph renders through the legacy renderers AND the
-//! engine, from **both IRs**, and the bytes must match. This harness is
-//! the migration's arbiter: the legacy renderers are deleted (RW8) only
-//! after it stays green across the corpus.
+//! Until RW8 this file was the dual-run byte-parity harness: every
+//! corpus graph rendered through the legacy renderers AND the engine,
+//! and the bytes had to match (R6.2). That mission completed — the
+//! legacy renderers are deleted, the engine is the output of record —
+//! and what remains are the invariants that outlive the migration:
+//! cross-backend self-parity, banding, BottomUp semantics, the
+//! zero-allocation surface, styling, the golden snapshot, and byte
+//! compatibility of the deprecated wrapper shims.
 
 #![cfg(all(test, feature = "std", feature = "arena"))]
 
@@ -38,7 +42,11 @@ fn assert_same(tag: &str, legacy: &str, engine: &str) {
     panic!("{tag}: outputs differ only in trailing newlines\nlegacy={legacy:?}\nengine={engine:?}");
 }
 
-fn csr_legacy_and_engine(g: &Graph<'_>, options: &RenderOptions) -> (String, String) {
+/// A corpus entry: fixture name + builder.
+type CorpusEntry = (&'static str, fn() -> Graph<'static>);
+
+/// Engine render of `g` through the CSR/arena pipeline.
+fn csr_engine(g: &Graph<'_>, options: &RenderOptions) -> String {
     let config = LayoutConfig::standard();
     let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
     let mut csr_arena = Arena::new(&mut csr_buf);
@@ -51,59 +59,11 @@ fn csr_legacy_and_engine(g: &Graph<'_>, options: &RenderOptions) -> (String, Str
     let ir = csr
         .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
         .expect("CSR layout");
-
-    let (render_bytes, _) = ir.estimate_render_size();
-    let mut render_buf = vec![0u8; render_bytes * 4 + 8192];
-    let mut line_buf = vec![' '; ir.width().max(1) + 32];
-    let mut scratch = vec![0usize; (ir.height() + ir.edge_count() * 2).max(1) + 64];
-    let bytes = ir
-        .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
-        .expect("legacy arena render");
-    let legacy = String::from_utf8_lossy(&render_buf[..bytes]).into_owned();
-
-    let engine = render_plain(&ir, options);
-    (legacy, engine)
-}
-
-fn check_heap(tag: &str, g: &Graph<'_>) {
-    let ir = g.compute_layout();
-    let legacy = ir.render_scanline();
-    let engine = render_plain(&ir, &RenderOptions::plain());
-    assert_same(&format!("{tag} (heap)"), &legacy, &engine);
-}
-
-fn check_csr(tag: &str, g: &Graph<'_>) {
-    let (legacy, engine) = csr_legacy_and_engine(g, &RenderOptions::plain());
-    assert_same(&format!("{tag} (csr)"), &legacy, &engine);
-}
-
-/// The parity check: engine output must byte-match the legacy plain
-/// renderers from both IRs.
-fn check(tag: &str, g: &Graph<'_>) {
-    check_heap(tag, g);
-    check_csr(tag, g);
-}
-
-/// A corpus entry: fixture name + builder.
-type CorpusEntry = (&'static str, fn() -> Graph<'static>);
-
-fn check_heap_colored(tag: &str, g: &Graph<'_>) {
-    let ir = g.compute_layout();
-    // Without legend: legacy places labels geometrically (no row veto).
-    let legacy = ir.render_scanline_colored(Palette::Ansi);
-    let mut options = RenderOptions::colored(Palette::Ansi);
-    options.legend = false;
-    let engine = render_colored(&ir, &options);
-    assert_same(&format!("{tag} (heap colored)"), &legacy, &engine);
-
-    // With legend: the row-veto placement path plus the legend block.
-    let legacy_legend = ir.render_scanline_colored_with_legend(Palette::Ansi);
-    let engine_legend = render_colored(&ir, &RenderOptions::colored(Palette::Ansi));
-    assert_same(
-        &format!("{tag} (heap colored+legend)"),
-        &legacy_legend,
-        &engine_legend,
-    );
+    if matches!(options.color_mode, crate::render::engine::ColorMode::None) {
+        render_plain(&ir, options)
+    } else {
+        render_colored(&ir, options)
+    }
 }
 
 // ── Corpus ───────────────────────────────────────────────────────────────
@@ -225,160 +185,8 @@ fn implicit_nodes() -> Graph<'static> {
     g
 }
 
-// ── The harness ──────────────────────────────────────────────────────────
+// ── Engine invariants ────────────────────────────────────────────────────
 
-#[test]
-fn parity_chain() {
-    check("chain", &chain());
-}
-
-// DIVERGENCE CLASS A — resolved by ruling (0.10.0): the legacy *plain*
-// path overwrites corner cells lossily (last edge wins: `┌───└───┐`)
-// where the engine merges arms into the correct junctions
-// (`┬───┴───┬` — what the legacy *colored* path already renders). The
-// engine's output is canonical; these legacy-comparison tests retire
-// with the legacy renderers at RW8, when the goldens regenerate.
-#[test]
-#[ignore = "class A divergence resolved by ruling: engine junctions are canonical; retires at RW8"]
-fn parity_fan() {
-    check("fan", &fan());
-}
-
-#[test]
-fn parity_stage() {
-    check("stage", &stage());
-}
-
-#[test]
-#[ignore = "class A divergence resolved by ruling: engine junctions are canonical; retires at RW8"]
-fn parity_skip() {
-    check("skip", &skip());
-}
-
-#[test]
-#[ignore = "class A divergence resolved by ruling: engine junctions are canonical; retires at RW8"]
-fn parity_back_edges() {
-    check("back_edges", &back_edges());
-}
-
-#[test]
-fn parity_two_cycle() {
-    check("two_cycle", &two_cycle());
-}
-
-#[test]
-fn parity_self_loop() {
-    check("self_loop", &self_loop());
-}
-
-#[test]
-fn parity_colliding_labels_heap() {
-    check_heap("colliding_labels", &colliding_labels());
-}
-
-// DIVERGENCE CLASS D — resolved by ruling (0.10.0): when an *edge*
-// label's quoted span exceeds the canvas width, the legacy heap path
-// skips it but the legacy arena path paints it truncated mid-word
-// without a closing quote, overwriting edge strokes. The engine's
-// behavior (skip, like heap) is canonical; this legacy comparison
-// retires with the legacy renderers at RW8.
-#[test]
-#[ignore = "class D divergence resolved by ruling: skipping unfittable edge labels is canonical; retires at RW8"]
-fn parity_colliding_labels_csr() {
-    check_csr("colliding_labels", &colliding_labels());
-}
-
-// DIVERGENCE CLASS B — resolved by ruling (0.10.0): nested cluster
-// borders CAN share cells, and the legacy renderers keep the
-// first-painted double glyph while the engine merges the overlapping
-// borders into the proper junction (`╠`). The engine's output is
-// canonical; this legacy comparison retires at RW8.
-#[test]
-#[ignore = "class B divergence resolved by ruling: merged border junctions are canonical; retires at RW8"]
-fn parity_nested_boxes() {
-    check("nested_boxes", &nested_boxes());
-}
-
-#[test]
-fn parity_implicit_nodes_csr() {
-    check_csr("implicit_nodes", &implicit_nodes());
-}
-
-// DIVERGENCE CLASS C — resolved by ruling (0.10.0): implicit nodes get
-// layout width 3, and the legacy arena renderer honors it (`[ ]`) while
-// the legacy heap renderer paints label-compact (`[]`), leaving a cell
-// of the reserved width unpainted. The engine honors the IR's width
-// (consistent with the layout's own bookkeeping); canonical. This
-// legacy comparison retires at RW8.
-#[test]
-#[ignore = "class C divergence resolved by ruling: IR-width node painting is canonical; retires at RW8"]
-fn parity_implicit_nodes_heap() {
-    check_heap("implicit_nodes", &implicit_nodes());
-}
-
-#[test]
-fn parity_colored_chain() {
-    check_heap_colored("chain", &chain());
-}
-
-#[test]
-fn parity_colored_stage() {
-    check_heap_colored("stage", &stage());
-}
-
-#[test]
-fn parity_colored_two_cycle() {
-    check_heap_colored("two_cycle", &two_cycle());
-}
-
-#[test]
-fn parity_colored_self_loop() {
-    check_heap_colored("self_loop", &self_loop());
-}
-
-#[test]
-fn parity_colored_colliding_labels() {
-    check_heap_colored("colliding_labels", &colliding_labels());
-}
-
-// The colored legacy path merges junctions (`merge_chars`), so the
-// class-A fixtures are expected to byte-match the engine here even
-// though their plain outputs diverged.
-#[test]
-fn parity_colored_fan() {
-    check_heap_colored("fan", &fan());
-}
-
-#[test]
-fn parity_colored_skip() {
-    check_heap_colored("skip", &skip());
-}
-
-#[test]
-fn parity_colored_back_edges() {
-    check_heap_colored("back_edges", &back_edges());
-}
-
-#[test]
-fn parity_colored_hero() {
-    check_heap_colored("hero", &hero_graph());
-}
-
-// Class C (implicit node width) and class B (overlapping nested
-// borders) apply to the colored legacy path too — same rulings.
-#[test]
-#[ignore = "class C divergence resolved by ruling: IR-width node painting is canonical; retires at RW8"]
-fn parity_colored_implicit_nodes() {
-    check_heap_colored("implicit_nodes", &implicit_nodes());
-}
-
-#[test]
-#[ignore = "class B divergence resolved by ruling: merged border junctions are canonical; retires at RW8"]
-fn parity_colored_nested_boxes() {
-    check_heap_colored("nested_boxes", &nested_boxes());
-}
-
-/// Colored engine output must also be identical from both IRs.
 #[test]
 fn engine_colored_self_parity_across_backends() {
     let corpus: [CorpusEntry; 10] = [
@@ -437,7 +245,7 @@ fn engine_self_parity_across_backends() {
         let g = build();
         let ir = g.compute_layout();
         let heap_out = render_plain(&ir, &RenderOptions::plain());
-        let (_, csr_out) = csr_legacy_and_engine(&g, &RenderOptions::plain());
+        let csr_out = csr_engine(&g, &RenderOptions::plain());
         assert_same(&format!("{tag} (engine heap vs engine csr)"), &heap_out, &csr_out);
     }
 }
@@ -465,17 +273,11 @@ fn ruled_classes_render_canonically() {
     assert_eq!(collide.matches('"').count() % 2, 0, "{collide}");
 }
 
-/// The hero example against both the legacy renderer and the golden
-/// file — the strongest single fixture in the repo.
+/// The hero example against the golden snapshot (regenerated at RW8
+/// when the engine became the output of record).
 #[test]
-#[ignore = "class A divergence resolved by ruling: engine junctions are canonical; retires at RW8"]
-fn parity_hero_and_golden() {
-    let g = hero_graph();
-    let ir = g.compute_layout();
-    let legacy = ir.render_scanline();
-    let engine = render_plain(&ir, &RenderOptions::plain());
-    assert_same("hero (heap)", &legacy, &engine);
-
+fn hero_matches_golden() {
+    let engine = render_plain(&hero_graph().compute_layout(), &RenderOptions::plain());
     let golden = include_str!("../../../tests/golden/hero.txt");
     assert_same("hero (golden)", golden.trim_end(), engine.trim_end());
 }
@@ -1093,5 +895,149 @@ mod styles {
 
     fn stage_graph_for_styles() -> Graph<'static> {
         stage()
+    }
+
+    fn red_edges(_: EdgeStyleCtx<'_>) -> EdgeStyle {
+        EdgeStyle {
+            color: CellColor::ansi256(196),
+            ..EdgeStyle::default()
+        }
+    }
+
+    /// Acceptance criterion #6 verbatim: a per-subgraph
+    /// `LabelPosition::InsideBottom` and a per-edge color override
+    /// render correctly — and byte-identically — from BOTH IRs, and the
+    /// public plan queries answer over the styled render.
+    #[test]
+    fn acceptance_6_style_overrides_from_both_irs() {
+        let mut options = RenderOptions::colored(Palette::Ansi);
+        options.subgraph_style_fn = bottom_labels;
+        options.edge_style_fn = red_edges;
+
+        let heap_ir = stage().compute_layout();
+        let heap_out = render_colored(&heap_ir, &options);
+        assert!(heap_out.contains("\x1b[38;5;196m"), "edge override:\n{heap_out:?}");
+        let sg = &heap_ir.subgraphs()[0];
+        let label_row = heap_out
+            .lines()
+            .position(|l| l.contains("Stage"))
+            .expect("label present");
+        assert_eq!(label_row, sg.y + sg.height - 2, "label at box bottom");
+
+        let csr_out = csr_engine(&stage(), &options);
+        assert_same("acceptance #6 (heap vs csr)", &heap_out, &csr_out);
+
+        // Public plan queries over the same layout (criterion #7 spot).
+        let plan = heap_ir.render_plan(&options);
+        assert!(plan.width() > 0 && plan.height() > 0 && plan.band_count() >= 1);
+        let start = heap_ir.node_by_id(1).unwrap();
+        assert_eq!(
+            heap_ir.hit_test(&plan, start.x + 1, start.y),
+            crate::render::engine::HitResult::Node(1)
+        );
+    }
+}
+
+// ── Deprecated wrapper compatibility (Q7/R6.1) ───────────────────────────
+//
+// Until 0.11 the legacy entry points remain as engine-backed shims.
+// Each must be byte-identical to its documented replacement, and the
+// legacy sizing contract (`estimate_render_size` → buffers →
+// `render_to_buffer`) must keep working end to end.
+
+#[allow(deprecated)]
+mod wrapper_compat {
+    use super::*;
+
+    #[test]
+    fn heap_wrappers_match_engine() {
+        for build in [stage as fn() -> Graph<'static>, hero_graph] {
+            let ir = build().compute_layout();
+            assert_eq!(ir.render_scanline(), render_plain(&ir, &RenderOptions::plain()));
+
+            let mut to = String::new();
+            ir.render_scanline_to(&mut to);
+            assert_eq!(to, render_plain(&ir, &RenderOptions::plain()));
+
+            let mut line = vec![' '; ir.width() + 8];
+            let mut with_buf = String::new();
+            ir.render_scanline_with_buffer(&mut line, &mut with_buf);
+            assert_eq!(with_buf, to);
+
+            let mut bytes = vec![0u8; to.len() + 64];
+            let n = ir.render_scanline_to_bytes(&mut line, &mut bytes);
+            assert_eq!(core::str::from_utf8(&bytes[..n]).unwrap(), to);
+
+            let mut colored = RenderOptions::colored(Palette::Ansi);
+            colored.legend = false;
+            assert_eq!(
+                ir.render_scanline_colored(Palette::Ansi),
+                render_colored(&ir, &colored)
+            );
+            let mut colored_to = String::new();
+            ir.render_scanline_colored_to(&mut colored_to, Palette::Ansi);
+            assert_eq!(colored_to, render_colored(&ir, &colored));
+            assert_eq!(
+                ir.render_scanline_colored_with_legend(Palette::Ansi),
+                render_colored(&ir, &RenderOptions::colored(Palette::Ansi))
+            );
+        }
+    }
+
+    /// The documented legacy flow — sizes from `estimate_render_size`,
+    /// `None` only when buffers are undersized — still works, and the
+    /// bytes match the replacement surface.
+    #[test]
+    fn arena_buffer_wrapper_keeps_its_contract() {
+        let g = hero_graph();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = g.estimate_layout_arena_size();
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut out_arena)
+            .expect("CSR layout");
+
+        let (out_size, scratch_len) = ir.estimate_render_size();
+        let mut buffer = vec![0u8; out_size];
+        let mut line = vec![' '; ir.width() + 8];
+        let mut scratch = vec![0usize; scratch_len];
+        let n = ir
+            .render_to_buffer(&mut buffer, &mut line, &mut scratch)
+            .expect("estimate-sized buffers must suffice");
+        assert_eq!(
+            core::str::from_utf8(&buffer[..n]).unwrap(),
+            render_plain(&ir, &RenderOptions::plain())
+        );
+
+        // Undersized scratch still reports None, never panics.
+        let mut tiny = vec![0usize; 4];
+        assert!(ir.render_to_buffer(&mut buffer, &mut line, &mut tiny).is_none());
+
+        // Colored wrappers match the engine's colored output.
+        let mut edge_colors = vec![0usize; ir.edge_count()];
+        ir.compute_edge_colors(&mut edge_colors, Palette::Ansi.colors().len());
+        let mut color_buf = vec![0u8; ir.width() + 8];
+        let mut skipped = vec![false; ir.edge_count()];
+        let colored_size = ir.estimate_render_output_size(&RenderOptions::colored(Palette::Ansi));
+        let mut cbuffer = vec![0u8; colored_size];
+        let n = ir
+            .render_to_buffer_colored_with_legend(
+                &mut cbuffer,
+                &mut line,
+                &mut color_buf,
+                &edge_colors,
+                Palette::Ansi.colors(),
+                &mut skipped,
+            )
+            .expect("colored wrapper renders");
+        assert_eq!(
+            core::str::from_utf8(&cbuffer[..n]).unwrap(),
+            render_colored(&ir, &RenderOptions::colored(Palette::Ansi))
+        );
     }
 }

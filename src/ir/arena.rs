@@ -455,28 +455,6 @@ impl<'a> LayoutIRArena<'a> {
         edge.edge_index
     }
 
-    /// Check if a label can be placed without collision.
-    /// Returns true if all positions are empty (space) or the edge's vertical line (│).
-    pub(crate) fn can_place_label(&self, buffer: &[char], label: &str, x: usize) -> bool {
-        if x >= buffer.len() {
-            return false;
-        }
-
-        let label_len = label.chars().count() + 2; // +2 for quotes
-
-        // Check if all positions are available (space or the edge's own vertical line)
-        for i in 0..label_len {
-            let pos_x = x + i;
-            if pos_x >= buffer.len() {
-                return false; // Would go out of bounds
-            }
-            let c = buffer[pos_x];
-            if c != ' ' && c != '│' {
-                return false; // Collision with existing character
-            }
-        }
-        true
-    }
 
     // ── Alloc-gated query methods ────────────────────────────────────────
 

@@ -39,8 +39,7 @@
 
 pub mod arena;
 pub(crate) mod arena_builder;
-pub(crate) mod arena_colored;
-pub(crate) mod arena_render;
+mod legacy;
 pub mod json;
 
 #[cfg(feature = "alloc")]
@@ -58,6 +57,10 @@ use std::collections::HashMap;
 /// Spatial index for fast scanline rendering.
 /// Maps a Y coordinate to the nodes and edges that occupy that line.
 #[cfg(feature = "alloc")]
+#[deprecated(
+    since = "0.10.0",
+    note = "the render engine's `RenderPlan` (via `render_plan`/`hit_test`) replaces the scanline index"
+)]
 #[derive(Debug, Clone)]
 pub struct LineOccupancy {
     /// Indices of nodes that appear on this line
@@ -67,6 +70,7 @@ pub struct LineOccupancy {
 }
 
 #[cfg(feature = "alloc")]
+#[allow(deprecated)]
 impl LineOccupancy {
     fn new() -> Self {
         Self {
@@ -262,6 +266,7 @@ pub struct LayoutIR<'a> {
     /// Rank direction the layout was computed for.
     pub(crate) direction: crate::graph::Direction,
     /// Spatial index for fast scanline rendering (built lazily on first access)
+    #[allow(deprecated)]
     y_index: OnceCell<Vec<LineOccupancy>>,
 }
 
@@ -390,12 +395,18 @@ impl<'a> LayoutIR<'a> {
     /// This is computed lazily on first access and cached for subsequent calls.
     ///
     /// Returns a slice where index `y` contains all nodes and edges that occupy line `y`.
+    #[deprecated(
+        since = "0.10.0",
+        note = "use `render_plan(&options)` + `hit_test` — the engine's spatial queries"
+    )]
+    #[allow(deprecated)]
     pub fn y_index(&self) -> &[LineOccupancy] {
         self.y_index.get_or_init(|| self.build_y_index())
     }
 
     /// Build the Y-index spatial structure.
     /// Maps each Y coordinate to the nodes and edges that appear on that line.
+    #[allow(deprecated)]
     fn build_y_index(&self) -> Vec<LineOccupancy> {
         let mut index = vec![LineOccupancy::new(); self.height];
 
@@ -425,6 +436,11 @@ impl<'a> LayoutIR<'a> {
 
     /// Get items that occupy a specific line (fast lookup with Y-index).
     /// Returns node and edge indices for the given Y coordinate.
+    #[deprecated(
+        since = "0.10.0",
+        note = "use `render_plan(&options)` + `hit_test` — the engine's spatial queries"
+    )]
+    #[allow(deprecated)]
     pub fn items_at_line(&self, y: usize) -> Option<&LineOccupancy> {
         self.y_index().get(y)
     }

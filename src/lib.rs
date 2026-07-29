@@ -152,6 +152,8 @@ pub use graph::{Direction, Graph, Subgraph};
 pub use ir::NodeKind;
 #[cfg(feature = "alloc")]
 pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};
+pub use render::colors::Palette;
+pub use render::engine::{Charset, ColorMode, RenderOptions};
 pub use validation::Requirements;
 // Primary config types (always available, no alloc needed)
 pub use algorithms::sugiyama::config::{

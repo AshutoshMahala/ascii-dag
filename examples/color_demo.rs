@@ -1,5 +1,6 @@
 use ascii_dag::Graph;
 use ascii_dag::render::colors::Palette;
+use ascii_dag::render::engine::RenderOptions;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -31,7 +32,7 @@ fn run_heap() {
     dag.add_edge(4, 5, None);
 
     let ir = dag.compute_layout();
-    println!("{}", ir.render_scanline_colored(Palette::Ansi));
+    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::Ansi); o.legend = false; o }));
 
     // Example 2: Diamond dependency (shows edge colors clearly)
     println!("2. Diamond Pattern:");
@@ -47,7 +48,7 @@ fn run_heap() {
     diamond.add_edge(3, 4, None);
 
     let ir = diamond.compute_layout();
-    println!("{}", ir.render_scanline_colored(Palette::Ansi));
+    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::Ansi); o.legend = false; o }));
 
     // Example 3: More complex graph
     println!("3. Module Dependencies:");
@@ -68,19 +69,19 @@ fn run_heap() {
     modules.add_edge(5, 6, None);
 
     let ir = modules.compute_layout();
-    println!("{}", ir.render_scanline_colored(Palette::Ansi));
+    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::Ansi); o.legend = false; o }));
 
     // Show different palettes
     println!("4. Same graph with different palettes:\n");
 
     println!("Default (Ansi):");
-    println!("{}", ir.render_scanline_colored(Palette::Ansi));
+    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::Ansi); o.legend = false; o }));
 
     println!("Dark Mode (AnsiDark):");
-    println!("{}", ir.render_scanline_colored(Palette::AnsiDark));
+    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::AnsiDark); o.legend = false; o }));
 
     println!("Light Mode (AnsiLight):");
-    println!("{}", ir.render_scanline_colored(Palette::AnsiLight));
+    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::AnsiLight); o.legend = false; o }));
 }
 
 #[cfg(feature = "arena")]
@@ -106,25 +107,14 @@ fn run_csr() {
             .compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut out_arena)
             .expect("Layout failed");
 
-        let mut edge_colors = vec![0usize; ir.edge_count()];
-        let palette_colors = palette.colors();
-        ir.compute_edge_colors(&mut edge_colors, palette_colors.len());
-
-        let (render_bytes, _) = ir.estimate_render_size();
-        let render_size = render_bytes * 10 + 4096;
-        let mut render_buffer = vec![0u8; render_size];
-        let mut line_buffer = vec![' '; ir.width().max(1) + 16];
-        let mut color_buffer = vec![0u8; ir.width().max(1) + 16];
-        let mut skipped_buffer = vec![false; ir.edge_count().max(1)];
-
-        if let Some(len) = ir.render_to_buffer_colored_with_legend(
-            &mut render_buffer,
-            &mut line_buffer,
-            &mut color_buffer,
-            &edge_colors,
-            palette_colors,
-            &mut skipped_buffer,
-        ) && let Ok(s) = std::str::from_utf8(&render_buffer[..len])
+        // Zero-allocation colored render: one arena, one output buffer,
+        // both sized by the library.
+        let options = RenderOptions::colored(palette);
+        let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+        let render_arena = ascii_dag::graph::arena::Arena::new(&mut arena_buf);
+        let mut render_buffer = vec![0u8; ir.estimate_render_output_size(&options)];
+        if let Ok(len) = ir.render_to_bytes(&options, &render_arena, &mut render_buffer)
+            && let Ok(s) = std::str::from_utf8(&render_buffer[..len])
         {
             println!("{}", s);
         }

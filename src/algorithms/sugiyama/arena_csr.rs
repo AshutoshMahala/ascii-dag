@@ -4819,11 +4819,12 @@ mod tests {
         let ir = compute_layout_arena_csr(&graph, &config, &mut temp_arena, &mut out_arena)
             .expect("layout should succeed");
 
-        let mut render_buf = [0u8; 4096];
-        let mut line_buf = [' '; 256];
-        let mut scratch_buf = [0usize; 256];
-        let rendered = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf);
-        assert!(rendered.is_some(), "rendering should succeed");
+        let opts = crate::render::engine::RenderOptions::plain();
+        let mut render_arena_buf = vec![0u8; ir.estimate_render_arena_size(&opts)];
+        let render_arena = Arena::new(&mut render_arena_buf);
+        let mut render_buf = vec![0u8; ir.estimate_render_output_size(&opts)];
+        let rendered = ir.render_to_bytes(&opts, &render_arena, &mut render_buf);
+        assert!(rendered.is_ok(), "rendering should succeed: {rendered:?}");
         let len = rendered.unwrap();
         assert!(len > 0, "should produce non-empty output");
     }
@@ -4889,11 +4890,12 @@ mod tests {
 
         assert_eq!(ir.node_count(), 3);
 
-        let mut render_buf = vec![0u8; 4096];
-        let mut line_buf = vec![' '; 256];
-        let mut scratch_buf = vec![0usize; 256];
-        let rendered = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf);
-        assert!(rendered.is_some(), "render should succeed");
+        let opts = crate::render::engine::RenderOptions::plain();
+        let mut render_arena_buf = vec![0u8; ir.estimate_render_arena_size(&opts)];
+        let render_arena = Arena::new(&mut render_arena_buf);
+        let mut render_buf = vec![0u8; ir.estimate_render_output_size(&opts)];
+        let rendered = ir.render_to_bytes(&opts, &render_arena, &mut render_buf);
+        assert!(rendered.is_ok(), "render should succeed: {rendered:?}");
     }
 
     #[test]
@@ -4939,11 +4941,12 @@ mod tests {
         );
 
         // Rendering should succeed
-        let mut render_buf = vec![0u8; 4096];
-        let mut line_buf = vec![' '; 256];
-        let mut scratch_buf = vec![0usize; 256];
-        let rendered = ir.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf);
-        assert!(rendered.is_some(), "render should succeed");
+        let opts = crate::render::engine::RenderOptions::plain();
+        let mut render_arena_buf = vec![0u8; ir.estimate_render_arena_size(&opts)];
+        let render_arena = Arena::new(&mut render_arena_buf);
+        let mut render_buf = vec![0u8; ir.estimate_render_output_size(&opts)];
+        let rendered = ir.render_to_bytes(&opts, &render_arena, &mut render_buf);
+        assert!(rendered.is_ok(), "render should succeed: {rendered:?}");
     }
 
     #[test]
@@ -4972,11 +4975,12 @@ mod tests {
         assert!(ir.node(0).has_self_loop, "self-loop node should be marked");
 
         // Rendered output should contain ↺
-        let mut render_buf = vec![0u8; 4096];
-        let mut line_buf = vec![' '; 256];
-        let mut scratch_buf = vec![0usize; 256];
+        let opts = crate::render::engine::RenderOptions::plain();
+        let mut render_arena_buf = vec![0u8; ir.estimate_render_arena_size(&opts)];
+        let render_arena = Arena::new(&mut render_arena_buf);
+        let mut render_buf = vec![0u8; ir.estimate_render_output_size(&opts)];
         let len = ir
-            .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf)
+            .render_to_bytes(&opts, &render_arena, &mut render_buf)
             .unwrap();
         let output = core::str::from_utf8(&render_buf[..len]).unwrap();
         assert!(
@@ -5025,11 +5029,12 @@ mod tests {
             .expect("layout should succeed");
 
         // Verify rendering works and produces expected characters
-        let mut render_buf = vec![0u8; 8192];
-        let mut line_buf = vec![' '; 256];
-        let mut scratch_buf = vec![0usize; 256];
+        let opts = crate::render::engine::RenderOptions::plain();
+        let mut render_arena_buf = vec![0u8; ir.estimate_render_arena_size(&opts)];
+        let render_arena = Arena::new(&mut render_arena_buf);
+        let mut render_buf = vec![0u8; ir.estimate_render_output_size(&opts)];
         let len = ir
-            .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch_buf)
+            .render_to_bytes(&opts, &render_arena, &mut render_buf)
             .unwrap();
         let output = core::str::from_utf8(&render_buf[..len]).unwrap();
 
@@ -5091,12 +5096,12 @@ mod tests {
         assert!(sg_info.height > 0, "subgraph should have height");
 
         // Render to text
-        let (out_size, scratch_size) = ir.estimate_render_size();
-        let mut render_buf = vec![0u8; out_size];
-        let mut line_buf = vec![' '; ir.width()];
-        let mut scratch = vec![0usize; scratch_size];
+        let opts = crate::render::engine::RenderOptions::plain();
+        let mut render_arena_buf = vec![0u8; ir.estimate_render_arena_size(&opts)];
+        let render_arena = Arena::new(&mut render_arena_buf);
+        let mut render_buf = vec![0u8; ir.estimate_render_output_size(&opts)];
         let bytes = ir
-            .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
+            .render_to_bytes(&opts, &render_arena, &mut render_buf)
             .expect("render");
         let output = core::str::from_utf8(&render_buf[..bytes]).expect("utf8");
 
@@ -5170,12 +5175,12 @@ mod tests {
         assert!(!ir.has_subgraphs());
 
         // Render should work fine
-        let (out_size, scratch_size) = ir.estimate_render_size();
-        let mut render_buf = vec![0u8; out_size];
-        let mut line_buf = vec![' '; ir.width()];
-        let mut scratch = vec![0usize; scratch_size];
+        let opts = crate::render::engine::RenderOptions::plain();
+        let mut render_arena_buf = vec![0u8; ir.estimate_render_arena_size(&opts)];
+        let render_arena = Arena::new(&mut render_arena_buf);
+        let mut render_buf = vec![0u8; ir.estimate_render_output_size(&opts)];
         let bytes = ir
-            .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
+            .render_to_bytes(&opts, &render_arena, &mut render_buf)
             .expect("render");
         let output = core::str::from_utf8(&render_buf[..bytes]).expect("utf8");
         assert!(output.contains("[A]"));

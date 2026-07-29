@@ -1,5 +1,6 @@
 use ascii_dag::Graph;
 use ascii_dag::render::colors::Palette;
+use ascii_dag::render::engine::RenderOptions;
 
 fn main() {
     let mut dag = Graph::new();
@@ -54,32 +55,19 @@ fn main() {
 
         if let Ok(ir) = csr_graph.compute_layout_arena(&config, &mut temp_arena, &mut output_arena)
         {
-            let mut edge_colors = vec![0usize; ir.edge_count()];
-            let palette_colors = Palette::Ansi.colors();
-            ir.compute_edge_colors(&mut edge_colors, palette_colors.len());
-
-            let (render_bytes, _) = ir.estimate_render_size();
-            let render_size = render_bytes * 10 + 4096;
-            let mut render_buffer = vec![0u8; render_size];
-            let mut line_buffer = vec![' '; ir.width().max(1) + 16];
-            let mut color_buffer = vec![0u8; ir.width().max(1) + 16];
-            let mut skipped_buffer = vec![false; ir.edge_count().max(1)];
-
-            if let Some(len) = ir.render_to_buffer_colored_with_legend(
-                &mut render_buffer,
-                &mut line_buffer,
-                &mut color_buffer,
-                &edge_colors,
-                palette_colors,
-                &mut skipped_buffer,
-            ) && let Ok(s) = std::str::from_utf8(&render_buffer[..len])
+            let options = RenderOptions::colored(Palette::Ansi);
+            let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+            let render_arena = ascii_dag::graph::arena::Arena::new(&mut arena_buf);
+            let mut render_buffer = vec![0u8; ir.estimate_render_output_size(&options)];
+            if let Ok(len) = ir.render_to_bytes(&options, &render_arena, &mut render_buffer)
+                && let Ok(s) = std::str::from_utf8(&render_buffer[..len])
             {
                 println!("{}", s);
             }
         }
     } else {
         let ir = dag.compute_layout();
-        println!("{}", ir.render_scanline_colored_with_legend(Palette::Ansi));
+        println!("{}", ir.render_string(&RenderOptions::colored(Palette::Ansi)));
     }
 
     // Benchmark: test with many labeled edges
@@ -102,7 +90,7 @@ fn main() {
         let layout_time = start.elapsed();
 
         let start2 = std::time::Instant::now();
-        let _ = ir2.render_scanline_colored_with_legend(Palette::Ansi);
+        let _ = ir2.render_string(&RenderOptions::colored(Palette::Ansi));
         let render_time = start2.elapsed();
 
         println!(
