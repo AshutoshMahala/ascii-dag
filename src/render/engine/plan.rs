@@ -354,7 +354,10 @@ impl<'buf> RenderPlan<'buf> {
                 placeable,
                 row_has_node,
             };
-            if !plan.placed_colored() {
+            // The legend exists only in colored renders with the legend
+            // enabled — `legend_entries` reflects the options this plan
+            // was built with.
+            if use_color && options.legend && !plan.placed_colored() {
                 legend.push(i);
             }
             labels.push(plan);
@@ -411,17 +414,26 @@ impl<'buf> RenderPlan<'buf> {
         self.band_ranges.len()
     }
 
-    /// Edge indices whose labels go to the legend under colored
-    /// rendering (in edge order).
+    /// Edge indices (IR-list order) whose labels go to the legend under
+    /// the options this plan was built with. Empty unless the options
+    /// enable colors *and* the legend — a plan for plain output reports
+    /// no legend, matching what actually renders.
     pub fn legend_entries(&self) -> &[usize] {
         self.legend.as_slice()
     }
 
     /// What occupies the cell at (x, y)? Nodes win over edges, edges
-    /// over subgraph boxes (matching visual z-order). Geometry follows
-    /// the painter exactly: edge hits use the same run/column formulas
-    /// the compositor paints, hidden dummy nodes never hit, and a
-    /// subgraph styled `SubgraphBorder::None` has no box to hit.
+    /// over subgraph boxes (matching visual z-order).
+    ///
+    /// Semantics are deliberately hybrid, serving interactive picking:
+    /// **edges hit as painted ink** (the exact run/column formulas the
+    /// compositor paints; hidden dummies never hit; a
+    /// `SubgraphBorder::None` box has no ink to hit), while **nodes and
+    /// bordered subgraphs hit as layout regions** (a node's declared
+    /// width including padding; a box's full rectangle including its
+    /// interior) — clicking inside a box selects it even on a blank
+    /// cell. Edge labels, box labels, and self-loop markers are part of
+    /// their owning element's region, not separate hit targets.
     /// Edges are reported by their **IR-list index** (the position in
     /// the layout's edge list — the same convention as
     /// [`RenderPlan::legend_entries`]).
@@ -452,13 +464,20 @@ impl<'buf> RenderPlan<'buf> {
                 ElementKind::Edge => {
                     if hit_edge == HitResult::None {
                         let e = view.edge(el.index);
-                        let mut cols = [usize::MAX; 8];
-                        let count =
-                            v_cols_at(&e.path, e.from_x, e.from_y, e.to_x, e.to_y, y, &mut cols);
-                        let on_vertical = cols[..count].contains(&x);
-                        let on_run = h_runs_at(&e.path, e.from_x, e.from_y, e.to_x, e.to_y, y)
-                            .any(|(x0, x1)| x >= x0 && x <= x1);
-                        if on_vertical || on_run {
+                        let mut on_ink = false;
+                        for_each_v_col(&e.path, e.from_x, e.from_y, e.to_x, e.to_y, y, &mut |c| {
+                            on_ink |= c == x;
+                        });
+                        for_each_h_run(
+                            &e.path,
+                            e.from_x,
+                            e.from_y,
+                            e.to_x,
+                            e.to_y,
+                            y,
+                            &mut |x0, x1| on_ink |= x >= x0 && x <= x1,
+                        );
+                        if on_ink {
                             hit_edge = HitResult::Edge(el.index);
                         }
                     }
@@ -723,17 +742,33 @@ fn span_blocked<V: LayoutView>(
             continue;
         }
         // Horizontal runs (with their corner endpoints) block.
-        if h_runs_at(&e.path, e.from_x, e.from_y, e.to_x, e.to_y, row)
-            .any(|(r0, r1)| r0 < x1 && r1 + 1 > x0)
-        {
+        let mut run_blocked = false;
+        for_each_h_run(
+            &e.path,
+            e.from_x,
+            e.from_y,
+            e.to_x,
+            e.to_y,
+            row,
+            &mut |r0, r1| run_blocked |= r0 < x1 && r1 + 1 > x0,
+        );
+        if run_blocked {
             return true;
         }
         // Dashed verticals block ('┊' is not '│'); solid verticals are
         // allowed — including other edges' (legacy checks only the char).
         if i != label_edge && e.reversed {
-            let mut cols = [usize::MAX; 8];
-            let n = v_cols_at(&e.path, e.from_x, e.from_y, e.to_x, e.to_y, row, &mut cols);
-            if cols[..n].iter().any(|&c| c >= x0 && c < x1) {
+            let mut col_blocked = false;
+            for_each_v_col(
+                &e.path,
+                e.from_x,
+                e.from_y,
+                e.to_x,
+                e.to_y,
+                row,
+                &mut |c| col_blocked |= c >= x0 && c < x1,
+            );
+            if col_blocked {
                 return true;
             }
         }
@@ -741,24 +776,19 @@ fn span_blocked<V: LayoutView>(
     false
 }
 
-/// Horizontal runs `[x0, x1]` (inclusive) painted by this path at `row`
-/// — the same formulas the legacy painter uses.
-fn h_runs_at(
+/// Visit every horizontal run `[x0, x1]` (inclusive) painted by this
+/// path at `row` — the same formulas the painter uses. Visitor-based so
+/// arbitrarily long multi-segment paths lose nothing to fixed caps.
+fn for_each_h_run(
     path: &PathRef<'_>,
     from_x: usize,
     from_y: usize,
     to_x: usize,
     to_y: usize,
     row: usize,
-) -> impl Iterator<Item = (usize, usize)> {
-    let mut runs: [(usize, usize); 4] = [(1, 0); 4];
-    let mut n = 0usize;
-    let mut push = |x0: usize, x1: usize| {
-        if n < runs.len() {
-            runs[n] = (x0.min(x1), x0.max(x1));
-            n += 1;
-        }
-    };
+    f: &mut dyn FnMut(usize, usize),
+) {
+    let mut push = |x0: usize, x1: usize| f(x0.min(x1), x0.max(x1));
     match *path {
         PathRef::Direct | PathRef::Spline { .. } => {}
         PathRef::Corner { horizontal_y } => {
@@ -808,36 +838,20 @@ fn h_runs_at(
             }
         }
     }
-    let mut i = 0usize;
-    core::iter::from_fn(move || {
-        if i < n {
-            let r = runs[i];
-            i += 1;
-            Some(r)
-        } else {
-            None
-        }
-    })
 }
 
-/// Vertical columns this path paints at `row` (between, not touching,
-/// the endpoints' node rows). Writes into `out`, returns the count.
-fn v_cols_at(
+/// Visit every vertical column this path paints at `row` (between, not
+/// touching, the endpoints' node rows). Visitor-based — no fixed cap.
+fn for_each_v_col(
     path: &PathRef<'_>,
     from_x: usize,
     from_y: usize,
     to_x: usize,
     to_y: usize,
     row: usize,
-    out: &mut [usize; 8],
-) -> usize {
-    let mut n = 0usize;
-    let mut push = |c: usize| {
-        if n < out.len() {
-            out[n] = c;
-            n += 1;
-        }
-    };
+    f: &mut dyn FnMut(usize),
+) {
+    let mut push = |c: usize| f(c);
     // Order-free strictly-between test (works for either flow).
     let betw = |a: usize, b: usize, r: usize| r > a.min(b) && r < a.max(b);
     match *path {
@@ -905,7 +919,6 @@ fn v_cols_at(
             }
         }
     }
-    n
 }
 
 #[cfg(all(test, feature = "std"))]

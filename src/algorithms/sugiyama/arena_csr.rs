@@ -221,13 +221,6 @@ pub fn compute_layout_arena_csr<'b>(
         }
     }
 
-    // Estimate max waypoints: for skip-level edges only
-    // A skip-level edge spanning k levels needs k-1 waypoints
-    // Worst case: all edges span (max_level) levels = edge_count * max_level waypoints
-    // But for typical graphs, most edges are adjacent-level (0 waypoints)
-    // Use a conservative estimate: avg 2 waypoints per edge (covers most skip edges)
-    let max_waypoints = (edge_count * 4).min(1000);
-
     // Step 1: Cycle breaking — allocate back_edges and run DFS before other temps
     let back_edges = {
         let be_size = edge_count.max(1);
@@ -271,12 +264,73 @@ pub fn compute_layout_arena_csr<'b>(
         });
     }
 
-    // Step 3: Allocate the remaining layout temporaries, per-level
-    // buffers sized to the real depth.
-    let sg_count = graph.subgraph_count();
-    let mut temps =
-        alloc_layout_temps_csr(temp_arena, node_count, edge_count, sg_count, node_levels, depth)
+    // Exact routing capacities (no silent caps): every skip-level edge
+    // spanning k levels contributes k-1 dummies, one per intermediate
+    // level. Buffers size from these counts; graphs whose virtual-node
+    // total exceeds the index type's capacity fail explicitly.
+    let (level_real, level_dummy) = {
+        let real = temp_arena
+            .alloc_slice_default::<usize>(depth.max(1))
             .ok_or(GraphError::ArenaOom)?;
+        let dummy = temp_arena
+            .alloc_slice_default::<usize>(depth.max(1))
+            .ok_or(GraphError::ArenaOom)?;
+        (real, dummy)
+    };
+    for &lvl in node_levels.iter() {
+        if (lvl as usize) < level_real.len() {
+            level_real[lvl as usize] += 1;
+        }
+    }
+    let mut total_dummies: usize = 0;
+    for (ei, (f, t)) in graph.edges_iter().enumerate() {
+        if f == t {
+            continue;
+        }
+        let _ = ei;
+        let lf = node_levels[f] as usize;
+        let lt = node_levels[t] as usize;
+        let (lo, hi) = (lf.min(lt), lf.max(lt));
+        if hi > lo + 1 {
+            total_dummies += hi - lo - 1;
+            for slot in level_dummy.iter_mut().take(hi).skip(lo + 1) {
+                *slot += 1;
+            }
+        }
+    }
+    let vnode_total = node_count
+        .checked_add(total_dummies)
+        .ok_or(GraphError::ExceedsMaxNodes {
+            count: usize::MAX,
+            max: MAX_NODES,
+        })?;
+    if vnode_total > MAX_NODES {
+        return Err(GraphError::ExceedsMaxNodes {
+            count: vnode_total,
+            max: MAX_NODES,
+        });
+    }
+    let max_level_width = level_real
+        .iter()
+        .zip(level_dummy.iter())
+        .map(|(r, d)| r + d)
+        .max()
+        .unwrap_or(0);
+
+    // Step 3: Allocate the remaining layout temporaries, per-level
+    // buffers sized to the real depth and exact vnode counts.
+    let sg_count = graph.subgraph_count();
+    let mut temps = alloc_layout_temps_csr(
+        temp_arena,
+        node_count,
+        edge_count,
+        sg_count,
+        node_levels,
+        depth,
+        total_dummies,
+        max_level_width,
+    )
+    .ok_or(GraphError::ArenaOom)?;
 
     // 2-node-cycle detection in O(E log E): sort edge indices by their
     // normalized endpoint pair, then scan each run for an anti-parallel
@@ -893,7 +947,8 @@ pub fn compute_layout_arena_csr<'b>(
         output_arena,
         node_count + dummy_node_capacity,
         edge_count,
-        max_waypoints,
+        // Kept waypoints are a subset of the dummy chain entries.
+        total_dummies.max(1),
         total_label_bytes + sg_label_bytes,
         max_level as usize + 1,
         sg_count,
@@ -1304,16 +1359,21 @@ fn alloc_layout_temps_csr<'b>(
     sg_count: usize,
     node_levels: &'b mut [Idx],
     depth: usize,
+    total_dummies: usize,
+    max_level_width: usize,
 ) -> Option<LayoutTemps<'b>> {
     // Per-level buffers hold exactly the graph's real depth (computed
     // by the caller before this allocation) — no fixed cap, no waste.
     let max_levels = depth.max(1);
-    // Virtual nodes = real + dummy nodes from skip-level edges.
-    // Most edges span only 1 level (no dummies). Skip-level edges typically span 2-4 levels.
-    // Use a reasonable estimate: each edge creates at most 4 dummy nodes on average.
-    let max_vnodes = (node_count + edge_count * 4).min(500000);
-    let max_level_size = node_count.min(50000);
-    let max_dummy_waypoints = (edge_count * 4).min(500000);
+    // Exact virtual-node counts, computed by the caller from level
+    // spans — no estimates, no silent caps.
+    let max_vnodes = node_count + total_dummies;
+    // `medians` is indexed by position-within-level (level width);
+    // `positions` doubles as a node-index → level-position map, so it
+    // must span every node.
+    let max_median_size = max_level_width.max(1);
+    let max_positions_size = node_count.max(1);
+    let max_dummy_waypoints = total_dummies.max(1);
 
     let (edge_indices_ptr, _) = arena.alloc_raw_uninit::<(Idx, Idx)>(edge_count)?;
     let (vlevel_offsets_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
@@ -1325,8 +1385,8 @@ fn alloc_layout_temps_csr<'b>(
         arena.alloc_raw_uninit::<(usize, usize, usize, usize)>(node_count)?;
     let (dummy_offsets_ptr, _) = arena.alloc_raw_uninit::<Idx>(edge_count + 1)?;
     let (dummy_data_ptr, _) = arena.alloc_raw_uninit::<(Idx, Coord)>(max_dummy_waypoints)?;
-    let (medians_ptr, _) = arena.alloc_raw_uninit::<(Idx, u32)>(max_level_size)?;
-    let (positions_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_level_size)?;
+    let (medians_ptr, _) = arena.alloc_raw_uninit::<(Idx, u32)>(max_median_size)?;
+    let (positions_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_positions_size)?;
 
     // Optimize allocs: boolean array
     let (node_is_source_ptr, _) = arena.alloc_raw_uninit::<bool>(node_count)?;
@@ -1426,8 +1486,8 @@ fn alloc_layout_temps_csr<'b>(
                 max_levels + 1,
             ),
             dummy_data: core::slice::from_raw_parts_mut(dummy_data_ptr, max_dummy_waypoints),
-            medians: core::slice::from_raw_parts_mut(medians_ptr, max_level_size),
-            positions: core::slice::from_raw_parts_mut(positions_ptr, max_level_size),
+            medians: core::slice::from_raw_parts_mut(medians_ptr, max_median_size),
+            positions: core::slice::from_raw_parts_mut(positions_ptr, max_positions_size),
             sg_ranges: if sg_count > 0 {
                 core::slice::from_raw_parts_mut(sg_ranges_ptr, sg_count)
             } else {
@@ -3976,46 +4036,28 @@ fn build_dummy_positions_csr(
 ) {
     let edge_count = graph.edge_count();
 
-    // Initialize offsets to 0
-    dummy_offsets[0] = 0;
-    for i in 1..=edge_count {
-        if i < dummy_offsets.len() {
-            dummy_offsets[i] = 0;
-        }
+    // Classic in-place CSR construction — the offsets buffer doubles as
+    // the per-edge write cursor, so there is no fixed edge cap and no
+    // extra memory.
+    // First pass: count dummies per edge into offsets[e + 1].
+    for i in 0..=edge_count.min(dummy_offsets.len().saturating_sub(1)) {
+        dummy_offsets[i] = 0;
     }
-
-    // Collect dummy positions per edge using stack buffer
-    let mut edge_dummy_counts = [0u16; 512]; // Support up to 512 edges
-
-    // First pass: count dummy nodes per edge
     for level in 0..=(max_level as usize) {
         let start = vlevel_offsets[level] as usize;
         let end = vlevel_offsets[level + 1] as usize;
-
         for pos in start..end {
-            let vnode_type = vnode_kind(vnode_data, pos);
-            if vnode_type == 1 {
+            if vnode_kind(vnode_data, pos) == 1 {
                 let edge_idx = vnode_payload(vnode_data, pos) as usize;
-                if edge_idx < 512 {
-                    edge_dummy_counts[edge_idx] += 1;
+                if edge_idx + 1 < dummy_offsets.len() {
+                    dummy_offsets[edge_idx + 1] += 1;
                 }
             }
         }
     }
-
-    // Build prefix sums for offsets
-    let mut running_offset: Idx = 0;
-    for edge_idx in 0..edge_count {
-        dummy_offsets[edge_idx] = running_offset;
-        if edge_idx < 512 {
-            running_offset += edge_dummy_counts[edge_idx] as Idx;
-        }
-    }
-    dummy_offsets[edge_count] = running_offset;
-
-    // Reset counts for use as write indices
-    for count in edge_dummy_counts.iter_mut() {
-        *count = 0;
+    // Prefix-sum into start offsets.
+    for i in 1..=edge_count {
+        dummy_offsets[i] += dummy_offsets[i - 1];
     }
 
     // Second pass: write dummy data in level order (important for waypoints)
@@ -4044,17 +4086,21 @@ fn build_dummy_positions_csr(
                 let edge_offset = edge_idx % 4;
                 let x = base_x + edge_offset;
 
-                if edge_idx < 512 && edge_idx < edge_count {
-                    let base_offset = dummy_offsets[edge_idx] as usize;
-                    let write_idx = base_offset + edge_dummy_counts[edge_idx] as usize;
+                if edge_idx < edge_count {
+                    let write_idx = dummy_offsets[edge_idx] as usize;
                     if write_idx < dummy_data.len() {
                         dummy_data[write_idx] = (level as Idx, x as Coord);
-                        edge_dummy_counts[edge_idx] += 1;
+                        dummy_offsets[edge_idx] += 1;
                     }
                 }
             }
         }
     }
+    // Each cursor ended at the next edge's start — shift back down.
+    for i in (1..=edge_count).rev() {
+        dummy_offsets[i] = dummy_offsets[i - 1];
+    }
+    dummy_offsets[0] = 0;
 }
 
 // ---------- Crossing reduction for CSR path ----------
@@ -4591,7 +4637,9 @@ impl<'a> Graph<'a> {
         }
 
         let max_vnodes = (node_count + actual_dummies).min(MAX_NODES);
-        let max_level_size = node_count.min(MAX_NODES);
+        // Medians scratch is sized by level width, which dummy-heavy
+        // graphs can push past the real-node count.
+        let max_level_size = max_vnodes;
         let max_dummy_waypoints = (actual_dummies + 16).min(MAX_NODES);
 
         let temps_size = node_count * core::mem::size_of::<Idx>()                      // node_levels

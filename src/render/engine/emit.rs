@@ -137,8 +137,10 @@ pub(crate) fn estimate_output_size<V: LayoutView>(
             .unwrap_or(0);
         for i in 0..view.edge_count() {
             let label_len = view.edge(i).label.map_or(0, |l| l.len());
-            // escape + two endpoint labels + arrow + quotes + reset + slack.
-            size += label_len + 2 * max_node_label + 32;
+            // Worst-case per-line overhead: truecolor escape (19) +
+            // indent/spacing/colon (6) + arrow (≤3) + quotes (2) +
+            // reset (4) + newline (1) = 35; rounded up for headroom.
+            size += label_len + 2 * max_node_label + 40;
         }
         size += 16; // header
     }

@@ -1227,6 +1227,35 @@ mod review_fixes {
         );
     }
 
+    /// Worst-case legend arithmetic: several TrueColor entries on a
+    /// minimal canvas must fit an exactly estimate-sized buffer.
+    #[test]
+    fn truecolor_legend_estimate_holds_with_many_entries() {
+        let mut g = Graph::new();
+        for i in 1..=6usize {
+            g.add_node(i, "N");
+        }
+        // Three colliding label pairs — several legend entries.
+        g.add_edge(1, 3, Some("first-very-long-colliding-label"));
+        g.add_edge(2, 4, Some("second-very-long-colliding-label"));
+        g.add_edge(3, 5, Some("third-very-long-colliding-label"));
+        g.add_edge(4, 6, Some("fourth-very-long-colliding-label"));
+        let ir = g.compute_layout();
+        let mut options = RenderOptions::colored(Palette::Ansi);
+        options.color_mode = crate::render::engine::ColorMode::TrueColor;
+        let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+        let arena = Arena::new(&mut arena_buf);
+        let mut out = vec![0u8; ir.estimate_render_output_size(&options)];
+        let n = ir
+            .render_to_bytes(&options, &arena, &mut out)
+            .expect("estimate-sized buffer fits a multi-entry TrueColor legend");
+        let text = core::str::from_utf8(&out[..n]).unwrap();
+        assert!(
+            text.matches("\x1b[38;2;").count() >= 2,
+            "multiple truecolor legend escapes:\n{text:?}"
+        );
+    }
+
     /// Hit-test and legend share one index convention: the IR-list index.
     #[test]
     fn edge_indices_are_ir_list_indices() {

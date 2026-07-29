@@ -50,8 +50,9 @@ pub enum RenderMode {
 /// Parses from the conventional short forms (case-insensitive):
 /// `"TB"`/`"TD"`, `"BT"`, `"LR"`, `"RL"`.
 ///
-/// The built-in renderers currently paint `TopDown` layouts only;
-/// rendering an IR with any other direction is unspecified.
+/// The render engine paints `TopDown` and `BottomUp` layouts through
+/// the same geometry-driven primitives. `LeftRight`/`RightLeft` are
+/// parsed and recorded on the IR but not yet laid out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
     /// Levels flow top → bottom (default; edges point down).

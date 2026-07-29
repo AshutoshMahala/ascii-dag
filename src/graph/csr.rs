@@ -109,8 +109,14 @@ impl<'a> CsrGraph<'a> {
         label_bytes: usize,
         subgraph_count: usize,
     ) -> usize {
-        let nodes_size = node_count * NODE_STRIDE * core::mem::size_of::<usize>();
-        let edges_size = edge_count * EDGE_STRIDE * core::mem::size_of::<u32>();
+        // Saturating arithmetic: absurd inputs yield a huge (allocation
+        // will fail cleanly) size rather than a wrapped-around small one.
+        let nodes_size = node_count
+            .saturating_mul(NODE_STRIDE)
+            .saturating_mul(core::mem::size_of::<usize>());
+        let edges_size = edge_count
+            .saturating_mul(EDGE_STRIDE)
+            .saturating_mul(core::mem::size_of::<u32>());
         let children_offsets_size = (node_count + 1) * core::mem::size_of::<u32>();
         let children_data_size = edge_count * core::mem::size_of::<u32>();
         let parents_offsets_size = (node_count + 1) * core::mem::size_of::<u32>();
@@ -129,16 +135,16 @@ impl<'a> CsrGraph<'a> {
         let padding = num_allocs * 8;
 
         nodes_size
-            + edges_size
-            + children_offsets_size
-            + children_data_size
-            + parents_offsets_size
-            + parents_data_size
-            + sg_data_size
-            + node_sg_size
-            + label_bytes
-            + padding
-            + 256 // Extra buffer
+            .saturating_add(edges_size)
+            .saturating_add(children_offsets_size)
+            .saturating_add(children_data_size)
+            .saturating_add(parents_offsets_size)
+            .saturating_add(parents_data_size)
+            .saturating_add(sg_data_size)
+            .saturating_add(node_sg_size)
+            .saturating_add(label_bytes)
+            .saturating_add(padding)
+            .saturating_add(256) // Extra buffer
     }
 
     /// Get the number of nodes.

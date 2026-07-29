@@ -626,7 +626,7 @@ cargo run --example git_log          # Git-log style visualization
 | Scenario | Cargo.toml | What you get |
 |----------|-----------|--------------|
 | **Default (just works)** | `ascii-dag = "0.9"` | Heap-based `Graph` API with full Sugiyama layout |
-| **No-alloc embedded** | `default-features = false, features = ["arena"]` | `CsrGraphBuilder` → arena layout → `render_to_buffer`. No `extern crate alloc`, no global allocator needed. |
+| **No-alloc embedded** | `default-features = false, features = ["arena"]` | `CsrGraphBuilder` → arena layout → `render_to_bytes` (buffers sized by `estimate_render_arena_size`/`estimate_render_output_size`). No `extern crate alloc`, no global allocator needed. |
 | **Alloc + arena speed** | `features = ["arena"]` | Ergonomic `Graph` API for construction + fast arena-based layout/render |
 | **`no_std` with alloc** | `default-features = false, features = ["alloc"]` | `Graph` API works via `alloc` crate. Needs `#[global_allocator]`. No `std`. |
 | **Small index arena** | `default-features = false, features = ["arena-idx-u16"]` | No-alloc arena with `u16` indices (~50% memory savings vs u32) |
