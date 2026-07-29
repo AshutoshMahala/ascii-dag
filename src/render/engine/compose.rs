@@ -25,7 +25,7 @@ use super::cell::{Cell, Dir, MarkerKind, Weight};
 use super::color::{CellColor, ColorMode};
 use super::config::RenderOptions;
 use super::mem::{PlanBuf, SliceHeap};
-use super::plan::{LabelPlan, RenderPlan};
+use super::plan::{LabelPlan, PlanElement, RenderPlan};
 use super::view::{LayoutView, PathRef};
 use crate::ir::NodeKind;
 
@@ -193,6 +193,14 @@ pub(crate) struct PaintScratch<'a> {
     sgs: PlanBuf<'a, usize>,
     edges: PlanBuf<'a, usize>,
     nodes: PlanBuf<'a, usize>,
+    /// Rolling band-sweep state: elements intersecting the current
+    /// band, as positions into the plan's y_min-sorted spatial index
+    /// (capacity: nodes + edges + subgraphs).
+    active: PlanBuf<'a, u32>,
+    /// Spatial-index entries the sweep has consumed so far.
+    sweep_cursor: usize,
+    /// Expected next band start; any other `y0` restarts the sweep.
+    sweep_next_y0: usize,
 }
 
 impl<'a> PaintScratch<'a> {
@@ -216,6 +224,9 @@ impl<'a> PaintScratch<'a> {
             sgs: PlanBuf::heap(view.subgraph_count()),
             edges: PlanBuf::heap(view.edge_count()),
             nodes: PlanBuf::heap(view.node_count()),
+            active: PlanBuf::heap(view.node_count() + view.edge_count() + view.subgraph_count()),
+            sweep_cursor: 0,
+            sweep_next_y0: 0,
         }
     }
 
@@ -244,6 +255,13 @@ impl<'a> PaintScratch<'a> {
             sgs: PlanBuf::carve(arena, view.subgraph_count(), oom())?,
             edges: PlanBuf::carve(arena, view.edge_count(), oom())?,
             nodes: PlanBuf::carve(arena, view.node_count(), oom())?,
+            active: PlanBuf::carve(
+                arena,
+                view.node_count() + view.edge_count() + view.subgraph_count(),
+                oom(),
+            )?,
+            sweep_cursor: 0,
+            sweep_next_y0: 0,
         })
     }
 
@@ -260,7 +278,34 @@ impl<'a> PaintScratch<'a> {
         let seq = if colored { width * band_rows } else { 0 };
         run_capacity * (core::mem::size_of::<Run>() + core::mem::size_of::<(u32, usize, u32)>())
             + seq * core::mem::size_of::<u32>()
-            + (subgraphs + edges + nodes) * core::mem::size_of::<usize>()
+            + (subgraphs + edges + nodes)
+                * (core::mem::size_of::<usize>() + core::mem::size_of::<u32>())
+    }
+
+    /// Advance the rolling active set to the band `[y0, y0 + rows)`.
+    ///
+    /// Bands arrive in ascending, contiguous order (the partition tiles
+    /// `0..height`), so each element enters the set once when the sweep
+    /// reaches its `y_min` and is dropped once a band start passes its
+    /// `y_max` — O(elements) total across all bands, where re-deriving
+    /// membership per band from the sorted index would re-scan its
+    /// whole prefix every time. A `y0` that is not the expected next
+    /// band start restarts the sweep from the top, so any call order
+    /// still yields exactly the intersecting elements.
+    fn sweep_band(&mut self, elements: &[PlanElement], y0: usize, rows: usize) {
+        if y0 != self.sweep_next_y0 {
+            self.active.clear();
+            self.sweep_cursor = 0;
+        }
+        let last = y0 + rows.saturating_sub(1);
+        self.active.retain(|&i| elements[i as usize].y_max >= y0);
+        while self.sweep_cursor < elements.len() && elements[self.sweep_cursor].y_min <= last {
+            if elements[self.sweep_cursor].y_max >= y0 {
+                self.active.push(self.sweep_cursor as u32);
+            }
+            self.sweep_cursor += 1;
+        }
+        self.sweep_next_y0 = last + 1;
     }
 }
 
@@ -461,13 +506,17 @@ pub(crate) fn composite_band<V: LayoutView>(
 ) {
     use super::plan::ElementKind;
     let (y0, rows) = (canvas.y0(), canvas.rows());
-    // The spatial index is sorted by row; painting must happen in LIST
-    // order (colors are last-writer-wins, marker overlap is last-wins),
-    // so each stage's band subset is re-sorted by element index.
+    // The sweep's active set is sorted by row; painting must happen in
+    // LIST order (colors are last-writer-wins, marker overlap is
+    // last-wins), so each stage's band subset is re-sorted by element
+    // index.
     scratch.sgs.clear();
     scratch.edges.clear();
     scratch.nodes.clear();
-    for el in plan.elements_in_band(y0, rows) {
+    let elements = plan.elements();
+    scratch.sweep_band(elements, y0, rows);
+    for &ei in scratch.active.as_slice() {
+        let el = &elements[ei as usize];
         match el.kind {
             ElementKind::Subgraph => scratch.sgs.push(el.index),
             ElementKind::Edge => scratch.edges.push(el.index),
@@ -856,4 +905,63 @@ fn paint_edge_label<V: LayoutView>(
         x += 1;
     }
     canvas.text(x, label.y, '"', paint);
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use crate::graph::Graph;
+
+    /// Composite one band and return its emitted text.
+    fn band_text<V: LayoutView>(
+        view: &V,
+        plan: &RenderPlan<'_>,
+        options: &RenderOptions,
+        scratch: &mut PaintScratch<'_>,
+        cells: &mut [Cell],
+        y0: usize,
+        rows: usize,
+    ) -> alloc::string::String {
+        let mut canvas = BandCanvas::new(cells, None, plan.width(), y0, rows);
+        composite_band(view, plan, options, &mut canvas, scratch);
+        let mut out = alloc::string::String::new();
+        super::super::emit::emit_plain_band(&canvas, options.charset, &mut out).unwrap();
+        out
+    }
+
+    /// The rolling sweep serves the driver loops' ascending band order
+    /// incrementally; any other order must restart it and still yield
+    /// exactly the band's elements. Reverse order (plus a repeated
+    /// band) hits the reset path on every call.
+    #[test]
+    fn sweep_is_call_order_independent() {
+        let mut g = Graph::new();
+        for i in 0..12 {
+            g.add_node(i, "N");
+        }
+        for i in 0..11 {
+            g.add_edge(i, i + 1, None);
+        }
+        let ir = g.compute_layout();
+        let mut options = RenderOptions::plain();
+        options.band_rows_cap = 3;
+        let plan = RenderPlan::build(&ir, &options);
+        assert!(plan.band_count() > 2, "corpus must actually band");
+        let mut cells = alloc::vec![Cell::EMPTY; plan.width() * plan.max_band_rows()];
+
+        let mut fwd = PaintScratch::heap_backed(&ir, &plan, false, plan.max_band_rows());
+        let ascending: alloc::vec::Vec<_> = plan
+            .band_ranges()
+            .iter()
+            .map(|&(y0, rows)| band_text(&ir, &plan, &options, &mut fwd, &mut cells, y0, rows))
+            .collect();
+
+        let mut rev = PaintScratch::heap_backed(&ir, &plan, false, plan.max_band_rows());
+        for (i, &(y0, rows)) in plan.band_ranges().iter().enumerate().rev() {
+            let got = band_text(&ir, &plan, &options, &mut rev, &mut cells, y0, rows);
+            assert_eq!(got, ascending[i], "band {i} (y0={y0}) reverse order");
+            let again = band_text(&ir, &plan, &options, &mut rev, &mut cells, y0, rows);
+            assert_eq!(again, ascending[i], "band {i} (y0={y0}) repeated");
+        }
+    }
 }

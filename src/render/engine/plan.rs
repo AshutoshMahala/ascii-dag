@@ -477,23 +477,12 @@ impl<'buf> RenderPlan<'buf> {
         self.labels.as_slice()
     }
 
-    #[cfg(test)]
+    /// The spatial index: every element with its row range, sorted by
+    /// `(y_min, y_max, index)`. The compositor's rolling band sweep
+    /// walks it in order — per-band membership is never re-derived by
+    /// scanning a prefix.
     pub(crate) fn elements(&self) -> &[PlanElement] {
         self.index.as_slice()
-    }
-
-    /// Elements whose row range intersects `[y0, y0 + rows)`. The index
-    /// is sorted by `y_min`, so entries past the band are cut off by
-    /// binary search; the prefix is filtered on `y_max`.
-    pub(crate) fn elements_in_band(
-        &self,
-        y0: usize,
-        rows: usize,
-    ) -> impl Iterator<Item = &PlanElement> {
-        let last = y0 + rows.saturating_sub(1);
-        let slice = self.index.as_slice();
-        let ub = slice.partition_point(|el| el.y_min <= last);
-        slice[..ub].iter().filter(move |el| el.y_max >= y0)
     }
 
     /// Band list as `(first_row, rows)` pairs covering `0..height`.
@@ -631,8 +620,8 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
         } else {
             0
         };
-    // Per-allocation alignment slack (≤ 8 bytes × ~16 carves) + margin.
-    plan_bytes + scratch_bytes + canvas_bytes + 16 * 8 + 64
+    // Per-allocation alignment slack (≤ 8 bytes × ~18 carves) + margin.
+    plan_bytes + scratch_bytes + canvas_bytes + 18 * 8 + 64
 }
 
 /// Structural count of horizontal-run interiors a path paints — the

@@ -119,6 +119,25 @@ impl<'a, T: Copy + Default> PlanBuf<'a, T> {
             *v = T::default();
         }
     }
+
+    /// Keep only the elements satisfying `pred`, preserving order.
+    #[inline]
+    pub(crate) fn retain(&mut self, mut pred: impl FnMut(&T) -> bool) {
+        match self {
+            #[cfg(feature = "alloc")]
+            PlanBuf::Heap(v) => v.retain(|t| pred(t)),
+            PlanBuf::Slice { data, len } => {
+                let mut w = 0usize;
+                for r in 0..*len {
+                    if pred(&data[r]) {
+                        data[w] = data[r];
+                        w += 1;
+                    }
+                }
+                *len = w;
+            }
+        }
+    }
 }
 
 /// A max-heap over a `PlanBuf` — the no-alloc replacement for

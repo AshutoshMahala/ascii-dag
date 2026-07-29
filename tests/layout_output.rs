@@ -720,3 +720,98 @@ mod dummy_nodes {
         }
     }
 }
+
+// ── Deep chains (regression: >256 levels) ────────────────────────────────
+//
+// A 20k-node chain used to panic with "index out of bounds" inside CSR
+// crossing reduction (per-level buffers were fixed at 256 levels).
+// Contract now: per-level buffers are sized from the graph's real
+// depth, so BOTH backends lay out arbitrarily deep graphs — limited
+// only by the index type's node capacity — and render byte-identically.
+// Unbroken cycles (CycleBreaking::None) that pump level relaxation past
+// any DAG-possible depth still error cleanly (covered by unit tests in
+// arena_csr.rs).
+mod deep_chain {
+    use super::*;
+    use ascii_dag::graph::arena::Arena;
+
+    fn chain(n: usize) -> Graph<'static> {
+        let mut g = Graph::new();
+        for i in 0..n {
+            g.add_node(i, "N");
+        }
+        for i in 0..n - 1 {
+            g.add_edge(i, i + 1, None);
+        }
+        g
+    }
+
+    #[test]
+    fn deep_chain_renders_heap() {
+        let out = render_heap(&chain(300), &LayoutConfig::standard());
+        assert!(
+            out.lines().count() >= 300,
+            "300-level chain should render at least one row per level"
+        );
+        assert!(out.contains("[N]"), "node labels missing from output");
+    }
+
+    /// Depth-sized per-level buffers: deep chains lay out in the CSR
+    /// backend and byte-match the heap render, with estimate-sized
+    /// arenas (no slack factor — the estimate must be sufficient).
+    #[test]
+    #[cfg(not(feature = "arena-idx-u8"))]
+    fn deep_chain_renders_identically_csr() {
+        // 300 = just past the old fixed cap; 1_000 and 20_000 = depth
+        // scaling (20k was the original panic report).
+        for n in [300usize, 1_000, 20_000] {
+            let g = chain(n);
+            let heap_out = render_heap(&g, &LayoutConfig::standard());
+
+            let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+            let mut csr_arena = Arena::new(&mut csr_buf);
+            let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+
+            let size = g.estimate_layout_arena_size();
+            let mut temp_buf = vec![0u8; size];
+            let mut out_buf = vec![0u8; size];
+            let mut temp_arena = Arena::new(&mut temp_buf);
+            let mut out_arena = Arena::new(&mut out_buf);
+            let ir = csr
+                .compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut out_arena)
+                .unwrap_or_else(|e| panic!("n={n}: CSR layout must succeed, got {e}"));
+
+            let (render_bytes, _) = ir.estimate_render_size();
+            let mut render_buf = vec![0u8; render_bytes * 4 + 8192];
+            let mut line_buf = vec![' '; ir.width().max(1) + 32];
+            let mut scratch = vec![0usize; (ir.height() + ir.edge_count() * 2).max(1) + 64];
+            let bytes = ir
+                .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
+                .expect("arena render");
+            let csr_out = String::from_utf8_lossy(&render_buf[..bytes]);
+            assert_eq!(heap_out, csr_out, "n={n}: backends must render identically");
+        }
+    }
+
+    /// Under arena-idx-u8 the node-count check bounds depth naturally.
+    #[test]
+    #[cfg(feature = "arena-idx-u8")]
+    fn deep_chain_bounded_by_node_capacity_u8() {
+        use ascii_dag::GraphError;
+        let g = chain(300);
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let Some(csr) = g.to_csr(&mut csr_arena) else {
+            return; // conversion itself may reject >255 nodes
+        };
+        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let err = csr
+            .compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut out_arena)
+            .expect_err("300 nodes exceed the u8 index capacity");
+        assert!(matches!(err, GraphError::ExceedsMaxNodes { .. }));
+    }
+}

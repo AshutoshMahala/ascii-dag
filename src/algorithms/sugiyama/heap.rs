@@ -28,9 +28,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap as HashMap;
+use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
 #[cfg(feature = "std")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ── VNode: Virtual node for layout computation ───────────────────────────
 
@@ -727,7 +727,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
     // Collect all horizontal Y values used by edge routing segments.
     // These will be passed to bounding box computation so subgraph borders
     // can be shifted to avoid overlapping with edge routing rows.
-    let mut edge_routing_ys: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut edge_routing_ys: HashSet<usize> = HashSet::new();
 
     // Per-level routing floor: the maximum Y used by edge routing at each level.
     // Bottom borders of subgraphs closing at level L must be placed BELOW this floor.

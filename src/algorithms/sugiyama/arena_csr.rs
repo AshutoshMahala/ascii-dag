@@ -56,7 +56,7 @@ fn vnode_set(vnode_data: &mut [Idx], pos: usize, kind: Idx, payload: Idx) {
 
 // Import configurable index types
 #[cfg(feature = "arena")]
-use super::idx::{Coord, Idx, MAX_LEVELS, MAX_NODES};
+use super::idx::{Coord, Idx, MAX_NODES};
 
 // Fallback types when arena feature not enabled (for compilation)
 #[cfg(not(feature = "arena"))]
@@ -65,8 +65,6 @@ type Idx = u32;
 type Coord = u16;
 #[cfg(not(feature = "arena"))]
 const MAX_NODES: usize = u32::MAX as usize;
-#[cfg(not(feature = "arena"))]
-const MAX_LEVELS: usize = usize::MAX;
 
 /// Maximum horizontal routing slots per level (caps height on extreme fan-out).
 const MAX_SLOTS_PER_LEVEL: usize = 8;
@@ -241,10 +239,39 @@ pub fn compute_layout_arena_csr<'b>(
         CycleBreaking::None => {} // already all-false from alloc_raw
     }
 
-    // Step 2: Allocate layout temporaries
+    // Step 2: Calculate levels (back edges have direction flipped).
+    // This needs only the per-node level array, so it runs BEFORE the
+    // main temps allocation — the per-level buffers are then sized from
+    // the graph's true depth instead of a fixed cap (heap parity: that
+    // backend has never had a depth cap).
+    let node_levels = {
+        let (ptr, _) = temp_arena
+            .alloc_raw_uninit::<Idx>(node_count)
+            .ok_or(GraphError::ArenaOom)?;
+        // Safety: freshly allocated for node_count entries; initialized
+        // by calculate_levels_csr before any read.
+        unsafe { core::slice::from_raw_parts_mut(ptr, node_count) }
+    };
+    let max_level = calculate_levels_csr(graph, node_levels, back_edges);
+    let depth = (max_level as usize).saturating_add(1);
+
+    // A DAG's depth cannot exceed its node count; a deeper result means
+    // an unbroken cycle pumped the relaxation (CycleBreaking::None).
+    // Reject cleanly — sizing buffers from a saturated depth would ask
+    // the arena for nonsense.
+    if depth > node_count.max(1) {
+        return Err(GraphError::ExceedsMaxLevels {
+            depth,
+            max: node_count,
+        });
+    }
+
+    // Step 3: Allocate the remaining layout temporaries, per-level
+    // buffers sized to the real depth.
     let sg_count = graph.subgraph_count();
-    let mut temps = alloc_layout_temps_csr(temp_arena, node_count, edge_count, sg_count)
-        .ok_or(GraphError::ArenaOom)?;
+    let mut temps =
+        alloc_layout_temps_csr(temp_arena, node_count, edge_count, sg_count, node_levels, depth)
+            .ok_or(GraphError::ArenaOom)?;
 
     // 2-node-cycle detection in O(E log E): sort edge indices by their
     // normalized endpoint pair, then scan each run for an anti-parallel
@@ -297,9 +324,6 @@ pub fn compute_layout_arena_csr<'b>(
             run_start = run_end;
         }
     }
-
-    // Step 3: Calculate levels (back edges have direction flipped)
-    let max_level = calculate_levels_csr(graph, temps.node_levels, back_edges);
 
     // Step 4: Build virtual levels (back edges have direction flipped)
     let (_vnode_count, _max_level_size) = build_virtual_levels_csr(
@@ -1243,9 +1267,12 @@ fn alloc_layout_temps_csr<'b>(
     node_count: usize,
     edge_count: usize,
     sg_count: usize,
+    node_levels: &'b mut [Idx],
+    depth: usize,
 ) -> Option<LayoutTemps<'b>> {
-    // Same allocation logic as DAG
-    let max_levels = node_count.min(256);
+    // Per-level buffers hold exactly the graph's real depth (computed
+    // by the caller before this allocation) — no fixed cap, no waste.
+    let max_levels = depth.max(1);
     // Virtual nodes = real + dummy nodes from skip-level edges.
     // Most edges span only 1 level (no dummies). Skip-level edges typically span 2-4 levels.
     // Use a reasonable estimate: each edge creates at most 4 dummy nodes on average.
@@ -1253,7 +1280,6 @@ fn alloc_layout_temps_csr<'b>(
     let max_level_size = node_count.min(50000);
     let max_dummy_waypoints = (edge_count * 4).min(500000);
 
-    let (node_levels_ptr, _) = arena.alloc_raw_uninit::<Idx>(node_count)?;
     let (edge_indices_ptr, _) = arena.alloc_raw_uninit::<(Idx, Idx)>(edge_count)?;
     let (vlevel_offsets_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (level_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels)?;
@@ -1316,7 +1342,7 @@ fn alloc_layout_temps_csr<'b>(
 
     unsafe {
         Some(LayoutTemps {
-            node_levels: core::slice::from_raw_parts_mut(node_levels_ptr, node_count),
+            node_levels,
             edge_indices: core::slice::from_raw_parts_mut(edge_indices_ptr, edge_count),
             vlevel_offsets: core::slice::from_raw_parts_mut(vlevel_offsets_ptr, max_levels + 1),
             level_counts: core::slice::from_raw_parts_mut(level_counts_ptr, max_levels),
@@ -2474,7 +2500,7 @@ fn clear_external_overlaps_csr(
         return 0;
     }
 
-    // CSR levels are capped at 256 (`max_levels = node_count.min(256)`).
+    // Per-level buffers are sized from the graph's real depth.
     const MAX_LEVEL_SLOTS: usize = 257;
     if max_level >= MAX_LEVEL_SLOTS {
         return 0;
@@ -3667,19 +3693,18 @@ fn calculate_levels_csr(graph: &CsrGraph<'_>, levels: &mut [Idx], back_edges: &[
             // For back edges, flip direction so cycles don't prevent convergence
             let is_back = back_edges.get(ei).copied().unwrap_or(false);
             let (src, dst) = if is_back { (to, from) } else { (from, to) };
-            let new_level = levels[src] + 1;
+            // Saturate: unbroken cycles (CycleBreaking::None) can push
+            // levels past Idx::MAX before the pass cap stops relaxation.
+            let new_level = levels[src].saturating_add(1);
             if new_level > levels[dst] {
                 levels[dst] = new_level;
                 changed = true;
             }
         }
     }
-    levels
-        .iter()
-        .copied()
-        .max()
-        .unwrap_or(0)
-        .min(MAX_LEVELS as Idx)
+    // True (unclamped) max: the caller checks it against buffer capacity
+    // and rejects too-deep graphs; clamping here would silently corrupt.
+    levels.iter().copied().max().unwrap_or(0)
 }
 
 fn build_virtual_levels_csr(
@@ -4437,7 +4462,7 @@ fn gather_csr_neighbours(
 // ── Graph::estimate_layout_arena_size ─────────────────────────────────────────
 #[cfg(feature = "alloc")]
 use crate::graph::Graph;
-#[cfg(feature = "std")]
+#[cfg(feature = "alloc")]
 use alloc::vec;
 
 #[cfg(feature = "alloc")]
@@ -4450,54 +4475,56 @@ impl<'a> Graph<'a> {
         let node_count = self.nodes.len();
         let edge_count = self.edges.len();
         let label_bytes: usize = self.nodes.iter().map(|(_, l)| l.len()).sum();
-        let max_levels = node_count.min(MAX_LEVELS);
-
-        // ── Cheap level computation to count actual dummies ────────────
+        // ── Cheap level relaxation: exact dummy count AND exact depth ──
+        // If this (unflipped) relaxation converges, the graph has no
+        // directed cycle, so cycle breaking is a no-op and the depth
+        // below equals the layout's exactly. If it does not converge,
+        // bound by node_count — a DAG's depth can never exceed its node
+        // count, which is precisely what the layout enforces.
         let actual_dummies: usize;
+        let max_levels: usize;
         {
-            #[cfg(feature = "std")]
-            {
-                let mut levels = vec![0u32; node_count];
-                let edge_idx: alloc::vec::Vec<(usize, usize)> = self
-                    .edges
-                    .iter()
-                    .map(|&(from_id, to_id, _)| {
-                        let fi = self.node_index(from_id).unwrap_or(usize::MAX);
-                        let ti = self.node_index(to_id).unwrap_or(usize::MAX);
-                        (fi, ti)
-                    })
-                    .collect();
-                let mut changed = true;
-                let mut passes = 0;
-                while changed && passes < node_count {
-                    changed = false;
-                    passes += 1;
-                    for &(fi, ti) in &edge_idx {
-                        if fi != usize::MAX && ti != usize::MAX {
-                            let nl = levels[fi] + 1;
-                            if nl > levels[ti] {
-                                levels[ti] = nl;
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-                let mut dummies = 0usize;
+            let mut levels = vec![0u32; node_count];
+            let edge_idx: alloc::vec::Vec<(usize, usize)> = self
+                .edges
+                .iter()
+                .map(|&(from_id, to_id, _)| {
+                    let fi = self.node_index(from_id).unwrap_or(usize::MAX);
+                    let ti = self.node_index(to_id).unwrap_or(usize::MAX);
+                    (fi, ti)
+                })
+                .collect();
+            let mut changed = true;
+            let mut passes = 0;
+            while changed && passes < node_count {
+                changed = false;
+                passes += 1;
                 for &(fi, ti) in &edge_idx {
-                    if fi != usize::MAX && ti != usize::MAX {
-                        let fl = levels[fi] as usize;
-                        let tl = levels[ti] as usize;
-                        if tl > fl + 1 {
-                            dummies += tl - fl - 1;
+                    if fi != usize::MAX && ti != usize::MAX && fi != ti {
+                        let nl = levels[fi].saturating_add(1);
+                        if nl > levels[ti] {
+                            levels[ti] = nl;
+                            changed = true;
                         }
                     }
                 }
-                actual_dummies = dummies;
             }
-            #[cfg(not(feature = "std"))]
-            {
-                actual_dummies = edge_count.saturating_mul(4);
+            max_levels = if changed {
+                node_count.max(1)
+            } else {
+                levels.iter().copied().max().unwrap_or(0) as usize + 1
+            };
+            let mut dummies = 0usize;
+            for &(fi, ti) in &edge_idx {
+                if fi != usize::MAX && ti != usize::MAX {
+                    let fl = levels[fi] as usize;
+                    let tl = levels[ti] as usize;
+                    if tl > fl + 1 {
+                        dummies += tl - fl - 1;
+                    }
+                }
             }
+            actual_dummies = dummies;
         }
 
         let max_vnodes = (node_count + actual_dummies).min(MAX_NODES);
@@ -4676,6 +4703,104 @@ mod tests {
             found_reversed,
             "cyclic graph should have at least one reversed edge"
         );
+    }
+
+    /// Helper: chain graph 0→1→…→n-1 (one node per level, depth = n).
+    #[cfg(not(feature = "arena-idx-u8"))]
+    fn build_chain_csr<'a>(arena: &'a mut Arena<'a>, n: usize) -> CsrGraph<'a> {
+        let mut builder = CsrGraphBuilder::new(arena, n, n - 1, n).expect("builder alloc");
+        for i in 0..n {
+            builder.add_node(i, "n").expect("add node");
+        }
+        for i in 0..n - 1 {
+            builder.add_edge(i, i + 1).expect("add edge");
+        }
+        builder.build().expect("csr build")
+    }
+
+    /// Regression: a chain deeper than the per-level buffer capacity
+    /// (256 levels) must return `ExceedsMaxLevels`, not index out of
+    /// bounds in crossing reduction. Original report used a 20k-node
+    /// chain; any depth past 256 triggers the same OOB.
+    /// arena-idx-u8 is excluded: >255 nodes already fails `ExceedsMaxNodes`.
+    #[cfg(not(feature = "arena-idx-u8"))]
+    #[test]
+    fn test_deep_chain_lays_out_with_depth_sized_buffers() {
+        // Per-level buffers are sized from the graph's real depth — a
+        // 300-level chain (past the old fixed 256 cap) must lay out.
+        const N: usize = 300;
+        let mut graph_buf = vec![0u8; 128 * 1024];
+        let mut graph_arena = Arena::new(&mut graph_buf);
+        let graph = build_chain_csr(&mut graph_arena, N);
+
+        let config = LayoutConfig::standard();
+        let mut temp_buf = vec![0u8; 1024 * 1024];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_buf = vec![0u8; 512 * 1024];
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let ir = compute_layout_arena_csr(&graph, &config, &mut temp_arena, &mut out_arena)
+            .expect("a deep chain lays out with depth-sized buffers");
+        assert_eq!(ir.nodes().len(), N);
+        assert_eq!(
+            ir.nodes().iter().map(|n| n.level).max(),
+            Some(N - 1),
+            "one node per level, depth = N"
+        );
+    }
+
+    #[test]
+    fn test_unbroken_cycle_errors_cleanly() {
+        // With CycleBreaking::None a cycle pumps level relaxation past
+        // any DAG-possible depth; the depth > node_count guard must
+        // reject it as ExceedsMaxLevels — never panic, never allocate
+        // per-level buffers from a saturated depth.
+        let mut graph_buf = vec![0u8; 64 * 1024];
+        let mut graph_arena = Arena::new(&mut graph_buf);
+        let mut builder = CsrGraphBuilder::new(&mut graph_arena, 2, 2, 8).expect("builder");
+        builder.add_node(1, "A").expect("node");
+        builder.add_node(2, "B").expect("node");
+        builder.add_edge(0, 1).expect("edge");
+        builder.add_edge(1, 0).expect("edge");
+        let graph = builder.build().expect("csr build");
+
+        let mut config = LayoutConfig::standard();
+        let crate::algorithms::sugiyama::config::AlgorithmConfig::Sugiyama {
+            cycle_breaking, ..
+        } = &mut config.algorithm;
+        *cycle_breaking = CycleBreaking::None;
+        let mut temp_buf = vec![0u8; 256 * 1024];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_buf = vec![0u8; 128 * 1024];
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let err = compute_layout_arena_csr(&graph, &config, &mut temp_arena, &mut out_arena)
+            .expect_err("unbroken cycle must error, not saturate");
+        assert!(
+            matches!(err, GraphError::ExceedsMaxLevels { .. }),
+            "expected ExceedsMaxLevels, got {err:?}"
+        );
+    }
+
+    /// Boundary: a chain of exactly 256 levels fills the per-level
+    /// buffers to capacity and must still lay out successfully.
+    #[cfg(not(feature = "arena-idx-u8"))]
+    #[test]
+    fn test_chain_at_level_capacity_ok() {
+        const N: usize = 256;
+        let mut graph_buf = vec![0u8; 128 * 1024];
+        let mut graph_arena = Arena::new(&mut graph_buf);
+        let graph = build_chain_csr(&mut graph_arena, N);
+
+        let config = LayoutConfig::standard();
+        let mut temp_buf = vec![0u8; 512 * 1024];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_buf = vec![0u8; 512 * 1024];
+        let mut out_arena = Arena::new(&mut out_buf);
+
+        let ir = compute_layout_arena_csr(&graph, &config, &mut temp_arena, &mut out_arena)
+            .expect("256-level chain should lay out");
+        assert_eq!(ir.node_count(), N);
     }
 
     #[test]

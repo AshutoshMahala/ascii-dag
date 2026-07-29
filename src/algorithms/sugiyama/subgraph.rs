@@ -34,9 +34,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap as HashMap;
+use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
 #[cfg(feature = "std")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ── VNode subgraph resolution ────────────────────────────────────────────
 
@@ -1334,7 +1334,7 @@ pub(crate) fn compute_bounding_boxes<'a>(
     real_node_coords: &[(usize, usize, usize, usize)], // (level, pos, x, width) per node_idx
     level_y_offsets: &[usize],
     total_height: usize,
-    edge_routing_ys: &std::collections::HashSet<usize>,
+    edge_routing_ys: &HashSet<usize>,
     level_routing_floor: &[usize],
 ) -> Vec<SubgraphInfo<'a>> {
     if dag.subgraphs.is_empty() {
