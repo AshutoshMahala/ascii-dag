@@ -7,6 +7,7 @@
 //! Run with `--csr` to use the arena/CSR pipeline instead of heap.
 
 use ascii_dag::graph::Graph;
+use ascii_dag::render::engine::RenderOptions;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -53,7 +54,7 @@ fn example_simple_cluster() {
         );
     }
     println!();
-    println!("{}", ir.render_scanline());
+    println!("{}", ir.render_string(&RenderOptions::plain()));
     println!();
 }
 
@@ -81,7 +82,7 @@ fn example_two_clusters() {
     let ir = g.compute_layout();
     println!("   {} subgraph(s) in IR", ir.subgraphs().len());
     println!();
-    println!("{}", ir.render_scanline());
+    println!("{}", ir.render_string(&RenderOptions::plain()));
     println!();
 }
 
@@ -117,7 +118,7 @@ fn example_nested_clusters() {
         );
     }
     println!();
-    println!("{}", ir.render_scanline());
+    println!("{}", ir.render_string(&RenderOptions::plain()));
     println!();
 }
 
@@ -225,7 +226,7 @@ fn example_horizontal_siblings() {
         );
     }
     println!();
-    println!("{}", ir.render_scanline());
+    println!("{}", ir.render_string(&RenderOptions::plain()));
     println!();
 }
 
@@ -271,14 +272,11 @@ fn run_csr() {
         }
         println!();
 
-        let (render_bytes, _) = ir.estimate_render_size();
-        let render_size = render_bytes * 4 + 4096;
-        let mut render_buffer = vec![0u8; render_size];
-        let mut line_buffer = vec![' '; ir.width().max(1) + 16];
-        let mut scratch_buffer = vec![0usize; (ir.height() + ir.edge_count() * 2).max(1)];
-
-        if let Some(len) =
-            ir.render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer)
+        let options = RenderOptions::plain();
+        let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+        let render_arena = ascii_dag::graph::arena::Arena::new(&mut arena_buf);
+        let mut render_buffer = vec![0u8; ir.estimate_render_output_size(&options)];
+        if let Ok(len) = ir.render_to_bytes(&options, &render_arena, &mut render_buffer)
             && let Ok(s) = std::str::from_utf8(&render_buffer[..len])
         {
             println!("{}\n", s);

@@ -24,13 +24,18 @@
 use crate::graph::arena::Arena;
 
 /// Node data stride: fields per node
-const NODE_STRIDE: usize = 5;
+const NODE_STRIDE: usize = 6;
 /// Node field offsets
 const NODE_ID: usize = 0;
 const NODE_LABEL_PTR: usize = 1;
 const NODE_LABEL_LEN: usize = 2;
 const NODE_WIDTH: usize = 3;
 const NODE_HEIGHT: usize = 4;
+const NODE_FLAGS: usize = 5;
+
+/// `NODE_FLAGS` bit: the node was auto-created by an edge reference
+/// (`NodeKind::Implicit` in the layout IR — heap parity).
+const NODE_FLAG_IMPLICIT: usize = 1;
 
 /// Edge data stride: fields per edge
 const EDGE_STRIDE: usize = 4;
@@ -104,8 +109,14 @@ impl<'a> CsrGraph<'a> {
         label_bytes: usize,
         subgraph_count: usize,
     ) -> usize {
-        let nodes_size = node_count * NODE_STRIDE * core::mem::size_of::<usize>();
-        let edges_size = edge_count * EDGE_STRIDE * core::mem::size_of::<u32>();
+        // Saturating arithmetic: absurd inputs yield a huge (allocation
+        // will fail cleanly) size rather than a wrapped-around small one.
+        let nodes_size = node_count
+            .saturating_mul(NODE_STRIDE)
+            .saturating_mul(core::mem::size_of::<usize>());
+        let edges_size = edge_count
+            .saturating_mul(EDGE_STRIDE)
+            .saturating_mul(core::mem::size_of::<u32>());
         let children_offsets_size = (node_count + 1) * core::mem::size_of::<u32>();
         let children_data_size = edge_count * core::mem::size_of::<u32>();
         let parents_offsets_size = (node_count + 1) * core::mem::size_of::<u32>();
@@ -124,16 +135,16 @@ impl<'a> CsrGraph<'a> {
         let padding = num_allocs * 8;
 
         nodes_size
-            + edges_size
-            + children_offsets_size
-            + children_data_size
-            + parents_offsets_size
-            + parents_data_size
-            + sg_data_size
-            + node_sg_size
-            + label_bytes
-            + padding
-            + 256 // Extra buffer
+            .saturating_add(edges_size)
+            .saturating_add(children_offsets_size)
+            .saturating_add(children_data_size)
+            .saturating_add(parents_offsets_size)
+            .saturating_add(parents_data_size)
+            .saturating_add(sg_data_size)
+            .saturating_add(node_sg_size)
+            .saturating_add(label_bytes)
+            .saturating_add(padding)
+            .saturating_add(256) // Extra buffer
     }
 
     /// Get the number of nodes.
@@ -160,7 +171,7 @@ impl<'a> CsrGraph<'a> {
         let ptr = self.nodes[index * NODE_STRIDE + NODE_LABEL_PTR];
         let len = self.nodes[index * NODE_STRIDE + NODE_LABEL_LEN];
 
-        // Safety: we store valid UTF-8 label offsets
+        // SAFETY: we store valid UTF-8 label offsets
         let bytes = &self.labels[ptr..ptr + len];
         core::str::from_utf8(bytes).unwrap_or("")
     }
@@ -175,6 +186,13 @@ impl<'a> CsrGraph<'a> {
     #[inline]
     pub fn node_height(&self, index: usize) -> usize {
         self.nodes[index * NODE_STRIDE + NODE_HEIGHT]
+    }
+
+    /// Whether the node was auto-created by an edge reference (renders
+    /// as `NodeKind::Implicit`, matching the heap pipeline).
+    #[inline]
+    pub fn node_is_implicit(&self, index: usize) -> bool {
+        self.nodes[index * NODE_STRIDE + NODE_FLAGS] & NODE_FLAG_IMPLICIT != 0
     }
 
     /// Get children of a node by index.
@@ -536,10 +554,12 @@ impl<'a> CsrGraphBuilder<'a> {
         max_edges: usize,
         max_label_bytes: usize,
     ) -> Option<Self> {
-        // Allocate all memory from arena using raw pointers
-        let (nodes_ptr, _) = arena.alloc_raw::<usize>(max_nodes * NODE_STRIDE)?;
-        let (edges_ptr, _) = arena.alloc_raw::<u32>(max_edges * EDGE_STRIDE)?;
-        let (children_offsets_ptr, _) = arena.alloc_raw::<u32>(max_nodes + 1)?;
+        // Allocate all memory from arena using raw pointers. Counts are
+        // pre-multiplied with checked arithmetic — adversarial sizes
+        // fail the allocation instead of wrapping.
+        let (nodes_ptr, _) = arena.alloc_raw::<usize>(max_nodes.checked_mul(NODE_STRIDE)?)?;
+        let (edges_ptr, _) = arena.alloc_raw::<u32>(max_edges.checked_mul(EDGE_STRIDE)?)?;
+        let (children_offsets_ptr, _) = arena.alloc_raw::<u32>(max_nodes.checked_add(1)?)?;
         let (children_data_ptr, _) = arena.alloc_raw::<u32>(max_edges)?;
         let (parents_offsets_ptr, _) = arena.alloc_raw::<u32>(max_nodes + 1)?;
         let (parents_data_ptr, _) = arena.alloc_raw::<u32>(max_edges)?;
@@ -690,6 +710,8 @@ impl<'a> CsrGraphBuilder<'a> {
         self.nodes[idx * NODE_STRIDE + NODE_LABEL_LEN] = label_len;
         self.nodes[idx * NODE_STRIDE + NODE_WIDTH] = width;
         self.nodes[idx * NODE_STRIDE + NODE_HEIGHT] = height;
+        // Direct-built CSR graphs declare every node — none is implicit.
+        self.nodes[idx * NODE_STRIDE + NODE_FLAGS] = 0;
 
         // Store label bytes
         self.labels[self.current_label_offset..self.current_label_offset + label_len]
@@ -989,7 +1011,7 @@ impl<'a> super::Graph<'a> {
         };
 
         // Convert raw pointers to slices
-        // Safety: alloc_raw has validated the allocations and zeroed the memory
+        // SAFETY: alloc_raw has validated the allocations and zeroed the memory
         let (nodes, edges, children_offsets, children_data, parents_offsets, parents_data, labels) = unsafe {
             (
                 core::slice::from_raw_parts_mut(nodes_ptr, node_count * NODE_STRIDE),
@@ -1010,6 +1032,11 @@ impl<'a> super::Graph<'a> {
             nodes[idx * NODE_STRIDE + NODE_LABEL_LEN] = label.len();
             nodes[idx * NODE_STRIDE + NODE_WIDTH] = self.get_node_width(idx);
             nodes[idx * NODE_STRIDE + NODE_HEIGHT] = self.get_node_height(idx);
+            nodes[idx * NODE_STRIDE + NODE_FLAGS] = if self.auto_created.contains(&id) {
+                NODE_FLAG_IMPLICIT
+            } else {
+                0
+            };
 
             // Copy label bytes
             labels[label_offset..label_offset + label.len()].copy_from_slice(label.as_bytes());

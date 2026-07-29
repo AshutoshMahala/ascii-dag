@@ -25,8 +25,9 @@
 //! let nums: &mut [usize] = arena.alloc_slice_default(100).unwrap();
 //! nums[0] = 42;
 //!
-//! // Reset for reuse (O(1))
-//! arena.reset();
+//! // Reset for reuse (O(1)).
+//! // SAFETY: no allocation from the arena is used after this point.
+//! unsafe { arena.reset() };
 //! ```
 
 use core::cell::Cell;
@@ -119,15 +120,18 @@ impl<'a> Arena<'a> {
             return Some((core::ptr::NonNull::<T>::dangling().as_ptr(), 0));
         }
 
-        let size = size_of::<T>() * count;
+        // Checked arithmetic throughout: an adversarial `count` must
+        // produce `None`, never a wrapped-around (too small) size that
+        // safe callers would then write past.
+        let size = size_of::<T>().checked_mul(count)?;
         let align = align_of::<T>();
 
         // Current pointer
         let current = self.ptr.get() as usize;
 
         // Align the pointer
-        let aligned_ptr = (current + align - 1) & !(align - 1);
-        let new_ptr = aligned_ptr + size;
+        let aligned_ptr = current.checked_add(align - 1)? & !(align - 1);
+        let new_ptr = aligned_ptr.checked_add(size)?;
 
         // Check bounds
         if new_ptr > self.end as usize {
@@ -150,11 +154,19 @@ impl<'a> Arena<'a> {
         Some((ptr as *mut T, count))
     }
 
-    /// Allocate a slice of `count` items, initialized to zero.
+    /// Allocate a slice of `count` items, initialized to zero bytes.
     ///
     /// Returns `None` if there isn't enough space in the arena.
+    ///
+    /// # Safety
+    ///
+    /// The all-zero bit pattern must be a valid value of `T` (true for
+    /// integers, floats, raw pointers-as-options, and `#[repr(C)]`
+    /// aggregates of such; NOT guaranteed for arbitrary enums, `bool`
+    /// wrappers, or references). Prefer [`Self::alloc_slice_default`],
+    /// which is safe for any `T: Copy + Default`.
     #[inline]
-    pub fn alloc_slice_zeroed<T: Copy>(&self, count: usize) -> Option<&'a mut [T]> {
+    pub unsafe fn alloc_slice_zeroed<T: Copy>(&self, count: usize) -> Option<&'a mut [T]> {
         self.alloc_slice_inner::<T>(count, true)
     }
 
@@ -165,9 +177,13 @@ impl<'a> Arena<'a> {
     ///
     /// # Safety
     ///
-    /// Caller MUST initialize all elements before reading them.
+    /// The returned slice refers to uninitialized memory. The caller
+    /// must write every element before any read, and `T` must tolerate
+    /// the transient invalid contents (in strict terms: prefer raw
+    /// pointer writes via [`Self::alloc_raw_uninit`] for types with
+    /// validity invariants such as enums or `bool`).
     #[inline]
-    pub fn alloc_slice_uninit<T: Copy>(&self, count: usize) -> Option<&'a mut [T]> {
+    pub unsafe fn alloc_slice_uninit<T: Copy>(&self, count: usize) -> Option<&'a mut [T]> {
         self.alloc_slice_inner::<T>(count, false)
     }
 
@@ -181,7 +197,7 @@ impl<'a> Arena<'a> {
 
         let (ptr, _size) = self.alloc_raw_inner::<T>(count, zero)?;
 
-        // Safety: we've allocated valid memory and bound it to lifetime 'a
+        // SAFETY: we've allocated valid memory and bound it to lifetime 'a
         // The bump pointer ensures disjointness from future allocations.
         // We rely on the borrow checker to ensure the arena itself outlives 'a (which is true since we borrow 'a mut [u8])
         Some(unsafe { core::slice::from_raw_parts_mut(ptr, count) })
@@ -190,16 +206,33 @@ impl<'a> Arena<'a> {
     /// Allocate a slice of `count` items, initialized to their default value.
     ///
     /// Returns `None` if there isn't enough space in the arena.
+    ///
+    /// Every element is written through a raw pointer **before** the
+    /// `&mut [T]` is formed, so no reference to uninitialized (or
+    /// invalid-bit-pattern) memory ever exists — sound for any
+    /// `T: Copy + Default`, including enums.
     #[inline]
     pub fn alloc_slice_default<T: Copy + Default>(&self, count: usize) -> Option<&'a mut [T]> {
-        let slice = self.alloc_slice_inner::<T>(count, false)?;
-
-        // Initialize to default
-        for item in slice.iter_mut() {
-            *item = T::default();
+        if count == 0 {
+            // SAFETY: a zero-length slice from a dangling, well-aligned
+            // pointer is always valid.
+            return Some(unsafe {
+                core::slice::from_raw_parts_mut(core::ptr::NonNull::dangling().as_ptr(), 0)
+            });
         }
-
-        Some(slice)
+        let (ptr, _size) = self.alloc_raw_inner::<T>(count, false)?;
+        // SAFETY: `ptr` is valid for `count` writes of `T` (freshly
+        // reserved, aligned, in-bounds); writing through the raw
+        // pointer requires no validity of the old bytes.
+        unsafe {
+            for i in 0..count {
+                ptr.add(i).write(T::default());
+            }
+            // SAFETY: all `count` elements are now initialized; the
+            // bump pointer guarantees disjointness from every other
+            // allocation, and the backing buffer outlives `'a`.
+            Some(core::slice::from_raw_parts_mut(ptr, count))
+        }
     }
 
     /// Allocate space for a single value, returning a mutable reference.
@@ -211,8 +244,16 @@ impl<'a> Arena<'a> {
     /// Reset the arena, freeing all allocations.
     ///
     /// This is an O(1) operation - it just resets the bump pointer.
+    ///
+    /// # Safety
+    ///
+    /// Every slice or reference previously carved from this arena
+    /// becomes dangling-equivalent: later allocations will reuse the
+    /// same memory while old `&mut` borrows may still be live (the
+    /// borrow checker cannot see this). The caller must guarantee that
+    /// **no allocation from this arena is used again** after the call.
     #[inline]
-    pub fn reset(&self) {
+    pub unsafe fn reset(&self) {
         self.ptr.set(self.start);
         self.alloc_count.set(0);
     }
@@ -238,15 +279,15 @@ impl<'a> Arena<'a> {
     /// Restore the allocation pointer to a previously saved position.
     ///
     /// All allocations made *after* the saved position are invalidated.
-    /// The caller must ensure no references to those allocations are used
-    /// after this call.
     ///
     /// # Safety
     ///
-    /// This is safe at the API level (no `unsafe` needed), but the caller
-    /// must treat all allocations made after the watermark as freed.
+    /// Allocations carved after the watermark alias memory that later
+    /// allocations will reuse. The caller must guarantee that no slice
+    /// or reference obtained from this arena after the corresponding
+    /// [`Self::save_position`] call is ever used again.
     #[inline]
-    pub fn restore_position(&self, saved: usize) {
+    pub unsafe fn restore_position(&self, saved: usize) {
         let target = (self.start as usize + saved) as *mut u8;
         debug_assert!(target as usize <= self.end as usize);
         debug_assert!(target as usize >= self.start as usize);
@@ -379,7 +420,8 @@ mod tests {
         assert!(arena.used() > 0);
         assert_eq!(arena.alloc_count(), 1);
 
-        arena.reset();
+        // SAFETY: `nums` is not used after this point.
+        unsafe { arena.reset() };
         assert_eq!(arena.used(), 0);
         assert_eq!(arena.alloc_count(), 0);
     }

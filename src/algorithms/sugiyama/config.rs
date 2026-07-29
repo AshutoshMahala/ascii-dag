@@ -159,9 +159,10 @@ pub struct LayoutConfig<'a> {
 
     /// Rank direction (default: [`Direction::TopDown`]).
     ///
-    /// Recorded on the layout IR; for `BottomUp` the heap layout path
-    /// flips its result into physical coordinates. The built-in
-    /// renderers currently paint `TopDown` layouts only.
+    /// Recorded on the layout IR; for `BottomUp` both layout paths flip
+    /// their result into physical coordinates and the render engine
+    /// paints it directly. `LeftRight`/`RightLeft` are recorded but not
+    /// yet laid out.
     pub direction: Direction,
 
     /// Include dummy (virtual) nodes in the output IR (default: `false`).
@@ -172,10 +173,11 @@ pub struct LayoutConfig<'a> {
     /// owning edge, a synthetic id (excluded from `node_by_id`), and
     /// width 1 at the drawn waypoint column. Zero cost when disabled.
     ///
-    /// Notes: the built-in text renderers paint an included dummy like
-    /// any node (an empty `[]` marker) — intended for debugging and IR
-    /// consumers. Arena users must budget the output arena for the
-    /// extra nodes (one per skip-level waypoint).
+    /// Notes: included dummies are hidden by default; set
+    /// `RenderOptions.show_dummy_nodes` to paint them as `◍` markers
+    /// (`o` in ASCII) — intended for debugging and IR consumers. Arena
+    /// users must budget the output arena for the extra nodes (one per
+    /// skip-level waypoint): use `estimate_layout_arena_size_with`.
     pub include_dummy_nodes: bool,
 
     /// Skip graph validation for performance.

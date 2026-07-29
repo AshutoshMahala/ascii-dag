@@ -76,9 +76,9 @@ impl<'a> Graph<'a> {
             return;
         }
 
-        // Use fast scanline renderer for vertical mode
+        // Vertical mode renders through the unified engine.
         let ir = self.compute_layout();
-        ir.render_scanline_to(output);
+        let _ = ir.render_with(&crate::render::engine::RenderOptions::plain(), output);
     }
 
     /// Render a graph with cycles (not a valid DAG, but useful for error visualization).

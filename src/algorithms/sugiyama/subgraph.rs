@@ -34,9 +34,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 #[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap as HashMap;
+use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
 #[cfg(feature = "std")]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ── VNode subgraph resolution ────────────────────────────────────────────
 
@@ -554,7 +554,7 @@ fn project_envelopes(
     }
 
     // Child → parent expansion, then label recheck (mirrors pass 2).
-    const PARENT_CHILD_H_GAP: usize = 1;
+    use crate::algorithms::sugiyama::geometry::PARENT_CHILD_H_GAP;
     for &si in order {
         if let (Some((cl, cr)), Some(pi)) = (bbox[si], parent_idx[si]) {
             let exp = (
@@ -1334,7 +1334,7 @@ pub(crate) fn compute_bounding_boxes<'a>(
     real_node_coords: &[(usize, usize, usize, usize)], // (level, pos, x, width) per node_idx
     level_y_offsets: &[usize],
     total_height: usize,
-    edge_routing_ys: &std::collections::HashSet<usize>,
+    edge_routing_ys: &HashSet<usize>,
     level_routing_floor: &[usize],
 ) -> Vec<SubgraphInfo<'a>> {
     if dag.subgraphs.is_empty() {
@@ -1441,11 +1441,10 @@ pub(crate) fn compute_bounding_boxes<'a>(
         }));
     }
 
-    // Pass 2: propagate child bounding boxes to parents (bottom-up)
-    // The child bbox already includes its own SUBGRAPH_H_PAD. The parent only
-    // needs enough extra to draw its own border without touching the child's
-    // border — 1 char for the border line + 1 char gap.
-    const PARENT_CHILD_H_GAP: usize = 1;
+    // Pass 2: propagate child bounding boxes to parents (bottom-up).
+    // The child bbox already includes its own SUBGRAPH_H_PAD; the parent
+    // adds only its border column (shared rule with the CSR backend).
+    use crate::algorithms::sugiyama::geometry::PARENT_CHILD_H_GAP;
     for &sg_idx in &order {
         let sg = &dag.subgraphs[sg_idx];
         if let Some(parent_id) = sg.parent_id {

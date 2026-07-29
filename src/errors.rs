@@ -62,14 +62,18 @@ macro_rules! severity {
 ///
 /// - `Graph`       — graph construction and validation (allocation-agnostic)
 /// - `ArenaLayout` — arena-based Sugiyama layout
+/// - `Render`      — unified render engine (plan / canvas / sink)
 /// - `Arena`       — arena allocator itself (reserved for future)
-/// - `Layout`      — heap/standard layout (reserved for future)
+/// - `Layout`      — heap/std layout (reserved for future)
 macro_rules! component {
     (Graph) => {
         "Graph"
     };
     (ArenaLayout) => {
         "ArenaLayout"
+    };
+    (Render) => {
+        "Render"
     };
     (Arena) => {
         "Arena"
@@ -94,6 +98,11 @@ macro_rules! component {
 /// - `Builder` — IR builder issues
 /// - `Node`    — node-count capacity issues (index type overflow)
 /// - `Level`   — level-depth capacity issues
+///
+/// **Under `Render`:**
+/// - `Plan`   — render-plan build issues (caller plan buffer/arena)
+/// - `Canvas` — band canvas issues (caller cell/color buffers)
+/// - `Sink`   — output sink issues (caller byte buffer)
 macro_rules! primary {
     (Node) => {
         "Node"
@@ -115,6 +124,15 @@ macro_rules! primary {
     };
     (Level) => {
         "Level"
+    };
+    (Plan) => {
+        "Plan"
+    };
+    (Canvas) => {
+        "Canvas"
+    };
+    (Sink) => {
+        "Sink"
     };
 }
 
@@ -197,6 +215,11 @@ macro_rules! wdp {
 //   ArenaLayout.Builder.026   BuilderFailed     (EXHAUSTED)
 //   ArenaLayout.Node.004      ExceedsMaxNodes   (OVERFLOW)
 //   ArenaLayout.Level.004     ExceedsMaxLevels  (OVERFLOW)
+//
+// Render component:
+//   Render.Plan.026    RenderPlanOom         (EXHAUSTED)
+//   Render.Canvas.026  RenderCanvasTooSmall  (EXHAUSTED)
+//   Render.Sink.026    RenderOutputTooSmall  (EXHAUSTED)
 
 /// Graph is empty — no nodes present.
 ///
@@ -244,6 +267,21 @@ pub const EXCEEDS_MAX_NODES: &str = wdp!(E.ArenaLayout.Node.OVERFLOW);
 /// `E.ArenaLayout.Level.004` — Sequence 004 = OVERFLOW.
 pub const EXCEEDS_MAX_LEVELS: &str = wdp!(E.ArenaLayout.Level.OVERFLOW);
 
+/// Caller-provided render-plan buffer/arena is too small (no_std path).
+///
+/// `E.Render.Plan.026` — Sequence 026 = EXHAUSTED: "resource exhausted."
+pub const RENDER_PLAN_OOM: &str = wdp!(E.Render.Plan.EXHAUSTED);
+
+/// Caller-provided band buffer is smaller than `width × band_rows`.
+///
+/// `E.Render.Canvas.026` — Sequence 026 = EXHAUSTED.
+pub const RENDER_CANVAS_TOO_SMALL: &str = wdp!(E.Render.Canvas.EXHAUSTED);
+
+/// Caller-provided output byte buffer is too small for the render.
+///
+/// `E.Render.Sink.026` — Sequence 026 = EXHAUSTED.
+pub const RENDER_OUTPUT_TOO_SMALL: &str = wdp!(E.Render.Sink.EXHAUSTED);
+
 // ── GraphError ──────────────────────────────────────────────────────────
 
 /// Unified error type for all graph and layout operations.
@@ -264,6 +302,9 @@ pub const EXCEEDS_MAX_LEVELS: &str = wdp!(E.ArenaLayout.Level.OVERFLOW);
 /// | `BuilderFailed` | `E.ArenaLayout.Builder.026` | EXHAUSTED — builder alloc |
 /// | `ExceedsMaxNodes` | `E.ArenaLayout.Node.004` | OVERFLOW — index type full |
 /// | `ExceedsMaxLevels` | `E.ArenaLayout.Level.004` | OVERFLOW — too deep |
+/// | `RenderPlanOom` | `E.Render.Plan.026` | EXHAUSTED — plan buffer |
+/// | `RenderCanvasTooSmall` | `E.Render.Canvas.026` | EXHAUSTED — band buffer |
+/// | `RenderOutputTooSmall` | `E.Render.Sink.026` | EXHAUSTED — output buffer |
 ///
 /// # Examples
 ///
@@ -275,6 +316,7 @@ pub const EXCEEDS_MAX_LEVELS: &str = wdp!(E.ArenaLayout.Level.OVERFLOW);
 /// assert!(!err.hint().is_empty());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GraphError {
     /// The graph has no nodes.
     ///
@@ -332,6 +374,29 @@ pub enum GraphError {
         /// Maximum supported levels.
         max: usize,
     },
+
+    /// The caller-provided render-plan buffer is too small.
+    ///
+    /// **WDP:** `E.Render.Plan.026` (EXHAUSTED)
+    ///
+    /// Use `estimate_render_arena_size()` to compute the required size.
+    RenderPlanOom,
+
+    /// The caller-provided band buffer holds fewer than
+    /// `width × band_rows` cells.
+    ///
+    /// **WDP:** `E.Render.Canvas.026` (EXHAUSTED)
+    RenderCanvasTooSmall {
+        /// Cells required (`width × band_rows`).
+        needed: usize,
+        /// Cells provided.
+        got: usize,
+    },
+
+    /// The caller-provided output byte buffer filled up mid-render.
+    ///
+    /// **WDP:** `E.Render.Sink.026` (EXHAUSTED)
+    RenderOutputTooSmall,
 }
 
 impl GraphError {
@@ -353,6 +418,9 @@ impl GraphError {
             Self::BuilderFailed => BUILDER_FAILED,
             Self::ExceedsMaxNodes { .. } => EXCEEDS_MAX_NODES,
             Self::ExceedsMaxLevels { .. } => EXCEEDS_MAX_LEVELS,
+            Self::RenderPlanOom => RENDER_PLAN_OOM,
+            Self::RenderCanvasTooSmall { .. } => RENDER_CANVAS_TOO_SMALL,
+            Self::RenderOutputTooSmall => RENDER_OUTPUT_TOO_SMALL,
         }
     }
 
@@ -374,6 +442,15 @@ impl GraphError {
             }
             Self::ExceedsMaxLevels { .. } => {
                 "Reduce chain depth or use a different layout strategy"
+            }
+            Self::RenderPlanOom => {
+                "Increase the render arena; use estimate_render_arena_size()"
+            }
+            Self::RenderCanvasTooSmall { .. } => {
+                "Provide at least width × band_rows cells; lower band_rows_cap to shrink bands"
+            }
+            Self::RenderOutputTooSmall => {
+                "Provide a larger output buffer; plan width × height plus escapes when colored"
             }
         }
     }
@@ -400,6 +477,11 @@ impl fmt::Display for GraphError {
             Self::ExceedsMaxLevels { depth, max } => {
                 write!(f, "graph depth {} exceeds max levels {}", depth, max)
             }
+            Self::RenderPlanOom => write!(f, "render plan buffer exhausted"),
+            Self::RenderCanvasTooSmall { needed, got } => {
+                write!(f, "band buffer holds {} cells, needs {}", got, needed)
+            }
+            Self::RenderOutputTooSmall => write!(f, "render output buffer exhausted"),
         }
     }
 }
@@ -564,5 +646,31 @@ impl<'a> Iterator for DiagnosticChain<'a> {
         let diag = self.current?;
         self.current = diag.cause.as_deref();
         Some(diag)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Render component's codes compose exactly as documented.
+    #[test]
+    fn render_component_codes() {
+        assert_eq!(GraphError::RenderPlanOom.code(), "E.Render.Plan.026");
+        assert_eq!(
+            GraphError::RenderCanvasTooSmall { needed: 0, got: 0 }.code(),
+            "E.Render.Canvas.026"
+        );
+        assert_eq!(
+            GraphError::RenderOutputTooSmall.code(),
+            "E.Render.Sink.026"
+        );
+        for e in [
+            GraphError::RenderPlanOom,
+            GraphError::RenderCanvasTooSmall { needed: 8, got: 4 },
+            GraphError::RenderOutputTooSmall,
+        ] {
+            assert!(!e.hint().is_empty(), "{}: hint must be actionable", e.code());
+        }
     }
 }

@@ -168,6 +168,7 @@ padding and border rendering.
 
 ```rust
 use ascii_dag::Graph;
+use ascii_dag::RenderOptions;
 
 let mut g = Graph::new();
 g.add_node(1, "Web");
@@ -187,7 +188,7 @@ let backend = g.add_subgraph("Backend");
 g.put_nodes(&[2, 3, 4]).inside(backend).unwrap();
 
 let ir = g.compute_layout();
-println!("{}", ir.render_scanline());
+println!("{}", ir.render_string(&RenderOptions::plain()));
 ```
 
 Features:
@@ -245,6 +246,7 @@ Render edges with distinct colors to visualize different dependency types:
 ```rust
 use ascii_dag::Graph;
 use ascii_dag::render::colors::Palette;
+use ascii_dag::RenderOptions;
 
 let dag = Graph::from_edges(
     &[(1, "Root"), (2, "A"), (3, "B"), (4, "C"), (5, "End")],
@@ -252,7 +254,7 @@ let dag = Graph::from_edges(
 );
 
 let ir = dag.compute_layout();
-let output = ir.render_scanline_colored(Palette::Ansi);
+let output = ir.render_string(&RenderOptions::colored(Palette::Ansi));
 println!("{}", output);
 ```
 
@@ -263,6 +265,7 @@ Add labels to edges to describe relationships:
 ```rust
 use ascii_dag::Graph;
 use ascii_dag::render::colors::Palette;
+use ascii_dag::RenderOptions;
 
 let mut dag = Graph::new();
 dag.add_node(1, "Parser");
@@ -274,7 +277,7 @@ dag.add_edge(1, 3, Some("produces"));
 dag.add_edge(2, 3, None);
 
 let ir = dag.compute_layout();
-let output = ir.render_scanline_colored_with_legend(Palette::Ansi);
+let output = ir.render_string(&RenderOptions::colored(Palette::Ansi));
 println!("{}", output);
 ```
 
@@ -286,6 +289,7 @@ in the output IR:
 
 ```rust
 use ascii_dag::Graph;
+use ascii_dag::RenderOptions;
 
 let mut dag = Graph::new();
 dag.add_node(1, "A");
@@ -301,7 +305,7 @@ assert!(dag.has_cycle());
 
 // But layout still works — cycles are broken automatically
 let ir = dag.compute_layout();
-println!("{}", ir.render_scanline());
+println!("{}", ir.render_string(&RenderOptions::plain()));
 ```
 
 ### Generic Cycle Detection for Custom Types
@@ -431,7 +435,9 @@ use ascii_dag::Graph;
 use ascii_dag::graph::csr::CsrGraphBuilder;
 use ascii_dag::algorithms::sugiyama::arena_csr::compute_layout_arena_csr;
 use ascii_dag::graph::arena::Arena;
-// Build, layout, render — all on caller-provided buffers.
+// Build → compute_layout_arena → ir.render_to_bytes(&options, &arena, &mut out)
+// — all on caller-provided buffers, sized by ir.estimate_render_arena_size /
+// ir.estimate_render_output_size.
 ```
 
 See [Feature Flags](#feature-flags) for the exact `Cargo.toml` lines.
@@ -620,7 +626,7 @@ cargo run --example git_log          # Git-log style visualization
 | Scenario | Cargo.toml | What you get |
 |----------|-----------|--------------|
 | **Default (just works)** | `ascii-dag = "0.9"` | Heap-based `Graph` API with full Sugiyama layout |
-| **No-alloc embedded** | `default-features = false, features = ["arena"]` | `CsrGraphBuilder` → arena layout → `render_to_buffer`. No `extern crate alloc`, no global allocator needed. |
+| **No-alloc embedded** | `default-features = false, features = ["arena"]` | `CsrGraphBuilder` → arena layout → `render_to_bytes` (buffers sized by `estimate_render_arena_size`/`estimate_render_output_size`). No `extern crate alloc`, no global allocator needed. |
 | **Alloc + arena speed** | `features = ["arena"]` | Ergonomic `Graph` API for construction + fast arena-based layout/render |
 | **`no_std` with alloc** | `default-features = false, features = ["alloc"]` | `Graph` API works via `alloc` crate. Needs `#[global_allocator]`. No `std`. |
 | **Small index arena** | `default-features = false, features = ["arena-idx-u16"]` | No-alloc arena with `u16` indices (~50% memory savings vs u32) |
@@ -786,10 +792,12 @@ let mut temp_arena = Arena::new(&mut temp_buffer);
 let mut output_arena = Arena::new(&mut output_buffer);
 
 if let Ok(ir) = graph.compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut output_arena) {
-    let mut render_buffer = [0u8; 4096];
-    let mut line_buffer = [' '; 256];
-    let mut scratch_buffer = [0usize; 256];
-    if let Some(bytes) = ir.render_to_buffer(&mut render_buffer, &mut line_buffer, &mut scratch_buffer) {
+    let options = RenderOptions::plain();
+    // Size the render arena and output buffer from the estimates.
+    let mut render_arena_buf = [0u8; 8192]; // ≥ ir.estimate_render_arena_size(&options)
+    let render_arena = Arena::new(&mut render_arena_buf);
+    let mut render_buffer = [0u8; 4096]; // ≥ ir.estimate_render_output_size(&options)
+    if let Ok(bytes) = ir.render_to_bytes(&options, &render_arena, &mut render_buffer) {
         // render_buffer[..bytes] contains the UTF-8 output
     }
 }

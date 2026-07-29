@@ -114,6 +114,7 @@ impl Palette {
 
 /// Get an ANSI color code from a palette by index (cycles through)
 #[inline]
+#[deprecated(since = "0.10.0", note = "use `Palette::colors()` and index directly, or the engine's per-edge styling")]
 pub fn get(palette: Palette, index: usize) -> u8 {
     let colors = palette.colors();
     colors[index % colors.len()]
@@ -133,6 +134,7 @@ pub mod escape {
     /// Format a foreground color using 256-color palette
     /// Returns the escape sequence as a fixed-size array
     #[inline]
+    #[deprecated(since = "0.10.0", note = "the engine emits color escapes internally; use `RenderOptions::colored`")]
     pub fn fg256(color: u8) -> [u8; 11] {
         let mut buf = [0u8; 11];
         buf[0] = 0x1b; // ESC
@@ -153,6 +155,7 @@ pub mod escape {
     /// Format a foreground color and write to a string
     #[cfg(feature = "alloc")]
     #[inline]
+    #[deprecated(since = "0.10.0", note = "the engine emits color escapes internally; use `RenderOptions::colored`")]
     pub fn write_fg256(output: &mut alloc::string::String, color: u8) {
         use core::fmt::Write;
         let _ = write!(output, "\x1b[38;5;{}m", color);
@@ -163,6 +166,7 @@ pub mod escape {
 pub use escape::RESET;
 
 #[cfg(test)]
+#[allow(deprecated)] // the deprecated helpers stay pinned until 0.11 removal
 mod tests {
     use super::*;
 

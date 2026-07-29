@@ -21,11 +21,14 @@
 //!
 //! - `std` (default): Standard library support
 //! - `generic` (default): Generic algorithms (cycle detection, topological sort, impact analysis, metrics)
+//! - `alloc`: Heap-based `Graph` API without `std`
+//! - `arena` (+ `arena-idx-u8`/`u16`/`u32`): No-alloc CSR layout and
+//!   rendering on caller-provided arenas
 //! - `warnings`: Debug warnings for auto-created nodes
 //!
 //! To minimize bundle size, disable `generic`:
 //! ```toml
-//! ascii-dag = { version = "0.1", default-features = false, features = ["std"] }
+//! ascii-dag = { version = "0.10", default-features = false, features = ["std"] }
 //! ```
 //!
 //! ## Quick Start
@@ -132,7 +135,7 @@ extern crate alloc;
 //   graph/          DAG struct + arena allocator + CSR graph
 //   algorithms/     cycles, generic analysis, Sugiyama layout
 //   ir/             layout intermediate representation
-//   render/         ASCII / scanline renderers
+//   render/         unified render engine + glyph/palette utilities
 
 pub mod algorithms;
 pub mod errors;
@@ -152,6 +155,8 @@ pub use graph::{Direction, Graph, Subgraph};
 pub use ir::NodeKind;
 #[cfg(feature = "alloc")]
 pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};
+pub use render::colors::Palette;
+pub use render::engine::{Charset, ColorMode, RenderOptions};
 pub use validation::Requirements;
 // Primary config types (always available, no alloc needed)
 pub use algorithms::sugiyama::config::{

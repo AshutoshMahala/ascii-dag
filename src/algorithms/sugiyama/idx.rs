@@ -43,8 +43,13 @@ pub type Idx = u32;
 /// Maximum number of nodes/edges supported by the current index type.
 pub const MAX_NODES: usize = Idx::MAX as usize;
 
-/// Maximum number of levels supported (capped at 255 regardless of Idx).
-pub const MAX_LEVELS: usize = if MAX_NODES < 256 { MAX_NODES } else { 255 };
+/// Maximum number of levels supported — the index type's capacity.
+///
+/// Depth can never exceed node count (every level holds at least one
+/// node), so the per-feature node capacity is also the natural level
+/// bound. Per-level layout buffers are sized from each graph's real
+/// depth, not from this constant.
+pub const MAX_LEVELS: usize = MAX_NODES;
 
 /// Coordinate type - always needs full width for x/y positions.
 /// On embedded, x coordinates can exceed 255 easily with wide graphs.

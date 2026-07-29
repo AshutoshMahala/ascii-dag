@@ -76,7 +76,8 @@ fn rows_between(rendered: &str) -> usize {
 }
 
 fn render_heap(g: &Graph<'_>, config: &LayoutConfig<'_>) -> String {
-    g.compute_layout_with_config(config).render_scanline()
+    g.compute_layout_with_config(config)
+        .render_string(&ascii_dag::render::engine::RenderOptions::plain())
 }
 
 // ── Heap backend ─────────────────────────────────────────────────────────
@@ -135,12 +136,12 @@ mod csr {
             .compute_layout_arena(config, &mut temp_arena, &mut out_arena)
             .expect("CSR layout");
 
-        let (render_bytes, _) = ir.estimate_render_size();
-        let mut render_buf = vec![0u8; render_bytes * 4 + 8192];
-        let mut line_buf = vec![' '; ir.width().max(1) + 32];
-        let mut scratch = vec![0usize; (ir.height() + ir.edge_count() * 2).max(1) + 64];
+        let options = ascii_dag::render::engine::RenderOptions::plain();
+        let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+        let render_arena = Arena::new(&mut arena_buf);
+        let mut render_buf = vec![0u8; ir.estimate_render_output_size(&options)];
         let bytes = ir
-            .render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch)
+            .render_to_bytes(&options, &render_arena, &mut render_buf)
             .expect("render");
         String::from_utf8_lossy(&render_buf[..bytes]).into_owned()
     }
@@ -227,7 +228,9 @@ mod csr {
 #[test]
 fn hero_example_matches_golden() {
     let g = hero_graph();
-    let rendered = g.compute_layout().render_scanline();
+    let rendered = g
+        .compute_layout()
+        .render_string(&ascii_dag::render::engine::RenderOptions::plain());
     let golden = include_str!("golden/hero.txt");
     assert_eq!(
         rendered.trim_end(),
@@ -348,10 +351,14 @@ mod direction {
     fn top_down_output_unchanged_by_direction_plumbing() {
         // Explicit TopDown must be byte-identical to the default.
         let g = stage_graph();
-        let default_out = g.compute_layout().render_scanline();
+        let default_out = g
+            .compute_layout()
+            .render_string(&ascii_dag::render::engine::RenderOptions::plain());
         let mut g2 = stage_graph();
         g2.set_direction(Direction::TopDown);
-        let explicit_out = g2.compute_layout().render_scanline();
+        let explicit_out = g2
+            .compute_layout()
+            .render_string(&ascii_dag::render::engine::RenderOptions::plain());
         assert_eq!(default_out, explicit_out);
     }
 
@@ -718,5 +725,292 @@ mod dummy_nodes {
                 }
             });
         }
+    }
+}
+
+// ── Deep chains (regression: >256 levels) ────────────────────────────────
+//
+// A 20k-node chain used to panic with "index out of bounds" inside CSR
+// crossing reduction (per-level buffers were fixed at 256 levels).
+// Contract now: per-level buffers are sized from the graph's real
+// depth, so BOTH backends lay out arbitrarily deep graphs — limited
+// only by the index type's node capacity — and render byte-identically.
+// Unbroken cycles (CycleBreaking::None) that pump level relaxation past
+// any DAG-possible depth still error cleanly (covered by unit tests in
+// arena_csr.rs).
+mod deep_chain {
+    use super::*;
+    use ascii_dag::graph::arena::Arena;
+
+    fn chain(n: usize) -> Graph<'static> {
+        let mut g = Graph::new();
+        for i in 0..n {
+            g.add_node(i, "N");
+        }
+        for i in 0..n - 1 {
+            g.add_edge(i, i + 1, None);
+        }
+        g
+    }
+
+    #[test]
+    fn deep_chain_renders_heap() {
+        let out = render_heap(&chain(300), &LayoutConfig::standard());
+        assert!(
+            out.lines().count() >= 300,
+            "300-level chain should render at least one row per level"
+        );
+        assert!(out.contains("[N]"), "node labels missing from output");
+    }
+
+    /// Depth-sized per-level buffers: deep chains lay out in the CSR
+    /// backend and byte-match the heap render, with estimate-sized
+    /// arenas (no slack factor — the estimate must be sufficient).
+    #[test]
+    #[cfg(not(feature = "arena-idx-u8"))]
+    fn deep_chain_renders_identically_csr() {
+        // 300 = just past the old fixed cap; 1_000 and 20_000 = depth
+        // scaling (20k was the original panic report).
+        for n in [300usize, 1_000, 20_000] {
+            let g = chain(n);
+            let heap_out = render_heap(&g, &LayoutConfig::standard());
+
+            let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+            let mut csr_arena = Arena::new(&mut csr_buf);
+            let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+
+            let size = g.estimate_layout_arena_size();
+            let mut temp_buf = vec![0u8; size];
+            let mut out_buf = vec![0u8; size];
+            let mut temp_arena = Arena::new(&mut temp_buf);
+            let mut out_arena = Arena::new(&mut out_buf);
+            let ir = csr
+                .compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut out_arena)
+                .unwrap_or_else(|e| panic!("n={n}: CSR layout must succeed, got {e}"));
+
+            let options = ascii_dag::render::engine::RenderOptions::plain();
+            let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+            let render_arena = Arena::new(&mut arena_buf);
+            let mut render_buf = vec![0u8; ir.estimate_render_output_size(&options)];
+            let bytes = ir
+                .render_to_bytes(&options, &render_arena, &mut render_buf)
+                .expect("arena render");
+            let csr_out = String::from_utf8_lossy(&render_buf[..bytes]);
+            assert_eq!(heap_out, csr_out, "n={n}: backends must render identically");
+        }
+    }
+
+    /// Deep AND clustered: the subgraph overlap-repair and cluster
+    /// compaction passes used fixed 257-level scratch and silently
+    /// skipped deeper graphs, breaking heap/CSR parity exactly there.
+    /// Now depth-sized: a 300-level chain with clusters and loose
+    /// nodes must render byte-identically from both backends.
+    #[test]
+    #[cfg(not(feature = "arena-idx-u8"))]
+    fn deep_clustered_chain_renders_identically_csr() {
+        let mut g = Graph::new();
+        for i in 0..300usize {
+            g.add_node(i, "N");
+            if i > 0 {
+                g.add_edge(i - 1, i, None);
+            }
+        }
+        // A cluster deep in the chain plus loose siblings around it.
+        let sg = g.add_subgraph("Deep");
+        g.put_nodes(&[280, 281, 282]).inside(sg).unwrap();
+        g.add_node(1000, "Loose");
+        g.add_edge(279, 1000, None);
+        g.add_edge(1000, 283, None);
+
+        let heap_out = render_heap(&g, &LayoutConfig::standard());
+        assert!(heap_out.contains("Deep"), "cluster renders:\n…");
+
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = g.estimate_layout_arena_size();
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut out_arena)
+            .expect("deep clustered CSR layout succeeds");
+        let options = ascii_dag::render::engine::RenderOptions::plain();
+        let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+        let render_arena = Arena::new(&mut arena_buf);
+        let mut render_buf = vec![0u8; ir.estimate_render_output_size(&options)];
+        let bytes = ir
+            .render_to_bytes(&options, &render_arena, &mut render_buf)
+            .expect("render");
+        let csr_out = String::from_utf8_lossy(&render_buf[..bytes]);
+        assert_eq!(
+            heap_out, csr_out,
+            "deep clustered backends must render identically"
+        );
+    }
+
+    /// More than 512 edges where the LATE edges are the skip-level
+    /// ones: the old fixed-size dummy bookkeeping silently dropped
+    /// routing for edges past index 511. Byte parity across backends
+    /// proves every edge keeps its dummy chain.
+    #[test]
+    #[cfg(not(feature = "arena-idx-u8"))]
+    fn many_edges_late_skips_render_identically_csr() {
+        let mut g = Graph::new();
+        // 280 adjacent chain edges first…
+        for i in 0..281usize {
+            g.add_node(i, "N");
+            if i > 0 {
+                g.add_edge(i - 1, i, None);
+            }
+        }
+        // …then 280 skip edges (indices 280..560 — crossing 512).
+        for i in 0..278usize {
+            g.add_edge(i, i + 3, None);
+        }
+        // 280 chain + 278 skip = 558 edges — crosses the old 512 cap.
+        let heap_out = render_heap(&g, &LayoutConfig::standard());
+        let csr_out = render_csr_exact(&g);
+        assert_eq!(heap_out, csr_out, "late skip edges keep their routing");
+    }
+
+    /// A waypoint-heavy graph (dummy chains past the old 1,000-waypoint
+    /// and 400-vnode caps) must route identically in both backends.
+    #[test]
+    #[cfg(not(feature = "arena-idx-u8"))]
+    fn waypoint_heavy_deep_graph_renders_identically_csr() {
+        let mut g = Graph::new();
+        for i in 0..90usize {
+            g.add_node(i, "n");
+            if i > 0 {
+                g.add_edge(i - 1, i, None);
+            }
+        }
+        // 15 long skips of ~70 levels each ≈ 1,000+ dummies with low
+        // mutual crossing pressure.
+        for k in 0..15usize {
+            g.add_edge(k, k + 70, None);
+        }
+        let heap_out = render_heap(&g, &LayoutConfig::standard());
+        let csr_out = render_csr_exact(&g);
+        assert_eq!(heap_out, csr_out, "deep waypoint chains route identically");
+    }
+
+    /// FRONTIER (pre-existing, newly reachable): under extreme mutual
+    /// crossing pressure (dozens of interleaved 60-level skips), the
+    /// crossing-reduction heuristics order dummy runs differently in the
+    /// two backends. Before the capacity fixes the CSR backend silently
+    /// degraded this shape (vnode/waypoint caps), so it was never
+    /// comparable at all. Un-ignore when the heuristics are aligned.
+    #[test]
+    #[ignore = "pre-existing crossing-heuristic divergence on extreme interleaved-skip shapes; caps fixed, ordering alignment pending"]
+    #[cfg(not(feature = "arena-idx-u8"))]
+    fn extreme_interleaved_skips_parity_frontier() {
+        let mut g = Graph::new();
+        for i in 0..80usize {
+            g.add_node(i, "n");
+            if i > 0 {
+                g.add_edge(i - 1, i, None);
+            }
+        }
+        for k in 0..40usize {
+            g.add_edge(k % 10, 70 + (k % 10), None);
+        }
+        let heap_out = render_heap(&g, &LayoutConfig::standard());
+        let csr_out = render_csr_exact(&g);
+        assert_eq!(heap_out, csr_out);
+    }
+
+    /// CSR render with EXACTLY estimate-sized arenas (shared helper for
+    /// the capacity tests — the estimate is part of what's under test).
+    #[cfg(not(feature = "arena-idx-u8"))]
+    fn render_csr_exact(g: &Graph<'_>) -> String {
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = g.estimate_layout_arena_size();
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut out_arena)
+            .expect("CSR layout");
+        let options = ascii_dag::render::engine::RenderOptions::plain();
+        let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
+        let render_arena = Arena::new(&mut arena_buf);
+        let mut render_buf = vec![0u8; ir.estimate_render_output_size(&options)];
+        let bytes = ir
+            .render_to_bytes(&options, &render_arena, &mut render_buf)
+            .expect("render");
+        String::from_utf8_lossy(&render_buf[..bytes]).into_owned()
+    }
+
+    /// The config-aware estimate must suffice EXACTLY (no slack
+    /// factor) for the demanding combination: long labels on nodes and
+    /// edges, nested clusters, and dummy emission enabled.
+    #[test]
+    #[cfg(not(feature = "arena-idx-u8"))]
+    fn config_aware_estimate_is_sufficient_exactly() {
+        let mut config = LayoutConfig::standard();
+        config.include_dummy_nodes = true;
+
+        let mut g = Graph::new();
+        for i in 0..40usize {
+            g.add_node(i, "a-rather-long-node-label-with-ünïcödé");
+            if i > 0 {
+                g.add_edge(i - 1, i, Some("labeled-edge-with-detail"));
+            }
+        }
+        // Skip edges create dummies; clusters exercise sg storage.
+        for k in 0..10usize {
+            g.add_edge(k, k + 20, Some("skip-label"));
+        }
+        let sg = g.add_subgraph("A-Cluster-With-A-Long-Label");
+        g.put_nodes(&[5, 6, 7]).inside(sg).unwrap();
+        let inner = g.add_subgraph("Inner");
+        g.put_nodes(&[6]).inside(inner).unwrap();
+        g.put_subgraphs(&[inner]).inside(sg).unwrap();
+
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = g.estimate_layout_arena_size_with(&config);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+            .expect("exactly estimate-sized arenas must suffice");
+        assert!(
+            ir.nodes()
+                .iter()
+                .any(|n| matches!(n.kind, ascii_dag::ir::NodeKind::Dummy)),
+            "dummy emission was exercised"
+        );
+    }
+
+    /// Under arena-idx-u8 the node-count check bounds depth naturally.
+    #[test]
+    #[cfg(feature = "arena-idx-u8")]
+    fn deep_chain_bounded_by_node_capacity_u8() {
+        use ascii_dag::GraphError;
+        let g = chain(300);
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let Some(csr) = g.to_csr(&mut csr_arena) else {
+            return; // conversion itself may reject >255 nodes
+        };
+        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let err = csr
+            .compute_layout_arena(&LayoutConfig::standard(), &mut temp_arena, &mut out_arena)
+            .expect_err("300 nodes exceed the u8 index capacity");
+        assert!(matches!(err, GraphError::ExceedsMaxNodes { .. }));
     }
 }
