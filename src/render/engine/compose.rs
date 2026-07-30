@@ -849,6 +849,7 @@ fn paint_node<V: LayoutView>(
     options: &RenderOptions,
     canvas: &mut BandCanvas<'_>,
 ) {
+    use super::style::NodePaint;
     let n = view.node(index);
     if matches!(n.kind, NodeKind::Dummy) {
         if options.show_dummy_nodes {
@@ -861,6 +862,74 @@ fn paint_node<V: LayoutView>(
     // Node ink writes its style color; the default (`DEFAULT`) is the
     // legacy behavior of explicitly resetting to the terminal default.
     let paint = Paint::Color(np.text_color);
+    let height = n.height.max(1);
+
+    // Every node fills its layout-reserved area through a painter —
+    // the classic `[label]` has no special privilege, it is simply the
+    // default painter. A box needs a border row above and below the
+    // label and both side columns, so `Boxed` on short or one-column
+    // nodes falls back to `Simple`.
+    match np.paint {
+        NodePaint::Boxed if height >= 3 && n.width >= 2 => {
+            paint_node_boxed(&n, np, canvas, paint)
+        }
+        NodePaint::Custom(painter) => {
+            // Node-local rows visible in this band — tall nodes replay
+            // per band; the ctx range lets painters skip clipped rows.
+            let band_lo = canvas.y0();
+            let band_hi = band_lo + canvas.rows();
+            let g_lo = n.y.max(band_lo);
+            let g_hi = (n.y + height).min(band_hi);
+            let visible_rows = if g_lo < g_hi {
+                (g_lo - n.y, g_hi - n.y)
+            } else {
+                (0, 0)
+            };
+            let mut region = super::region::NodeRegion::new(
+                canvas,
+                n.x,
+                n.y,
+                n.width,
+                height,
+                np.text_color,
+            );
+            painter(
+                &mut region,
+                super::region::NodePaintCtx {
+                    node_id: n.id,
+                    label: n.label,
+                    width: n.width,
+                    height,
+                    charset: options.charset,
+                    visible_rows,
+                },
+            );
+        }
+        _ => paint_node_simple(&n, np, canvas, paint),
+    }
+
+    // The self-loop marker is engine ink, one cell right of the area's
+    // top row — outside every painter's region by design.
+    if n.has_self_loop {
+        canvas.marker(
+            n.x + n.width.saturating_sub(1) + 1,
+            n.y,
+            MarkerKind::SelfLoop,
+            Dir::Up,
+            false,
+            paint,
+        );
+    }
+}
+
+/// The classic `[label]` painter: delimiters + label on the top row;
+/// any extra reserved rows stay blank.
+fn paint_node_simple(
+    n: &super::view::NodeRef<'_>,
+    np: &super::plan::NodePlan,
+    canvas: &mut BandCanvas<'_>,
+    paint: Paint,
+) {
     let (open, close) = match np.border {
         super::style::NodeBorder::Bracket => ('[', ']'),
         super::style::NodeBorder::Angle => ('<', '>'),
@@ -883,8 +952,62 @@ fn paint_node<V: LayoutView>(
     if n.width >= 2 {
         canvas.text(close_x, n.y, close, paint);
     }
-    if n.has_self_loop {
-        canvas.marker(close_x + 1, n.y, MarkerKind::SelfLoop, Dir::Up, false, paint);
+}
+
+/// A light-stroke box spanning the node's full `width × height`, label
+/// inside. Strokes merge with crossing edge ink into proper junctions
+/// and decode to `+ - |` under the ASCII charset.
+fn paint_node_boxed(
+    n: &super::view::NodeRef<'_>,
+    _np: &super::plan::NodePlan,
+    canvas: &mut BandCanvas<'_>,
+    paint: Paint,
+) {
+    let l = Weight::Light;
+    let no = Weight::None;
+    let top = n.y;
+    let bottom = n.y + n.height.max(1) - 1;
+    let left = n.x;
+    let right = n.x + n.width - 1;
+
+    // A tall node is replayed once per band it spans; every loop below
+    // is clipped to the current band so total work across all bands is
+    // O(width + height), not O(spans × extent) — the canvas would clip
+    // out-of-band writes anyway, but iterating to be clipped is the
+    // cost this avoids.
+    let band_lo = canvas.y0();
+    let band_hi = band_lo + canvas.rows();
+    let in_band = |y: usize| y >= band_lo && y < band_hi;
+
+    if in_band(top) {
+        canvas.stroke(left, top, no, l, no, l, paint);
+        canvas.stroke(right, top, no, l, l, no, paint);
+        for x in (left + 1)..right {
+            canvas.stroke(x, top, no, no, l, l, paint);
+        }
+    }
+    if in_band(bottom) {
+        canvas.stroke(left, bottom, l, no, no, l, paint);
+        canvas.stroke(right, bottom, l, no, l, no, paint);
+        for x in (left + 1)..right {
+            canvas.stroke(x, bottom, no, no, l, l, paint);
+        }
+    }
+    let side_lo = (top + 1).max(band_lo);
+    let side_hi = bottom.min(band_hi);
+    for y in side_lo..side_hi {
+        canvas.stroke(left, y, l, l, no, no, paint);
+        canvas.stroke(right, y, l, l, no, no, paint);
+    }
+    // Label inside, one row below the top border, one pad column in.
+    let label_y = top + 1;
+    if in_band(label_y) {
+        let max_len = n.width.saturating_sub(4);
+        let mut x = left + 2;
+        for ch in n.label.chars().take(max_len) {
+            canvas.text(x, label_y, ch, paint);
+            x += 1;
+        }
     }
 }
 

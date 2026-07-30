@@ -564,6 +564,13 @@ impl<'a> Graph<'a> {
     /// * `width` - Explicit width in layout units
     /// * `height` - Explicit height in layout rows (1 = single-line node)
     ///
+    /// The declared `width × height` area is reserved by layout — edges
+    /// route around it — and filled at render time by the node's
+    /// painter (`NodeStyle.paint`): `Simple` (default) draws `[label]`
+    /// on the top row and leaves extra rows blank, `Boxed` draws a
+    /// border box across the full area, and `Custom` hands the area to
+    /// a user painter. See `examples/node_painting.rs`.
+    ///
     /// # Examples
     ///
     /// ```

@@ -106,6 +106,7 @@ pub(crate) struct EdgePlan {
 pub(crate) struct NodePlan {
     pub border: NodeBorder,
     pub text_color: CellColor,
+    pub paint: super::style::NodePaint,
 }
 
 /// Resolved per-subgraph style.
@@ -289,6 +290,7 @@ impl<'buf> RenderPlan<'buf> {
             node_plans.push(NodePlan {
                 border: style.border,
                 text_color: style.text_color,
+                paint: style.paint,
             });
         }
 
@@ -488,10 +490,12 @@ impl<'buf> RenderPlan<'buf> {
                         }
                         continue;
                     }
-                    // The self-loop marker (`↺`) paints one cell past
-                    // the node's declared width and belongs to it.
-                    let span = n.width + usize::from(n.has_self_loop);
-                    if y == n.y && x >= n.x && x < n.x + span {
+                    // The node owns its full reserved area (painters
+                    // may fill any of it); the self-loop marker (`↺`)
+                    // adds one cell on the top row.
+                    let in_rows = y >= n.y && y < n.y + n.height.max(1);
+                    let span = n.width + usize::from(n.has_self_loop && y == n.y);
+                    if in_rows && x >= n.x && x < n.x + span {
                         return HitResult::Node(n.id);
                     }
                 }

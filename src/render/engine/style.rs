@@ -8,6 +8,7 @@
 
 use super::cell::Weight;
 use super::color::CellColor;
+use super::region::{NodePaintCtx, NodeRegion};
 
 /// Stroke weight for an edge, resolved to cell arms by the compositor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -53,6 +54,37 @@ pub enum NodeBorder {
     Bracket,
     /// `<label>` — e.g. to visually mark implicit (auto-created) nodes.
     Angle,
+}
+
+/// A custom node painter: fills the node's declared `width × height`
+/// area through the clipped, node-local [`NodeRegion`]. Plain `fn`
+/// pointer (`no_std`-safe, non-capturing): derive content from the
+/// context (id, label, dimensions).
+pub type NodePaintFn = fn(&mut NodeRegion<'_, '_>, NodePaintCtx<'_>);
+
+/// How a node's reserved area is filled at render time.
+///
+/// The default `[label]` look has no special privilege — it is one
+/// painter among peers, all filling the same layout-reserved area that
+/// edges already route around.
+///
+/// No `PartialEq`: the `Custom` variant holds a function pointer, and
+/// fn-pointer comparisons are not meaningful (addresses are not
+/// guaranteed unique across codegen units).
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub enum NodePaint {
+    /// `[label]` on the node's top row (the classic look; extra
+    /// reserved rows stay blank).
+    #[default]
+    Simple,
+    /// A light-stroke box spanning the full `width × height`, label
+    /// inside. Falls back to `Simple` when `height < 3` (a box needs a
+    /// border row above and below the label) or `width < 2` (both side
+    /// columns).
+    Boxed,
+    /// User-supplied painter with full control of the area.
+    Custom(NodePaintFn),
 }
 
 /// Subgraph (cluster) box border style.
@@ -138,10 +170,12 @@ impl Default for EdgeStyle {
 /// Resolved style for one node.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NodeStyle {
-    /// Border form.
+    /// Border form (bracket delimiters used by the `Simple` painter).
     pub border: NodeBorder,
     /// Label text color (`DEFAULT` = terminal default, the legacy look).
     pub text_color: CellColor,
+    /// How the node's reserved area is filled.
+    pub paint: NodePaint,
 }
 
 /// Resolved style for one subgraph.

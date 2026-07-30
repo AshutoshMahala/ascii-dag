@@ -35,6 +35,7 @@ pub(crate) mod mem;
 mod parity;
 pub(crate) mod plan;
 pub(crate) mod presets;
+pub(crate) mod region;
 pub(crate) mod style;
 pub(crate) mod view;
 
@@ -195,8 +196,9 @@ pub use charset::Charset;
 pub use color::{CellColor, ColorMode};
 pub use config::{DEFAULT_BAND_ROWS, RenderOptions};
 pub use plan::{HitResult, RenderPlan};
+pub use region::{NodePaintCtx, NodeRegion};
 pub use style::{
     EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPlacement, LabelPosition, LineWeight,
-    MarkerShape, NodeBorder, NodeStyle, NodeStyleCtx, SubgraphBorder, SubgraphStyle,
-    SubgraphStyleCtx,
+    MarkerShape, NodeBorder, NodePaint, NodePaintFn, NodeStyle, NodeStyleCtx, SubgraphBorder,
+    SubgraphStyle, SubgraphStyleCtx,
 };

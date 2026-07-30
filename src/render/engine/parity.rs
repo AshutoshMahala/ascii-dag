@@ -1273,3 +1273,274 @@ mod review_fixes {
         }
     }
 }
+
+// ── Node painters (fill the reserved area) ───────────────────────────────
+
+mod node_painters {
+    use super::*;
+    use crate::render::engine::style::{NodePaint, NodeStyle, NodeStyleCtx};
+    use crate::render::engine::{NodePaintCtx, NodeRegion};
+
+    fn sized_graph() -> Graph<'static> {
+        let mut g = Graph::new();
+        g.add_node_with_size(1, "Server", 14, 5);
+        g.add_node_with_size(2, "Cache", 11, 4);
+        g.add_node(3, "Client");
+        g.add_edge(3, 1, None);
+        g.add_edge(1, 2, None);
+        g
+    }
+
+    fn boxed_nodes(_: NodeStyleCtx<'_>) -> NodeStyle {
+        NodeStyle {
+            paint: NodePaint::Boxed,
+            ..NodeStyle::default()
+        }
+    }
+
+    fn card_painter(region: &mut NodeRegion<'_, '_>, ctx: NodePaintCtx<'_>) {
+        // Header, separator, body — a zigraph-style card.
+        region.write_str(0, 0, "#");
+        region.write_str(2, 0, ctx.label);
+        for x in 0..region.width() {
+            region.set(x, 1, '=');
+        }
+        region.write_str(0, 2, "id:");
+        region.write_str(4, 2, if ctx.node_id == 1 { "one" } else { "n" });
+        // Escapes must be silent no-ops.
+        region.set(region.width() + 10, 0, 'X');
+        region.set(0, region.height() + 10, 'X');
+        region.write_str(region.width() - 1, 0, "OVERFLOWING");
+    }
+
+    fn card_nodes(ctx: NodeStyleCtx<'_>) -> NodeStyle {
+        NodeStyle {
+            paint: if ctx.node_id == 1 {
+                NodePaint::Custom(card_painter)
+            } else {
+                NodePaint::Boxed
+            },
+            ..NodeStyle::default()
+        }
+    }
+
+    /// Boxed nodes render a full-extent box, byte-identically from
+    /// both IRs, and edges route around the reserved area.
+    #[test]
+    fn boxed_nodes_fill_their_area_across_backends() {
+        let mut options = RenderOptions::plain();
+        options.node_style_fn = boxed_nodes;
+        let heap_out = render_plain(&sized_graph().compute_layout(), &options);
+        for glyph in ['\u{250c}', '\u{2510}', '\u{2514}', '\u{2518}'] {
+            assert!(heap_out.contains(glyph), "box corner {glyph}:\n{heap_out}");
+        }
+        assert!(heap_out.contains("Server"), "label inside:\n{heap_out}");
+        // Client (height 1) falls back to Simple.
+        assert!(heap_out.contains("[Client]"), "short node stays simple:\n{heap_out}");
+        let csr_out = csr_engine(&sized_graph(), &options);
+        assert_same("boxed nodes (heap vs csr)", &heap_out, &csr_out);
+    }
+
+    /// A custom painter fills its region; writes outside the region
+    /// are silent no-ops — neighbors stay untouched.
+    #[test]
+    fn custom_painter_is_clipped_to_its_region() {
+        let mut options = RenderOptions::plain();
+        options.node_style_fn = card_nodes;
+        let ir = sized_graph().compute_layout();
+        let out = render_plain(&ir, &options);
+        assert!(out.contains("# Server"), "card header:\n{out}");
+        assert!(out.contains("===="), "separator row:\n{out}");
+        assert!(out.contains("id: one"), "body row:\n{out}");
+        assert!(!out.contains('X'), "escaped writes must be dropped:\n{out}");
+        assert!(!out.contains("OVERFLOWING"), "overflow truncated:\n{out}");
+        // The truncated overflow leaves only its first char in-region.
+        let server = ir.node_by_id(1).unwrap();
+        let row: &str = out.lines().nth(server.y).unwrap();
+        assert_eq!(
+            row.chars().nth(server.x + server.width - 1),
+            Some('O'),
+            "last in-region cell keeps the first overflow char:\n{out}"
+        );
+    }
+
+    /// Banding replays painters per band — output is cap-invariant.
+    #[test]
+    fn painted_nodes_are_band_invariant() {
+        for style in [boxed_nodes as fn(NodeStyleCtx<'_>) -> NodeStyle, card_nodes] {
+            let mut options = RenderOptions::plain();
+            options.node_style_fn = style;
+            let ir = sized_graph().compute_layout();
+            let reference = render_plain(&ir, &options);
+            for cap in [1usize, 2, 3] {
+                let mut capped = options;
+                capped.band_rows_cap = cap;
+                assert_same("painted node banding", &reference, &render_plain(&ir, &capped));
+            }
+        }
+    }
+
+    /// Out-of-range starts must be silent no-ops, not arithmetic:
+    /// `x + i` on a `usize::MAX` start panicked in debug builds and
+    /// wrapped back into the region in release builds.
+    fn overflow_painter(region: &mut NodeRegion<'_, '_>, _ctx: NodePaintCtx<'_>) {
+        region.write_str(usize::MAX, 0, "@~");
+        region.write_str(0, usize::MAX, "@~");
+        region.write_str(usize::MAX, usize::MAX, "@~");
+        region.write_str(1, 1, "ok");
+    }
+
+    fn overflow_nodes(ctx: NodeStyleCtx<'_>) -> NodeStyle {
+        NodeStyle {
+            paint: if ctx.node_id == 1 {
+                NodePaint::Custom(overflow_painter)
+            } else {
+                NodePaint::Simple
+            },
+            ..NodeStyle::default()
+        }
+    }
+
+    #[test]
+    fn write_str_out_of_range_start_is_a_noop() {
+        let mut options = RenderOptions::plain();
+        options.node_style_fn = overflow_nodes;
+        let out = render_plain(&sized_graph().compute_layout(), &options);
+        assert!(
+            !out.contains('@') && !out.contains('~'),
+            "out-of-range writes dropped:\n{out}"
+        );
+        assert!(out.contains("ok"), "in-region writes still land:\n{out}");
+    }
+
+    /// Custom painters render byte-identically from both IRs (the
+    /// boxed test covers the tag path; this covers the fn path).
+    #[test]
+    fn custom_painter_parity_across_backends() {
+        let mut options = RenderOptions::plain();
+        options.node_style_fn = card_nodes;
+        let heap_out = render_plain(&sized_graph().compute_layout(), &options);
+        let csr_out = csr_engine(&sized_graph(), &options);
+        assert_same("custom painter (heap vs csr)", &heap_out, &csr_out);
+    }
+
+    fn tall_graph() -> Graph<'static> {
+        let mut g = Graph::new();
+        g.add_node_with_size(1, "T", 9, 40);
+        g.add_node(2, "sink");
+        g.add_edge(1, 2, None);
+        g
+    }
+
+    /// A painter that trusts `visible_rows`: it draws only the rows
+    /// the ctx declares visible. Cap-invariant output proves the
+    /// per-band ranges tile the node exactly.
+    fn banded_rows_painter(region: &mut NodeRegion<'_, '_>, ctx: NodePaintCtx<'_>) {
+        let (lo, hi) = ctx.visible_rows;
+        for y in lo..hi {
+            let ch = char::from_digit((y % 10) as u32, 10).unwrap();
+            region.set(0, y, ch);
+            region.set(region.width() - 1, y, ch);
+        }
+    }
+
+    fn tall_custom(ctx: NodeStyleCtx<'_>) -> NodeStyle {
+        NodeStyle {
+            paint: if ctx.node_id == 1 {
+                NodePaint::Custom(banded_rows_painter)
+            } else {
+                NodePaint::Simple
+            },
+            ..NodeStyle::default()
+        }
+    }
+
+    fn tall_boxed(ctx: NodeStyleCtx<'_>) -> NodeStyle {
+        NodeStyle {
+            paint: if ctx.node_id == 1 {
+                NodePaint::Boxed
+            } else {
+                NodePaint::Simple
+            },
+            ..NodeStyle::default()
+        }
+    }
+
+    /// Tall painted nodes across pathological band caps: the boxed
+    /// painter's band clipping and the ctx `visible_rows` ranges must
+    /// both reproduce the unbanded output byte-for-byte.
+    #[test]
+    fn tall_nodes_band_clip_and_visible_rows() {
+        for style in [tall_boxed as fn(NodeStyleCtx<'_>) -> NodeStyle, tall_custom] {
+            let mut options = RenderOptions::plain();
+            options.node_style_fn = style;
+            let ir = tall_graph().compute_layout();
+            let reference = render_plain(&ir, &options); // height 40 < default cap: one band
+            for cap in [1usize, 2, 7, 1000] {
+                let mut capped = options;
+                capped.band_rows_cap = cap;
+                assert_same(
+                    "tall painted node banding",
+                    &reference,
+                    &render_plain(&ir, &capped),
+                );
+            }
+        }
+    }
+
+    /// The no-alloc byte surface renders painted nodes identically to
+    /// the String surface, with estimate-sized buffers.
+    #[test]
+    fn painted_nodes_render_to_bytes() {
+        use crate::render::engine::{
+            estimate_render_arena_size, estimate_render_output_size, render_to_bytes,
+        };
+        for style in [boxed_nodes as fn(NodeStyleCtx<'_>) -> NodeStyle, card_nodes] {
+            let mut options = RenderOptions::plain();
+            options.node_style_fn = style;
+            options.band_rows_cap = 2;
+            let ir = sized_graph().compute_layout();
+            let want = render_plain(&ir, &options);
+            let mut backing = vec![0u8; estimate_render_arena_size(&ir, &options)];
+            let arena = Arena::new(&mut backing);
+            let mut out = vec![0u8; estimate_render_output_size(&ir, &options)];
+            let written =
+                render_to_bytes(&ir, &options, &arena, &mut out).expect("bytes render");
+            let got = core::str::from_utf8(&out[..written]).unwrap();
+            assert_same("painted nodes (bytes vs string)", &want, got);
+        }
+    }
+
+    /// The whole reserved area hits the node, painter-agnostic.
+    #[test]
+    fn multi_row_nodes_hit_across_their_area() {
+        let mut options = RenderOptions::plain();
+        options.node_style_fn = boxed_nodes;
+        let ir = sized_graph().compute_layout();
+        let plan = ir.render_plan(&options);
+        let server = ir.node_by_id(1).unwrap();
+        for dy in 0..5 {
+            assert_eq!(
+                ir.hit_test(&plan, server.x + 1, server.y + dy),
+                crate::render::engine::HitResult::Node(1),
+                "row {dy} of the reserved area"
+            );
+        }
+        assert_ne!(
+            ir.hit_test(&plan, server.x + 1, server.y + 5),
+            crate::render::engine::HitResult::Node(1),
+            "below the reserved area"
+        );
+    }
+
+    /// Boxed borders are semantic strokes: ASCII charset renders them
+    /// as `+ - |`.
+    #[test]
+    fn boxed_nodes_project_to_ascii() {
+        let mut options = RenderOptions::ascii();
+        options.node_style_fn = boxed_nodes;
+        let out = render_plain(&sized_graph().compute_layout(), &options);
+        assert!(out.contains('+') && out.contains('-') && out.contains('|'), "{out}");
+        assert!(!out.contains('\u{250c}'), "no unicode corners in ascii:\n{out}");
+    }
+}
