@@ -23,9 +23,9 @@
 //! RW8); --bt and --ascii render through the new engine — the only
 //! paint path with direction and charset support.
 
+use ascii_dag::Direction;
 use ascii_dag::render::colors::Palette;
 use ascii_dag::render::engine::{Charset, RenderOptions};
-use ascii_dag::Direction;
 
 include!("shared/hero_graph.rs");
 

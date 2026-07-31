@@ -25,10 +25,20 @@ pub fn requested() -> bool {
 /// Render `g` through the CSR/arena pipeline.
 #[cfg(feature = "arena")]
 pub fn render(g: &Graph<'_>, options: &RenderOptions) -> String {
-    use ascii_dag::LayoutConfig;
-    use ascii_dag::graph::arena::Arena;
-    let mut config = LayoutConfig::standard();
+    let mut config = ascii_dag::LayoutConfig::standard();
     config.direction = g.direction();
+    render_with(g, options, &config)
+}
+
+/// Like [`render`], with a caller-supplied layout config (e.g. to set
+/// `include_dummy_nodes`).
+#[cfg(feature = "arena")]
+pub fn render_with(
+    g: &Graph<'_>,
+    options: &RenderOptions,
+    config: &ascii_dag::LayoutConfig<'_>,
+) -> String {
+    use ascii_dag::graph::arena::Arena;
     let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
     let mut csr_arena = Arena::new(&mut csr_buf);
     let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
@@ -38,15 +48,26 @@ pub fn render(g: &Graph<'_>, options: &RenderOptions) -> String {
     let mut temp_arena = Arena::new(&mut temp_buf);
     let mut out_arena = Arena::new(&mut out_buf);
     let ir = csr
-        .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+        .compute_layout_arena(config, &mut temp_arena, &mut out_arena)
         .expect("CSR layout");
     ir.render_string(options)
 }
 
 #[cfg(not(feature = "arena"))]
 pub fn render(_g: &Graph<'_>, _options: &RenderOptions) -> String {
-    eprintln!("--csr needs the arena feature: cargo run --example <name> --features arena -- --csr");
+    eprintln!(
+        "--csr needs the arena feature: cargo run --example <name> --features arena -- --csr"
+    );
     std::process::exit(2)
+}
+
+#[cfg(not(feature = "arena"))]
+pub fn render_with(
+    g: &Graph<'_>,
+    options: &RenderOptions,
+    _config: &ascii_dag::LayoutConfig<'_>,
+) -> String {
+    render(g, options)
 }
 
 /// Print `g` rendered with `options` — through the CSR pipeline when

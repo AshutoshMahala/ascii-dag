@@ -22,6 +22,7 @@ cargo run --example node_painting --features arena -- --csr
 | `git_log` | A commit-history shaped graph |
 | `dependency_analysis` | Roots/leaves/impact queries over a package graph |
 | `topological_sort` | Topological ordering (no rendering) |
+| `dummy_nodes` | Routing waypoints: `include_dummy_nodes` (IR) + `show_dummy_nodes` (◍ markers) |
 | `hit_test` | Interactive mouse hit-testing (raw ANSI mouse reports, zero deps); `--probe X Y` for scripts |
 | `hero` | The showcase graph; `--bt` (bottom-up), `--ascii`, `--color` |
 | `hero_colored` | Colored hero with the legend |
