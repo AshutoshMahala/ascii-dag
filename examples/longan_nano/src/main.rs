@@ -71,7 +71,7 @@ fn main() -> ! {
 
     // ── Build graph ────────────────────────────────────────
     let mut graph_arena = Arena::new(&mut graph_buf);
-    let mut builder = CsrGraphBuilder::new(&mut graph_arena, 5, 5, 64).unwrap();
+    let mut builder = CsrGraphBuilder::new(&mut graph_arena, 5, 5, 64, 0).unwrap();
 
     let n0 = builder.add_node(0, "Init").unwrap();
     let n1 = builder.add_node(1, "Build").unwrap();

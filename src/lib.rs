@@ -150,12 +150,14 @@ pub mod validation;
 pub use errors::Diagnostic;
 pub use errors::GraphError;
 pub use graph::RenderMode;
+pub use graph::{AUTO, Auto, IdOrAuto, NodeId};
 #[cfg(feature = "alloc")]
 pub use graph::{Direction, Graph, Subgraph};
 pub use ir::NodeKind;
 #[cfg(feature = "alloc")]
 pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};
 pub use render::colors::Palette;
+pub use render::engine::{BoxedNode, CustomNode, NodeContent, SimpleNode};
 pub use render::engine::{Charset, ColorMode, RenderOptions};
 pub use validation::Requirements;
 // Primary config types (always available, no alloc needed)

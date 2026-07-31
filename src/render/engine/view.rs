@@ -39,6 +39,9 @@ pub(crate) struct NodeRef<'a> {
     /// Owning edge for dummy nodes; `None` for real nodes.
     #[allow(dead_code)] // consumer lands with RW7 dummy introspection
     pub edge_index: Option<usize>,
+    /// Declared content kind (raw `NodeKindTag` value) — routes
+    /// `paint_node`.
+    pub content_tag: u8,
 }
 
 /// An edge path as the engine sees it — waypoints are a plain slice in
@@ -113,6 +116,10 @@ pub(crate) trait LayoutView {
     fn direction(&self) -> Direction;
     fn node_count(&self) -> usize;
     fn node(&self, index: usize) -> NodeRef<'_>;
+    /// A node's declared custom content: painter + payload. Returns
+    /// `(None, "")` for nodes without an entry — including blank
+    /// custom nodes, which reserve their area and paint nothing.
+    fn node_custom(&self, index: usize) -> (Option<super::style::NodePaintFn>, &str);
     fn edge_count(&self) -> usize;
     fn edge(&self, index: usize) -> EdgeRef<'_>;
     fn subgraph_count(&self) -> usize;
@@ -159,6 +166,20 @@ impl LayoutView for crate::ir::LayoutIR<'_> {
             kind: n.kind,
             has_self_loop: n.has_self_loop,
             edge_index: n.edge_index,
+            content_tag: n.content_tag,
+        }
+    }
+
+    fn node_custom(&self, index: usize) -> (Option<super::style::NodePaintFn>, &str) {
+        match self
+            .custom_nodes
+            .binary_search_by_key(&index, |entry| entry.0)
+        {
+            Ok(pos) => {
+                let (_, painter, payload) = self.custom_nodes[pos];
+                (painter, payload)
+            }
+            Err(_) => (None, ""),
         }
     }
 
@@ -279,6 +300,18 @@ impl LayoutView for crate::ir::arena::LayoutIRArena<'_> {
             } else {
                 Some(n.edge_index)
             },
+            content_tag: n.content_tag,
+        }
+    }
+
+    fn node_custom(&self, index: usize) -> (Option<super::style::NodePaintFn>, &str) {
+        let entries = self.custom_nodes();
+        match entries.binary_search_by_key(&index, |entry| entry.node_idx) {
+            Ok(pos) => {
+                let entry = &entries[pos];
+                (entry.painter, self.custom_payload(entry))
+            }
+            Err(_) => (None, ""),
         }
     }
 

@@ -1,7 +1,8 @@
 //! Builder for constructing [`LayoutIRArena`] from arena memory.
 
 use super::arena::{
-    EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SubgraphInfoArena,
+    CustomNodeArena, EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena,
+    SubgraphInfoArena,
 };
 use crate::graph::arena::Arena;
 
@@ -23,6 +24,8 @@ pub struct LayoutIRArenaBuilder<'a> {
     level_data_offset: usize,
     subgraphs: &'a mut [SubgraphInfoArena],
     subgraph_count: usize,
+    custom_nodes: &'a mut [CustomNodeArena],
+    custom_count: usize,
     width: usize,
     height: usize,
     level_count: usize,
@@ -46,10 +49,16 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             max_label_bytes,
             max_levels,
             0,
+            0,
         )
     }
 
-    /// Create a new builder with subgraph support.
+    /// Create a new builder with subgraph and custom-content support.
+    ///
+    /// `max_label_bytes` must cover custom payload bytes too — payloads
+    /// ride the label storage. `max_custom` sizes the sparse
+    /// custom-content entry array (0 when no node declares content).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_subgraphs(
         arena: &'a mut Arena<'a>,
         max_nodes: usize,
@@ -58,6 +67,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         max_label_bytes: usize,
         max_levels: usize,
         max_subgraphs: usize,
+        max_custom: usize,
     ) -> Option<Self> {
         // Allocate all buffers upfront
         let (nodes_ptr, _) = arena.alloc_raw::<LayoutNodeArena>(max_nodes)?;
@@ -71,6 +81,11 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         } else {
             None
         };
+        let custom_ptr = if max_custom > 0 {
+            Some(arena.alloc_raw::<CustomNodeArena>(max_custom)?.0)
+        } else {
+            None
+        };
 
         unsafe {
             let nodes = core::slice::from_raw_parts_mut(nodes_ptr, max_nodes);
@@ -81,6 +96,11 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             let level_data = core::slice::from_raw_parts_mut(level_data_ptr, max_nodes);
             let subgraphs = if let Some(ptr) = sg_ptr {
                 core::slice::from_raw_parts_mut(ptr, max_subgraphs)
+            } else {
+                &mut []
+            };
+            let custom_nodes = if let Some(ptr) = custom_ptr {
+                core::slice::from_raw_parts_mut(ptr, max_custom)
             } else {
                 &mut []
             };
@@ -105,6 +125,8 @@ impl<'a> LayoutIRArenaBuilder<'a> {
                 level_data_offset: 0,
                 subgraphs,
                 subgraph_count: 0,
+                custom_nodes,
+                custom_count: 0,
                 width: 0,
                 height: 0,
                 level_count: 0,
@@ -127,6 +149,8 @@ impl<'a> LayoutIRArenaBuilder<'a> {
     ///
     /// `edge_index` is the owning edge for dummy nodes; pass
     /// `usize::MAX` for real nodes (sentinel convention).
+    /// `content_tag` is the raw `NodeKindTag` value (0 = simple,
+    /// 1 = boxed, 2 = custom; dummies pass 0).
     #[allow(clippy::too_many_arguments)]
     pub fn add_node(
         &mut self,
@@ -140,6 +164,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         level_position: usize,
         kind: crate::ir::NodeKind,
         edge_index: usize,
+        content_tag: u8,
     ) -> Option<usize> {
         if self.node_count >= self.nodes.len() {
             return None;
@@ -169,12 +194,42 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             kind,
             has_self_loop: false,
             edge_index,
+            content_tag,
         };
 
         self.label_offset += label_bytes.len();
         self.node_count += 1;
 
         Some(node_idx)
+    }
+
+    /// Attach custom content (painter + payload) to an already-added
+    /// node. Payload bytes are copied into label storage (size
+    /// `max_label_bytes` to include them). Entries must be added in
+    /// ascending `node_idx` order — emission loops do this naturally.
+    pub fn add_custom(
+        &mut self,
+        node_idx: usize,
+        painter: Option<crate::render::engine::NodePaintFn>,
+        payload: &str,
+    ) -> Option<()> {
+        if self.custom_count >= self.custom_nodes.len() {
+            return None;
+        }
+        if self.label_offset + payload.len() > self.labels.len() {
+            return None;
+        }
+        let bytes = payload.as_bytes();
+        self.labels[self.label_offset..self.label_offset + bytes.len()].copy_from_slice(bytes);
+        self.custom_nodes[self.custom_count] = CustomNodeArena {
+            node_idx,
+            painter,
+            payload_offset: self.label_offset,
+            payload_len: bytes.len(),
+        };
+        self.label_offset += bytes.len();
+        self.custom_count += 1;
+        Some(())
     }
 
     /// Add an edge.
@@ -377,6 +432,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             self.level_count,
             &self.level_offsets[..self.level_count + 1],
             &self.level_data[..self.level_data_offset],
+            &self.custom_nodes[..self.custom_count],
         )
     }
 }

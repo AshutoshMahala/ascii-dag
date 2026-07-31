@@ -560,7 +560,7 @@ pub(crate) fn composite_band<V: LayoutView>(
     }
     // Z3: nodes.
     for i in 0..scratch.nodes.len() {
-        paint_node(view, plan, scratch.nodes.as_slice()[i], options, canvas);
+        paint_node(view, scratch.nodes.as_slice()[i], options, canvas);
     }
     // Z4: subgraph labels (always readable; colors untouched).
     for i in 0..scratch.sgs.len() {
@@ -844,12 +844,11 @@ fn paint_subgraph_label<V: LayoutView>(
 
 fn paint_node<V: LayoutView>(
     view: &V,
-    plan: &RenderPlan<'_>,
     index: usize,
     options: &RenderOptions,
     canvas: &mut BandCanvas<'_>,
 ) {
-    use super::style::NodePaint;
+    use super::node_content::NodeKindTag;
     let n = view.node(index);
     if matches!(n.kind, NodeKind::Dummy) {
         if options.show_dummy_nodes {
@@ -858,54 +857,59 @@ fn paint_node<V: LayoutView>(
         }
         return;
     }
-    let np = plan.node_plan(index);
-    // Node ink writes its style color; the default (`DEFAULT`) is the
-    // legacy behavior of explicitly resetting to the terminal default.
-    let paint = Paint::Color(np.text_color);
+    // Node ink explicitly resets to the terminal default — the legacy
+    // behavior (nodes are never colored by edge ink bleeding through).
+    let paint = Paint::Color(CellColor::DEFAULT);
     let height = n.height.max(1);
 
-    // Every node fills its layout-reserved area through a painter —
-    // the classic `[label]` has no special privilege, it is simply the
-    // default painter. A box needs a border row above and below the
-    // label and both side columns, so `Boxed` on short or one-column
-    // nodes falls back to `Simple`.
-    match np.paint {
-        NodePaint::Boxed if height >= 3 && n.width >= 2 => {
-            paint_node_boxed(&n, np, canvas, paint)
-        }
-        NodePaint::Custom(painter) => {
-            // Node-local rows visible in this band — tall nodes replay
-            // per band; the ctx range lets painters skip clipped rows.
-            let band_lo = canvas.y0();
-            let band_hi = band_lo + canvas.rows();
-            let g_lo = n.y.max(band_lo);
-            let g_hi = (n.y + height).min(band_hi);
-            let visible_rows = if g_lo < g_hi {
-                (g_lo - n.y, g_hi - n.y)
-            } else {
-                (0, 0)
-            };
-            let mut region = super::region::NodeRegion::new(
-                canvas,
-                n.x,
-                n.y,
-                n.width,
-                height,
-                np.text_color,
-            );
-            painter(
-                &mut region,
-                super::region::NodePaintCtx {
-                    node_id: n.id,
-                    label: n.label,
-                    width: n.width,
+    // Every node fills its layout-reserved area according to its
+    // DECLARED kind — the content channel is the only steering (there
+    // is no style override). A box needs a border row above and below
+    // the label and both side columns, so a boxed declaration on a
+    // too-small area falls back to the simple look. A custom
+    // declaration without a painter is a blank node: the area stays
+    // reserved and unpainted.
+    match NodeKindTag::from_u8(n.content_tag) {
+        NodeKindTag::Boxed if height >= 3 && n.width >= 2 => paint_node_boxed(&n, canvas, paint),
+        NodeKindTag::Custom => {
+            let (painter, payload) = view.node_custom(index);
+            if let Some(painter) = painter {
+                // Node-local rows visible in this band — tall nodes
+                // replay per band; the ctx range lets painters skip
+                // clipped rows.
+                let band_lo = canvas.y0();
+                let band_hi = band_lo + canvas.rows();
+                let g_lo = n.y.max(band_lo);
+                let g_hi = (n.y + height).min(band_hi);
+                let visible_rows = if g_lo < g_hi {
+                    (g_lo - n.y, g_hi - n.y)
+                } else {
+                    (0, 0)
+                };
+                let mut region = super::region::NodeRegion::new(
+                    canvas,
+                    n.x,
+                    n.y,
+                    n.width,
                     height,
-                    charset: options.charset,
-                    visible_rows,
-                },
-            );
+                    CellColor::DEFAULT,
+                );
+                painter(
+                    &mut region,
+                    super::region::NodePaintCtx {
+                        node_id: n.id,
+                        label: n.label,
+                        width: n.width,
+                        height,
+                        charset: options.charset,
+                        visible_rows,
+                        payload,
+                    },
+                );
+            }
+            // No painter → blank: skip painting entirely.
         }
-        _ => paint_node_simple(&n, np, canvas, paint),
+        _ => paint_node_simple(&n, canvas, paint),
     }
 
     // The self-loop marker is engine ink, one cell right of the area's
@@ -924,16 +928,8 @@ fn paint_node<V: LayoutView>(
 
 /// The classic `[label]` painter: delimiters + label on the top row;
 /// any extra reserved rows stay blank.
-fn paint_node_simple(
-    n: &super::view::NodeRef<'_>,
-    np: &super::plan::NodePlan,
-    canvas: &mut BandCanvas<'_>,
-    paint: Paint,
-) {
-    let (open, close) = match np.border {
-        super::style::NodeBorder::Bracket => ('[', ']'),
-        super::style::NodeBorder::Angle => ('<', '>'),
-    };
+fn paint_node_simple(n: &super::view::NodeRef<'_>, canvas: &mut BandCanvas<'_>, paint: Paint) {
+    let (open, close) = ('[', ']');
     // Border row at the node's top row (content atomicity, D4). The
     // closing delimiter sits at the node's declared width (arena widths
     // can exceed label+2 — the padded interior cells are left
@@ -957,12 +953,7 @@ fn paint_node_simple(
 /// A light-stroke box spanning the node's full `width × height`, label
 /// inside. Strokes merge with crossing edge ink into proper junctions
 /// and decode to `+ - |` under the ASCII charset.
-fn paint_node_boxed(
-    n: &super::view::NodeRef<'_>,
-    _np: &super::plan::NodePlan,
-    canvas: &mut BandCanvas<'_>,
-    paint: Paint,
-) {
+fn paint_node_boxed(n: &super::view::NodeRef<'_>, canvas: &mut BandCanvas<'_>, paint: Paint) {
     let l = Weight::Light;
     let no = Weight::None;
     let top = n.y;

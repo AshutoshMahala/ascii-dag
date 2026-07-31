@@ -678,7 +678,14 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                     kind,
                     has_self_loop: node_has_self_loop[*idx],
                     edge_index: None,
+                    content_tag: dag.node_kind_tag[*idx],
                 });
+                // Carry the node's declared painter/payload (sparse —
+                // present only for custom-content nodes).
+                if let Ok(pos) = dag.node_custom.binary_search_by_key(idx, |entry| entry.0) {
+                    let (_, painter, payload) = dag.node_custom[pos];
+                    builder.add_custom_for_last(painter, payload);
+                }
             }
         }
     }
@@ -716,6 +723,7 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
                         kind: NodeKind::Dummy,
                         has_self_loop: false,
                         edge_index: Some(*edge_idx),
+                        content_tag: 0,
                     });
                 }
             }

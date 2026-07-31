@@ -23,11 +23,14 @@
 //! RW8); --bt and --ascii render through the new engine — the only
 //! paint path with direction and charset support.
 
+use ascii_dag::Direction;
 use ascii_dag::render::colors::Palette;
 use ascii_dag::render::engine::{Charset, RenderOptions};
-use ascii_dag::Direction;
 
 include!("shared/hero_graph.rs");
+
+#[path = "support/csr.rs"]
+mod csr;
 
 fn main() {
     let mut g = hero_graph();
@@ -40,6 +43,20 @@ fn main() {
 
     if bottom_up {
         g.set_direction(Direction::BottomUp);
+    }
+
+    if csr::requested() {
+        // Same graph, arena pipeline — byte-identical output.
+        let mut opts = if use_color {
+            RenderOptions::colored(Palette::Ansi)
+        } else {
+            RenderOptions::plain()
+        };
+        if ascii {
+            opts.charset = Charset::Ascii;
+        }
+        println!("{}", csr::render(&g, &opts));
+        return;
     }
 
     let ir = g.compute_layout();

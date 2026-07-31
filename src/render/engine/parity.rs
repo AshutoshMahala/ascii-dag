@@ -722,8 +722,8 @@ mod styles {
     use super::*;
     use crate::graph::Direction;
     use crate::render::engine::style::{
-        EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPosition, MarkerShape, NodeBorder,
-        NodeStyle, NodeStyleCtx, SubgraphBorder, SubgraphStyle, SubgraphStyleCtx,
+        EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPosition, MarkerShape, SubgraphBorder,
+        SubgraphStyle, SubgraphStyleCtx,
     };
     use crate::render::engine::CellColor;
 
@@ -738,22 +738,6 @@ mod styles {
         EdgeStyle {
             marker_start: MarkerShape::Arrow,
             ..EdgeStyle::default()
-        }
-    }
-    fn angle_implicit(ctx: NodeStyleCtx<'_>) -> NodeStyle {
-        NodeStyle {
-            border: if ctx.is_implicit {
-                NodeBorder::Angle
-            } else {
-                NodeBorder::Bracket
-            },
-            ..NodeStyle::default()
-        }
-    }
-    fn red_nodes(_: NodeStyleCtx<'_>) -> NodeStyle {
-        NodeStyle {
-            text_color: CellColor::ansi256(196),
-            ..NodeStyle::default()
         }
     }
     fn light_boxes(_: SubgraphStyleCtx<'_>) -> SubgraphStyle {
@@ -829,31 +813,6 @@ mod styles {
     }
 
     #[test]
-    fn angle_border_marks_implicit_nodes_only() {
-        let ir = implicit_nodes().compute_layout();
-        let mut options = RenderOptions::plain();
-        options.node_style_fn = angle_implicit;
-        let out = render_plain(&ir, &options);
-        assert!(out.contains("[Root]"), "explicit keeps brackets:\n{out}");
-        assert!(out.contains('<') && out.contains('>'), "implicit gets angles:\n{out}");
-        // And the arena IR agrees byte-for-byte.
-        let g = implicit_nodes();
-        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
-        let mut csr_arena = Arena::new(&mut csr_buf);
-        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
-        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
-        let mut temp_buf = vec![0u8; size];
-        let mut out_buf = vec![0u8; size];
-        let mut temp_arena = Arena::new(&mut temp_buf);
-        let mut out_arena = Arena::new(&mut out_buf);
-        let config = LayoutConfig::standard();
-        let csr_ir = csr
-            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
-            .expect("CSR layout");
-        assert_same("angle borders (heap vs csr)", &out, &render_plain(&csr_ir, &options));
-    }
-
-    #[test]
     fn subgraph_border_styles_restyle_the_box() {
         let ir = nested_boxes().compute_layout();
 
@@ -882,15 +841,13 @@ mod styles {
     }
 
     #[test]
-    fn subgraph_and_node_colors_reach_the_escape_stream() {
+    fn subgraph_and_label_colors_reach_the_escape_stream() {
         let ir = stage_graph_for_styles().compute_layout();
         let mut options = RenderOptions::colored(Palette::Ansi);
         options.subgraph_style_fn = green_boxes;
-        options.node_style_fn = red_nodes;
         options.edge_label_style_fn = magenta_labels;
         let out = render_colored(&ir, &options);
         assert!(out.contains("\x1b[38;5;42m"), "border color escapes:\n{out:?}");
-        assert!(out.contains("\x1b[38;5;196m"), "node text color escapes:\n{out:?}");
         assert!(out.contains("\x1b[38;5;201m"), "label color escapes:\n{out:?}");
     }
 
@@ -1278,80 +1235,86 @@ mod review_fixes {
 
 mod node_painters {
     use super::*;
-    use crate::render::engine::style::{NodePaint, NodeStyle, NodeStyleCtx};
-    use crate::render::engine::{NodePaintCtx, NodeRegion};
+    use crate::render::engine::{BoxedNode, CustomNode, NodePaintCtx, NodeRegion};
 
-    fn sized_graph() -> Graph<'static> {
+    /// Declared content end-to-end: `[Client]` simple, boxed Server
+    /// and Cache — no style steering anywhere; the declaration is the
+    /// only source of what a node is.
+    fn boxed_graph() -> Graph<'static> {
         let mut g = Graph::new();
-        g.add_node_with_size(1, "Server", 14, 5);
-        g.add_node_with_size(2, "Cache", 11, 4);
+        g.add_node(1, BoxedNode("Server"));
+        g.add_node(2, BoxedNode("Cache"));
         g.add_node(3, "Client");
         g.add_edge(3, 1, None);
         g.add_edge(1, 2, None);
         g
     }
 
-    fn boxed_nodes(_: NodeStyleCtx<'_>) -> NodeStyle {
-        NodeStyle {
-            paint: NodePaint::Boxed,
-            ..NodeStyle::default()
-        }
-    }
-
     fn card_painter(region: &mut NodeRegion<'_, '_>, ctx: NodePaintCtx<'_>) {
-        // Header, separator, body — a zigraph-style card.
+        // Header, separator, payload body — a zigraph-style card.
         region.write_str(0, 0, "#");
         region.write_str(2, 0, ctx.label);
         for x in 0..region.width() {
             region.set(x, 1, '=');
         }
-        region.write_str(0, 2, "id:");
-        region.write_str(4, 2, if ctx.node_id == 1 { "one" } else { "n" });
+        for (i, line) in ctx.payload.lines().enumerate() {
+            region.write_str(0, 2 + i, line);
+        }
         // Escapes must be silent no-ops.
         region.set(region.width() + 10, 0, 'X');
         region.set(0, region.height() + 10, 'X');
         region.write_str(region.width() - 1, 0, "OVERFLOWING");
     }
 
-    fn card_nodes(ctx: NodeStyleCtx<'_>) -> NodeStyle {
-        NodeStyle {
-            paint: if ctx.node_id == 1 {
-                NodePaint::Custom(card_painter)
-            } else {
-                NodePaint::Boxed
+    /// Server is a declared card (painter + payload), Cache a boxed
+    /// declaration, Client plain sugar.
+    fn card_graph() -> Graph<'static> {
+        let mut g = Graph::new();
+        g.add_node(
+            1,
+            CustomNode {
+                label: "Server",
+                width: 14,
+                height: 5,
+                painter: Some(card_painter),
+                payload: "id: one",
             },
-            ..NodeStyle::default()
-        }
+        );
+        g.add_node(2, BoxedNode("Cache"));
+        g.add_node(3, "Client");
+        g.add_edge(3, 1, None);
+        g.add_edge(1, 2, None);
+        g
     }
 
-    /// Boxed nodes render a full-extent box, byte-identically from
-    /// both IRs, and edges route around the reserved area.
+    /// Declared boxed nodes render full-extent boxes byte-identically
+    /// from both IRs; a simple declaration stays `[label]`.
     #[test]
-    fn boxed_nodes_fill_their_area_across_backends() {
-        let mut options = RenderOptions::plain();
-        options.node_style_fn = boxed_nodes;
-        let heap_out = render_plain(&sized_graph().compute_layout(), &options);
+    fn declared_boxed_nodes_fill_their_area_across_backends() {
+        let options = RenderOptions::plain();
+        let heap_out = render_plain(&boxed_graph().compute_layout(), &options);
         for glyph in ['\u{250c}', '\u{2510}', '\u{2514}', '\u{2518}'] {
             assert!(heap_out.contains(glyph), "box corner {glyph}:\n{heap_out}");
         }
         assert!(heap_out.contains("Server"), "label inside:\n{heap_out}");
-        // Client (height 1) falls back to Simple.
-        assert!(heap_out.contains("[Client]"), "short node stays simple:\n{heap_out}");
-        let csr_out = csr_engine(&sized_graph(), &options);
-        assert_same("boxed nodes (heap vs csr)", &heap_out, &csr_out);
+        assert!(
+            heap_out.contains("[Client]"),
+            "simple declaration stays simple:\n{heap_out}"
+        );
+        let csr_out = csr_engine(&boxed_graph(), &options);
+        assert_same("declared boxed (heap vs csr)", &heap_out, &csr_out);
     }
 
-    /// A custom painter fills its region; writes outside the region
-    /// are silent no-ops — neighbors stay untouched.
+    /// A declared painter fills its region from its declared payload;
+    /// writes outside the region are silent no-ops.
     #[test]
-    fn custom_painter_is_clipped_to_its_region() {
-        let mut options = RenderOptions::plain();
-        options.node_style_fn = card_nodes;
-        let ir = sized_graph().compute_layout();
+    fn declared_card_is_clipped_and_reads_payload() {
+        let options = RenderOptions::plain();
+        let ir = card_graph().compute_layout();
         let out = render_plain(&ir, &options);
         assert!(out.contains("# Server"), "card header:\n{out}");
         assert!(out.contains("===="), "separator row:\n{out}");
-        assert!(out.contains("id: one"), "body row:\n{out}");
+        assert!(out.contains("id: one"), "payload row:\n{out}");
         assert!(!out.contains('X'), "escaped writes must be dropped:\n{out}");
         assert!(!out.contains("OVERFLOWING"), "overflow truncated:\n{out}");
         // The truncated overflow leaves only its first char in-region.
@@ -1364,13 +1327,22 @@ mod node_painters {
         );
     }
 
+    /// Custom painters + payloads travel the CSR pipeline: the
+    /// declared card renders byte-identically from the arena IR.
+    #[test]
+    fn declared_card_parity_across_backends() {
+        let options = RenderOptions::plain();
+        let heap_out = render_plain(&card_graph().compute_layout(), &options);
+        let csr_out = csr_engine(&card_graph(), &options);
+        assert_same("declared card (heap vs csr)", &heap_out, &csr_out);
+    }
+
     /// Banding replays painters per band — output is cap-invariant.
     #[test]
     fn painted_nodes_are_band_invariant() {
-        for style in [boxed_nodes as fn(NodeStyleCtx<'_>) -> NodeStyle, card_nodes] {
-            let mut options = RenderOptions::plain();
-            options.node_style_fn = style;
-            let ir = sized_graph().compute_layout();
+        for build in [boxed_graph as fn() -> Graph<'static>, card_graph] {
+            let options = RenderOptions::plain();
+            let ir = build().compute_layout();
             let reference = render_plain(&ir, &options);
             for cap in [1usize, 2, 3] {
                 let mut capped = options;
@@ -1378,6 +1350,52 @@ mod node_painters {
                 assert_same("painted node banding", &reference, &render_plain(&ir, &capped));
             }
         }
+    }
+
+    /// A blank node (custom declaration, no painter) reserves its
+    /// area, paints nothing, and keeps its identity for hit-testing —
+    /// on both backends.
+    #[test]
+    fn blank_nodes_reserve_without_painting() {
+        let build = || {
+            let mut g = Graph::new();
+            g.add_node(1, "top");
+            g.add_node(
+                2,
+                CustomNode {
+                    label: "spacer",
+                    width: 10,
+                    height: 3,
+                    painter: None,
+                    payload: "",
+                },
+            );
+            g.add_node(3, "bottom");
+            g.add_edge(1, 2, None);
+            g.add_edge(2, 3, None);
+            g
+        };
+        let ir = build().compute_layout();
+        let options = RenderOptions::plain();
+        let out = render_plain(&ir, &options);
+        assert!(!out.contains("spacer"), "blank nodes paint nothing:\n{out}");
+        let spacer = ir.node_by_id(2).unwrap();
+        for dy in 0..3 {
+            let row = out.lines().nth(spacer.y + dy).unwrap_or("");
+            let cells: String = row.chars().skip(spacer.x).take(spacer.width).collect();
+            assert!(
+                cells.trim().is_empty(),
+                "row {dy} of the reserved area stays blank:\n{out}"
+            );
+        }
+        let plan = ir.render_plan(&options);
+        assert_eq!(
+            ir.hit_test(&plan, spacer.x + 1, spacer.y + 1),
+            crate::render::engine::HitResult::Node(2),
+            "blank node still hit-tests as itself"
+        );
+        let csr_out = csr_engine(&build(), &options);
+        assert_same("blank node (heap vs csr)", &out, &csr_out);
     }
 
     /// Out-of-range starts must be silent no-ops, not arithmetic:
@@ -1390,46 +1408,27 @@ mod node_painters {
         region.write_str(1, 1, "ok");
     }
 
-    fn overflow_nodes(ctx: NodeStyleCtx<'_>) -> NodeStyle {
-        NodeStyle {
-            paint: if ctx.node_id == 1 {
-                NodePaint::Custom(overflow_painter)
-            } else {
-                NodePaint::Simple
-            },
-            ..NodeStyle::default()
-        }
-    }
-
     #[test]
     fn write_str_out_of_range_start_is_a_noop() {
-        let mut options = RenderOptions::plain();
-        options.node_style_fn = overflow_nodes;
-        let out = render_plain(&sized_graph().compute_layout(), &options);
+        let mut g = Graph::new();
+        g.add_node(
+            1,
+            CustomNode {
+                label: "n",
+                width: 8,
+                height: 3,
+                painter: Some(overflow_painter),
+                payload: "",
+            },
+        );
+        g.add_node(2, "sink");
+        g.add_edge(1, 2, None);
+        let out = render_plain(&g.compute_layout(), &RenderOptions::plain());
         assert!(
             !out.contains('@') && !out.contains('~'),
             "out-of-range writes dropped:\n{out}"
         );
         assert!(out.contains("ok"), "in-region writes still land:\n{out}");
-    }
-
-    /// Custom painters render byte-identically from both IRs (the
-    /// boxed test covers the tag path; this covers the fn path).
-    #[test]
-    fn custom_painter_parity_across_backends() {
-        let mut options = RenderOptions::plain();
-        options.node_style_fn = card_nodes;
-        let heap_out = render_plain(&sized_graph().compute_layout(), &options);
-        let csr_out = csr_engine(&sized_graph(), &options);
-        assert_same("custom painter (heap vs csr)", &heap_out, &csr_out);
-    }
-
-    fn tall_graph() -> Graph<'static> {
-        let mut g = Graph::new();
-        g.add_node_with_size(1, "T", 9, 40);
-        g.add_node(2, "sink");
-        g.add_edge(1, 2, None);
-        g
     }
 
     /// A painter that trusts `visible_rows`: it draws only the rows
@@ -1444,82 +1443,363 @@ mod node_painters {
         }
     }
 
-    fn tall_custom(ctx: NodeStyleCtx<'_>) -> NodeStyle {
-        NodeStyle {
-            paint: if ctx.node_id == 1 {
-                NodePaint::Custom(banded_rows_painter)
-            } else {
-                NodePaint::Simple
-            },
-            ..NodeStyle::default()
-        }
-    }
-
-    fn tall_boxed(ctx: NodeStyleCtx<'_>) -> NodeStyle {
-        NodeStyle {
-            paint: if ctx.node_id == 1 {
-                NodePaint::Boxed
-            } else {
-                NodePaint::Simple
-            },
-            ..NodeStyle::default()
-        }
-    }
-
-    /// Tall painted nodes across pathological band caps: the boxed
-    /// painter's band clipping and the ctx `visible_rows` ranges must
-    /// both reproduce the unbanded output byte-for-byte.
+    /// Tall declared painters may skip out-of-band rows; tall boxed
+    /// nodes come from a hand-built IR (graph declarations size boxes
+    /// from their labels — the IR is the general contract) and pin the
+    /// band-clipped box painter. Both must be cap-invariant.
     #[test]
     fn tall_nodes_band_clip_and_visible_rows() {
-        for style in [tall_boxed as fn(NodeStyleCtx<'_>) -> NodeStyle, tall_custom] {
-            let mut options = RenderOptions::plain();
-            options.node_style_fn = style;
-            let ir = tall_graph().compute_layout();
-            let reference = render_plain(&ir, &options); // height 40 < default cap: one band
-            for cap in [1usize, 2, 7, 1000] {
-                let mut capped = options;
-                capped.band_rows_cap = cap;
-                assert_same(
-                    "tall painted node banding",
-                    &reference,
-                    &render_plain(&ir, &capped),
-                );
-            }
+        let mut g = Graph::new();
+        g.add_node(
+            1,
+            CustomNode {
+                label: "T",
+                width: 9,
+                height: 40,
+                painter: Some(banded_rows_painter),
+                payload: "",
+            },
+        );
+        g.add_node(2, "sink");
+        g.add_edge(1, 2, None);
+        let ir = g.compute_layout();
+        let reference = render_plain(&ir, &RenderOptions::plain());
+        for cap in [1usize, 2, 7, 1000] {
+            let mut capped = RenderOptions::plain();
+            capped.band_rows_cap = cap;
+            assert_same(
+                "tall custom banding",
+                &reference,
+                &render_plain(&ir, &capped),
+            );
+        }
+
+        let mut b = crate::ir::LayoutIRBuilder::new();
+        b.set_dimensions(20, 42);
+        b.add_node(crate::ir::LayoutNode {
+            id: 1,
+            label: "T",
+            x: 2,
+            y: 1,
+            width: 9,
+            height: 40,
+            center_x: 6,
+            center_y: 20,
+            level: 0,
+            level_position: 0,
+            kind: crate::ir::NodeKind::Explicit,
+            has_self_loop: false,
+            edge_index: None,
+            content_tag: 1, // boxed
+        });
+        let ir = b.build();
+        let reference = render_plain(&ir, &RenderOptions::plain());
+        assert!(reference.contains('\u{250c}'), "box paints:\n{reference}");
+        for cap in [1usize, 3, 7] {
+            let mut capped = RenderOptions::plain();
+            capped.band_rows_cap = cap;
+            assert_same(
+                "tall boxed banding",
+                &reference,
+                &render_plain(&ir, &capped),
+            );
         }
     }
 
-    /// The no-alloc byte surface renders painted nodes identically to
+    /// The no-alloc byte surface renders declared nodes identically to
     /// the String surface, with estimate-sized buffers.
     #[test]
     fn painted_nodes_render_to_bytes() {
         use crate::render::engine::{
             estimate_render_arena_size, estimate_render_output_size, render_to_bytes,
         };
-        for style in [boxed_nodes as fn(NodeStyleCtx<'_>) -> NodeStyle, card_nodes] {
+        for build in [boxed_graph as fn() -> Graph<'static>, card_graph] {
             let mut options = RenderOptions::plain();
-            options.node_style_fn = style;
             options.band_rows_cap = 2;
-            let ir = sized_graph().compute_layout();
+            let ir = build().compute_layout();
             let want = render_plain(&ir, &options);
             let mut backing = vec![0u8; estimate_render_arena_size(&ir, &options)];
             let arena = Arena::new(&mut backing);
             let mut out = vec![0u8; estimate_render_output_size(&ir, &options)];
-            let written =
-                render_to_bytes(&ir, &options, &arena, &mut out).expect("bytes render");
+            let written = render_to_bytes(&ir, &options, &arena, &mut out).expect("bytes render");
             let got = core::str::from_utf8(&out[..written]).unwrap();
-            assert_same("painted nodes (bytes vs string)", &want, got);
+            assert_same("declared nodes (bytes vs string)", &want, got);
         }
     }
 
-    /// The whole reserved area hits the node, painter-agnostic.
+    /// Content kinds declared at construction arrive byte-identically
+    /// in both IRs — and now drive rendering directly.
+    #[test]
+    fn content_tags_travel_both_irs() {
+        let build = || {
+            let mut g = Graph::new();
+            g.add_node(1, "simple");
+            g.add_node(2, BoxedNode("boxed"));
+            g.add_node(
+                3,
+                CustomNode {
+                    label: "card",
+                    width: 8,
+                    height: 3,
+                    painter: None,
+                    payload: "",
+                },
+            );
+            g.add_edge(1, 2, None);
+            g.add_edge(2, 3, None);
+            g
+        };
+        let heap_ir = build().compute_layout();
+        let mut heap_tags: Vec<(usize, u8)> = heap_ir
+            .nodes
+            .iter()
+            .map(|n| (n.id, n.content_tag))
+            .collect();
+        heap_tags.sort_unstable();
+        assert_eq!(heap_tags, [(1, 0), (2, 1), (3, 2)]);
+
+        let g = build();
+        let config = LayoutConfig::standard();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+            .expect("CSR layout");
+        let mut csr_tags: Vec<(usize, u8)> =
+            ir.nodes().iter().map(|n| (n.id, n.content_tag)).collect();
+        csr_tags.sort_unstable();
+        assert_eq!(csr_tags, heap_tags);
+
+        let options = RenderOptions::plain();
+        let heap_out = render_plain(&heap_ir, &options);
+        let csr_out = csr_engine(&build(), &options);
+        assert_same("content-tag graph (heap vs csr)", &heap_out, &csr_out);
+    }
+
+    /// D8 — the embedded front door: the same declared content built
+    /// directly on `CsrGraphBuilder` (no `Graph`, no alloc-side
+    /// construction) renders byte-identically to the Graph → to_csr
+    /// path. Conversion tests alone do not cover this door.
+    #[test]
+    fn direct_built_csr_declares_content() {
+        use crate::graph::csr::{CsrGraph, CsrGraphBuilder};
+        let options = RenderOptions::plain();
+        let via_graph = csr_engine(&card_graph(), &options);
+
+        let payload = "id: one";
+        let label_bytes = "Server".len() + "Cache".len() + "Client".len() + payload.len();
+        let csr_size = CsrGraph::required_arena_size_with_content(3, 2, label_bytes, 0, 1) + 256;
+        let mut csr_buf = vec![0u8; csr_size];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let mut b = CsrGraphBuilder::new(&mut csr_arena, 3, 2, label_bytes, 1).unwrap();
+        b.add_node(
+            1,
+            CustomNode {
+                label: "Server",
+                width: 14,
+                height: 5,
+                painter: Some(card_painter),
+                payload,
+            },
+        )
+        .unwrap();
+        b.add_node(2, BoxedNode("Cache")).unwrap();
+        b.add_node(3, "Client").unwrap();
+        b.add_edge(2, 0).unwrap(); // Client → Server (indices)
+        b.add_edge(0, 1).unwrap(); // Server → Cache
+        let csr = b.build().unwrap();
+
+        let config = LayoutConfig::standard();
+        let size = 256 * 1024;
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+            .expect("direct CSR layout");
+        let direct = ir.render_string(&options);
+        assert_same(
+            "declared content (direct CSR vs Graph→to_csr)",
+            &via_graph,
+            &direct,
+        );
+    }
+
+    /// Failed direct-builder insertions must be atomic: any exhausted
+    /// capacity leaves the builder untouched (no committed node, no
+    /// shifted indices).
+    #[test]
+    fn direct_builder_failures_are_atomic() {
+        use crate::graph::csr::{CsrGraph, CsrGraphBuilder};
+        // Exhausted custom-entry capacity (max_custom = 0).
+        let size = CsrGraph::required_arena_size_with_content(2, 1, 64, 0, 0) + 256;
+        let mut buf = vec![0u8; size];
+        let mut arena = Arena::new(&mut buf);
+        let mut b = CsrGraphBuilder::new(&mut arena, 2, 1, 64, 0).unwrap();
+        let failed = b.add_node(
+            1,
+            CustomNode {
+                label: "card",
+                width: 8,
+                height: 3,
+                painter: Some(card_painter),
+                payload: "p",
+            },
+        );
+        assert!(failed.is_none(), "no custom capacity → None");
+        // The failed insertion committed nothing: the next node is 0.
+        assert_eq!(b.add_node(1, "ok"), Some(0));
+
+        // Exhausted label/payload storage.
+        let size = CsrGraph::required_arena_size_with_content(2, 1, 4, 0, 1) + 256;
+        let mut buf = vec![0u8; size];
+        let mut arena = Arena::new(&mut buf);
+        let mut b = CsrGraphBuilder::new(&mut arena, 2, 1, 4, 1).unwrap();
+        let failed = b.add_node(
+            1,
+            CustomNode {
+                label: "n",
+                width: 8,
+                height: 3,
+                painter: Some(card_painter),
+                payload: "way too long for four bytes",
+            },
+        );
+        assert!(failed.is_none(), "no payload space → None");
+        assert_eq!(b.add_node(1, "ok"), Some(0));
+    }
+
+    /// NC9 parity includes Unicode: character-based sizing on the
+    /// direct builder matches `Graph`, so multi-byte labels render
+    /// byte-identically through both construction paths.
+    #[test]
+    fn unicode_labels_parity_direct_vs_graph() {
+        use crate::graph::csr::{CsrGraph, CsrGraphBuilder};
+        let options = RenderOptions::plain();
+        let build = || {
+            let mut g = Graph::new();
+            g.add_node(1, "Caché");
+            g.add_node(2, BoxedNode("naïve"));
+            g.add_edge(1, 2, None);
+            g
+        };
+        let via_graph = csr_engine(&build(), &options);
+
+        let label_bytes = "Caché".len() + "naïve".len();
+        let size = CsrGraph::required_arena_size_with_content(2, 1, label_bytes, 0, 0) + 256;
+        let mut buf = vec![0u8; size];
+        let mut arena = Arena::new(&mut buf);
+        let mut b = CsrGraphBuilder::new(&mut arena, 2, 1, label_bytes, 0).unwrap();
+        b.add_node(1, "Caché").unwrap();
+        b.add_node(2, BoxedNode("naïve")).unwrap();
+        b.add_edge(0, 1).unwrap();
+        let csr = b.build().unwrap();
+        let mut temp_buf = vec![0u8; 256 * 1024];
+        let mut out_buf = vec![0u8; 256 * 1024];
+        let mut ta = Arena::new(&mut temp_buf);
+        let mut oa = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&LayoutConfig::standard(), &mut ta, &mut oa)
+            .expect("layout");
+        assert_same(
+            "unicode labels (direct vs Graph→to_csr)",
+            &via_graph,
+            &ir.render_string(&options),
+        );
+    }
+
+    /// `estimate_json_size` must be a real upper bound with custom
+    /// content: payload bytes, escaping, and Unicode included — an
+    /// exactly estimate-sized buffer always serializes.
+    #[test]
+    fn json_estimate_covers_custom_content() {
+        let mut g = Graph::new();
+        g.add_node(
+            1,
+            CustomNode {
+                label: "Caché",
+                width: 10,
+                height: 4,
+                painter: Some(card_painter),
+                payload: "line \"one\"\nline\ttwo — naïve",
+            },
+        );
+        g.add_node(2, "sink");
+        g.add_edge(1, 2, None);
+        let config = LayoutConfig::standard();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let mut temp_buf = vec![0u8; 256 * 1024];
+        let mut out_buf = vec![0u8; 256 * 1024];
+        let mut ta = Arena::new(&mut temp_buf);
+        let mut oa = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&config, &mut ta, &mut oa)
+            .expect("layout");
+        let estimate = ir.estimate_json_size();
+        let mut buf = vec![0u8; estimate];
+        let written = ir
+            .serialize_json(&mut buf)
+            .expect("estimate-sized buffer must suffice");
+        let json = core::str::from_utf8(&buf[..written]).unwrap();
+        assert!(json.contains("\"content_kind\":\"custom\""), "{json}");
+        assert!(json.contains("\"payload\":"), "{json}");
+    }
+
+    /// NC7 flyweight: ONE painter fn backs many nodes; per-node
+    /// identity arrives through the ctx (label + payload), so each
+    /// node renders its own content — on both backends.
+    #[test]
+    fn one_painter_many_nodes_flyweight() {
+        fn tagline(region: &mut NodeRegion<'_, '_>, ctx: NodePaintCtx<'_>) {
+            region.write_str(0, 0, ctx.label);
+            region.write_str(0, 1, ctx.payload);
+        }
+        let build = || {
+            let mut g = Graph::new();
+            for (id, label, payload) in
+                [(1, "alpha", "first"), (2, "beta", "second"), (3, "gamma", "third")]
+            {
+                g.add_node(
+                    id,
+                    CustomNode {
+                        label,
+                        width: 8,
+                        height: 2,
+                        painter: Some(tagline), // the SAME fn every time
+                        payload,
+                    },
+                );
+            }
+            g.add_edge(1, 2, None);
+            g.add_edge(2, 3, None);
+            g
+        };
+        let options = RenderOptions::plain();
+        let out = render_plain(&build().compute_layout(), &options);
+        for text in ["alpha", "first", "beta", "second", "gamma", "third"] {
+            assert!(out.contains(text), "per-node content {text}:\n{out}");
+        }
+        let csr_out = csr_engine(&build(), &options);
+        assert_same("flyweight painter (heap vs csr)", &out, &csr_out);
+    }
+
+    /// The whole reserved area hits the node, declaration-agnostic.
     #[test]
     fn multi_row_nodes_hit_across_their_area() {
-        let mut options = RenderOptions::plain();
-        options.node_style_fn = boxed_nodes;
-        let ir = sized_graph().compute_layout();
+        let ir = boxed_graph().compute_layout();
+        let options = RenderOptions::plain();
         let plan = ir.render_plan(&options);
         let server = ir.node_by_id(1).unwrap();
-        for dy in 0..5 {
+        for dy in 0..3 {
             assert_eq!(
                 ir.hit_test(&plan, server.x + 1, server.y + dy),
                 crate::render::engine::HitResult::Node(1),
@@ -1527,20 +1807,9 @@ mod node_painters {
             );
         }
         assert_ne!(
-            ir.hit_test(&plan, server.x + 1, server.y + 5),
+            ir.hit_test(&plan, server.x + 1, server.y + 3),
             crate::render::engine::HitResult::Node(1),
             "below the reserved area"
         );
-    }
-
-    /// Boxed borders are semantic strokes: ASCII charset renders them
-    /// as `+ - |`.
-    #[test]
-    fn boxed_nodes_project_to_ascii() {
-        let mut options = RenderOptions::ascii();
-        options.node_style_fn = boxed_nodes;
-        let out = render_plain(&sized_graph().compute_layout(), &options);
-        assert!(out.contains('+') && out.contains('-') && out.contains('|'), "{out}");
-        assert!(!out.contains('\u{250c}'), "no unicode corners in ascii:\n{out}");
     }
 }

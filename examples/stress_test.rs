@@ -253,7 +253,7 @@ fn test_skyscraper() -> Graph<'static> {
     let mut dag = Graph::new();
     // Very deep, narrow graph to test vertical spacing
     for i in 0..50 {
-        dag.add_node(i, Box::leak(format!("Floor {}", i).into_boxed_str()));
+        dag.add_node(i, &*Box::leak(format!("Floor {}", i).into_boxed_str()));
         if i > 0 {
             dag.add_edge(i - 1, i, None);
         }
@@ -268,7 +268,7 @@ fn test_wide_fan() -> Graph<'static> {
 
     // 50 parallel nodes
     for i in 1..51 {
-        dag.add_node(i, Box::leak(format!("Worker {}", i).into_boxed_str()));
+        dag.add_node(i, &*Box::leak(format!("Worker {}", i).into_boxed_str()));
         dag.add_edge(0, i, None);
         dag.add_edge(i, 1000, None);
     }
@@ -325,7 +325,7 @@ fn test_random_hairball() -> Graph<'static> {
     let nodes = 30;
 
     for i in 0..nodes {
-        dag.add_node(i, Box::leak(format!("N{}", i).into_boxed_str()));
+        dag.add_node(i, &*Box::leak(format!("N{}", i).into_boxed_str()));
     }
 
     // Add random edges, ensuring no cycles (i < j rule)
@@ -348,7 +348,7 @@ fn test_skip_level_nightmare() -> Graph<'static> {
 
     // Levels 1, 2, 3, 4, 5
     for i in 1..6 {
-        dag.add_node(i, Box::leak(format!("L{}", i).into_boxed_str()));
+        dag.add_node(i, &*Box::leak(format!("L{}", i).into_boxed_str()));
         dag.add_edge(i - 1, i, None); // Normal connection
     }
 
@@ -371,7 +371,7 @@ fn test_verbose_logger() -> Graph<'static> {
     // Long text to test centering
     dag.add_node(
         3,
-        Box::leak(
+        &*Box::leak(
             "Error: NullPointerException at line 55 (Critical Failure in Module X)"
                 .to_string()
                 .into_boxed_str(),

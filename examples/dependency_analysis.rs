@@ -1,4 +1,6 @@
 use ascii_dag::algorithms::cycles::generic::roots::{RootFindable, find_leaves_fn, find_roots_fn};
+#[path = "support/csr.rs"]
+mod csr;
 use ascii_dag::algorithms::generic::impact::{
     ImpactAnalyzable, compute_blast_radius_fn, compute_descendants_fn,
 };
@@ -205,7 +207,11 @@ fn example_metrics_dashboard() {
     dag.add_edge(1, 3, None);
     dag.add_edge(3, 4, None);
 
-    println!("{}", dag.render());
+    if csr::requested() {
+        println!("{}", csr::render(&dag, &ascii_dag::RenderOptions::plain()));
+    } else {
+        println!("{}", dag.render());
+    }
 
     // Find the most impactful file
     let mut max_impact = 0;

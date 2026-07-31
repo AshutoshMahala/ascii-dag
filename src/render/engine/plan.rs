@@ -24,8 +24,8 @@ use super::color::CellColor;
 use super::config::RenderOptions;
 use super::mem::PlanBuf;
 use super::style::{
-    EdgeStyle, EdgeStyleCtx, LabelPosition, LineWeight, MarkerShape, NodeBorder, NodeStyleCtx,
-    SubgraphBorder, SubgraphStyleCtx,
+    EdgeStyle, EdgeStyleCtx, LabelPosition, LineWeight, MarkerShape, SubgraphBorder,
+    SubgraphStyleCtx,
 };
 use super::view::{LayoutView, PathRef};
 use crate::graph::arena::Arena;
@@ -101,14 +101,6 @@ pub(crate) struct EdgePlan {
     pub marker_start: MarkerShape,
 }
 
-/// Resolved per-node style.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct NodePlan {
-    pub border: NodeBorder,
-    pub text_color: CellColor,
-    pub paint: super::style::NodePaint,
-}
-
 /// Resolved per-subgraph style.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SubgraphPlan {
@@ -142,7 +134,7 @@ impl LabelPlan {
 }
 
 /// The render plan. Public read-only queries; internals private.
-/// Storage is heap- or arena-backed behind [`PlanBuf`] — one build
+/// Storage is heap- or arena-backed behind `PlanBuf` — one build
 /// path serves std and no-alloc callers alike.
 ///
 /// A plan is a snapshot for **introspection** (dimensions, bands,
@@ -156,7 +148,6 @@ pub struct RenderPlan<'buf> {
     band_ranges: PlanBuf<'buf, (usize, usize)>,
     edge_plans: PlanBuf<'buf, EdgePlan>,
     subgraph_plans: PlanBuf<'buf, SubgraphPlan>,
-    node_plans: PlanBuf<'buf, NodePlan>,
     labels: PlanBuf<'buf, LabelPlan>,
     index: PlanBuf<'buf, PlanElement>,
     /// Edge indices whose labels go to the legend (colored semantics).
@@ -270,29 +261,6 @@ impl<'buf> RenderPlan<'buf> {
             });
         }
 
-        let mut node_plans: PlanBuf<'buf, NodePlan> = mem.buf(view.node_count(), oom())?;
-        for i in 0..view.node_count() {
-            let n = view.node(i);
-            // Dummies are markers, not styleable nodes — the style fn
-            // never sees them.
-            if matches!(n.kind, crate::ir::NodeKind::Dummy) {
-                node_plans.push(NodePlan::default());
-                continue;
-            }
-            let ctx = NodeStyleCtx {
-                node_id: n.id,
-                label: n.label,
-                is_implicit: matches!(n.kind, crate::ir::NodeKind::Implicit),
-                has_self_loop: n.has_self_loop,
-                total_nodes: view.node_count(),
-            };
-            let style = (options.node_style_fn)(ctx);
-            node_plans.push(NodePlan {
-                border: style.border,
-                text_color: style.text_color,
-                paint: style.paint,
-            });
-        }
 
         // ── Spatial index + run capacity ───────────────────────────────
         let mut index: PlanBuf<'buf, PlanElement> = mem.buf(
@@ -402,7 +370,6 @@ impl<'buf> RenderPlan<'buf> {
             band_ranges,
             edge_plans,
             subgraph_plans,
-            node_plans,
             labels,
             index,
             legend,
@@ -563,10 +530,6 @@ impl<'buf> RenderPlan<'buf> {
         &self.subgraph_plans.as_slice()[index]
     }
 
-    pub(crate) fn node_plan(&self, index: usize) -> &NodePlan {
-        &self.node_plans.as_slice()[index]
-    }
-
     pub(crate) fn labels(&self) -> &[LabelPlan] {
         self.labels.as_slice()
     }
@@ -694,7 +657,6 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
 
     let plan_bytes = e * size_of::<EdgePlan>()
         + s * size_of::<SubgraphPlan>()
-        + n * size_of::<NodePlan>()
         + (n + e + s) * size_of::<PlanElement>()
         + labeled * (size_of::<LabelPlan>() + size_of::<usize>() + size_of::<(usize, usize, usize)>())
         + n * size_of::<usize>()

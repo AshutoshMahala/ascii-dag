@@ -62,6 +62,26 @@ pub struct LayoutNodeArena {
     /// `usize::MAX` = none (real node) — same sentinel convention as
     /// `SubgraphInfoArena::parent_idx`. Mirrors zigraph.
     pub edge_index: usize,
+    /// Content kind declared at construction (raw `NodeKindTag`
+    /// value): 0 = simple `[label]`, 1 = boxed, 2 = custom. Dummies
+    /// use 0. Field parity with `LayoutNode.content_tag`; fits the
+    /// struct's existing padding — no size change.
+    pub content_tag: u8,
+}
+
+/// Sparse custom-content entry: painter + payload for one node
+/// (arena mirror of the heap IR's custom list — field parity).
+/// Payload bytes live in the IR's label storage, like labels do.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CustomNodeArena {
+    /// Index into the IR's node array.
+    pub node_idx: usize,
+    /// Template fn; `None` = blank node (area reserved, unpainted).
+    pub painter: Option<crate::render::engine::NodePaintFn>,
+    /// Offset of the payload bytes in label storage.
+    pub payload_offset: usize,
+    /// Length of the payload in bytes.
+    pub payload_len: usize,
 }
 
 /// Edge routing type (no heap allocation version).
@@ -181,8 +201,10 @@ pub struct LayoutIRArena<'a> {
     edges: &'a [LayoutEdgeArena],
     /// Waypoints for multi-segment edges: (x, y) pairs
     waypoints: &'a [(usize, usize)],
-    /// Label storage (raw bytes, UTF-8)
+    /// Label storage (raw bytes, UTF-8); custom payloads ride here too
     labels: &'a [u8],
+    /// Sparse custom-content entries, sorted by node index
+    custom_nodes: &'a [CustomNodeArena],
     /// Subgraph bounding boxes
     subgraphs: &'a [SubgraphInfoArena],
     /// Total width in character cells
@@ -202,6 +224,7 @@ pub struct LayoutIRArena<'a> {
 impl<'a> LayoutIRArena<'a> {
     /// Construct from pre-allocated parts. Used by [`LayoutIRArenaBuilder::build`].
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         nodes: &'a [LayoutNodeArena],
         edges: &'a [LayoutEdgeArena],
@@ -213,12 +236,14 @@ impl<'a> LayoutIRArena<'a> {
         level_count: usize,
         level_offsets: &'a [usize],
         level_data: &'a [usize],
+        custom_nodes: &'a [CustomNodeArena],
     ) -> Self {
         Self {
             nodes,
             edges,
             waypoints,
             labels,
+            custom_nodes,
             subgraphs,
             width,
             height,
@@ -316,6 +341,18 @@ impl<'a> LayoutIRArena<'a> {
     pub fn node_label(&self, index: usize) -> &str {
         let node = &self.nodes[index];
         let bytes = &self.labels[node.label_offset..node.label_offset + node.label_len];
+        core::str::from_utf8(bytes).unwrap_or("")
+    }
+
+    /// Sparse custom-content entries, sorted by node index.
+    pub(crate) fn custom_nodes(&self) -> &[CustomNodeArena] {
+        self.custom_nodes
+    }
+
+    /// A custom entry's payload text (empty on malformed UTF-8 —
+    /// unreachable for builder-written payloads).
+    pub(crate) fn custom_payload(&self, entry: &CustomNodeArena) -> &str {
+        let bytes = &self.labels[entry.payload_offset..entry.payload_offset + entry.payload_len];
         core::str::from_utf8(bytes).unwrap_or("")
     }
 
@@ -454,7 +491,6 @@ impl<'a> LayoutIRArena<'a> {
     pub fn edge_color_index(&self, edge: &LayoutEdgeArena) -> usize {
         edge.edge_index
     }
-
 
     // ── Alloc-gated query methods ────────────────────────────────────────
 

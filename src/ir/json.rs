@@ -192,7 +192,20 @@ impl<'a> LayoutIRArena<'a> {
             if i > 0 {
                 w.write_byte(b',')?;
             }
-            write_node_arena(&mut w, node, self.node_label(i))?;
+            let payload = if node.content_tag == 2 {
+                Some(
+                    match self
+                        .custom_nodes()
+                        .binary_search_by_key(&i, |entry| entry.node_idx)
+                    {
+                        Ok(pos) => self.custom_payload(&self.custom_nodes()[pos]),
+                        Err(_) => "",
+                    },
+                )
+            } else {
+                None
+            };
+            write_node_arena(&mut w, node, self.node_label(i), payload)?;
         }
         w.write_byte(b']')?;
         w.write_byte(b',')?;
@@ -237,12 +250,30 @@ impl<'a> LayoutIRArena<'a> {
     pub fn estimate_json_size(&self) -> usize {
         // Base: {"version":"1.2","width":N,"height":N,"level_count":N,"nodes":[...],"edges":[...]}
         let base: usize = 100;
-        // Each node: ~150 bytes (fields + label)
-        let nodes = self.node_count().saturating_mul(150);
-        // Each edge: ~200 bytes (fields + path + optional label)
+        // Each node: fixed fields incl. `content_kind` (~180 bytes)
+        // plus its label at worst-case JSON escaping (6 bytes per input
+        // byte — \u00XX form).
+        let nodes = self.node_count().saturating_mul(180);
+        let node_labels: usize = (0..self.node_count())
+            .map(|i| self.node_label(i).len().saturating_mul(6))
+            .fold(0usize, |a, b| a.saturating_add(b));
+        // Custom payloads: key/quotes overhead + escaped bytes.
+        let payloads: usize = self
+            .custom_nodes()
+            .iter()
+            .map(|entry| entry.payload_len.saturating_mul(6).saturating_add(16))
+            .fold(0usize, |a, b| a.saturating_add(b));
+        // Each edge: fixed fields + path (~200 bytes) plus its label
+        // at worst-case escaping.
         let edges = self.edge_count().saturating_mul(200);
-        // Each subgraph: ~120 bytes
+        let edge_labels: usize = (0..self.edge_count())
+            .map(|i| self.edge_label(i).len().saturating_mul(6))
+            .fold(0usize, |a, b| a.saturating_add(b));
+        // Each subgraph: fixed fields (~120 bytes) plus escaped label.
         let sgs = self.subgraph_count().saturating_mul(120);
+        let sg_labels: usize = (0..self.subgraph_count())
+            .map(|i| self.subgraph_label(i).len().saturating_mul(6))
+            .fold(0usize, |a, b| a.saturating_add(b));
         // Waypoints: ~20 bytes each
         let wps: usize = self
             .edges()
@@ -255,13 +286,22 @@ impl<'a> LayoutIRArena<'a> {
             })
             .fold(0usize, |a, b| a.saturating_add(b));
         base.saturating_add(nodes)
+            .saturating_add(node_labels)
+            .saturating_add(payloads)
             .saturating_add(edges)
+            .saturating_add(edge_labels)
             .saturating_add(sgs)
+            .saturating_add(sg_labels)
             .saturating_add(wps)
     }
 }
 
-fn write_node_arena(w: &mut JsonWriter<'_>, node: &LayoutNodeArena, label: &str) -> Option<()> {
+fn write_node_arena(
+    w: &mut JsonWriter<'_>,
+    node: &LayoutNodeArena,
+    label: &str,
+    payload: Option<&str>,
+) -> Option<()> {
     w.write_byte(b'{')?;
 
     w.write_key("id")?;
@@ -304,6 +344,23 @@ fn write_node_arena(w: &mut JsonWriter<'_>, node: &LayoutNodeArena, label: &str)
         NodeKind::Dummy => w.write_str("dummy")?,
     }
     w.write_byte(b',')?;
+
+    // Declared content kind — a separate field from `kind`, which is
+    // the layout classification (explicit/implicit/dummy). `payload`
+    // is emitted only for custom nodes (their painter is code and
+    // never serializes — data only).
+    w.write_key("content_kind")?;
+    w.write_str(match node.content_tag {
+        1 => "boxed",
+        2 => "custom",
+        _ => "simple",
+    })?;
+    w.write_byte(b',')?;
+    if let Some(payload) = payload {
+        w.write_key("payload")?;
+        w.write_str(payload)?;
+        w.write_byte(b',')?;
+    }
 
     w.write_key("edge_index")?;
     if node.edge_index != usize::MAX {
@@ -542,7 +599,17 @@ mod heap_json {
                 if i > 0 {
                     out.push(',');
                 }
-                write_node_heap(out, node);
+                let payload = if node.content_tag == 2 {
+                    Some(
+                        match self.custom_nodes.binary_search_by_key(&i, |entry| entry.0) {
+                            Ok(pos) => self.custom_nodes[pos].2,
+                            Err(_) => "",
+                        },
+                    )
+                } else {
+                    None
+                };
+                write_node_heap(out, node, payload);
             }
             out.push(']');
             out.push(',');
@@ -616,7 +683,7 @@ mod heap_json {
         out.push_str(if b { "true" } else { "false" });
     }
 
-    fn write_node_heap(out: &mut String, node: &LayoutNode<'_>) {
+    fn write_node_heap(out: &mut String, node: &LayoutNode<'_>, payload: Option<&str>) {
         out.push('{');
 
         push_key(out, "id");
@@ -657,6 +724,24 @@ mod heap_json {
             NodeKind::Dummy => push_json_str(out, "dummy"),
         }
         out.push(',');
+
+        // Declared content kind — separate from the layout `kind`
+        // field; `payload` only for custom nodes (data, never code).
+        push_key(out, "content_kind");
+        push_json_str(
+            out,
+            match node.content_tag {
+                1 => "boxed",
+                2 => "custom",
+                _ => "simple",
+            },
+        );
+        out.push(',');
+        if let Some(payload) = payload {
+            push_key(out, "payload");
+            push_json_str(out, payload);
+            out.push(',');
+        }
 
         push_key(out, "edge_index");
         if let Some(ei) = node.edge_index {
