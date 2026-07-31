@@ -1754,6 +1754,44 @@ mod node_painters {
         assert!(json.contains("\"payload\":"), "{json}");
     }
 
+    /// NC7 flyweight: ONE painter fn backs many nodes; per-node
+    /// identity arrives through the ctx (label + payload), so each
+    /// node renders its own content — on both backends.
+    #[test]
+    fn one_painter_many_nodes_flyweight() {
+        fn tagline(region: &mut NodeRegion<'_, '_>, ctx: NodePaintCtx<'_>) {
+            region.write_str(0, 0, ctx.label);
+            region.write_str(0, 1, ctx.payload);
+        }
+        let build = || {
+            let mut g = Graph::new();
+            for (id, label, payload) in
+                [(1, "alpha", "first"), (2, "beta", "second"), (3, "gamma", "third")]
+            {
+                g.add_node(
+                    id,
+                    CustomNode {
+                        label,
+                        width: 8,
+                        height: 2,
+                        painter: Some(tagline), // the SAME fn every time
+                        payload,
+                    },
+                );
+            }
+            g.add_edge(1, 2, None);
+            g.add_edge(2, 3, None);
+            g
+        };
+        let options = RenderOptions::plain();
+        let out = render_plain(&build().compute_layout(), &options);
+        for text in ["alpha", "first", "beta", "second", "gamma", "third"] {
+            assert!(out.contains(text), "per-node content {text}:\n{out}");
+        }
+        let csr_out = csr_engine(&build(), &options);
+        assert_same("flyweight painter (heap vs csr)", &out, &csr_out);
+    }
+
     /// The whole reserved area hits the node, declaration-agnostic.
     #[test]
     fn multi_row_nodes_hit_across_their_area() {

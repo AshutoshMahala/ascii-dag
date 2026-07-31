@@ -14,9 +14,9 @@
 //! The trait is **sugar, not storage** (NC7b): implementors are
 //! resolved once at insertion into plain data — label, size, kind tag,
 //! optional painter fn, payload — so the object may be a temporary and
-//! no `&dyn` is stored anywhere. The kind tag already travels both
-//! IRs; painter/payload reach the render path and CSR pipeline with
-//! this release's engine-resolution work.
+//! no `&dyn` is stored anywhere. All five fields travel both IRs
+//! (including graphs built directly on `CsrGraphBuilder`) and drive
+//! rendering; custom nodes serialize their kind and payload to JSON.
 //! Rich typed state must flatten into `payload`; the painter parses it
 //! back as it draws (zero-alloc iteration — see the trait docs).
 
@@ -48,7 +48,8 @@ impl NodeKindTag {
     /// Exhaustive on purpose — the CSR-tag-drift guard: a new kind
     /// added here fails to compile until every conversion handles it.
     #[inline]
-    #[cfg_attr(not(feature = "alloc"), allow(dead_code))] // direct-CSR builder consumes it next phase
+    // Consumers: Graph resolution (alloc) and CsrGraphBuilder (arena).
+    #[cfg_attr(not(any(feature = "alloc", feature = "arena")), allow(dead_code))]
     pub(crate) fn to_u8(self) -> u8 {
         match self {
             NodeKindTag::Simple => 0,
@@ -60,7 +61,6 @@ impl NodeKindTag {
     /// Rebuild from a storage value; unknown values fall back to
     /// `Simple` (renders the label — nothing is silently invisible).
     #[inline]
-    #[allow(dead_code)] // consumed by the engine's tag resolution (next phase)
     pub(crate) fn from_u8(value: u8) -> Self {
         match value {
             1 => NodeKindTag::Boxed,
@@ -110,9 +110,8 @@ pub trait NodeContent<'a> {
     }
 
     /// Data for the painter: travels like a second label, delivered
-    /// via [`NodePaintCtx`](super::region::NodePaintCtx) once this
-    /// release's engine resolution consumes it (JSON export lands
-    /// with the schema addition).
+    /// via [`NodePaintCtx`](super::region::NodePaintCtx) at paint time
+    /// and exported to JSON as `"payload"` on custom nodes.
     fn payload(&self) -> &'a str {
         ""
     }
@@ -134,7 +133,6 @@ pub trait NodeContent<'a> {
     fn size_is_implicit(&self) -> bool {
         false
     }
-
 }
 
 /// The classic `[label]` node as an explicit object — identical to
