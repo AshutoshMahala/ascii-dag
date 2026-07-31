@@ -1199,7 +1199,9 @@ impl<'a> Graph<'a> {
     pub fn compute_layout(&self) -> crate::ir::LayoutIR<'a> {
         let mut config: LayoutConfig<'_> = LayoutConfig::from(&self.sugiyama_config);
         config.direction = self.direction;
-        crate::algorithms::sugiyama::heap::compute_layout_cfg(self, &config)
+        crate::algorithms::sugiyama::heap::compute_layout_cfg::<
+            crate::algorithms::sugiyama::geometry::Vertical,
+        >(self, &config)
     }
 
     /// Compute the layout using a custom [`LayoutConfig`].
@@ -1223,7 +1225,9 @@ impl<'a> Graph<'a> {
     pub fn compute_layout_with_config(&self, config: &LayoutConfig<'_>) -> crate::ir::LayoutIR<'a> {
         let mut dag = self.clone();
         dag.render_mode = config.render_mode;
-        crate::algorithms::sugiyama::heap::compute_layout_cfg(&dag, config)
+        crate::algorithms::sugiyama::heap::compute_layout_cfg::<
+            crate::algorithms::sugiyama::geometry::Vertical,
+        >(&dag, config)
     }
 
     /// Compute the layout using a custom [`SugiyamaConfig`].

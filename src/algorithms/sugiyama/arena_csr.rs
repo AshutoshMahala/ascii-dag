@@ -197,6 +197,23 @@ pub fn compute_layout_arena_csr<'b>(
     temp_arena: &mut Arena<'_>,
     output_arena: &'b mut Arena<'b>,
 ) -> Result<LayoutIRArena<'b>, GraphError> {
+    compute_layout_arena_csr_axis::<super::geometry::Vertical>(
+        graph,
+        config,
+        temp_arena,
+        output_arena,
+    )
+}
+
+/// Axis-parameterized CSR layout (temp/08 D1). The body currently
+/// spells the roles as y/x — LR-P0 threads `A` inward slice by slice,
+/// each slice gated on byte-identical TD/BT output.
+pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
+    graph: &CsrGraph<'_>,
+    config: &LayoutConfig<'_>,
+    temp_arena: &mut Arena<'_>,
+    output_arena: &'b mut Arena<'b>,
+) -> Result<LayoutIRArena<'b>, GraphError> {
     let node_count = graph.node_count();
     let edge_count = graph.edge_count();
 
@@ -445,7 +462,7 @@ pub fn compute_layout_arena_csr<'b>(
     // Step 5: Assign x-coordinates
     let node_spacing: Coord = config.node_spacing.min(Coord::MAX as usize) as Coord;
     let node_spacing_usize: usize = config.node_spacing;
-    assign_x_coords_csr(
+    assign_x_coords_csr::<A>(
         graph,
         temps.vlevel_offsets,
         temps.vnode_data,
@@ -871,7 +888,8 @@ pub fn compute_layout_arena_csr<'b>(
     }
     for idx in 0..node_count {
         let level = temps.real_coords[idx].0;
-        let h = graph.node_height(idx) as Idx;
+        // Level-axis extent (Vertical: the node's height).
+        let h = A::level_extent(graph.node_width(idx), graph.node_height(idx)) as Idx;
         if level < alloc_size && h > max_node_heights[level] {
             max_node_heights[level] = h;
         }
@@ -3937,7 +3955,7 @@ fn build_virtual_levels_csr(
     (total, max_size)
 }
 
-fn assign_x_coords_csr(
+fn assign_x_coords_csr<A: super::geometry::Axis>(
     graph: &CsrGraph<'_>,
     vlevel_offsets: &[Idx],
     vnode_data: &[Idx],
@@ -3966,11 +3984,11 @@ fn assign_x_coords_csr(
             let vnode_idx = vnode_payload(vnode_data, pos) as usize;
 
             let width: Coord = if vnode_type == 0 {
-                // Real node: use stored width from CsrGraph
-                graph.node_width(vnode_idx) as Coord
+                // Cross-axis extent (Vertical: the stored width).
+                A::cross_extent(graph.node_width(vnode_idx), graph.node_height(vnode_idx)) as Coord
             } else {
-                // Dummy node - use width 3 for visual separation (matches heap mode)
-                3
+                // Dummy clearance — shared constant, matches heap mode.
+                A::DUMMY_CROSS as Coord
             };
 
             if pos < x_coords.len() {

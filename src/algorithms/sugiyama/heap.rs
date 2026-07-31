@@ -71,7 +71,13 @@ impl VNode {
 /// This is the implementation behind `Graph::compute_layout()`. Returns a
 /// renderer-agnostic `LayoutIR` containing node positions, edge routes,
 /// and dimensional information.
-pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>) -> LayoutIR<'a> {
+/// Compute the layout under axis profile `A` (temp/08 D1). The body
+/// currently spells the roles as y/x — LR-P0 threads `A` inward slice
+/// by slice, each slice gated on byte-identical TD/BT output.
+pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
+    dag: &Graph<'a>,
+    config: &LayoutConfig<'_>,
+) -> LayoutIR<'a> {
     if dag.nodes.is_empty() {
         return LayoutIRBuilder::new().build();
     }
@@ -204,8 +210,11 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
 
         for vnode in level_vnodes {
             let width = match vnode {
-                VNode::Real(idx) => dag.get_node_width(*idx),
-                VNode::Dummy { .. } => 3, // Width 3 for visual separation between parallel edges
+                // Cross-axis extent (Vertical: the node's width).
+                VNode::Real(idx) => {
+                    A::cross_extent(dag.get_node_width(*idx), dag.get_node_height(*idx))
+                }
+                VNode::Dummy { .. } => A::DUMMY_CROSS,
             };
             level_x.push(x);
             level_w.push(width);
@@ -586,7 +595,9 @@ pub(crate) fn compute_layout_cfg<'a>(dag: &Graph<'a>, config: &LayoutConfig<'_>)
     for (level, level_vnodes) in virtual_levels.iter().enumerate() {
         for vnode in level_vnodes {
             if let VNode::Real(idx) = vnode {
-                let node_height = dag.get_node_height(*idx);
+                // Level-axis extent (Vertical: the node's height).
+                let node_height =
+                    A::level_extent(dag.get_node_width(*idx), dag.get_node_height(*idx));
                 if node_height > max_node_height[level] {
                     max_node_height[level] = node_height;
                 }

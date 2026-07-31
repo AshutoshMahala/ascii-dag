@@ -40,6 +40,64 @@ pub(crate) const DUMMY_WIDTH: usize = 3;
 /// external node pushed or compacted next to it.
 pub(crate) const ENVELOPE_CLEARANCE: usize = 1;
 
+// ── Axis profile (temp/08 D1) ───────────────────────────────────────────
+//
+// The layout pipeline computes in two ROLES: a level (flow) axis and a
+// cross axis. Today's code spells the roles as y and x; the `Axis`
+// trait names which node dimension and which constants feed each role,
+// so ONE pipeline serves TopDown/BottomUp (`Vertical`) and, once
+// LR-P1 lands, LeftRight/RightLeft (`Horizontal`). Zero-sized +
+// monomorphized: every lookup inlines and constant-folds. LR-P0's
+// byte-identity gate proves unchanged BEHAVIOR; the performance claim
+// is verified separately by LR-N1's timing and binary-size checks.
+
+/// Which node dimension and which spacing constants feed the level
+/// axis vs the cross axis. Implemented by zero-sized marker types;
+/// never stored, never public — layout-internal only.
+// Consumers: heap layout (alloc) and CSR layout (arena); the trait is
+// wholly unused in builds with neither feature. SG_PAD_* items are
+// consumed by LR-P0 slice 3 — narrow this to a cfg_attr on
+// not(alloc|arena) when that slice lands.
+#[allow(dead_code)]
+pub(crate) trait Axis {
+    /// Node extent along the level (flow) axis. Vertical: height.
+    fn level_extent(width: usize, height: usize) -> usize;
+    /// Node extent across the flow. Vertical: width.
+    fn cross_extent(width: usize, height: usize) -> usize;
+    /// Subgraph border padding along the level axis (before, after
+    /// content). Vertical: (`SUBGRAPH_V_PAD_TOP`, `SUBGRAPH_V_PAD_BOTTOM`).
+    const SG_PAD_LEVEL: (usize, usize);
+    /// Subgraph border padding across the flow (before, after) —
+    /// asymmetric because the box label stays physically at the TOP:
+    /// in Vertical the label row lives in the level-axis "before" pad;
+    /// in Horizontal it lives in the cross-axis "before" pad.
+    /// Vertical: (`SUBGRAPH_H_PAD`, `SUBGRAPH_H_PAD`).
+    const SG_PAD_CROSS: (usize, usize);
+    /// Cross-axis clearance a dummy waypoint's body reserves.
+    /// Vertical: `DUMMY_WIDTH` (covers the `edge_idx % 4` draw offset).
+    const DUMMY_CROSS: usize;
+}
+
+/// The TopDown/BottomUp profile: levels are rows, in-level order is
+/// columns. (`Horizontal` arrives with LR-P1.)
+pub(crate) struct Vertical;
+
+impl Axis for Vertical {
+    #[inline]
+    fn level_extent(_width: usize, height: usize) -> usize {
+        height
+    }
+
+    #[inline]
+    fn cross_extent(width: usize, _height: usize) -> usize {
+        width
+    }
+
+    const SG_PAD_LEVEL: (usize, usize) = (SUBGRAPH_V_PAD_TOP, SUBGRAPH_V_PAD_BOTTOM);
+    const SG_PAD_CROSS: (usize, usize) = (SUBGRAPH_H_PAD, SUBGRAPH_H_PAD);
+    const DUMMY_CROSS: usize = DUMMY_WIDTH;
+}
+
 /// Cap on how far a subgraph *label* may widen its bounding box.
 ///
 /// A box is always wide enough for its member nodes; the label only
