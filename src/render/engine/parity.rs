@@ -1632,6 +1632,128 @@ mod node_painters {
         );
     }
 
+    /// Failed direct-builder insertions must be atomic: any exhausted
+    /// capacity leaves the builder untouched (no committed node, no
+    /// shifted indices).
+    #[test]
+    fn direct_builder_failures_are_atomic() {
+        use crate::graph::csr::{CsrGraph, CsrGraphBuilder};
+        // Exhausted custom-entry capacity (max_custom = 0).
+        let size = CsrGraph::required_arena_size_with_content(2, 1, 64, 0, 0) + 256;
+        let mut buf = vec![0u8; size];
+        let mut arena = Arena::new(&mut buf);
+        let mut b = CsrGraphBuilder::new(&mut arena, 2, 1, 64, 0).unwrap();
+        let failed = b.add_node(
+            1,
+            CustomNode {
+                label: "card",
+                width: 8,
+                height: 3,
+                painter: Some(card_painter),
+                payload: "p",
+            },
+        );
+        assert!(failed.is_none(), "no custom capacity → None");
+        // The failed insertion committed nothing: the next node is 0.
+        assert_eq!(b.add_node(1, "ok"), Some(0));
+
+        // Exhausted label/payload storage.
+        let size = CsrGraph::required_arena_size_with_content(2, 1, 4, 0, 1) + 256;
+        let mut buf = vec![0u8; size];
+        let mut arena = Arena::new(&mut buf);
+        let mut b = CsrGraphBuilder::new(&mut arena, 2, 1, 4, 1).unwrap();
+        let failed = b.add_node(
+            1,
+            CustomNode {
+                label: "n",
+                width: 8,
+                height: 3,
+                painter: Some(card_painter),
+                payload: "way too long for four bytes",
+            },
+        );
+        assert!(failed.is_none(), "no payload space → None");
+        assert_eq!(b.add_node(1, "ok"), Some(0));
+    }
+
+    /// NC9 parity includes Unicode: character-based sizing on the
+    /// direct builder matches `Graph`, so multi-byte labels render
+    /// byte-identically through both construction paths.
+    #[test]
+    fn unicode_labels_parity_direct_vs_graph() {
+        use crate::graph::csr::{CsrGraph, CsrGraphBuilder};
+        let options = RenderOptions::plain();
+        let build = || {
+            let mut g = Graph::new();
+            g.add_node(1, "Caché");
+            g.add_node(2, BoxedNode("naïve"));
+            g.add_edge(1, 2, None);
+            g
+        };
+        let via_graph = csr_engine(&build(), &options);
+
+        let label_bytes = "Caché".len() + "naïve".len();
+        let size = CsrGraph::required_arena_size_with_content(2, 1, label_bytes, 0, 0) + 256;
+        let mut buf = vec![0u8; size];
+        let mut arena = Arena::new(&mut buf);
+        let mut b = CsrGraphBuilder::new(&mut arena, 2, 1, label_bytes, 0).unwrap();
+        b.add_node(1, "Caché").unwrap();
+        b.add_node(2, BoxedNode("naïve")).unwrap();
+        b.add_edge(0, 1).unwrap();
+        let csr = b.build().unwrap();
+        let mut temp_buf = vec![0u8; 256 * 1024];
+        let mut out_buf = vec![0u8; 256 * 1024];
+        let mut ta = Arena::new(&mut temp_buf);
+        let mut oa = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&LayoutConfig::standard(), &mut ta, &mut oa)
+            .expect("layout");
+        assert_same(
+            "unicode labels (direct vs Graph→to_csr)",
+            &via_graph,
+            &ir.render_string(&options),
+        );
+    }
+
+    /// `estimate_json_size` must be a real upper bound with custom
+    /// content: payload bytes, escaping, and Unicode included — an
+    /// exactly estimate-sized buffer always serializes.
+    #[test]
+    fn json_estimate_covers_custom_content() {
+        let mut g = Graph::new();
+        g.add_node(
+            1,
+            CustomNode {
+                label: "Caché",
+                width: 10,
+                height: 4,
+                painter: Some(card_painter),
+                payload: "line \"one\"\nline\ttwo — naïve",
+            },
+        );
+        g.add_node(2, "sink");
+        g.add_edge(1, 2, None);
+        let config = LayoutConfig::standard();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let mut temp_buf = vec![0u8; 256 * 1024];
+        let mut out_buf = vec![0u8; 256 * 1024];
+        let mut ta = Arena::new(&mut temp_buf);
+        let mut oa = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&config, &mut ta, &mut oa)
+            .expect("layout");
+        let estimate = ir.estimate_json_size();
+        let mut buf = vec![0u8; estimate];
+        let written = ir
+            .serialize_json(&mut buf)
+            .expect("estimate-sized buffer must suffice");
+        let json = core::str::from_utf8(&buf[..written]).unwrap();
+        assert!(json.contains("\"content_kind\":\"custom\""), "{json}");
+        assert!(json.contains("\"payload\":"), "{json}");
+    }
+
     /// The whole reserved area hits the node, declaration-agnostic.
     #[test]
     fn multi_row_nodes_hit_across_their_area() {

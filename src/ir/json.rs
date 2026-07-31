@@ -250,12 +250,30 @@ impl<'a> LayoutIRArena<'a> {
     pub fn estimate_json_size(&self) -> usize {
         // Base: {"version":"1.2","width":N,"height":N,"level_count":N,"nodes":[...],"edges":[...]}
         let base: usize = 100;
-        // Each node: ~150 bytes (fields + label)
-        let nodes = self.node_count().saturating_mul(150);
-        // Each edge: ~200 bytes (fields + path + optional label)
+        // Each node: fixed fields incl. `content_kind` (~180 bytes)
+        // plus its label at worst-case JSON escaping (6 bytes per input
+        // byte — \u00XX form).
+        let nodes = self.node_count().saturating_mul(180);
+        let node_labels: usize = (0..self.node_count())
+            .map(|i| self.node_label(i).len().saturating_mul(6))
+            .fold(0usize, |a, b| a.saturating_add(b));
+        // Custom payloads: key/quotes overhead + escaped bytes.
+        let payloads: usize = self
+            .custom_nodes()
+            .iter()
+            .map(|entry| entry.payload_len.saturating_mul(6).saturating_add(16))
+            .fold(0usize, |a, b| a.saturating_add(b));
+        // Each edge: fixed fields + path (~200 bytes) plus its label
+        // at worst-case escaping.
         let edges = self.edge_count().saturating_mul(200);
-        // Each subgraph: ~120 bytes
+        let edge_labels: usize = (0..self.edge_count())
+            .map(|i| self.edge_label(i).len().saturating_mul(6))
+            .fold(0usize, |a, b| a.saturating_add(b));
+        // Each subgraph: fixed fields (~120 bytes) plus escaped label.
         let sgs = self.subgraph_count().saturating_mul(120);
+        let sg_labels: usize = (0..self.subgraph_count())
+            .map(|i| self.subgraph_label(i).len().saturating_mul(6))
+            .fold(0usize, |a, b| a.saturating_add(b));
         // Waypoints: ~20 bytes each
         let wps: usize = self
             .edges()
@@ -268,8 +286,12 @@ impl<'a> LayoutIRArena<'a> {
             })
             .fold(0usize, |a, b| a.saturating_add(b));
         base.saturating_add(nodes)
+            .saturating_add(node_labels)
+            .saturating_add(payloads)
             .saturating_add(edges)
+            .saturating_add(edge_labels)
             .saturating_add(sgs)
+            .saturating_add(sg_labels)
             .saturating_add(wps)
     }
 }

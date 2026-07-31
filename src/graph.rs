@@ -482,6 +482,13 @@ impl<'a> Graph<'a> {
         self.direction = direction;
     }
 
+    /// The rank direction set via [`set_direction`](Self::set_direction)
+    /// (`TopDown` by default) — e.g. to carry it into a
+    /// [`LayoutConfig`] for the CSR pipeline.
+    pub fn direction(&self) -> Direction {
+        self.direction
+    }
+
     /// Set the full Sugiyama pipeline configuration.
     ///
     /// # Examples

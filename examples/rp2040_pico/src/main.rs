@@ -379,7 +379,7 @@ fn run_arena_benchmark(
         
         let mut graph_arena = Arena::new(graph_mem);
         let label_bytes = nodes.iter().map(|(_, l)| l.len()).sum::<usize>() + 256;
-        let mut builder = match CsrGraphBuilder::new(&mut graph_arena, nodes.len(), edges.len(), label_bytes) {
+        let mut builder = match CsrGraphBuilder::new(&mut graph_arena, nodes.len(), edges.len(), label_bytes, 0) {
             Some(b) => b,
             None => {
                 write_serial(serial, usb_dev, "  [Arena FAIL: CsrGraphBuilder::new]\r\n");

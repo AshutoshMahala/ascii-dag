@@ -776,12 +776,16 @@ impl<'a> CsrGraphBuilder<'a> {
 
     /// Add a node to the graph. Returns the node index (0 to N-1).
     ///
-    /// Accepts anything implementing `NodeContent` — a bare `&str`
-    /// (default width: label bytes + 2, height 1 — the direct
-    /// builder's historical formula), a built-in `SimpleNode`/
-    /// `BoxedNode`, or a custom declaration whose painter/payload are
-    /// carried through the arena pipeline (payload bytes come out of
-    /// `max_label_bytes`; entries out of `max_custom`).
+    /// Accepts anything implementing `NodeContent` — a bare `&str`,
+    /// a built-in `SimpleNode`/`BoxedNode`, or a custom declaration
+    /// whose painter/payload are carried through the arena pipeline
+    /// (payload bytes come out of `max_label_bytes`; entries out of
+    /// `max_custom`). Sizing matches `Graph::add_node` exactly —
+    /// character-based (NC9 parity: the same declaration renders
+    /// byte-identically whether built here or via `Graph → to_csr`).
+    ///
+    /// Failure-atomic: on `None` (any capacity exhausted) the builder
+    /// is unchanged.
     pub fn add_node<'c>(
         &mut self,
         id: usize,
@@ -789,28 +793,27 @@ impl<'a> CsrGraphBuilder<'a> {
     ) -> Option<usize> {
         let label = node.label();
         let (width, height) = node.size();
-        // Label-only content keeps the direct builder's historical
-        // byte-based width; declared sizes are authoritative.
-        let (width, height) = if node.size_is_implicit() {
-            (label.len() + 2, 1)
-        } else {
-            (width, height)
-        };
         let kind = node.kind();
         let painter = node.painter();
         let payload = node.payload();
+        let has_custom = painter.is_some() || !payload.is_empty();
+        // Preflight EVERY capacity before committing anything — a
+        // failed insertion must leave the builder untouched.
+        if self.current_node_count >= self.max_nodes {
+            return None;
+        }
+        if self.current_label_offset + label.len() + payload.len() > self.labels.len() {
+            return None;
+        }
+        if has_custom && self.current_custom_count >= self.custom_nodes.len() {
+            return None;
+        }
         let idx = self.add_node_with_size(id, label, width, height)?;
         // Overwrite the tag written by add_node_with_size (Simple).
         self.nodes[idx * NODE_STRIDE + NODE_FLAGS] =
             (kind.to_u8() as usize & NODE_TAG_MASK) << NODE_TAG_SHIFT;
-        if painter.is_some() || !payload.is_empty() {
-            if self.current_custom_count >= self.custom_nodes.len() {
-                return None;
-            }
+        if has_custom {
             let bytes = payload.as_bytes();
-            if self.current_label_offset + bytes.len() > self.labels.len() {
-                return None;
-            }
             self.labels[self.current_label_offset..self.current_label_offset + bytes.len()]
                 .copy_from_slice(bytes);
             self.custom_nodes[self.current_custom_count] = crate::ir::arena::CustomNodeArena {

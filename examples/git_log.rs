@@ -1,4 +1,16 @@
 use ascii_dag::graph::Graph;
+use ascii_dag::RenderOptions;
+
+#[path = "support/csr.rs"]
+mod csr;
+
+fn show(dag: &ascii_dag::Graph<'_>) {
+    if csr::requested() {
+        println!("{}", csr::render(dag, &RenderOptions::plain()));
+    } else {
+        println!("{}", dag.render());
+    }
+}
 
 fn main() {
     println!("\n=== Git History Visualization ===\n");
@@ -24,7 +36,7 @@ fn main() {
     dag.add_edge(3, 4, None);
     dag.add_edge(4, 5, None);
 
-    println!("{}", dag.render());
+    show(&dag);
 
     println!("\n=== Complex Branching ===\n");
     // Diverge -> Diverge -> Converge
@@ -53,5 +65,5 @@ fn main() {
     complex.add_edge(13, 16, None);
     complex.add_edge(15, 16, None);
 
-    println!("{}", complex.render());
+    show(&complex);
 }
