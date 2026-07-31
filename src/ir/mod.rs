@@ -127,6 +127,11 @@ pub struct LayoutNode<'a> {
     /// `None` for real (explicit/implicit) nodes. Mirrors zigraph's
     /// `LayoutNode.edge_index`.
     pub edge_index: Option<usize>,
+    /// Content kind declared at construction (raw `NodeKindTag`
+    /// value): 0 = simple `[label]`, 1 = boxed, 2 = custom. Dummies
+    /// and hand-built IRs use 0. Fits the struct's existing padding —
+    /// no size change.
+    pub content_tag: u8,
 }
 
 /// How an edge is routed between nodes.
@@ -253,6 +258,9 @@ pub struct LayoutIR<'a> {
     pub(crate) edges: Vec<LayoutEdge<'a>>,
     /// All subgraph bounding boxes (empty when no subgraphs)
     pub(crate) subgraphs: Vec<SubgraphInfo<'a>>,
+    /// Sparse custom-content entries (node index, painter, payload),
+    /// sorted by node index — field parity with the arena IR
+    pub(crate) custom_nodes: Vec<(usize, Option<crate::render::engine::NodePaintFn>, &'a str)>,
     /// Total width in character cells
     pub(crate) width: usize,
     /// Total height in lines
@@ -569,6 +577,7 @@ pub struct LayoutIRBuilder<'a> {
     level_count: usize,
     levels: Vec<Vec<usize>>,
     direction: crate::graph::Direction,
+    custom_nodes: Vec<(usize, Option<crate::render::engine::NodePaintFn>, &'a str)>,
 }
 
 #[cfg(feature = "alloc")]
@@ -594,6 +603,19 @@ impl<'a> LayoutIRBuilder<'a> {
         // Track nodes by level
         if level < self.levels.len() {
             self.levels[level].push(idx);
+        }
+    }
+
+    /// Attach custom content (painter + payload) to the most recently
+    /// added node. Entries stay sorted by node index because emission
+    /// appends nodes in order.
+    pub fn add_custom_for_last(
+        &mut self,
+        painter: Option<crate::render::engine::NodePaintFn>,
+        payload: &'a str,
+    ) {
+        if let Some(idx) = self.nodes.len().checked_sub(1) {
+            self.custom_nodes.push((idx, painter, payload));
         }
     }
 
@@ -635,6 +657,7 @@ impl<'a> LayoutIRBuilder<'a> {
             nodes: self.nodes,
             edges: self.edges,
             subgraphs: self.subgraphs,
+            custom_nodes: self.custom_nodes,
             width: self.width,
             height: self.height,
             level_count: self.level_count,

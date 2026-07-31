@@ -136,7 +136,7 @@ fn run_comparison(topology: Topology, count: usize) {
         let mut graph_arena = Arena::new(&mut graph_mem);
 
         let mut builder =
-            CsrGraphBuilder::new(&mut graph_arena, nodes.len(), edges.len(), label_bytes)
+            CsrGraphBuilder::new(&mut graph_arena, nodes.len(), edges.len(), label_bytes, 0)
                 .expect("Failed to create CsrGraphBuilder");
 
         for (id, label) in &nodes {

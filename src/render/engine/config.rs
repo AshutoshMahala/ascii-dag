@@ -8,8 +8,8 @@
 use super::charset::Charset;
 use super::color::ColorMode;
 use super::style::{
-    EdgeLabelStyleFn, EdgeStyleFn, NodeStyleFn, SubgraphStyleFn, default_edge_label_style,
-    default_edge_style, default_node_style, default_subgraph_style,
+    EdgeLabelStyleFn, EdgeStyleFn, SubgraphStyleFn, default_edge_label_style, default_edge_style,
+    default_subgraph_style,
 };
 use crate::render::colors::Palette;
 
@@ -38,8 +38,6 @@ pub struct RenderOptions {
     pub palette: Palette,
     /// Per-edge style callback.
     pub edge_style_fn: EdgeStyleFn,
-    /// Per-node style callback.
-    pub node_style_fn: NodeStyleFn,
     /// Per-subgraph style callback.
     pub subgraph_style_fn: SubgraphStyleFn,
     /// Per-edge-label style callback.
@@ -58,7 +56,6 @@ impl RenderOptions {
             legend: false,
             palette: Palette::Ansi,
             edge_style_fn: default_edge_style,
-            node_style_fn: default_node_style,
             subgraph_style_fn: default_subgraph_style,
             edge_label_style_fn: default_edge_label_style,
         }

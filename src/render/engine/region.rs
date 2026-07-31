@@ -54,6 +54,10 @@ pub struct NodePaintCtx<'a> {
     /// not be re-parsed and re-drawn every band); ignoring it stays
     /// correct.
     pub visible_rows: (usize, usize),
+    /// The node's declared payload — the **data** half of the
+    /// template/data pair, set at `add_node` and parsed by the painter
+    /// as it draws (empty when the node declared none).
+    pub payload: &'a str,
 }
 
 /// A clipped, node-local view onto the render canvas.

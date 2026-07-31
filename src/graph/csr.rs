@@ -33,6 +33,12 @@ const NODE_WIDTH: usize = 3;
 const NODE_HEIGHT: usize = 4;
 const NODE_FLAGS: usize = 5;
 
+/// `NODE_FLAGS` bits 1–2: the node's content kind tag (raw
+/// `NodeKindTag` value: 0 = simple, 1 = boxed, 2 = custom) — packed
+/// into the existing flags word, zero extra stride (D6).
+const NODE_TAG_SHIFT: usize = 1;
+const NODE_TAG_MASK: usize = 0b11;
+
 /// `NODE_FLAGS` bit: the node was auto-created by an edge reference
 /// (`NodeKind::Implicit` in the layout IR — heap parity).
 const NODE_FLAG_IMPLICIT: usize = 1;
@@ -76,6 +82,11 @@ pub struct CsrGraph<'a> {
     /// Children adjacency data: indices of child nodes
     children_data: &'a [u32],
 
+    /// Sparse custom-content entries (graph node index, painter,
+    /// payload offset/len into `labels`), sorted by node index. Reuses
+    /// the arena-IR entry shape — same fields, different index space.
+    custom_nodes: &'a [crate::ir::arena::CustomNodeArena],
+
     /// Parents adjacency offsets
     parents_offsets: &'a [u32],
     /// Parents adjacency data: indices of parent nodes
@@ -99,6 +110,30 @@ impl<'a> CsrGraph<'a> {
     #[inline]
     pub fn required_arena_size(node_count: usize, edge_count: usize, label_bytes: usize) -> usize {
         Self::required_arena_size_with_subgraphs(node_count, edge_count, label_bytes, 0)
+    }
+
+    /// Like [`required_arena_size_with_subgraphs`](Self::required_arena_size_with_subgraphs),
+    /// plus capacity for declared node content: `label_bytes` must
+    /// already include custom payload bytes (payloads ride the label
+    /// storage), and `custom_count` sizes the sparse entry array —
+    /// the number of nodes declaring a painter or non-empty payload.
+    pub fn required_arena_size_with_content(
+        node_count: usize,
+        edge_count: usize,
+        label_bytes: usize,
+        subgraph_count: usize,
+        custom_count: usize,
+    ) -> usize {
+        Self::required_arena_size_with_subgraphs(
+            node_count,
+            edge_count,
+            label_bytes,
+            subgraph_count,
+        )
+        .saturating_add(
+            custom_count.saturating_mul(core::mem::size_of::<crate::ir::arena::CustomNodeArena>()),
+        )
+        .saturating_add(if custom_count == 0 { 0 } else { 16 })
     }
 
     /// Calculate required arena size including subgraph storage.
@@ -193,6 +228,23 @@ impl<'a> CsrGraph<'a> {
     #[inline]
     pub fn node_is_implicit(&self, index: usize) -> bool {
         self.nodes[index * NODE_STRIDE + NODE_FLAGS] & NODE_FLAG_IMPLICIT != 0
+    }
+
+    /// The node's content kind tag (raw `NodeKindTag` value: 0 =
+    /// simple, 1 = boxed, 2 = custom).
+    pub fn node_content_tag(&self, index: usize) -> u8 {
+        ((self.nodes[index * NODE_STRIDE + NODE_FLAGS] >> NODE_TAG_SHIFT) & NODE_TAG_MASK) as u8
+    }
+
+    /// Sparse custom-content entries, sorted by graph node index.
+    pub(crate) fn custom_nodes(&self) -> &[crate::ir::arena::CustomNodeArena] {
+        self.custom_nodes
+    }
+
+    /// A custom entry's payload text.
+    pub(crate) fn custom_payload(&self, entry: &crate::ir::arena::CustomNodeArena) -> &str {
+        let bytes = &self.labels[entry.payload_offset..entry.payload_offset + entry.payload_len];
+        core::str::from_utf8(bytes).unwrap_or("")
     }
 
     /// Get children of a node by index.
@@ -410,7 +462,7 @@ impl<'a> CsrGraph<'a> {
         edges: &[(usize, usize)],
     ) -> Option<CsrGraph<'a>> {
         let label_bytes: usize = nodes.iter().map(|(_, l)| l.len()).sum();
-        let mut builder = CsrGraphBuilder::new(arena, nodes.len(), edges.len(), label_bytes + 64)?;
+        let mut builder = CsrGraphBuilder::new(arena, nodes.len(), edges.len(), label_bytes + 64, 0)?;
 
         for &(id, label) in nodes {
             builder.add_node(id, label)?;
@@ -456,7 +508,8 @@ impl<'a> CsrGraph<'a> {
         let node_label_bytes: usize = nodes.iter().map(|(_, l)| l.len()).sum();
         let edge_label_bytes: usize = edges.iter().map(|(_, _, l)| l.map_or(0, |s| s.len())).sum();
         let label_bytes = node_label_bytes + edge_label_bytes;
-        let mut builder = CsrGraphBuilder::new(arena, nodes.len(), edges.len(), label_bytes + 64)?;
+        let mut builder =
+            CsrGraphBuilder::new(arena, nodes.len(), edges.len(), label_bytes + 64, 0)?;
 
         for &(id, label) in nodes {
             builder.add_node(id, label)?;
@@ -534,11 +587,15 @@ pub struct CsrGraphBuilder<'a> {
     subgraph_data: &'a mut [usize],
     node_subgraph: &'a mut [u32],
 
+    // Sparse custom-content entries (graph node index order)
+    custom_nodes: &'a mut [crate::ir::arena::CustomNodeArena],
+
     // Tracking current progress
     current_node_count: usize,
     current_edge_count: usize,
     current_label_offset: usize,
     current_subgraph_count: usize,
+    current_custom_count: usize,
 
     // Limits
     max_nodes: usize,
@@ -548,11 +605,16 @@ pub struct CsrGraphBuilder<'a> {
 
 impl<'a> CsrGraphBuilder<'a> {
     /// Create a new builder with known maximum graph dimensions.
+    /// `max_label_bytes` must also cover custom payload bytes (payloads
+    /// ride the label storage); `max_custom` sizes the sparse
+    /// custom-content entry array — pass 0 when no node declares a
+    /// painter or payload.
     pub fn new(
         arena: &'a mut Arena<'a>,
         max_nodes: usize,
         max_edges: usize,
         max_label_bytes: usize,
+        max_custom: usize,
     ) -> Option<Self> {
         // Allocate all memory from arena using raw pointers. Counts are
         // pre-multiplied with checked arithmetic — adversarial sizes
@@ -564,6 +626,15 @@ impl<'a> CsrGraphBuilder<'a> {
         let (parents_offsets_ptr, _) = arena.alloc_raw::<u32>(max_nodes + 1)?;
         let (parents_data_ptr, _) = arena.alloc_raw::<u32>(max_edges)?;
         let (labels_ptr, _) = arena.alloc_raw::<u8>(max_label_bytes)?;
+        let custom_ptr = if max_custom > 0 {
+            Some(
+                arena
+                    .alloc_raw::<crate::ir::arena::CustomNodeArena>(max_custom)?
+                    .0,
+            )
+        } else {
+            None
+        };
 
         // Convert to slices
         let (nodes, edges, children_offsets, children_data, parents_offsets, parents_data, labels) = unsafe {
@@ -586,6 +657,12 @@ impl<'a> CsrGraphBuilder<'a> {
         // (safe: zero-length slices from a valid, non-null, aligned pointer)
         let subgraph_data: &'a mut [usize] = &mut [];
         let node_subgraph: &'a mut [u32] = &mut [];
+        // SAFETY: alloc_raw zeroed the memory; all-zero is a valid
+        // CustomNodeArena (`Option<fn>` is null-pointer optimized).
+        let custom_nodes: &'a mut [crate::ir::arena::CustomNodeArena] = match custom_ptr {
+            Some(ptr) => unsafe { core::slice::from_raw_parts_mut(ptr, max_custom) },
+            None => &mut [],
+        };
 
         Some(Self {
             arena,
@@ -598,10 +675,12 @@ impl<'a> CsrGraphBuilder<'a> {
             labels,
             subgraph_data,
             node_subgraph,
+            custom_nodes,
             current_node_count: 0,
             current_edge_count: 0,
             current_label_offset: 0,
             current_subgraph_count: 0,
+            current_custom_count: 0,
             max_nodes,
             max_edges,
             max_subgraphs: 0,
@@ -617,6 +696,7 @@ impl<'a> CsrGraphBuilder<'a> {
         max_edges: usize,
         max_label_bytes: usize,
         max_subgraphs: usize,
+        max_custom: usize,
     ) -> Option<Self> {
         let (nodes_ptr, _) = arena.alloc_raw::<usize>(max_nodes * NODE_STRIDE)?;
         let (edges_ptr, _) = arena.alloc_raw::<u32>(max_edges * EDGE_STRIDE)?;
@@ -625,6 +705,15 @@ impl<'a> CsrGraphBuilder<'a> {
         let (parents_offsets_ptr, _) = arena.alloc_raw::<u32>(max_nodes + 1)?;
         let (parents_data_ptr, _) = arena.alloc_raw::<u32>(max_edges)?;
         let (labels_ptr, _) = arena.alloc_raw::<u8>(max_label_bytes)?;
+        let custom_ptr = if max_custom > 0 {
+            Some(
+                arena
+                    .alloc_raw::<crate::ir::arena::CustomNodeArena>(max_custom)?
+                    .0,
+            )
+        } else {
+            None
+        };
         let (sg_data_ptr, _) = arena.alloc_raw::<usize>(max_subgraphs * SUBGRAPH_STRIDE)?;
         let (node_sg_ptr, _) = arena.alloc_raw::<u32>(max_nodes)?;
 
@@ -655,6 +744,12 @@ impl<'a> CsrGraphBuilder<'a> {
         children_offsets.fill(0);
         parents_offsets.fill(0);
         node_subgraph.fill(u32::MAX); // no subgraph
+        // SAFETY: alloc_raw zeroed the memory; all-zero is a valid
+        // CustomNodeArena (`Option<fn>` is null-pointer optimized).
+        let custom_nodes: &'a mut [crate::ir::arena::CustomNodeArena] = match custom_ptr {
+            Some(ptr) => unsafe { core::slice::from_raw_parts_mut(ptr, max_custom) },
+            None => &mut [],
+        };
 
         Some(Self {
             arena,
@@ -667,21 +762,67 @@ impl<'a> CsrGraphBuilder<'a> {
             labels,
             subgraph_data,
             node_subgraph,
+            custom_nodes,
             current_node_count: 0,
             current_edge_count: 0,
             current_label_offset: 0,
             current_subgraph_count: 0,
+            current_custom_count: 0,
             max_nodes,
             max_edges,
             max_subgraphs,
         })
     }
 
-    /// Add a node to the graph with default width (label + 2 for brackets) and height 1.
-    /// Returns the node index (0 to N-1).
-    pub fn add_node(&mut self, id: usize, label: &str) -> Option<usize> {
-        let width = label.len() + 2; // brackets
-        self.add_node_with_size(id, label, width, 1)
+    /// Add a node to the graph. Returns the node index (0 to N-1).
+    ///
+    /// Accepts anything implementing `NodeContent` — a bare `&str`
+    /// (default width: label bytes + 2, height 1 — the direct
+    /// builder's historical formula), a built-in `SimpleNode`/
+    /// `BoxedNode`, or a custom declaration whose painter/payload are
+    /// carried through the arena pipeline (payload bytes come out of
+    /// `max_label_bytes`; entries out of `max_custom`).
+    pub fn add_node<'c>(
+        &mut self,
+        id: usize,
+        node: impl crate::render::engine::NodeContent<'c>,
+    ) -> Option<usize> {
+        let label = node.label();
+        let (width, height) = node.size();
+        // Label-only content keeps the direct builder's historical
+        // byte-based width; declared sizes are authoritative.
+        let (width, height) = if node.size_is_implicit() {
+            (label.len() + 2, 1)
+        } else {
+            (width, height)
+        };
+        let kind = node.kind();
+        let painter = node.painter();
+        let payload = node.payload();
+        let idx = self.add_node_with_size(id, label, width, height)?;
+        // Overwrite the tag written by add_node_with_size (Simple).
+        self.nodes[idx * NODE_STRIDE + NODE_FLAGS] =
+            (kind.to_u8() as usize & NODE_TAG_MASK) << NODE_TAG_SHIFT;
+        if painter.is_some() || !payload.is_empty() {
+            if self.current_custom_count >= self.custom_nodes.len() {
+                return None;
+            }
+            let bytes = payload.as_bytes();
+            if self.current_label_offset + bytes.len() > self.labels.len() {
+                return None;
+            }
+            self.labels[self.current_label_offset..self.current_label_offset + bytes.len()]
+                .copy_from_slice(bytes);
+            self.custom_nodes[self.current_custom_count] = crate::ir::arena::CustomNodeArena {
+                node_idx: idx,
+                painter,
+                payload_offset: self.current_label_offset,
+                payload_len: bytes.len(),
+            };
+            self.current_label_offset += bytes.len();
+            self.current_custom_count += 1;
+        }
+        Some(idx)
     }
 
     /// Add a node with explicit display dimensions.
@@ -832,10 +973,12 @@ impl<'a> CsrGraphBuilder<'a> {
             labels,
             subgraph_data,
             node_subgraph,
+            custom_nodes,
             current_node_count,
             current_edge_count,
             current_label_offset,
             current_subgraph_count,
+            current_custom_count,
             ..
         } = self;
 
@@ -916,6 +1059,7 @@ impl<'a> CsrGraphBuilder<'a> {
             parents_offsets: &parents_offsets[..node_count + 1],
             parents_data: &parents_data[..edge_count],
             labels: &labels[..current_label_offset],
+            custom_nodes: &custom_nodes[..current_custom_count],
             subgraph_data: &subgraph_data[..current_subgraph_count * SUBGRAPH_STRIDE],
             subgraph_count: current_subgraph_count,
             node_subgraph: if current_subgraph_count > 0 {
@@ -986,7 +1130,10 @@ impl<'a> super::Graph<'a> {
             .filter_map(|(_, _, label)| label.map(|l| l.len()))
             .sum();
         let sg_label_bytes: usize = self.subgraphs.iter().map(|sg| sg.label.len()).sum();
-        let total_label_bytes: usize = node_label_bytes + edge_label_bytes + sg_label_bytes;
+        // Custom payloads ride the label storage, like labels.
+        let payload_bytes: usize = self.node_custom.iter().map(|entry| entry.2.len()).sum();
+        let total_label_bytes: usize =
+            node_label_bytes + edge_label_bytes + sg_label_bytes + payload_bytes;
 
         // Allocate all memory from arena using raw pointers
         // This avoids the borrow checker issue with multiple mutable borrows
@@ -1006,6 +1153,16 @@ impl<'a> super::Graph<'a> {
         };
         let node_sg_ptr = if sg_count > 0 {
             Some(arena.alloc_raw::<u32>(node_count)?.0)
+        } else {
+            None
+        };
+        let custom_count = self.node_custom.len();
+        let custom_ptr = if custom_count > 0 {
+            Some(
+                arena
+                    .alloc_raw::<crate::ir::arena::CustomNodeArena>(custom_count)?
+                    .0,
+            )
         } else {
             None
         };
@@ -1032,10 +1189,14 @@ impl<'a> super::Graph<'a> {
             nodes[idx * NODE_STRIDE + NODE_LABEL_LEN] = label.len();
             nodes[idx * NODE_STRIDE + NODE_WIDTH] = self.get_node_width(idx);
             nodes[idx * NODE_STRIDE + NODE_HEIGHT] = self.get_node_height(idx);
-            nodes[idx * NODE_STRIDE + NODE_FLAGS] = if self.auto_created.contains(&id) {
-                NODE_FLAG_IMPLICIT
-            } else {
-                0
+            nodes[idx * NODE_STRIDE + NODE_FLAGS] = {
+                let implicit = if self.auto_created.contains(&id) {
+                    NODE_FLAG_IMPLICIT
+                } else {
+                    0
+                };
+                let tag = (self.node_kind_tag[idx] as usize & NODE_TAG_MASK) << NODE_TAG_SHIFT;
+                implicit | tag
             };
 
             // Copy label bytes
@@ -1194,6 +1355,30 @@ impl<'a> super::Graph<'a> {
             (&[], &[])
         };
 
+        // Copy custom payloads into label storage and record entries
+        // (sorted: node_custom is sorted by node index already).
+        let custom_nodes: &[crate::ir::arena::CustomNodeArena] = if custom_count > 0 {
+            // SAFETY: alloc_raw zeroed the memory, and all-zero is a
+            // valid CustomNodeArena (`Option<fn>` is null-pointer
+            // optimized: None = 0); every element is overwritten below.
+            let entries =
+                unsafe { core::slice::from_raw_parts_mut(custom_ptr.unwrap(), custom_count) };
+            for (i, &(node_idx, painter, payload)) in self.node_custom.iter().enumerate() {
+                let bytes = payload.as_bytes();
+                labels[label_offset..label_offset + bytes.len()].copy_from_slice(bytes);
+                entries[i] = crate::ir::arena::CustomNodeArena {
+                    node_idx,
+                    painter,
+                    payload_offset: label_offset,
+                    payload_len: bytes.len(),
+                };
+                label_offset += bytes.len();
+            }
+            entries
+        } else {
+            &[]
+        };
+        let _ = label_offset;
         let labels: &[u8] = labels;
 
         Some(CsrGraph {
@@ -1206,6 +1391,7 @@ impl<'a> super::Graph<'a> {
             parents_offsets,
             parents_data,
             labels,
+            custom_nodes,
             subgraph_data,
             subgraph_count: sg_count,
             node_subgraph: node_subgraph_slice,
@@ -1221,11 +1407,18 @@ impl<'a> super::Graph<'a> {
             .filter_map(|(_, _, label)| label.map(|l| l.len()))
             .sum();
         let sg_label_bytes: usize = self.subgraphs.iter().map(|sg| sg.label.len()).sum();
+        let payload_bytes: usize = self.node_custom.iter().map(|entry| entry.2.len()).sum();
         CsrGraph::required_arena_size_with_subgraphs(
             self.nodes.len(),
             self.edges.len(),
-            node_label_bytes + edge_label_bytes + sg_label_bytes,
+            node_label_bytes + edge_label_bytes + sg_label_bytes + payload_bytes,
             self.subgraphs.len(),
         )
+        .saturating_add(
+            self.node_custom
+                .len()
+                .saturating_mul(core::mem::size_of::<crate::ir::arena::CustomNodeArena>()),
+        )
+        .saturating_add(if self.node_custom.is_empty() { 0 } else { 16 })
     }
 }

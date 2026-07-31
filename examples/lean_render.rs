@@ -27,7 +27,7 @@ fn main() {
 
     // Build Graph (Same as simulate_pure)
     println!("> Building Graph...");
-    let mut builder = CsrGraphBuilder::new(&mut graph_arena, 10, 10, 64).expect("arena too small");
+    let mut builder = CsrGraphBuilder::new(&mut graph_arena, 10, 10, 64, 0).expect("arena too small");
     let n0 = builder.add_node(0, "Source").expect("add Source");
     let n1 = builder.add_node(1, "Middle").expect("add Middle");
     let n2 = builder.add_node(2, "Sink").expect("add Sink");

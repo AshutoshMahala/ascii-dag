@@ -31,6 +31,7 @@ pub(crate) mod compose;
 pub(crate) mod config;
 pub(crate) mod emit;
 pub(crate) mod mem;
+pub(crate) mod node_content;
 #[cfg(all(test, feature = "std", feature = "arena"))]
 mod parity;
 pub(crate) mod plan;
@@ -195,10 +196,11 @@ pub(crate) fn estimate_render_output_size<V: view::LayoutView>(
 pub use charset::Charset;
 pub use color::{CellColor, ColorMode};
 pub use config::{DEFAULT_BAND_ROWS, RenderOptions};
+pub use node_content::{BoxedNode, CustomNode, NodeContent, NodeKindTag, SimpleNode};
 pub use plan::{HitResult, RenderPlan};
 pub use region::{NodePaintCtx, NodeRegion};
 pub use style::{
     EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPlacement, LabelPosition, LineWeight,
-    MarkerShape, NodeBorder, NodePaint, NodePaintFn, NodeStyle, NodeStyleCtx, SubgraphBorder,
+    MarkerShape, NodePaintFn, SubgraphBorder,
     SubgraphStyle, SubgraphStyleCtx,
 };

@@ -943,15 +943,23 @@ pub fn compute_layout_arena_csr<'b>(
     } else {
         0
     };
+    // Custom payloads ride the IR label storage; the entry array is
+    // sized by the declared-content count.
+    let custom_payload_bytes: usize = graph
+        .custom_nodes()
+        .iter()
+        .map(|entry| entry.payload_len)
+        .sum();
     let mut builder = LayoutIRArenaBuilder::new_with_subgraphs(
         output_arena,
         node_count + dummy_node_capacity,
         edge_count,
         // Kept waypoints are a subset of the dummy chain entries.
         total_dummies.max(1),
-        total_label_bytes + sg_label_bytes,
+        total_label_bytes + sg_label_bytes + custom_payload_bytes,
         max_level as usize + 1,
         sg_count,
+        graph.custom_nodes().len(),
     )
     .ok_or(GraphError::BuilderFailed)?;
 
@@ -970,7 +978,7 @@ pub fn compute_layout_arena_csr<'b>(
         let id = graph.node_id(idx);
         let label = graph.node_label(idx);
 
-        builder
+        let ir_idx = builder
             .add_node(
                 id,
                 label,
@@ -986,8 +994,19 @@ pub fn compute_layout_arena_csr<'b>(
                     crate::ir::NodeKind::Explicit
                 },
                 usize::MAX,
+                graph.node_content_tag(idx),
             )
             .ok_or(GraphError::ArenaOom)?;
+        // Carry the node's declared painter/payload (sparse).
+        if let Ok(pos) = graph
+            .custom_nodes()
+            .binary_search_by_key(&idx, |entry| entry.node_idx)
+        {
+            let entry = graph.custom_nodes()[pos];
+            builder
+                .add_custom(ir_idx, entry.painter, graph.custom_payload(&entry))
+                .ok_or(GraphError::ArenaOom)?;
+        }
         builder
             .add_node_to_level(level as usize, idx)
             .ok_or(GraphError::ArenaOom)?;
@@ -1032,6 +1051,7 @@ pub fn compute_layout_arena_csr<'b>(
                         pos - vstart,
                         crate::ir::NodeKind::Dummy,
                         edge_idx,
+                        0,
                     )
                     .ok_or(GraphError::ArenaOom)?;
                 builder
@@ -4612,7 +4632,18 @@ impl<'a> Graph<'a> {
             .map(|(_, l)| l.len())
             .chain(self.edges.iter().map(|&(_, _, l)| l.map_or(0, |t| t.len())))
             .chain(self.subgraphs.iter().map(|sg| sg.label.len()))
+            // Custom payloads ride the IR label storage — twice: once
+            // in the CSR carry, once in the IR (both from this arena
+            // budget when the caller shares one arena; itemized here
+            // for the IR side, the CSR side is estimate_csr_arena_size).
+            .chain(self.node_custom.iter().map(|entry| entry.2.len()))
             .fold(0usize, |a, b| a.saturating_add(b));
+        // Sparse custom entry array in the IR output (+ alignment).
+        let custom_entry_bytes: usize = self
+            .node_custom
+            .len()
+            .saturating_mul(core::mem::size_of::<crate::ir::arena::CustomNodeArena>())
+            .saturating_add(if self.node_custom.is_empty() { 0 } else { 16 });
         // ── Cheap level relaxation: exact dummy count AND exact depth ──
         // If this (unflipped) relaxation converges, the graph has no
         // directed cycle, so cycle breaking is a no-op and the depth
@@ -4744,7 +4775,9 @@ impl<'a> Graph<'a> {
             sg_count,
         );
 
-        temps_size.saturating_add(ir_size)
+        temps_size
+            .saturating_add(ir_size)
+            .saturating_add(custom_entry_bytes)
     }
 }
 
@@ -4761,7 +4794,7 @@ mod tests {
         edges: &[(usize, usize)],
     ) -> CsrGraph<'a> {
         let label_bytes = node_count * 2; // single-char labels
-        let mut builder = CsrGraphBuilder::new(arena, node_count, edges.len(), label_bytes)
+        let mut builder = CsrGraphBuilder::new(arena, node_count, edges.len(), label_bytes, 0)
             .expect("builder alloc");
         for i in 0..node_count {
             let label = &[b'A' + i as u8];
@@ -4885,7 +4918,7 @@ mod tests {
     /// Helper: chain graph 0→1→…→n-1 (one node per level, depth = n).
     #[cfg(not(feature = "arena-idx-u8"))]
     fn build_chain_csr<'a>(arena: &'a mut Arena<'a>, n: usize) -> CsrGraph<'a> {
-        let mut builder = CsrGraphBuilder::new(arena, n, n - 1, n).expect("builder alloc");
+        let mut builder = CsrGraphBuilder::new(arena, n, n - 1, n, 0).expect("builder alloc");
         for i in 0..n {
             builder.add_node(i, "n").expect("add node");
         }
@@ -4934,7 +4967,7 @@ mod tests {
         // per-level buffers from a saturated depth.
         let mut graph_buf = vec![0u8; 64 * 1024];
         let mut graph_arena = Arena::new(&mut graph_buf);
-        let mut builder = CsrGraphBuilder::new(&mut graph_arena, 2, 2, 8).expect("builder");
+        let mut builder = CsrGraphBuilder::new(&mut graph_arena, 2, 2, 8, 0).expect("builder");
         builder.add_node(1, "A").expect("node");
         builder.add_node(2, "B").expect("node");
         builder.add_edge(0, 1).expect("edge");
@@ -5245,7 +5278,7 @@ mod tests {
         let sg_label_bytes = 7; // "cluster"
         let label_bytes = 4 + sg_label_bytes; // A+B node labels + sg label
         let mut builder =
-            CsrGraphBuilder::new_with_subgraphs(&mut arena, 2, 1, label_bytes, 1).expect("builder");
+            CsrGraphBuilder::new_with_subgraphs(&mut arena, 2, 1, label_bytes, 1, 0).expect("builder");
         builder.add_node(0, "A");
         builder.add_node(1, "B");
         builder.add_edge(0, 1);
@@ -5460,7 +5493,7 @@ mod tests {
         let mut graph_buf = [0u8; 16384];
         let mut graph_arena = Arena::new(&mut graph_buf);
         let mut b =
-            CsrGraphBuilder::new_with_subgraphs(&mut graph_arena, 16, 16, 256, 4).expect("builder");
+            CsrGraphBuilder::new_with_subgraphs(&mut graph_arena, 16, 16, 256, 4, 0).expect("builder");
         let sg = b.add_subgraph(0, sg_label).expect("sg");
         for (i, (label, _)) in nodes.iter().enumerate() {
             b.add_node(i, label).expect("node");
@@ -5508,7 +5541,7 @@ mod tests {
         let mut graph_buf = [0u8; 16384];
         let mut graph_arena = Arena::new(&mut graph_buf);
         let mut b =
-            CsrGraphBuilder::new_with_subgraphs(&mut graph_arena, 4, 4, 512, 2).expect("builder");
+            CsrGraphBuilder::new_with_subgraphs(&mut graph_arena, 4, 4, 512, 2, 0).expect("builder");
         let sg = b.add_subgraph(0, &long_label).expect("sg");
         b.add_node(0, "A").expect("node");
         b.add_node(1, "B").expect("node");

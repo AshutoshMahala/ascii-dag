@@ -107,6 +107,8 @@ use crate::algorithms::sugiyama::config::SugiyamaConfig;
 use crate::algorithms::sugiyama::crossing::CrossingReducer;
 #[cfg(feature = "alloc")]
 use crate::errors::GraphError;
+#[cfg(feature = "alloc")]
+use crate::render::engine::{NodeContent, NodeKindTag, NodePaintFn};
 
 /// A named subgraph (cluster) for visual grouping.
 ///
@@ -294,6 +296,11 @@ pub struct Graph<'a> {
     pub(crate) next_auto: usize,             // AUTO id source: 1 above every id seen (saturating)
     #[cfg(feature = "warnings")]
     pub(crate) auto_numbered: HashSet<usize>, // Ids assigned via AUTO (D5 replace diagnostics)
+    // D6 sparse+packed content storage: 1 B/node kind tag; painter +
+    // payload only for nodes that have them, keyed by node index
+    // (sorted — appends are naturally ordered, replaces upsert).
+    pub(crate) node_kind_tag: Vec<u8>,
+    pub(crate) node_custom: Vec<(usize, Option<NodePaintFn>, &'a str)>,
 }
 
 #[cfg(feature = "alloc")]
@@ -345,6 +352,8 @@ impl<'a> Graph<'a> {
             next_auto: 0,
             #[cfg(feature = "warnings")]
             auto_numbered: HashSet::new(),
+            node_kind_tag: Vec::new(),
+            node_custom: Vec::new(),
         };
 
         // Build id_to_index map, widths cache, and heights cache; seed
@@ -356,6 +365,7 @@ impl<'a> Graph<'a> {
             let width = dag.compute_node_width(id, label);
             dag.node_widths.push(width);
             dag.node_heights.push(1);
+            dag.node_kind_tag.push(NodeKindTag::Simple.to_u8());
             next_auto = next_auto.max(id.saturating_add(1));
         }
         dag.next_auto = next_auto;
@@ -406,6 +416,8 @@ impl<'a> Graph<'a> {
             next_auto: 0,
             #[cfg(feature = "warnings")]
             auto_numbered: HashSet::new(),
+            node_kind_tag: Vec::new(),
+            node_custom: Vec::new(),
         };
 
         // Build id_to_index map, widths cache, and heights cache; seed
@@ -417,6 +429,7 @@ impl<'a> Graph<'a> {
             let width = dag.compute_node_width(id, label);
             dag.node_widths.push(width);
             dag.node_heights.push(1);
+            dag.node_kind_tag.push(NodeKindTag::Simple.to_u8());
             next_auto = next_auto.max(id.saturating_add(1));
         }
         dag.next_auto = next_auto;
@@ -656,8 +669,35 @@ impl<'a> Graph<'a> {
         }
     }
 
+    /// Upsert the sparse painter/payload entry for a node index —
+    /// entries exist only for nodes that have a painter or a non-empty
+    /// payload (D6). The list is sorted by node index; appends during
+    /// construction hit the `Err(end)` arm, replaces upsert in place.
+    fn set_custom_entry(&mut self, idx: usize, painter: Option<NodePaintFn>, payload: &'a str) {
+        let pos = self.node_custom.binary_search_by_key(&idx, |entry| entry.0);
+        let keep = painter.is_some() || !payload.is_empty();
+        match (pos, keep) {
+            (Ok(at), true) => self.node_custom[at] = (idx, painter, payload),
+            (Ok(at), false) => {
+                self.node_custom.remove(at);
+            }
+            (Err(at), true) => self.node_custom.insert(at, (idx, painter, payload)),
+            (Err(_), false) => {}
+        }
+    }
+
     /// Add a node to the DAG. Returns a typed [`NodeId`] handle usable
     /// wherever a node id is accepted (edges, subgraph placement).
+    ///
+    /// The content slot accepts anything implementing
+    /// [`NodeContent`]: a bare `&str` (the classic `[label]` node,
+    /// byte-identical to previous releases), a built-in object
+    /// ([`SimpleNode`](crate::SimpleNode) /
+    /// [`BoxedNode`](crate::BoxedNode)), or a user type /
+    /// [`CustomNode`](crate::CustomNode) carrying its own size,
+    /// painter, and payload. The declaration is the *only* source of
+    /// what the node is — there is no style-side override. The object
+    /// is resolved once, here — it may be a temporary.
     ///
     /// The id slot takes an explicit `usize` **or** the [`AUTO`]
     /// sentinel, which assigns the next id above every id this graph
@@ -686,13 +726,26 @@ impl<'a> Graph<'a> {
     /// let n = dag.add_node(AUTO, "Auto");   // graph-assigned id
     /// dag.add_edge(1, n, None);             // handles flow into edges
     /// ```
-    pub fn add_node(&mut self, id: impl Into<IdOrAuto>, label: &'a str) -> NodeId {
+    pub fn add_node(&mut self, id: impl Into<IdOrAuto>, node: impl NodeContent<'a>) -> NodeId {
         let (id, incoming_auto) = match id.into() {
             IdOrAuto::Id(id) => (id, false),
             IdOrAuto::Auto => (self.next_auto, true),
         };
         #[cfg(not(feature = "warnings"))]
         let _ = incoming_auto;
+        // Resolve the content BEFORE any graph state mutates: the
+        // accessors are user code and may panic — a caught panic must
+        // not leave the AUTO counter or diagnostics state advanced for
+        // an insertion that never happened ("successful creation
+        // only"). Accessors should be cheap and pure; resolution may
+        // call them more than once (the default `size()` reads
+        // `label()`).
+        let label = node.label();
+        let (width, height) = node.size();
+        let kind = node.kind();
+        let painter = node.painter();
+        let payload = node.payload();
+        let size_is_implicit = node.size_is_implicit();
         self.bump_next_auto(id);
         #[cfg(feature = "warnings")]
         if self.id_to_index.contains_key(&id) {
@@ -729,27 +782,39 @@ impl<'a> Graph<'a> {
                 self.auto_numbered.remove(&id);
             }
         }
+        // Empty-label placeholders render as ⟨id⟩ — an id-dependent
+        // width the content object cannot know. Only content whose
+        // `size()` is the provided default (`&str`, `&String`,
+        // `SimpleNode` — size provenance, not a value heuristic) gets
+        // today's formula; every overridden `size()` is authoritative.
+        let width = if label.is_empty() && size_is_implicit {
+            self.compute_node_width(id, label)
+        } else {
+            width
+        };
+        let height = height.max(1);
         // Check if node already exists (could be auto-created) - O(1) with HashMap
         if let Some(&idx) = self.id_to_index.get(&id) {
             // Promote auto-created node to explicit node
             self.nodes[idx] = (id, label);
             // Remove from auto_created set - O(1)
             self.auto_created.remove(&id);
-            // Update cached width, keep height=1
-            let width = self.compute_node_width(id, label);
             self.node_widths[idx] = width;
-            self.node_heights[idx] = 1;
+            self.node_heights[idx] = height;
+            self.node_kind_tag[idx] = kind.to_u8();
+            self.set_custom_entry(idx, painter, payload);
         } else {
             // Brand new node
             let idx = self.nodes.len();
             self.nodes.push((id, label));
             self.id_to_index.insert(id, idx);
-            let width = self.compute_node_width(id, label);
             self.node_widths.push(width);
-            self.node_heights.push(1);
+            self.node_heights.push(height);
+            self.node_kind_tag.push(kind.to_u8());
             // Extend adjacency lists
             self.children.push(Vec::new());
             self.parents.push(Vec::new());
+            self.set_custom_entry(idx, painter, payload);
         }
         NodeId(id)
     }
@@ -767,12 +832,12 @@ impl<'a> Graph<'a> {
     /// * `width` - Explicit width in layout units
     /// * `height` - Explicit height in layout rows (1 = single-line node)
     ///
-    /// The declared `width × height` area is reserved by layout — edges
-    /// route around it — and filled at render time by the node's
-    /// painter (`NodeStyle.paint`): `Simple` (default) draws `[label]`
-    /// on the top row and leaves extra rows blank, `Boxed` draws a
-    /// border box across the full area, and `Custom` hands the area to
-    /// a user painter. See `examples/node_painting.rs`.
+    /// The declared `width × height` area is reserved by layout —
+    /// edges route around it — and rendered as a simple `[label]` on
+    /// the top row with the extra rows left blank. For content that
+    /// fills the area, declare it on the node instead
+    /// (`CustomNode { … }` / a `NodeContent` impl). See
+    /// `examples/node_painting.rs`.
     ///
     /// Like [`add_node`](Self::add_node), returns a typed [`NodeId`]
     /// handle for the added node.
@@ -781,6 +846,12 @@ impl<'a> Graph<'a> {
     /// accept [`AUTO`]: this method keeps its 0.9 signature and is
     /// superseded in 0.10 by sized node objects, which ride
     /// `add_node`'s full id slot. New code should not need it.
+    #[deprecated(
+        since = "0.10.0",
+        note = "size is a property of the node object now — declare content that \
+                knows its area: `add_node(id, CustomNode { label, width, height, \
+                painter, payload })` or your own `NodeContent` impl"
+    )]
     ///
     /// # Examples
     ///
@@ -824,12 +895,17 @@ impl<'a> Graph<'a> {
             self.auto_created.remove(&id);
             self.node_widths[idx] = width;
             self.node_heights[idx] = height;
+            // A sized simple node: reset the tag and drop any custom
+            // entry a previous occupant of this id left behind.
+            self.node_kind_tag[idx] = NodeKindTag::Simple.to_u8();
+            self.set_custom_entry(idx, None, "");
         } else {
             let idx = self.nodes.len();
             self.nodes.push((id, label));
             self.id_to_index.insert(id, idx);
             self.node_widths.push(width);
             self.node_heights.push(height);
+            self.node_kind_tag.push(NodeKindTag::Simple.to_u8());
             self.children.push(Vec::new());
             self.parents.push(Vec::new());
         }
@@ -837,7 +913,11 @@ impl<'a> Graph<'a> {
     }
 
     /// Add a node with an explicit width override (height defaults to 1).
-    #[deprecated(since = "0.9.0", note = "Use `add_node_with_size` instead")]
+    #[deprecated(
+        since = "0.9.0",
+        note = "declare a content object with its own size (`CustomNode` or a \
+                `NodeContent` impl) — `add_node_with_size` is itself deprecated"
+    )]
     pub fn add_node_with_width(&mut self, id: usize, label: &'a str, width: usize) {
         self.add_node_with_size(id, label, width, 1);
     }
@@ -915,6 +995,7 @@ impl<'a> Graph<'a> {
             let width = self.compute_node_width(id, "");
             self.node_widths.push(width);
             self.node_heights.push(1);
+            self.node_kind_tag.push(NodeKindTag::Simple.to_u8());
             // Extend adjacency lists
             self.children.push(Vec::new());
             self.parents.push(Vec::new());
@@ -1418,6 +1499,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // deliberately pins the deprecated method's counter behavior
     fn auto_numbers_from_zero_on_fresh_graphs() {
         let mut g = Graph::new();
         assert_eq!(usize::from(g.add_node(AUTO, "a")), 0);
@@ -1511,6 +1593,7 @@ mod tests {
     /// the set drives every emission decision, so it is the pin.
     #[cfg(feature = "warnings")]
     #[test]
+    #[allow(deprecated)] // with_size's explicit path is part of the pin
     fn auto_numbered_tracking_powers_replace_diagnostics() {
         let mut g = Graph::new();
         let a = g.add_node(AUTO, "a");
@@ -1528,6 +1611,28 @@ mod tests {
         assert!(!g.auto_numbered.contains(&usize::MAX));
     }
 
+    /// A panicking content accessor must not advance graph state: the
+    /// counter moves only on successful creation (review round: the
+    /// resolve-then-commit transaction order).
+    #[test]
+    fn panicking_content_does_not_advance_the_counter() {
+        struct Bomb;
+        impl<'a> NodeContent<'a> for Bomb {
+            fn label(&self) -> &'a str {
+                panic!("content accessor panicked");
+            }
+        }
+        let mut g = Graph::new();
+        g.add_node(AUTO, "a"); // counter → 1
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            g.add_node(AUTO, Bomb);
+        }));
+        assert!(result.is_err(), "the bomb must go off");
+        assert_eq!(g.nodes.len(), 1, "failed insertion adds nothing");
+        // The next AUTO id is 1, not 2 — no id was skipped.
+        assert_eq!(usize::from(g.add_node(AUTO, "b")), 1);
+    }
+
     #[test]
     fn auto_counter_saturates_at_the_top() {
         // D7: near usize::MAX the counter saturates; the next AUTO
@@ -1539,6 +1644,135 @@ mod tests {
         assert_eq!(usize::from(next), usize::MAX);
         assert_eq!(g.nodes.len(), 1); // replaced, not appended
         assert_eq!(g.nodes[0].1, "saturated");
+    }
+
+    // ── Node content storage (NC-P2, D6 sparse+packed) ────────────────
+
+    #[test]
+    fn content_objects_resolve_to_sparse_storage() {
+        use crate::render::engine::{BoxedNode, CustomNode};
+        fn probe(
+            _: &mut crate::render::engine::NodeRegion<'_, '_>,
+            _: crate::render::engine::NodePaintCtx<'_>,
+        ) {
+        }
+        let mut g = Graph::new();
+        g.add_node(1, "plain");
+        g.add_node(2, BoxedNode("boxed"));
+        g.add_node(
+            3,
+            CustomNode {
+                label: "card",
+                width: 10,
+                height: 4,
+                painter: Some(probe),
+                payload: "rows",
+            },
+        );
+        g.add_node(
+            4,
+            CustomNode {
+                label: "blank",
+                width: 6,
+                height: 2,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_node(
+            5,
+            CustomNode {
+                label: "data",
+                width: 6,
+                height: 2,
+                painter: None,
+                payload: "json-only",
+            },
+        );
+        assert_eq!(g.node_kind_tag, vec![0, 1, 2, 2, 2]);
+        assert_eq!((g.node_widths[1], g.node_heights[1]), (9, 3)); // boxed: label+4 × 3
+        // Sparse entries only where painter or payload exists: idx 2
+        // (painter+payload) and idx 4 (payload-only blank) — idx 3 is
+        // a fully blank custom node, no entry.
+        assert_eq!(g.node_custom.len(), 2);
+        assert_eq!(g.node_custom[0].0, 2);
+        assert!(g.node_custom[0].1.is_some());
+        assert_eq!(g.node_custom[0].2, "rows");
+        assert_eq!(g.node_custom[1].0, 4);
+        assert!(g.node_custom[1].1.is_none());
+        assert_eq!(g.node_custom[1].2, "json-only");
+    }
+
+    #[test]
+    #[allow(deprecated)] // with_size replace-clears are part of the pin
+    fn replace_maintains_the_sparse_list() {
+        use crate::render::engine::CustomNode;
+        fn probe(
+            _: &mut crate::render::engine::NodeRegion<'_, '_>,
+            _: crate::render::engine::NodePaintCtx<'_>,
+        ) {
+        }
+        let custom = |label| CustomNode {
+            label,
+            width: 8,
+            height: 3,
+            painter: Some(probe),
+            payload: "p",
+        };
+        let mut g = Graph::new();
+        g.add_node(1, custom("a"));
+        g.add_node(2, "plain");
+        g.add_node(3, custom("c"));
+        assert_eq!(g.node_custom.len(), 2);
+        // Custom → simple removes the mid-list entry (risk 6).
+        g.add_node(1, "now-plain");
+        assert_eq!(g.node_custom.len(), 1);
+        assert_eq!(g.node_custom[0].0, 2);
+        assert_eq!(g.node_kind_tag[0], 0);
+        // Simple → custom inserts in sorted position.
+        g.add_node(2, custom("b"));
+        assert_eq!(g.node_custom.len(), 2);
+        assert_eq!((g.node_custom[0].0, g.node_custom[1].0), (1, 2));
+        // add_node_with_size replacing a custom node clears its entry.
+        g.add_node_with_size(3, "sized", 9, 2);
+        assert_eq!(g.node_custom.len(), 1);
+        assert_eq!(g.node_kind_tag[2], 0);
+        // Re-declaring custom content restores the entry with the
+        // declared size.
+        g.add_node(
+            3,
+            CustomNode {
+                label: "c",
+                width: 20,
+                height: 6,
+                painter: Some(probe),
+                payload: "p",
+            },
+        );
+        assert_eq!((g.node_widths[2], g.node_heights[2]), (20, 6));
+        assert_eq!(g.node_custom.len(), 2);
+    }
+
+    #[test]
+    fn declared_sizes_and_empty_label_widths() {
+        let empty_custom = |w, h| crate::CustomNode {
+            label: "",
+            width: w,
+            height: h,
+            painter: None,
+            payload: "",
+        };
+        let mut g = Graph::new();
+        // Empty label with the default footprint = today's ⟨id⟩ width.
+        g.add_node(42, "");
+        assert_eq!(g.node_widths[0], 4); // ⟨42⟩
+        // A declared size wins even for an empty label — including one
+        // that happens to equal the default footprint (size provenance,
+        // not a value heuristic).
+        g.add_node(3, empty_custom(10, 1));
+        assert_eq!(g.node_widths[1], 10);
+        g.add_node(12345, empty_custom(2, 1));
+        assert_eq!(g.node_widths[2], 2); // NOT widened to ⟨12345⟩ = 7
     }
 
     // ── Subgraph creation ──────────────────────────────────────────────
