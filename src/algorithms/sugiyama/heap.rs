@@ -22,6 +22,7 @@
 
 use crate::algorithms::sugiyama::config::{CycleBreaking, LayoutConfig};
 use crate::algorithms::sugiyama::crossing::{CrossingReducer, count_crossings_pair};
+use crate::algorithms::sugiyama::geometry::Axis;
 use crate::graph::Graph;
 use crate::ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, NodeKind};
 use alloc::vec;
@@ -74,7 +75,7 @@ impl VNode {
 /// Compute the layout under axis profile `A` (temp/08 D1). The body
 /// currently spells the roles as y/x — LR-P0 threads `A` inward slice
 /// by slice, each slice gated on byte-identical TD/BT output.
-pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
+pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     dag: &Graph<'a>,
     config: &LayoutConfig<'_>,
 ) -> LayoutIR<'a> {
@@ -227,7 +228,7 @@ pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
 
     // Insert extra horizontal padding at subgraph boundary transitions
     if dag.has_subgraphs() {
-        crate::algorithms::sugiyama::subgraph::subgraph_padding(
+        crate::algorithms::sugiyama::subgraph::subgraph_padding::<A>(
             dag,
             &virtual_levels,
             &mut x_coords,
@@ -246,7 +247,7 @@ pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
         let node_edge_indices_for_refine = build_node_edge_indices(dag);
         let compact_rounds = 3;
         for _ in 0..compact_rounds {
-            refine_x_positions(
+            refine_x_positions::<A>(
                 dag,
                 &virtual_levels,
                 &mut x_coords,
@@ -254,7 +255,7 @@ pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
                 &node_edge_indices_for_refine,
                 node_spacing,
             );
-            compact_subgraphs(dag, &virtual_levels, &mut x_coords, &widths, node_spacing);
+            compact_subgraphs::<A>(dag, &virtual_levels, &mut x_coords, &widths, node_spacing);
         }
     }
 
@@ -334,13 +335,13 @@ pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
     // Fix sibling subgraph overlaps that arise from centering (different levels
     // get different centering offsets, which can push bounding boxes together).
     let max_width = if dag.has_subgraphs() {
-        let extra = crate::algorithms::sugiyama::subgraph::fix_subgraph_overlaps(
+        let extra = crate::algorithms::sugiyama::subgraph::fix_subgraph_overlaps::<A>(
             dag,
             &mut real_node_coords,
         );
         // Reclaim slack the sibling shifts left behind: pull nodes toward
         // their connected neighbors within current level bounds.
-        crate::algorithms::sugiyama::subgraph::tighten_levels(
+        crate::algorithms::sugiyama::subgraph::tighten_levels::<A>(
             dag,
             &mut real_node_coords,
             node_spacing,
@@ -349,14 +350,14 @@ pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
         // cluster's projected border envelope (cross-level extent + label
         // minimum). Runs after overlap repair so it sees the coordinates
         // the bounding boxes will actually be computed from.
-        let pushed = crate::algorithms::sugiyama::subgraph::clear_external_overlaps(
+        let pushed = crate::algorithms::sugiyama::subgraph::clear_external_overlaps::<A>(
             dag,
             &mut real_node_coords,
             node_spacing,
         );
         // Pull whole root clusters (and loose nodes) back together after
         // the overlap shifts — reclaims the empty gulfs between boxes.
-        let reclaimed = crate::algorithms::sugiyama::subgraph::compact_clusters(
+        let reclaimed = crate::algorithms::sugiyama::subgraph::compact_clusters::<A>(
             dag,
             &mut real_node_coords,
             &virtual_levels,
@@ -552,8 +553,7 @@ pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
         if !chain.is_empty() {
             let &(from_id, to_id, _) = &dag.edges[edge_idx];
             let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
-            if let (Some(from_idx), Some(to_idx)) =
-                (dag.node_index(from_id), dag.node_index(to_id))
+            if let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id))
             {
                 let layout_dst = if is_back { from_idx } else { to_idx };
                 let (_, _, dx, dw) = real_node_coords[layout_dst];
@@ -608,7 +608,11 @@ pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
 
     // When subgraphs exist, compute per-boundary extra rows for opening/closing borders
     let (sg_initial_offset, sg_boundary_extras, sg_trailing_extra) = if dag.has_subgraphs() {
-        crate::algorithms::sugiyama::subgraph::compute_level_y_extras(dag, &node_levels, max_level)
+        crate::algorithms::sugiyama::subgraph::compute_level_y_extras::<A>(
+            dag,
+            &node_levels,
+            max_level,
+        )
     } else {
         (0, vec![0; max_level + 1], 0)
     };
@@ -624,9 +628,8 @@ pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
         // 2. Rows for edges passing through: only jogging waypoints claim
         // a row (straight pass-throughs are pure verticals), plus the
         // bend row below the deepest jog (shared rule with CSR).
-        let skip_slots = crate::algorithms::sugiyama::geometry::passthrough_rows(
-            level_jog_count[level],
-        );
+        let skip_slots =
+            crate::algorithms::sugiyama::geometry::passthrough_rows(level_jog_count[level]);
 
         // Determine max slots needed for this specific level
         let slots_needed = adjacent_slots.max(skip_slots);
@@ -862,8 +865,7 @@ pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
                         // x differs from the next column by construction).
                         let inter_corner_y = wp_y + 1;
                         edge_routing_ys.insert(inter_corner_y);
-                        level_routing_floor[level] =
-                            level_routing_floor[level].max(inter_corner_y);
+                        level_routing_floor[level] = level_routing_floor[level].max(inter_corner_y);
                         waypoints.push((x, wp_y));
                     }
 
@@ -921,70 +923,71 @@ pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
             //   from_y+2: vertical connector
             //   from_y+3: label text row
             //   to_y:     [Target Node]
-            let (label_x, label_y) = label.map(|lbl| {
-                let label_len = lbl.chars().count() + 2; // +2 for quotes
+            let (label_x, label_y) = label
+                .map(|lbl| {
+                    let label_len = lbl.chars().count() + 2; // +2 for quotes
 
-                // First row below the source level's routing block — shared
-                // with the CSR backend so label rows cannot drift.
-                let label_y = from_y
-                    + crate::algorithms::sugiyama::geometry::edge_label_row_offset(
-                        level_occupied_slots[layout_from_level].len(),
-                    );
+                    // First row below the source level's routing block — shared
+                    // with the CSR backend so label rows cannot drift.
+                    let label_y = from_y
+                        + crate::algorithms::sugiyama::geometry::edge_label_row_offset(
+                            level_occupied_slots[layout_from_level].len(),
+                        );
 
-                // Find the edge's X position at the label row
-                let edge_x_at_label = match &path {
-                    EdgePath::Direct => from_x,
-                    EdgePath::Corner { horizontal_y } => {
-                        // If label row is before the corner, edge is at from_x
-                        // If label row is after the corner, edge is at to_x
-                        if label_y <= *horizontal_y {
-                            from_x
-                        } else {
-                            to_x
+                    // Find the edge's X position at the label row
+                    let edge_x_at_label = match &path {
+                        EdgePath::Direct => from_x,
+                        EdgePath::Corner { horizontal_y } => {
+                            // If label row is before the corner, edge is at from_x
+                            // If label row is after the corner, edge is at to_x
+                            if label_y <= *horizontal_y {
+                                from_x
+                            } else {
+                                to_x
+                            }
                         }
-                    }
-                    EdgePath::SideChannel {
-                        channel_x, start_y, ..
-                    } => {
-                        // If before the horizontal segment, use from_x
-                        // Otherwise use channel_x
-                        if label_y < *start_y {
-                            from_x
-                        } else {
-                            *channel_x
+                        EdgePath::SideChannel {
+                            channel_x, start_y, ..
+                        } => {
+                            // If before the horizontal segment, use from_x
+                            // Otherwise use channel_x
+                            if label_y < *start_y {
+                                from_x
+                            } else {
+                                *channel_x
+                            }
                         }
-                    }
-                    EdgePath::MultiSegment {
-                        waypoints,
-                        start_y_offset,
-                    } => {
-                        // Find which segment the label row falls into
-                        // from_y is bottom of source node, +1 goes to routing area
-                        let horizontal_y = from_y + 1 + start_y_offset;
+                        EdgePath::MultiSegment {
+                            waypoints,
+                            start_y_offset,
+                        } => {
+                            // Find which segment the label row falls into
+                            // from_y is bottom of source node, +1 goes to routing area
+                            let horizontal_y = from_y + 1 + start_y_offset;
 
-                        if label_y <= horizontal_y || waypoints.is_empty() {
-                            from_x
-                        } else {
-                            waypoints[0].0
+                            if label_y <= horizontal_y || waypoints.is_empty() {
+                                from_x
+                            } else {
+                                waypoints[0].0
+                            }
                         }
-                    }
-                    EdgePath::Spline { .. } => from_x,
-                };
+                        EdgePath::Spline { .. } => from_x,
+                    };
 
-                // Center the label on the edge's X position
-                // Label goes through the line: the edge character is replaced by label
-                let half_len = label_len / 2;
-                let label_x = edge_x_at_label.saturating_sub(half_len);
+                    // Center the label on the edge's X position
+                    // Label goes through the line: the edge character is replaced by label
+                    let half_len = label_len / 2;
+                    let label_x = edge_x_at_label.saturating_sub(half_len);
 
-                // Ensure label fits within width
-                let clamped_x = if label_x + label_len > max_width {
-                    max_width.saturating_sub(label_len)
-                } else {
-                    label_x
-                };
-                (clamped_x, label_y)
-            })
-            .unwrap_or((0, 0));
+                    // Ensure label fits within width
+                    let clamped_x = if label_x + label_len > max_width {
+                        max_width.saturating_sub(label_len)
+                    } else {
+                        label_x
+                    };
+                    (clamped_x, label_y)
+                })
+                .unwrap_or((0, 0));
 
             let reversed = back_edges.get(edge_idx).copied().unwrap_or(false);
             builder.add_edge(LayoutEdge {
@@ -1010,7 +1013,7 @@ pub(crate) fn compute_layout_cfg<'a, A: super::geometry::Axis>(
     // extend past the node extent that `max_width` was derived from.
     let mut canvas_width = max_width;
     if dag.has_subgraphs() {
-        let sg_infos = crate::algorithms::sugiyama::subgraph::compute_bounding_boxes(
+        let sg_infos = crate::algorithms::sugiyama::subgraph::compute_bounding_boxes::<A>(
             dag,
             &real_node_coords,
             &level_y_offsets,
@@ -1063,7 +1066,7 @@ fn build_node_edge_indices(dag: &Graph<'_>) -> Vec<Vec<usize>> {
 /// (align with children) for several iterations. Each node is shifted
 /// toward its ideal position, constrained by minimum spacing with its
 /// neighbors on the same level.
-fn refine_x_positions(
+fn refine_x_positions<A: Axis>(
     dag: &Graph<'_>,
     virtual_levels: &[Vec<VNode>],
     x_coords: &mut [Vec<usize>],
@@ -1079,7 +1082,6 @@ fn refine_x_positions(
         return;
     }
 
-    use crate::algorithms::sugiyama::geometry::SG_GAP;
     const ITERATIONS: usize = 8;
 
     // Helper: compute minimum gap between adjacent nodes, accounting for
@@ -1088,7 +1090,7 @@ fn refine_x_positions(
         let left_sg = vnode_subgraph(dag, &virtual_levels[level][left_pos]);
         let right_sg = vnode_subgraph(dag, &virtual_levels[level][right_pos]);
         if left_sg != right_sg {
-            SG_GAP
+            A::SG_GAP_CROSS
         } else {
             node_spacing
         }
@@ -1099,7 +1101,7 @@ fn refine_x_positions(
             return 0;
         }
         let sg = vnode_subgraph(dag, &virtual_levels[level][0]);
-        if sg.is_some() { 2 } else { 0 } // SUBGRAPH_H_PAD
+        if sg.is_some() { A::SG_PAD_CROSS.0 } else { 0 }
     };
 
     // Helper: compute median center-x of connected neighbors on an adjacent level.
@@ -1278,7 +1280,7 @@ fn refine_x_positions(
 /// outliers and shifts them inward, respecting same-level gap constraints.
 /// When a member is blocked by non-member neighbors, it cascades the push
 /// to those neighbors to make room.
-fn compact_subgraphs(
+fn compact_subgraphs<A: Axis>(
     dag: &Graph<'_>,
     virtual_levels: &[Vec<VNode>],
     x_coords: &mut [Vec<usize>],
@@ -1287,14 +1289,12 @@ fn compact_subgraphs(
 ) {
     use crate::algorithms::sugiyama::subgraph::vnode_subgraph;
 
-    use crate::algorithms::sugiyama::geometry::SG_GAP;
-
     // Helper: minimum gap between two adjacent positions on a level.
     let gap_between = |level: usize, left_pos: usize, right_pos: usize| -> usize {
         let left_sg = vnode_subgraph(dag, &virtual_levels[level][left_pos]);
         let right_sg = vnode_subgraph(dag, &virtual_levels[level][right_pos]);
         if left_sg != right_sg {
-            SG_GAP
+            A::SG_GAP_CROSS
         } else {
             node_spacing
         }
@@ -1321,7 +1321,7 @@ fn compact_subgraphs(
                 // Can't push past left edge
                 let margin = if i - 1 == 0 {
                     let sg = vnode_subgraph(dag, &virtual_levels[level][0]);
-                    if sg.is_some() { 2 } else { 0 }
+                    if sg.is_some() { A::SG_PAD_CROSS.0 } else { 0 }
                 } else {
                     0
                 };
@@ -1391,7 +1391,7 @@ fn compact_subgraphs(
         by_distance.sort_by(|a, b| b.2.cmp(&a.2));
 
         for &(level, pos, dist) in &by_distance {
-            if dist < SG_GAP {
+            if dist < A::SG_GAP_CROSS {
                 continue; // close enough, don't bother
             }
 
@@ -1403,7 +1403,7 @@ fn compact_subgraphs(
             let n = x_coords[level].len();
             let min_x = if pos == 0 {
                 let sg = vnode_subgraph(dag, &virtual_levels[level][0]);
-                if sg.is_some() { 2 } else { 0 }
+                if sg.is_some() { A::SG_PAD_CROSS.0 } else { 0 }
             } else {
                 let g = gap_between(level, pos - 1, pos);
                 x_coords[level][pos - 1] + widths[level][pos - 1] + g

@@ -27,10 +27,6 @@ pub(crate) const SIBLING_GAP: usize = 1;
 /// `SUBGRAPH_H_PAD`, so the parent needs only its border column.
 pub(crate) const PARENT_CHILD_H_GAP: usize = 1;
 
-/// Gap between adjacent nodes belonging to different clusters:
-/// both nodes' border padding plus the sibling gap between the boxes.
-pub(crate) const SG_GAP: usize = SUBGRAPH_H_PAD * 2 + SIBLING_GAP;
-
 /// Width of a dummy (edge pass-through) vnode in the level packing.
 /// Covers the per-edge draw offset (`edge_idx % 4`) so a dummy's body
 /// extent bounds the column its vertical is actually drawn at.
@@ -55,10 +51,8 @@ pub(crate) const ENVELOPE_CLEARANCE: usize = 1;
 /// axis vs the cross axis. Implemented by zero-sized marker types;
 /// never stored, never public — layout-internal only.
 // Consumers: heap layout (alloc) and CSR layout (arena); the trait is
-// wholly unused in builds with neither feature. SG_PAD_* items are
-// consumed by LR-P0 slice 3 — narrow this to a cfg_attr on
-// not(alloc|arena) when that slice lands.
-#[allow(dead_code)]
+// wholly unused in builds with neither feature.
+#[cfg_attr(not(any(feature = "alloc", feature = "arena")), allow(dead_code))]
 pub(crate) trait Axis {
     /// Node extent along the level (flow) axis. Vertical: height.
     fn level_extent(width: usize, height: usize) -> usize;
@@ -76,6 +70,21 @@ pub(crate) trait Axis {
     /// Cross-axis clearance a dummy waypoint's body reserves.
     /// Vertical: `DUMMY_WIDTH` (covers the `edge_idx % 4` draw offset).
     const DUMMY_CROSS: usize;
+    /// Cross-axis gap between sibling cluster boxes.
+    /// Vertical: `SIBLING_GAP`.
+    const SIBLING_GAP_CROSS: usize;
+    /// Cross-axis clearance between a cluster's envelope and an
+    /// external node. Vertical: `ENVELOPE_CLEARANCE`.
+    const ENVELOPE_CLEARANCE_CROSS: usize;
+    /// Cross-axis expansion of a parent envelope around a child box
+    /// (the parent's border line; the child carries its own pads).
+    /// Vertical: `PARENT_CHILD_H_GAP`.
+    const PARENT_CHILD_GAP_CROSS: usize;
+    /// Cross-axis gap between adjacent nodes of different clusters:
+    /// one box's trailing pad + the sibling gap + the other's leading
+    /// pad. Derived — do not override.
+    const SG_GAP_CROSS: usize =
+        Self::SG_PAD_CROSS.1 + Self::SIBLING_GAP_CROSS + Self::SG_PAD_CROSS.0;
 }
 
 /// The TopDown/BottomUp profile: levels are rows, in-level order is
@@ -96,6 +105,9 @@ impl Axis for Vertical {
     const SG_PAD_LEVEL: (usize, usize) = (SUBGRAPH_V_PAD_TOP, SUBGRAPH_V_PAD_BOTTOM);
     const SG_PAD_CROSS: (usize, usize) = (SUBGRAPH_H_PAD, SUBGRAPH_H_PAD);
     const DUMMY_CROSS: usize = DUMMY_WIDTH;
+    const SIBLING_GAP_CROSS: usize = SIBLING_GAP;
+    const ENVELOPE_CLEARANCE_CROSS: usize = ENVELOPE_CLEARANCE;
+    const PARENT_CHILD_GAP_CROSS: usize = PARENT_CHILD_H_GAP;
 }
 
 /// Cap on how far a subgraph *label* may widen its bounding box.
@@ -108,6 +120,12 @@ impl Axis for Vertical {
 pub(crate) const SUBGRAPH_LABEL_BOX_CAP: usize = 40;
 
 /// Minimum box width needed to show `label` (borders + spaces), capped.
+///
+/// This is a **physical x-width** — label text always reads
+/// horizontally. The cluster passes fold it into their *cross-axis*
+/// extents, which is valid only while cross == x (`Vertical`).
+/// `Horizontal` needs a separate label-span rule (temp/08 D8) before
+/// those passes can serve it.
 #[inline]
 pub(crate) fn label_min_width(label: &str) -> usize {
     (label.len() + 4).min(SUBGRAPH_LABEL_BOX_CAP)

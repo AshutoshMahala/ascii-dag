@@ -11,9 +11,7 @@ use crate::graph::csr::CsrGraph;
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
 
 use super::geometry::{
-    ARROW_CELL_PAD, DUMMY_WIDTH, EDGE_START_ROW, ENVELOPE_CLEARANCE, PARENT_CHILD_H_GAP,
-    SIBLING_GAP, SUBGRAPH_H_PAD,
-    SUBGRAPH_V_PAD_BOTTOM, SUBGRAPH_V_PAD_TOP, edge_label_row_offset,
+    ARROW_CELL_PAD, Axis, EDGE_START_ROW, edge_label_row_offset,
     label_min_width as sg_label_min_width,
 };
 
@@ -208,7 +206,7 @@ pub fn compute_layout_arena_csr<'b>(
 /// Axis-parameterized CSR layout (temp/08 D1). The body currently
 /// spells the roles as y/x — LR-P0 threads `A` inward slice by slice,
 /// each slice gated on byte-identical TD/BT output.
-pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
+pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     graph: &CsrGraph<'_>,
     config: &LayoutConfig<'_>,
     temp_arena: &mut Arena<'_>,
@@ -474,7 +472,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
 
     // Step 5b: Subgraph horizontal padding
     if graph.has_subgraphs() {
-        subgraph_padding_csr(
+        subgraph_padding_csr::<A>(
             graph,
             temps.vlevel_offsets,
             temps.vnode_data,
@@ -491,7 +489,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
     if graph.has_subgraphs() {
         let compact_rounds = 3;
         for _ in 0..compact_rounds {
-            refine_x_positions_csr(
+            refine_x_positions_csr::<A>(
                 graph,
                 temps.vlevel_offsets,
                 temps.vnode_data,
@@ -500,7 +498,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
                 max_level as usize,
                 node_spacing,
             );
-            compact_subgraphs_csr(
+            compact_subgraphs_csr::<A>(
                 graph,
                 temps.vlevel_offsets,
                 temps.vnode_data,
@@ -550,7 +548,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
 
     // Step 6b: Fix sibling subgraph overlaps introduced by centering
     if graph.has_subgraphs() {
-        let extra = fix_subgraph_overlaps_csr(
+        let extra = fix_subgraph_overlaps_csr::<A>(
             graph,
             temps.real_coords,
             temps.sg_envelopes,
@@ -562,7 +560,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
         // Reclaim slack the sibling shifts left behind: pull nodes toward
         // their connected neighbors within current level bounds.
 
-        tighten_levels_csr(
+        tighten_levels_csr::<A>(
             graph,
             temps.real_coords,
             max_level as usize,
@@ -570,12 +568,11 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
             temps.positions,
         );
 
-
         // Step 6c: Cluster-width feedback — push unaffiliated nodes clear
         // of each cluster's projected border envelope (cross-level extent
         // + label minimum). Runs after overlap repair so it sees the
         // coordinates the bounding boxes will actually be computed from.
-        let pushed = clear_external_overlaps_csr(
+        let pushed = clear_external_overlaps_csr::<A>(
             graph,
             temps.real_coords,
             max_level as usize,
@@ -591,7 +588,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
 
         // Pull whole root clusters (and loose nodes) back together after
         // the overlap shifts — reclaims the empty gulfs between boxes.
-        let reclaimed = compact_clusters_csr(
+        let reclaimed = compact_clusters_csr::<A>(
             graph,
             temps.real_coords,
             max_level as usize,
@@ -617,7 +614,6 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
             temps.x_coords,
             max_level as usize,
         );
-
     }
 
     // Step 7: Build dummy positions using actual virtual level positions
@@ -900,7 +896,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
 
     // Compute subgraph Y extras (vertical border space)
     let (sg_initial_offset, sg_trailing_extra) = if graph.has_subgraphs() {
-        compute_sg_y_extras(
+        compute_sg_y_extras::<A>(
             graph,
             temps.node_levels,
             max_level as usize,
@@ -921,8 +917,9 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
         let slot_count = temps.level_slot_next[level] as usize;
         // Jog rows plus the bend row below the deepest jog (shared rule
         // with the heap backend).
-        let diff = slot_count
-            .max(super::geometry::passthrough_rows(temps.dummy_counts[level] as usize));
+        let diff = slot_count.max(super::geometry::passthrough_rows(
+            temps.dummy_counts[level] as usize,
+        ));
         // Per-level overhead: the label row is budgeted only where a
         // labeled edge is sourced (shared rule with the heap backend).
         let routing_overhead =
@@ -1222,8 +1219,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
                     // Track routing floor: the row itself and the bend row
                     // right below it (every kept waypoint bends).
                     if lvl_idx < level_routing_floor.len() {
-                        level_routing_floor[lvl_idx] =
-                            level_routing_floor[lvl_idx].max(wp_y + 1);
+                        level_routing_floor[lvl_idx] = level_routing_floor[lvl_idx].max(wp_y + 1);
                     }
                 }
 
@@ -1360,7 +1356,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: super::geometry::Axis>(
 
     // Step 10: Compute subgraph bounding boxes and add to builder
     if graph.has_subgraphs() {
-        let sg_max_right = compute_sg_bounding_boxes(
+        let sg_max_right = compute_sg_bounding_boxes::<A>(
             graph,
             temps.real_coords,
             temps.level_y_offsets,
@@ -1508,10 +1504,7 @@ fn alloc_layout_temps_csr<'b>(
                 max_levels + 1,
             ),
             two_cycle_order: core::slice::from_raw_parts_mut(two_cycle_order_ptr, edge_count),
-            edge_in_two_cycle: core::slice::from_raw_parts_mut(
-                edge_in_two_cycle_ptr,
-                edge_count,
-            ),
+            edge_in_two_cycle: core::slice::from_raw_parts_mut(edge_in_two_cycle_ptr, edge_count),
             slot_pool: core::slice::from_raw_parts_mut(slot_pool_ptr, slot_pool_size),
             slot_heads: core::slice::from_raw_parts_mut(slot_heads_ptr, slot_list_size),
             slot_tails: core::slice::from_raw_parts_mut(slot_tails_ptr, slot_list_size),
@@ -1827,7 +1820,7 @@ fn vnode_subgraph_csr(graph: &CsrGraph<'_>, vnode_type: Idx, vnode_idx: Idx) -> 
 
 /// Insert horizontal subgraph padding into x_coords.
 /// Returns the updated max_width.
-fn subgraph_padding_csr(
+fn subgraph_padding_csr<A: Axis>(
     graph: &CsrGraph<'_>,
     vlevel_offsets: &[Idx],
     vnode_data: &[Idx],
@@ -1850,13 +1843,13 @@ fn subgraph_padding_csr(
 
         let mut x = 0usize;
 
-        // Left padding: flat SUBGRAPH_H_PAD if first node is inside any subgraph
+        // Left padding: flat cross-axis entry pad if first node is inside any subgraph
         // (matches heap's flat padding — bbox pass handles nesting expansion)
         let first_type = vnode_data.get(start * 2).copied().unwrap_or(0);
         let first_idx = vnode_data.get(start * 2 + 1).copied().unwrap_or(0);
         let first_sg = vnode_subgraph_csr(graph, first_type, first_idx);
         if first_sg.is_some() {
-            x += SUBGRAPH_H_PAD;
+            x += A::SG_PAD_CROSS.0;
         }
 
         for pos in start..end {
@@ -1868,9 +1861,10 @@ fn subgraph_padding_csr(
                 let prev_sg = vnode_subgraph_csr(graph, prev_type, prev_idx);
                 let curr_sg = vnode_subgraph_csr(graph, curr_type, curr_idx);
                 if prev_sg != curr_sg {
-                    // Flat padding per boundary transition (matches heap)
-                    // The bbox pass handles depth-proportional expansion.
-                    x += SUBGRAPH_H_PAD * 2;
+                    // Flat padding per boundary transition (matches heap):
+                    // one exit margin + one entry margin. The bbox pass
+                    // handles depth-proportional expansion.
+                    x += A::SG_PAD_CROSS.1 + A::SG_PAD_CROSS.0;
                 }
             }
             if pos < x_coords.len() {
@@ -1880,12 +1874,16 @@ fn subgraph_padding_csr(
             x += w + node_spacing;
         }
 
-        // Right padding: flat SUBGRAPH_H_PAD if last node is inside any subgraph
+        // Right padding: flat cross-axis exit pad if last node is inside any subgraph
         let last_pos = end - 1;
         let last_type = vnode_kind(vnode_data, last_pos);
         let last_idx = vnode_payload(vnode_data, last_pos);
         let last_sg = vnode_subgraph_csr(graph, last_type, last_idx);
-        let right_extra = if last_sg.is_some() { SUBGRAPH_H_PAD } else { 0 };
+        let right_extra = if last_sg.is_some() {
+            A::SG_PAD_CROSS.1
+        } else {
+            0
+        };
 
         // Compute level width
         let mut level_max = 0usize;
@@ -1990,14 +1988,13 @@ fn connected_median_csr(
 }
 
 /// Gap between adjacent nodes, accounting for subgraph boundaries.
-fn gap_between_csr(
+fn gap_between_csr<A: Axis>(
     graph: &CsrGraph<'_>,
     vnode_data: &[Idx],
     pos_a: usize,
     pos_b: usize,
     node_spacing: Coord,
 ) -> Coord {
-    const SG_GAP_C: Coord = crate::algorithms::sugiyama::geometry::SG_GAP as Coord;
     let a_type = vnode_kind(vnode_data, pos_a);
     let a_idx = vnode_payload(vnode_data, pos_a);
     let b_type = vnode_kind(vnode_data, pos_b);
@@ -2005,7 +2002,7 @@ fn gap_between_csr(
     let a_sg = vnode_subgraph_csr(graph, a_type, a_idx);
     let b_sg = vnode_subgraph_csr(graph, b_type, b_idx);
     if a_sg != b_sg && (a_sg.is_some() || b_sg.is_some()) {
-        SG_GAP_C
+        A::SG_GAP_CROSS as Coord
     } else {
         node_spacing
     }
@@ -2019,7 +2016,7 @@ fn gap_between_csr(
 /// current level neighbors — so it can never widen a level, and the
 /// rightmost node may only move left. `order_scratch` holds the x-order
 /// permutation for one level (the `positions` crossing scratch fits).
-fn tighten_levels_csr(
+fn tighten_levels_csr<A: Axis>(
     graph: &CsrGraph<'_>,
     real_coords: &mut [(usize, usize, usize, usize)], // (level, pos, x, width)
     max_level: usize,
@@ -2030,7 +2027,6 @@ fn tighten_levels_csr(
     if node_count < 2 {
         return;
     }
-    use crate::algorithms::sugiyama::geometry::SG_GAP;
     // Bound the per-level insertion sort (quadratic in level size).
     const TIGHTEN_MAX_LEVEL_SIZE: usize = 1024;
     // Per-cluster extent snapshot lives on the stack; skip the pass for
@@ -2123,12 +2119,16 @@ fn tighten_levels_csr(
 
                 let my_sg = graph.node_subgraph(ni);
                 let mut min_x = if k == 0 {
-                    if my_sg.is_some() { SUBGRAPH_H_PAD } else { 0 }
+                    if my_sg.is_some() {
+                        A::SG_PAD_CROSS.0
+                    } else {
+                        0
+                    }
                 } else {
                     let prev = order_scratch[k - 1] as usize;
                     let prev_sg = graph.node_subgraph(prev);
                     let gap = if prev_sg != my_sg && (prev_sg.is_some() || my_sg.is_some()) {
-                        SG_GAP
+                        A::SG_GAP_CROSS
                     } else {
                         node_spacing
                     };
@@ -2138,7 +2138,7 @@ fn tighten_levels_csr(
                     let next = order_scratch[k + 1] as usize;
                     let next_sg = graph.node_subgraph(next);
                     let gap = if next_sg != my_sg && (next_sg.is_some() || my_sg.is_some()) {
-                        SG_GAP
+                        A::SG_GAP_CROSS
                     } else {
                         node_spacing
                     };
@@ -2173,9 +2173,9 @@ fn tighten_levels_csr(
 /// Project per-cluster x-envelopes and level ranges into `sg_envelopes`
 /// (scratch layout per subgraph: left, right, first_level, last_level),
 /// mirroring `compute_sg_bounding_boxes` x-math: member extent,
-/// `SUBGRAPH_H_PAD`, label minimum width, child → parent expansion
+/// `A::SG_PAD_CROSS`, label minimum width, child → parent expansion
 /// (deepest-first via `sg_depths`), label recheck.
-fn project_sg_envelopes_csr(
+fn project_sg_envelopes_csr<A: Axis>(
     graph: &CsrGraph<'_>,
     real_coords: &[(usize, usize, usize, usize)],
     node_count: usize,
@@ -2226,8 +2226,8 @@ fn project_sg_envelopes_csr(
         if l == usize::MAX {
             continue;
         }
-        let left = l.saturating_sub(SUBGRAPH_H_PAD);
-        let mut right = r + SUBGRAPH_H_PAD;
+        let left = l.saturating_sub(A::SG_PAD_CROSS.0);
+        let mut right = r + A::SG_PAD_CROSS.1;
         let min_label_width = sg_label_min_width(graph.subgraph_label(si));
         if right - left < min_label_width {
             right = left + min_label_width;
@@ -2252,12 +2252,12 @@ fn project_sg_envelopes_csr(
                     continue;
                 }
                 // Shared parent-gap rule (geometry.rs): the child bbox
-                // already carries its own H_PAD; the parent adds only
-                // its border column. (This projection previously used
-                // SUBGRAPH_H_PAD and silently disagreed with the heap
-                // twin by one column per nesting level.)
-                let exp_l = cl.saturating_sub(PARENT_CHILD_H_GAP);
-                let exp_r = cr + PARENT_CHILD_H_GAP;
+                // already carries its own cross pads; the parent adds
+                // only its border column. (This projection previously
+                // used the full box pad and silently disagreed with the
+                // heap twin by one column per nesting level.)
+                let exp_l = cl.saturating_sub(A::PARENT_CHILD_GAP_CROSS);
+                let exp_r = cr + A::PARENT_CHILD_GAP_CROSS;
                 let p = &mut sg_envelopes[pi];
                 if p.0 == usize::MAX {
                     p.0 = exp_l;
@@ -2295,7 +2295,7 @@ fn project_sg_envelopes_csr(
 /// Treats each root cluster as a rigid body and each unaffiliated node
 /// as a singleton body, sweeps bodies left-to-right, and shifts each as
 /// far left as the per-level frontier allows (envelope↔envelope keeps
-/// `SIBLING_GAP`, envelope↔node 1, node↔node `node_spacing`).
+/// [`Axis::SIBLING_GAP_CROSS`], envelope↔node 1, node↔node `node_spacing`).
 /// Shift-left only. Per-level frontiers use depth-sized caller scratch
 /// (no level cap). Body count is capped by a fixed stack table; graphs
 /// with more bodies keep the first `MAX_BODIES` and skip the rest (the
@@ -2304,7 +2304,7 @@ fn project_sg_envelopes_csr(
 /// Returns the reclaimed canvas width (conservative minimum of node- and
 /// envelope-extent reductions).
 #[allow(clippy::too_many_arguments)]
-fn compact_clusters_csr(
+fn compact_clusters_csr<A: Axis>(
     graph: &CsrGraph<'_>,
     real_coords: &mut [(usize, usize, usize, usize)],
     max_level: usize,
@@ -2333,7 +2333,7 @@ fn compact_clusters_csr(
     }
     let max_depth = sg_depths[..sg_count].iter().copied().max().unwrap_or(0);
 
-    project_sg_envelopes_csr(
+    project_sg_envelopes_csr::<A>(
         graph,
         real_coords,
         node_count,
@@ -2424,7 +2424,7 @@ fn compact_clusters_csr(
             if n_bodies >= MAX_BODIES {
                 return 0;
             }
-            bodies[n_bodies] = (x as usize, x as usize + DUMMY_WIDTH, 2, level, pos);
+            bodies[n_bodies] = (x as usize, x as usize + A::DUMMY_CROSS, 2, level, pos);
             n_bodies += 1;
         }
     }
@@ -2460,10 +2460,10 @@ fn compact_clusters_csr(
                 let mut allowed = 0usize;
                 for lvl in first..=last.min(max_level) {
                     if env_right[lvl] != usize::MAX {
-                        allowed = allowed.max(env_right[lvl] + SIBLING_GAP);
+                        allowed = allowed.max(env_right[lvl] + A::SIBLING_GAP_CROSS);
                     }
                     if node_right[lvl] != usize::MAX {
-                        allowed = allowed.max(node_right[lvl] + ENVELOPE_CLEARANCE);
+                        allowed = allowed.max(node_right[lvl] + A::ENVELOPE_CLEARANCE_CROSS);
                     }
                 }
                 let delta = env_left.saturating_sub(allowed);
@@ -2509,7 +2509,7 @@ fn compact_clusters_csr(
                 }
                 let mut allowed = 0usize;
                 if env_right[lvl] != usize::MAX {
-                    allowed = allowed.max(env_right[lvl] + ENVELOPE_CLEARANCE);
+                    allowed = allowed.max(env_right[lvl] + A::ENVELOPE_CLEARANCE_CROSS);
                 }
                 if node_right[lvl] != usize::MAX {
                     allowed = allowed.max(node_right[lvl] + node_spacing);
@@ -2531,7 +2531,7 @@ fn compact_clusters_csr(
                 let x = xc as usize;
                 let mut allowed = 0usize;
                 if env_right[lvl] != usize::MAX {
-                    allowed = allowed.max(env_right[lvl] + ENVELOPE_CLEARANCE);
+                    allowed = allowed.max(env_right[lvl] + A::ENVELOPE_CLEARANCE_CROSS);
                 }
                 if node_right[lvl] != usize::MAX {
                     allowed = allowed.max(node_right[lvl] + node_spacing);
@@ -2540,7 +2540,7 @@ fn compact_clusters_csr(
                 if delta > 0 {
                     x_coords[pos] = (x - delta).min(Coord::MAX as usize) as Coord;
                 }
-                let r = x - delta + DUMMY_WIDTH;
+                let r = x - delta + A::DUMMY_CROSS;
                 if node_right[lvl] == usize::MAX || node_right[lvl] < r {
                     node_right[lvl] = r;
                 }
@@ -2548,7 +2548,7 @@ fn compact_clusters_csr(
         }
     }
 
-    project_sg_envelopes_csr(
+    project_sg_envelopes_csr::<A>(
         graph,
         real_coords,
         node_count,
@@ -2644,7 +2644,7 @@ fn nudge_dummies_off_nodes_csr(
 /// room for the largest level's real-node count.
 ///
 /// Returns the growth of the maximum node right edge (0 if nothing moved).
-fn clear_external_overlaps_csr(
+fn clear_external_overlaps_csr<A: Axis>(
     graph: &CsrGraph<'_>,
     real_coords: &mut [(usize, usize, usize, usize)], // (level, pos, x, width)
     max_level: usize,
@@ -2660,13 +2660,10 @@ fn clear_external_overlaps_csr(
         return 0;
     }
     let node_count = graph.node_count().min(real_coords.len());
-    if node_count == 0
-        || frontier_touched.len() <= max_level
-        || frontier_cursors.len() <= max_level
+    if node_count == 0 || frontier_touched.len() <= max_level || frontier_cursors.len() <= max_level
     {
         return 0;
     }
-    use crate::algorithms::sugiyama::geometry::SG_GAP;
 
     for i in 0..sg_count {
         sg_depths[i] = graph.sg_chain_depth(Some(i));
@@ -2680,7 +2677,7 @@ fn clear_external_overlaps_csr(
         .unwrap_or(0);
 
     for _round in 0..8 {
-        project_sg_envelopes_csr(
+        project_sg_envelopes_csr::<A>(
             graph,
             real_coords,
             node_count,
@@ -2702,7 +2699,7 @@ fn clear_external_overlaps_csr(
             }
             let cursors: &mut [usize] = frontier_cursors;
             for c in cursors[first..=last.min(max_level)].iter_mut() {
-                *c = right + ENVELOPE_CLEARANCE;
+                *c = right + A::ENVELOPE_CLEARANCE_CROSS;
             }
             for node_idx in 0..node_count {
                 if graph.node_subgraph(node_idx).is_some() {
@@ -2769,7 +2766,7 @@ fn clear_external_overlaps_csr(
                 let prev_sg = graph.node_subgraph(prev);
                 let cur_sg = graph.node_subgraph(cur);
                 let gap = if prev_sg != cur_sg && (prev_sg.is_some() || cur_sg.is_some()) {
-                    SG_GAP
+                    A::SG_GAP_CROSS
                 } else {
                     node_spacing
                 };
@@ -2790,7 +2787,7 @@ fn clear_external_overlaps_csr(
 }
 
 /// Left margin for a level (H_PAD if first node is in a subgraph).
-fn left_margin_csr(
+fn left_margin_csr<A: Axis>(
     graph: &CsrGraph<'_>,
     vnode_data: &[Idx],
     vlevel_offsets: &[Idx],
@@ -2807,7 +2804,7 @@ fn left_margin_csr(
     let vtype = vnode_kind(vnode_data, start);
     let vidx = vnode_payload(vnode_data, start);
     if vnode_subgraph_csr(graph, vtype, vidx).is_some() {
-        2
+        A::SG_PAD_CROSS.0 as Coord
     } else {
         0
     }
@@ -2815,7 +2812,7 @@ fn left_margin_csr(
 
 /// Refine x-coordinates by shifting nodes toward the median position of their
 /// connected neighbors on adjacent levels. CSR equivalent of `refine_x_positions`.
-fn refine_x_positions_csr(
+fn refine_x_positions_csr<A: Axis>(
     graph: &CsrGraph<'_>,
     vlevel_offsets: &[Idx],
     vnode_data: &[Idx],
@@ -2832,7 +2829,7 @@ fn refine_x_positions_csr(
     }
 
     // Helper: apply a single sweep (down or up) for one level
-    fn sweep_level(
+    fn sweep_level<A: Axis>(
         graph: &CsrGraph<'_>,
         vlevel_offsets: &[Idx],
         vnode_data: &[Idx],
@@ -2849,7 +2846,7 @@ fn refine_x_positions_csr(
         if n == 0 {
             return;
         }
-        let margin = left_margin_csr(graph, vnode_data, vlevel_offsets, level);
+        let margin = left_margin_csr::<A>(graph, vnode_data, vlevel_offsets, level);
 
         // Right-to-left pass
         for i in (0..n).rev() {
@@ -2863,13 +2860,13 @@ fn refine_x_positions_csr(
                     margin
                 } else {
                     let prev = start + i - 1;
-                    x_coords[prev]
-                        .saturating_add(widths[prev])
-                        .saturating_add(gap_between_csr(graph, vnode_data, prev, pos, node_spacing))
+                    x_coords[prev].saturating_add(widths[prev]).saturating_add(
+                        gap_between_csr::<A>(graph, vnode_data, prev, pos, node_spacing),
+                    )
                 };
                 let max_x = if i + 1 < n {
                     let next = start + i + 1;
-                    x_coords[next].saturating_sub(my_w.saturating_add(gap_between_csr(
+                    x_coords[next].saturating_sub(my_w.saturating_add(gap_between_csr::<A>(
                         graph,
                         vnode_data,
                         pos,
@@ -2895,13 +2892,13 @@ fn refine_x_positions_csr(
                     margin
                 } else {
                     let prev = start + i - 1;
-                    x_coords[prev]
-                        .saturating_add(widths[prev])
-                        .saturating_add(gap_between_csr(graph, vnode_data, prev, pos, node_spacing))
+                    x_coords[prev].saturating_add(widths[prev]).saturating_add(
+                        gap_between_csr::<A>(graph, vnode_data, prev, pos, node_spacing),
+                    )
                 };
                 let max_x = if i + 1 < n {
                     let next = start + i + 1;
-                    x_coords[next].saturating_sub(my_w.saturating_add(gap_between_csr(
+                    x_coords[next].saturating_sub(my_w.saturating_add(gap_between_csr::<A>(
                         graph,
                         vnode_data,
                         pos,
@@ -2924,7 +2921,7 @@ fn refine_x_positions_csr(
             }
             let adj_start = vlevel_offsets[level - 1] as usize;
             let adj_end = vlevel_offsets[level] as usize;
-            sweep_level(
+            sweep_level::<A>(
                 graph,
                 vlevel_offsets,
                 vnode_data,
@@ -2949,7 +2946,7 @@ fn refine_x_positions_csr(
                 } else {
                     vlevel_offsets[level + 1] as usize
                 };
-                sweep_level(
+                sweep_level::<A>(
                     graph,
                     vlevel_offsets,
                     vnode_data,
@@ -2969,7 +2966,7 @@ fn refine_x_positions_csr(
 
 /// Compact subgraph nodes toward their subgraph centroid using cascading push.
 /// CSR equivalent of `compact_subgraphs`.
-fn compact_subgraphs_csr(
+fn compact_subgraphs_csr<A: Axis>(
     graph: &CsrGraph<'_>,
     vlevel_offsets: &[Idx],
     vnode_data: &[Idx],
@@ -2978,8 +2975,6 @@ fn compact_subgraphs_csr(
     max_level: usize,
     node_spacing: Coord,
 ) {
-    const SG_GAP_C: Coord = crate::algorithms::sugiyama::geometry::SG_GAP as Coord;
-
     let sg_count = graph.subgraph_count();
     if sg_count == 0 {
         return;
@@ -3054,7 +3049,7 @@ fn compact_subgraphs_csr(
 
         for mi in 0..member_count {
             let (level, pos, dist) = by_dist[mi];
-            if dist < SG_GAP_C {
+            if dist < A::SG_GAP_CROSS as Coord {
                 continue;
             }
 
@@ -3068,23 +3063,24 @@ fn compact_subgraphs_csr(
             let target_x = centroid.saturating_sub(my_w / 2);
 
             // Compute constraints
-            let min_x = if i == 0 {
-                let vtype = vnode_kind(vnode_data, start);
-                let vidx = vnode_payload(vnode_data, start);
-                if vnode_subgraph_csr(graph, vtype, vidx).is_some() {
-                    2
+            let min_x =
+                if i == 0 {
+                    let vtype = vnode_kind(vnode_data, start);
+                    let vidx = vnode_payload(vnode_data, start);
+                    if vnode_subgraph_csr(graph, vtype, vidx).is_some() {
+                        2
+                    } else {
+                        0
+                    }
                 } else {
-                    0
-                }
-            } else {
-                let prev = start + i - 1;
-                x_coords[prev]
-                    .saturating_add(widths[prev])
-                    .saturating_add(gap_between_csr(graph, vnode_data, prev, pos, node_spacing))
-            };
+                    let prev = start + i - 1;
+                    x_coords[prev].saturating_add(widths[prev]).saturating_add(
+                        gap_between_csr::<A>(graph, vnode_data, prev, pos, node_spacing),
+                    )
+                };
             let max_x = if i + 1 < n {
                 let next = start + i + 1;
-                x_coords[next].saturating_sub(my_w.saturating_add(gap_between_csr(
+                x_coords[next].saturating_sub(my_w.saturating_add(gap_between_csr::<A>(
                     graph,
                     vnode_data,
                     pos,
@@ -3112,7 +3108,7 @@ fn compact_subgraphs_csr(
                     while k > 0 {
                         let cur = start + k;
                         let prev = start + k - 1;
-                        let g = gap_between_csr(graph, vnode_data, prev, cur, node_spacing);
+                        let g = gap_between_csr::<A>(graph, vnode_data, prev, cur, node_spacing);
                         let needed = x_coords[cur].saturating_sub(widths[prev].saturating_add(g));
                         if x_coords[prev] <= needed {
                             break;
@@ -3142,7 +3138,7 @@ fn compact_subgraphs_csr(
                     while k + 1 < n {
                         let cur = start + k;
                         let next = start + k + 1;
-                        let g = gap_between_csr(graph, vnode_data, cur, next, node_spacing);
+                        let g = gap_between_csr::<A>(graph, vnode_data, cur, next, node_spacing);
                         let needed = x_coords[cur].saturating_add(widths[cur]).saturating_add(g);
                         if x_coords[next] >= needed {
                             break;
@@ -3182,7 +3178,7 @@ fn node_in_sg_subtree(graph: &CsrGraph<'_>, node_idx: usize, target_sg: usize) -
 /// * `sg_envelopes` — scratch for bbox data: `(left, right, shift, 0)`.
 /// * `sg_depths` — scratch for nesting depths.
 /// * `scratch` — scratch for per-level node sorting (`node_slots`, `>= node_count`).
-fn fix_subgraph_overlaps_csr(
+fn fix_subgraph_overlaps_csr<A: Axis>(
     graph: &CsrGraph<'_>,
     real_coords: &mut [(usize, usize, usize, usize)],
     sg_envelopes: &mut [(usize, usize, usize, usize)],
@@ -3195,7 +3191,7 @@ fn fix_subgraph_overlaps_csr(
     }
     let node_count = graph.node_count().min(real_coords.len());
 
-    let cross_sg_gap: usize = 2 * SUBGRAPH_H_PAD + SIBLING_GAP;
+    let cross_sg_gap: usize = A::SG_GAP_CROSS;
 
     // Fill nesting depths
     for i in 0..sg_count {
@@ -3265,9 +3261,8 @@ fn fix_subgraph_overlaps_csr(
             }
         }
         // Propagate children → parents (bottom-up)
-        // Use minimal gap: the child bbox already includes its own H_PAD,
-        // so the parent only needs 1 char for border + gap (matches heap PROP_GAP).
-        const PROP_GAP: usize = 1;
+        // Minimal gap: the child bbox already includes its own cross
+        // pads, so the parent only needs its border column (matches heap).
         for depth in (0..=max_depth).rev() {
             for sg_idx in 0..sg_count {
                 if sg_depths[sg_idx] != depth {
@@ -3278,8 +3273,8 @@ fn fix_subgraph_overlaps_csr(
                     if cx == usize::MAX {
                         continue;
                     }
-                    let exp_l = cx.saturating_sub(PROP_GAP);
-                    let exp_r = cr + PROP_GAP;
+                    let exp_l = cx.saturating_sub(A::PARENT_CHILD_GAP_CROSS);
+                    let exp_r = cr + A::PARENT_CHILD_GAP_CROSS;
                     let (ref mut pl, ref mut pr, _, _) = sg_envelopes[pidx];
                     if exp_l < *pl {
                         *pl = exp_l;
@@ -3296,8 +3291,8 @@ fn fix_subgraph_overlaps_csr(
             if mn == usize::MAX {
                 continue;
             }
-            let left = mn.saturating_sub(SUBGRAPH_H_PAD);
-            let mut right = mx + SUBGRAPH_H_PAD;
+            let left = mn.saturating_sub(A::SG_PAD_CROSS.0);
+            let mut right = mx + A::SG_PAD_CROSS.1;
             let label_w = sg_label_min_width(graph.subgraph_label(sg_idx));
             if right.saturating_sub(left) < label_w {
                 right = left + label_w;
@@ -3369,8 +3364,8 @@ fn fix_subgraph_overlaps_csr(
                     }
                 }
 
-                if has_level_overlap && eff_frontier + SIBLING_GAP > left {
-                    let shift = eff_frontier + SIBLING_GAP - left;
+                if has_level_overlap && eff_frontier + A::SIBLING_GAP_CROSS > left {
+                    let shift = eff_frontier + A::SIBLING_GAP_CROSS - left;
                     for ni in 0..node_count {
                         if node_in_sg_subtree(graph, ni, sg_idx) {
                             real_coords[ni].2 += shift;
@@ -3444,7 +3439,7 @@ fn fix_subgraph_overlaps_csr(
 /// Compute per-level Y extras for subgraph borders.
 /// Populates `sg_ranges`, `sg_depths`, `sg_y_extras` in temps and returns
 /// (initial_offset, trailing_extra).
-fn compute_sg_y_extras(
+fn compute_sg_y_extras<A: Axis>(
     graph: &CsrGraph<'_>,
     node_levels: &[Idx],
     max_level: usize,
@@ -3569,7 +3564,7 @@ fn compute_sg_y_extras(
             }
         }
     }
-    let initial_offset = max_open_at_0 * SUBGRAPH_V_PAD_TOP;
+    let initial_offset = max_open_at_0 * A::SG_PAD_LEVEL.0;
 
     // 5. Per-boundary extras
     sg_y_extras.fill(0);
@@ -3600,7 +3595,7 @@ fn compute_sg_y_extras(
 
         if boundary_after < sg_y_extras.len() {
             sg_y_extras[boundary_after] =
-                max_close * SUBGRAPH_V_PAD_BOTTOM + max_open * SUBGRAPH_V_PAD_TOP;
+                max_close * A::SG_PAD_LEVEL.1 + max_open * A::SG_PAD_LEVEL.0;
         }
     }
 
@@ -3618,7 +3613,7 @@ fn compute_sg_y_extras(
             }
         }
     }
-    let trailing_extra = max_close_at_end * SUBGRAPH_V_PAD_BOTTOM;
+    let trailing_extra = max_close_at_end * A::SG_PAD_LEVEL.1;
 
     (initial_offset, trailing_extra)
 }
@@ -3629,7 +3624,7 @@ fn compute_sg_y_extras(
 /// so bottom borders can be placed below the routing area.
 /// Returns the maximum bounding-box right edge (`x + width`) across all
 /// subgraphs, so the caller can widen the canvas to cover every border.
-fn compute_sg_bounding_boxes(
+fn compute_sg_bounding_boxes<A: Axis>(
     graph: &CsrGraph<'_>,
     real_coords: &[(usize, usize, usize, usize)], // (level, pos, x, width)
     level_y_offsets: &[usize],
@@ -3691,9 +3686,9 @@ fn compute_sg_bounding_boxes(
             continue;
         } // no nodes
 
-        let x = min_x.saturating_sub(SUBGRAPH_H_PAD);
-        let y = min_y.saturating_sub(SUBGRAPH_V_PAD_TOP);
-        let right = max_x + SUBGRAPH_H_PAD;
+        let x = min_x.saturating_sub(A::SG_PAD_CROSS.0);
+        let y = min_y.saturating_sub(A::SG_PAD_LEVEL.0);
+        let right = max_x + A::SG_PAD_CROSS.1;
 
         // Place bottom border below edge routing area if possible.
         let last_level = if sg_idx < 64 { sg_max_level[sg_idx] } else { 0 };
@@ -3702,7 +3697,7 @@ fn compute_sg_bounding_boxes(
         } else {
             0
         };
-        let base_bottom = max_y + SUBGRAPH_V_PAD_BOTTOM;
+        let base_bottom = max_y + A::SG_PAD_LEVEL.1;
         // Ensure bottom border row (base_bottom - 1) is below the routing floor
         let bottom = if routing_floor > 0 && base_bottom.saturating_sub(1) <= routing_floor {
             (routing_floor + 2).min(total_height) // +2: 1 blank row + border row
@@ -3750,14 +3745,14 @@ fn compute_sg_bounding_boxes(
             if cx == usize::MAX {
                 continue;
             }
-            // The child box already includes its own SUBGRAPH_H_PAD; the
-            // parent adds only its border column (shared rule with heap —
-            // using H_PAD here made CSR parents one column wider per side).
+            // The child box already includes its own cross-axis pads;
+            // the parent adds only its border column (shared rule with heap —
+            // using the full pad here made CSR parents one column wider per side).
             let expanded = (
-                cx.saturating_sub(PARENT_CHILD_H_GAP),
-                cy.saturating_sub(SUBGRAPH_V_PAD_TOP),
-                cr + PARENT_CHILD_H_GAP,
-                cb + SUBGRAPH_V_PAD_BOTTOM,
+                cx.saturating_sub(A::PARENT_CHILD_GAP_CROSS),
+                cy.saturating_sub(A::SG_PAD_LEVEL.0),
+                cr + A::PARENT_CHILD_GAP_CROSS,
+                cb + A::SG_PAD_LEVEL.1,
             );
             let (ref mut px, ref mut py, ref mut pr, ref mut pb) = sg_envelopes[parent_idx];
             if *px == usize::MAX {
@@ -3955,7 +3950,7 @@ fn build_virtual_levels_csr(
     (total, max_size)
 }
 
-fn assign_x_coords_csr<A: super::geometry::Axis>(
+fn assign_x_coords_csr<A: Axis>(
     graph: &CsrGraph<'_>,
     vlevel_offsets: &[Idx],
     vnode_data: &[Idx],
@@ -4726,14 +4721,20 @@ impl<'a> Graph<'a> {
         let temps_size = [
             item(edge_count.max(1), core::mem::size_of::<bool>()), // back_edges
             item(node_count, core::mem::size_of::<Idx>()),         // node_levels
-            item(2 * max_levels.saturating_add(2), core::mem::size_of::<usize>()), // level_real + level_dummy
+            item(
+                2 * max_levels.saturating_add(2),
+                core::mem::size_of::<usize>(),
+            ), // level_real + level_dummy
             item(edge_count, core::mem::size_of::<(Idx, Idx)>()),  // edge_indices
             item(max_levels.saturating_add(2), core::mem::size_of::<Idx>()), // vlevel_offsets
             item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // level_counts
             item(max_vnodes.saturating_mul(2), core::mem::size_of::<Idx>()), // vnode_data
             item(max_vnodes, core::mem::size_of::<Coord>()),       // x_coords
             item(max_vnodes, core::mem::size_of::<Coord>()),       // widths
-            item(node_count, core::mem::size_of::<(usize, usize, usize, usize)>()), // real_coords
+            item(
+                node_count,
+                core::mem::size_of::<(usize, usize, usize, usize)>(),
+            ), // real_coords
             item(edge_count.saturating_add(1), core::mem::size_of::<Idx>()), // dummy_offsets
             item(max_dummy_waypoints, core::mem::size_of::<(Idx, Coord)>()), // dummy_data
             item(max_level_size, core::mem::size_of::<(Idx, u32)>()), // medians
@@ -4749,7 +4750,9 @@ impl<'a> Graph<'a> {
                 3 * core::mem::size_of::<usize>(),
             ), // slot_pool
             item(
-                2 * max_levels.saturating_add(1).saturating_mul(MAX_SLOTS_PER_LEVEL),
+                2 * max_levels
+                    .saturating_add(1)
+                    .saturating_mul(MAX_SLOTS_PER_LEVEL),
                 core::mem::size_of::<usize>(),
             ), // slot heads + tails
             item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // level_dummy_next
@@ -4766,7 +4769,10 @@ impl<'a> Graph<'a> {
             // an estimate must cover the clustered case).
             item(sg_count, core::mem::size_of::<(usize, usize)>()), // sg_ranges
             item(sg_count, core::mem::size_of::<usize>()),          // sg_depths
-            item(sg_count, core::mem::size_of::<(usize, usize, usize, usize)>()), // sg_envelopes
+            item(
+                sg_count,
+                core::mem::size_of::<(usize, usize, usize, usize)>(),
+            ), // sg_envelopes
             item(max_levels.saturating_add(1), core::mem::size_of::<usize>()), // sg_y_extras
             item(
                 2 * max_levels.saturating_add(2),
@@ -5295,8 +5301,8 @@ mod tests {
         let mut arena = Arena::new(&mut buf);
         let sg_label_bytes = 7; // "cluster"
         let label_bytes = 4 + sg_label_bytes; // A+B node labels + sg label
-        let mut builder =
-            CsrGraphBuilder::new_with_subgraphs(&mut arena, 2, 1, label_bytes, 1, 0).expect("builder");
+        let mut builder = CsrGraphBuilder::new_with_subgraphs(&mut arena, 2, 1, label_bytes, 1, 0)
+            .expect("builder");
         builder.add_node(0, "A");
         builder.add_node(1, "B");
         builder.add_edge(0, 1);
@@ -5510,8 +5516,8 @@ mod tests {
     ) {
         let mut graph_buf = [0u8; 16384];
         let mut graph_arena = Arena::new(&mut graph_buf);
-        let mut b =
-            CsrGraphBuilder::new_with_subgraphs(&mut graph_arena, 16, 16, 256, 4, 0).expect("builder");
+        let mut b = CsrGraphBuilder::new_with_subgraphs(&mut graph_arena, 16, 16, 256, 4, 0)
+            .expect("builder");
         let sg = b.add_subgraph(0, sg_label).expect("sg");
         for (i, (label, _)) in nodes.iter().enumerate() {
             b.add_node(i, label).expect("node");
@@ -5558,8 +5564,8 @@ mod tests {
         let long_label = "L".repeat(300);
         let mut graph_buf = [0u8; 16384];
         let mut graph_arena = Arena::new(&mut graph_buf);
-        let mut b =
-            CsrGraphBuilder::new_with_subgraphs(&mut graph_arena, 4, 4, 512, 2, 0).expect("builder");
+        let mut b = CsrGraphBuilder::new_with_subgraphs(&mut graph_arena, 4, 4, 512, 2, 0)
+            .expect("builder");
         let sg = b.add_subgraph(0, &long_label).expect("sg");
         b.add_node(0, "A").expect("node");
         b.add_node(1, "B").expect("node");
