@@ -282,6 +282,49 @@ pub const RENDER_CANVAS_TOO_SMALL: &str = wdp!(E.Render.Canvas.EXHAUSTED);
 /// `E.Render.Sink.026` — Sequence 026 = EXHAUSTED.
 pub const RENDER_OUTPUT_TOO_SMALL: &str = wdp!(E.Render.Sink.EXHAUSTED);
 
+// ── Warning codes (severity W — non-blocking, WDP Part 1) ───────────────
+//
+// Warnings share the error codes' Component.Primary.Sequence space:
+//   Graph.Node.021  NodeAutoCreated  (NOT_FOUND — referenced, so created)
+//   Graph.Node.007  AutoReplaced     (DUPLICATE — AUTO-involved replace)
+//   Graph.Dag.003   ConfigClamped    (INVALID — config value out of range)
+
+/// An edge referenced a node that was never added; a placeholder was
+/// auto-created (rendered as `⟨⟩` until explicitly defined).
+///
+/// `W.Graph.Node.021` — Sequence 021 = NOT_FOUND, severity W =
+/// non-blocking warning. Emitted under the opt-in `warnings` feature.
+pub const WARN_NODE_AUTO_CREATED: &str = wdp!(W.Graph.Node.NOT_FOUND);
+
+/// A duplicate `add_node` replaced an existing node with `AUTO`
+/// numbering involved on either side — an explicit id overwrote an
+/// auto-numbered node, or a saturated `AUTO` overwrote an existing one.
+///
+/// `W.Graph.Node.007` — Sequence 007 = DUPLICATE. Emitted under the
+/// opt-in `warnings` feature.
+pub const WARN_AUTO_REPLACED: &str = wdp!(W.Graph.Node.DUPLICATE);
+
+/// A layout-configuration value is outside its useful range and was
+/// clamped or will behave poorly (e.g. `crossing_reduction_passes`).
+///
+/// `W.Graph.Dag.003` — Sequence 003 = INVALID. Emitted in any `std`
+/// build: this diagnostic predates the `warnings` feature and keeps
+/// its historical gate — moving it behind `warnings` would silence it
+/// for existing users.
+pub const WARN_CONFIG_CLAMPED: &str = wdp!(W.Graph.Dag.INVALID);
+
+/// Emit a WDP-coded warning to stderr — best-effort, never panicking.
+///
+/// `eprintln!` panics if writing to stderr fails (e.g. fd 2 closed in a
+/// daemonized process), which would violate the crate's no-panic
+/// discipline for a *diagnostic*. Write failures are deliberately
+/// discarded: when no console exists, warnings degrade to silence.
+#[cfg(feature = "std")]
+pub(crate) fn emit_warning(code: &str, message: core::fmt::Arguments<'_>) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "[ascii-dag] {code}: {message}");
+}
+
 // ── GraphError ──────────────────────────────────────────────────────────
 
 /// Unified error type for all graph and layout operations.

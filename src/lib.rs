@@ -150,6 +150,7 @@ pub mod validation;
 pub use errors::Diagnostic;
 pub use errors::GraphError;
 pub use graph::RenderMode;
+pub use graph::{AUTO, Auto, IdOrAuto, NodeId};
 #[cfg(feature = "alloc")]
 pub use graph::{Direction, Graph, Subgraph};
 pub use ir::NodeKind;

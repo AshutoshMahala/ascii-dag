@@ -148,6 +148,109 @@ use std::collections::{HashMap, HashSet};
 #[cfg(all(feature = "alloc", not(feature = "std")))]
 use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
 
+// ── Node handles & the AUTO sentinel ─────────────────────────────────────
+
+/// A typed handle to a node, returned by [`Graph::add_node`].
+///
+/// Handles flow back into the edge and subgraph APIs (which accept
+/// `impl Into<NodeId>`), so graphs can be built end-to-end without
+/// hand-tracked integer ids:
+///
+/// ```
+/// use ascii_dag::{Graph, AUTO};
+///
+/// let mut g = Graph::new();
+/// let a = g.add_node(AUTO, "A");
+/// let b = g.add_node(AUTO, "B");
+/// g.add_edge(a, b, None);
+/// ```
+///
+/// Raw `usize` ids keep working everywhere — `NodeId` is the safer
+/// *recommended* path, not a fence: it converts from and to `usize`
+/// freely and **carries no graph provenance** — a handle obtained from
+/// graph A is accepted by graph B, where it names whatever node has
+/// that id there (possibly none, in which case edge endpoints
+/// auto-create a placeholder as raw ids always have).
+///
+/// The handle vocabulary (`NodeId`, [`Auto`]/[`AUTO`], [`IdOrAuto`])
+/// is allocation-free and available in every build, `no_std`
+/// included — a no-alloc component can produce and pass handles
+/// (e.g. `(NodeId, NodeId)` edge pairs) for an alloc-enabled host to
+/// assemble into a [`Graph`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NodeId(usize);
+
+impl NodeId {
+    /// The raw id this handle names.
+    #[inline]
+    pub fn id(self) -> usize {
+        self.0
+    }
+}
+
+impl From<usize> for NodeId {
+    #[inline]
+    fn from(id: usize) -> Self {
+        NodeId(id)
+    }
+}
+
+impl From<NodeId> for usize {
+    #[inline]
+    fn from(handle: NodeId) -> usize {
+        handle.0
+    }
+}
+
+/// The type of the [`AUTO`] sentinel — see [`Graph::add_node`].
+#[derive(Debug, Clone, Copy)]
+pub struct Auto;
+
+/// Auto-numbering sentinel for [`Graph::add_node`]'s id slot:
+/// `g.add_node(AUTO, "label")` lets the graph pick the next id above
+/// every id it has seen. `Auto` does not convert to [`NodeId`], so the
+/// sentinel cannot appear where an *existing* node is referenced
+/// (`add_edge(AUTO, …)` is a compile error).
+pub const AUTO: Auto = Auto;
+
+/// An explicit node id or the [`AUTO`] sentinel, for
+/// [`Graph::add_node`]'s id slot.
+///
+/// `From<usize>` keeps every existing call site compiling — including
+/// bare integer literals. STANDING GUARD (compile-pinned by test):
+/// `usize` must remain the **only** integer `From` impl here and on
+/// [`NodeId`]; a second one would re-ambiguate bare literals onto
+/// Rust's `i32` fallback and break them.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum IdOrAuto {
+    /// A caller-chosen id.
+    Id(usize),
+    /// Graph-assigned: the next id above every id seen so far.
+    Auto,
+}
+
+impl From<usize> for IdOrAuto {
+    #[inline]
+    fn from(id: usize) -> Self {
+        IdOrAuto::Id(id)
+    }
+}
+
+impl From<Auto> for IdOrAuto {
+    #[inline]
+    fn from(_: Auto) -> Self {
+        IdOrAuto::Auto
+    }
+}
+
+impl From<NodeId> for IdOrAuto {
+    #[inline]
+    fn from(handle: NodeId) -> Self {
+        IdOrAuto::Id(handle.0)
+    }
+}
+
 /// A directed graph with ASCII rendering capabilities.
 ///
 /// Despite the crate name (`ascii-dag`), `Graph` supports cycles — they are
@@ -188,6 +291,9 @@ pub struct Graph<'a> {
     pub(crate) subgraphs: Vec<Subgraph<'a>>, // Named clusters
     pub(crate) node_subgraph: HashMap<usize, usize>, // node_id → subgraph_id
     pub(crate) next_subgraph_id: usize,      // Monotonic ID counter
+    pub(crate) next_auto: usize,             // AUTO id source: 1 above every id seen (saturating)
+    #[cfg(feature = "warnings")]
+    pub(crate) auto_numbered: HashSet<usize>, // Ids assigned via AUTO (D5 replace diagnostics)
 }
 
 #[cfg(feature = "alloc")]
@@ -236,15 +342,23 @@ impl<'a> Graph<'a> {
             subgraphs: Vec::new(),
             node_subgraph: HashMap::new(),
             next_subgraph_id: 0,
+            next_auto: 0,
+            #[cfg(feature = "warnings")]
+            auto_numbered: HashSet::new(),
         };
 
-        // Build id_to_index map, widths cache, and heights cache
+        // Build id_to_index map, widths cache, and heights cache; seed
+        // the AUTO counter above every batch-supplied id in the same
+        // pass.
+        let mut next_auto = 0usize;
         for (idx, &(id, label)) in dag.nodes.iter().enumerate() {
             dag.id_to_index.insert(id, idx);
             let width = dag.compute_node_width(id, label);
             dag.node_widths.push(width);
             dag.node_heights.push(1);
+            next_auto = next_auto.max(id.saturating_add(1));
         }
+        dag.next_auto = next_auto;
 
         // Initialize adjacency lists
         dag.children.resize(dag.nodes.len(), Vec::new());
@@ -289,15 +403,23 @@ impl<'a> Graph<'a> {
             subgraphs: Vec::new(),
             node_subgraph: HashMap::new(),
             next_subgraph_id: 0,
+            next_auto: 0,
+            #[cfg(feature = "warnings")]
+            auto_numbered: HashSet::new(),
         };
 
-        // Build id_to_index map, widths cache, and heights cache
+        // Build id_to_index map, widths cache, and heights cache; seed
+        // the AUTO counter above every batch-supplied id in the same
+        // pass.
+        let mut next_auto = 0usize;
         for (idx, &(id, label)) in dag.nodes.iter().enumerate() {
             dag.id_to_index.insert(id, idx);
             let width = dag.compute_node_width(id, label);
             dag.node_widths.push(width);
             dag.node_heights.push(1);
+            next_auto = next_auto.max(id.saturating_add(1));
         }
+        dag.next_auto = next_auto;
 
         // Initialize adjacency lists
         dag.children.resize(dag.nodes.len(), Vec::new());
@@ -410,16 +532,24 @@ impl<'a> Graph<'a> {
     fn validate_passes(passes: usize) -> usize {
         if passes > 1000 {
             #[cfg(feature = "std")]
-            eprintln!(
-                "[ascii-dag] Warning: crossing_reduction_passes={} is unreasonably large (possibly from negative value). Clamping to 0.",
-                passes
+            crate::errors::emit_warning(
+                crate::errors::WARN_CONFIG_CLAMPED,
+                format_args!(
+                    "crossing_reduction_passes={} is unreasonably large (possibly \
+                     from negative value). Clamping to 0.",
+                    passes
+                ),
             );
             0
         } else if passes > 20 {
             #[cfg(feature = "std")]
-            eprintln!(
-                "[ascii-dag] Warning: crossing_reduction_passes={} is high. Values >20 have diminishing returns and may be slow.",
-                passes
+            crate::errors::emit_warning(
+                crate::errors::WARN_CONFIG_CLAMPED,
+                format_args!(
+                    "crossing_reduction_passes={} is high. Values >20 have \
+                     diminishing returns and may be slow.",
+                    passes
+                ),
             );
             passes
         } else {
@@ -513,20 +643,92 @@ impl<'a> Graph<'a> {
         Self::new().with_render_mode(mode)
     }
 
-    /// Add a node to the DAG.
+    /// Record `id` as seen so a later [`AUTO`] pick lands above it.
+    /// Saturating: near `usize::MAX` the counter pins to the top and a
+    /// subsequent `AUTO` falls through to the documented
+    /// replace-on-duplicate semantics (don't park explicit ids there —
+    /// that band already collides with synthetic dummy ids).
+    #[inline]
+    fn bump_next_auto(&mut self, id: usize) {
+        let next = id.saturating_add(1);
+        if next > self.next_auto {
+            self.next_auto = next;
+        }
+    }
+
+    /// Add a node to the DAG. Returns a typed [`NodeId`] handle usable
+    /// wherever a node id is accepted (edges, subgraph placement).
     ///
-    /// If the node was previously auto-created by `add_edge`, this will promote it
-    /// by setting its label and removing the auto-created flag.
+    /// The id slot takes an explicit `usize` **or** the [`AUTO`]
+    /// sentinel, which assigns the next id above every id this graph
+    /// has seen — explicit ids first (e.g. [`Graph::from_edges`]) then
+    /// `AUTO` extras stay collision-free until the counter saturates
+    /// at `usize::MAX` (only reachable by explicitly parking ids
+    /// there); a saturated `AUTO`, like any duplicate id, falls
+    /// through to the replace semantics below and emits a diagnostic
+    /// under the `warnings` feature.
+    ///
+    /// If the node already exists (auto-created by `add_edge`, or added
+    /// earlier), this replaces its label — promoting auto-created
+    /// placeholders to explicit nodes. Under the `warnings` feature, a
+    /// replacement involving `AUTO` on either side (an explicit id
+    /// overwriting an auto-numbered node, or a saturated `AUTO`
+    /// overwriting anything) prints a diagnostic, mirroring the
+    /// auto-created-placeholder warning.
     ///
     /// # Examples
     ///
     /// ```
-    /// use ascii_dag::graph::Graph;
+    /// use ascii_dag::{Graph, AUTO};
     ///
     /// let mut dag = Graph::new();
-    /// dag.add_node(1, "MyNode");
+    /// dag.add_node(1, "MyNode");            // explicit id
+    /// let n = dag.add_node(AUTO, "Auto");   // graph-assigned id
+    /// dag.add_edge(1, n, None);             // handles flow into edges
     /// ```
-    pub fn add_node(&mut self, id: usize, label: &'a str) {
+    pub fn add_node(&mut self, id: impl Into<IdOrAuto>, label: &'a str) -> NodeId {
+        let (id, incoming_auto) = match id.into() {
+            IdOrAuto::Id(id) => (id, false),
+            IdOrAuto::Auto => (self.next_auto, true),
+        };
+        #[cfg(not(feature = "warnings"))]
+        let _ = incoming_auto;
+        self.bump_next_auto(id);
+        #[cfg(feature = "warnings")]
+        if self.id_to_index.contains_key(&id) {
+            // D5/D7: a duplicate involving AUTO on either side is worth
+            // a diagnostic — an explicit id silently overwriting an
+            // auto-numbered node, or a saturated AUTO overwriting an
+            // existing node.
+            let existing_auto = self.auto_numbered.contains(&id);
+            if incoming_auto || existing_auto {
+                crate::errors::emit_warning(
+                    crate::errors::WARN_AUTO_REPLACED,
+                    format_args!(
+                        "node {} replaced ({}). Replace-on-duplicate is the standing \
+                         semantic; this diagnostic fires because AUTO numbering was \
+                         involved.",
+                        id,
+                        if incoming_auto {
+                            "AUTO resolved to an id that is already taken — the counter \
+                             only saturates when explicit ids sit near usize::MAX"
+                        } else {
+                            "an explicit id overwrote an auto-numbered node"
+                        },
+                    ),
+                );
+            }
+        }
+        #[cfg(feature = "warnings")]
+        {
+            // Track how this id was assigned (auto or explicit) so the
+            // check above can see the existing side next time.
+            if incoming_auto {
+                self.auto_numbered.insert(id);
+            } else {
+                self.auto_numbered.remove(&id);
+            }
+        }
         // Check if node already exists (could be auto-created) - O(1) with HashMap
         if let Some(&idx) = self.id_to_index.get(&id) {
             // Promote auto-created node to explicit node
@@ -549,6 +751,7 @@ impl<'a> Graph<'a> {
             self.children.push(Vec::new());
             self.parents.push(Vec::new());
         }
+        NodeId(id)
     }
 
     /// Add a node with explicit width and height overrides.
@@ -571,6 +774,14 @@ impl<'a> Graph<'a> {
     /// border box across the full area, and `Custom` hands the area to
     /// a user painter. See `examples/node_painting.rs`.
     ///
+    /// Like [`add_node`](Self::add_node), returns a typed [`NodeId`]
+    /// handle for the added node.
+    ///
+    /// Explicit ids only — the id slot deliberately does **not**
+    /// accept [`AUTO`]: this method keeps its 0.9 signature and is
+    /// superseded in 0.10 by sized node objects, which ride
+    /// `add_node`'s full id slot. New code should not need it.
+    ///
     /// # Examples
     ///
     /// ```
@@ -582,7 +793,31 @@ impl<'a> Graph<'a> {
     /// // Multi-row node for complex content
     /// dag.add_node_with_size(2, "Pipeline", 12, 3);
     /// ```
-    pub fn add_node_with_size(&mut self, id: usize, label: &'a str, width: usize, height: usize) {
+    pub fn add_node_with_size(
+        &mut self,
+        id: usize,
+        label: &'a str,
+        width: usize,
+        height: usize,
+    ) -> NodeId {
+        self.bump_next_auto(id);
+        #[cfg(feature = "warnings")]
+        {
+            // D5: an explicit id silently overwriting an auto-numbered
+            // node deserves the same diagnostic as in `add_node`.
+            if self.id_to_index.contains_key(&id) && self.auto_numbered.contains(&id) {
+                crate::errors::emit_warning(
+                    crate::errors::WARN_AUTO_REPLACED,
+                    format_args!(
+                        "node {} replaced (an explicit id overwrote an auto-numbered \
+                         node). Replace-on-duplicate is the standing semantic; this \
+                         diagnostic fires because AUTO numbering was involved.",
+                        id,
+                    ),
+                );
+            }
+            self.auto_numbered.remove(&id);
+        }
         let height = height.max(1);
         if let Some(&idx) = self.id_to_index.get(&id) {
             self.nodes[idx] = (id, label);
@@ -598,6 +833,7 @@ impl<'a> Graph<'a> {
             self.children.push(Vec::new());
             self.parents.push(Vec::new());
         }
+        NodeId(id)
     }
 
     /// Add a node with an explicit width override (height defaults to 1).
@@ -623,7 +859,17 @@ impl<'a> Graph<'a> {
     /// dag.add_edge(1, 2, None);  // A -> B (no label)
     /// dag.add_edge(2, 3, Some("depends on"));  // B -> C with label
     /// ```
-    pub fn add_edge(&mut self, from: usize, to: usize, label: Option<&'a str>) {
+    ///
+    /// Accepts raw ids and [`NodeId`] handles alike. The [`AUTO`]
+    /// sentinel is *not* accepted here — an edge references nodes, and
+    /// "auto" is meaningless as a reference.
+    pub fn add_edge(
+        &mut self,
+        from: impl Into<NodeId>,
+        to: impl Into<NodeId>,
+        label: Option<&'a str>,
+    ) {
+        let (from, to) = (from.into().id(), to.into().id());
         self.ensure_node_exists(from);
         self.ensure_node_exists(to);
         self.edges.push((from, to, label));
@@ -650,15 +896,18 @@ impl<'a> Graph<'a> {
         // O(1) lookup with HashMap
         if !self.id_to_index.contains_key(&id) {
             #[cfg(feature = "warnings")]
-            {
-                eprintln!(
-                    "[ascii-dag] Warning: Node {} missing - auto-creating as placeholder. \
-                     Call add_node({}, \"label\") before add_edge() to provide a label.",
+            crate::errors::emit_warning(
+                crate::errors::WARN_NODE_AUTO_CREATED,
+                format_args!(
+                    "node {} missing - auto-creating as placeholder. Call \
+                     add_node({}, \"label\") before add_edge() to provide a label.",
                     id, id
-                );
-            }
+                ),
+            );
 
-            // Create node with empty label
+            // Create node with empty label. An id-creating site: the
+            // AUTO counter must clear implicitly created ids too.
+            self.bump_next_auto(id);
             let idx = self.nodes.len();
             self.nodes.push((id, ""));
             self.auto_created.insert(id); // O(1) insert
@@ -963,7 +1212,12 @@ impl<'a> Graph<'a> {
     /// g.put_nodes(&[1, 2]).inside(sg).unwrap();
     /// assert_eq!(g.node_subgraph(1), Some(sg));
     /// ```
-    pub fn put_nodes<'g>(&'g mut self, node_ids: &'g [usize]) -> NodePlacer<'g, 'a> {
+    ///
+    /// The slice may hold raw `usize` ids or [`NodeId`] handles.
+    pub fn put_nodes<'g, N: Into<NodeId> + Copy>(
+        &'g mut self,
+        node_ids: &'g [N],
+    ) -> NodePlacer<'g, 'a, N> {
         NodePlacer {
             graph: self,
             node_ids,
@@ -1050,13 +1304,13 @@ impl<'a> Graph<'a> {
 ///
 /// Call [`.inside(subgraph_id)`](NodePlacer::inside) to assign nodes to a cluster.
 #[cfg(feature = "alloc")]
-pub struct NodePlacer<'g, 'a> {
+pub struct NodePlacer<'g, 'a, N = usize> {
     graph: &'g mut Graph<'a>,
-    node_ids: &'g [usize],
+    node_ids: &'g [N],
 }
 
 #[cfg(feature = "alloc")]
-impl<'g, 'a> NodePlacer<'g, 'a> {
+impl<'g, 'a, N: Into<NodeId> + Copy> NodePlacer<'g, 'a, N> {
     /// Assign every node in the list to the given subgraph.
     ///
     /// # Errors
@@ -1068,8 +1322,11 @@ impl<'g, 'a> NodePlacer<'g, 'a> {
         if !self.graph.subgraphs.iter().any(|s| s.id == sg_id) {
             return Err(GraphError::SubgraphNotFound(sg_id));
         }
-        // Validate & assign each node
+        // Validate & assign each node. Placement only references
+        // existing nodes — it never creates, so it is not an
+        // id-creating site for the AUTO counter.
         for &nid in self.node_ids {
+            let nid: usize = nid.into().id();
             if !self.graph.id_to_index.contains_key(&nid) {
                 return Err(GraphError::NodeNotFound(nid));
             }
@@ -1125,6 +1382,164 @@ impl<'g, 'a> SubgraphPlacer<'g, 'a> {
 #[cfg(feature = "alloc")]
 mod tests {
     use super::*;
+
+    // ── Node handles & AUTO numbering (NC-P1) ──────────────────────────
+
+    #[test]
+    fn handles_round_trip_and_flow_into_apis() {
+        let mut g = Graph::new();
+        let a = g.add_node(1, "A");
+        let b = g.add_node(2, "B");
+        assert_eq!(usize::from(a), 1);
+        assert_eq!(a, NodeId::from(1));
+        assert_eq!(a.id(), 1);
+        g.add_edge(a, b, None); // handles as edge endpoints
+        let sg = g.add_subgraph("S");
+        g.put_nodes(&[a, b]).inside(sg).unwrap(); // handles in placement
+        assert_eq!(g.node_subgraph(1), Some(sg));
+        // A handle is accepted back in the id slot (replace semantics).
+        g.add_node(a, "A2");
+        assert_eq!(g.nodes.len(), 2);
+        assert_eq!(g.nodes[0].1, "A2");
+    }
+
+    #[test]
+    fn bare_integer_literals_still_compile() {
+        // D3 standing guard (compile pin): `usize` must remain the ONLY
+        // integer `From` impl on `IdOrAuto` and `NodeId` — a second one
+        // would push these bare literals onto the i32 fallback and
+        // break them. The beyond-i32 literal pins the large case.
+        let mut g = Graph::new();
+        g.add_node(1, "A");
+        g.add_node(4_000_000_000, "big");
+        g.add_edge(1, 4_000_000_000, None);
+        let sg = g.add_subgraph("S");
+        g.put_nodes(&[1]).inside(sg).unwrap();
+    }
+
+    #[test]
+    fn auto_numbers_from_zero_on_fresh_graphs() {
+        let mut g = Graph::new();
+        assert_eq!(usize::from(g.add_node(AUTO, "a")), 0);
+        assert_eq!(usize::from(g.add_node(AUTO, "b")), 1);
+        assert_eq!(usize::from(g.add_node_with_size(9, "big", 10, 3)), 9);
+        assert_eq!(usize::from(g.add_node(AUTO, "c")), 10);
+    }
+
+    #[test]
+    fn auto_continues_above_every_id_creating_site() {
+        let mut g = Graph::new();
+        g.add_node(10, "ten");
+        g.add_node(3, "three");
+        // Explicit-then-AUTO is collision-free by construction (D5).
+        assert_eq!(usize::from(g.add_node(AUTO, "next")), 11);
+        // Edge auto-creation is an id-creating site too.
+        g.add_edge(11, 40, None);
+        assert_eq!(usize::from(g.add_node(AUTO, "after-edge")), 41);
+        // Subgraph placement references nodes — NOT an id-creating
+        // site; the counter must not move.
+        let sg = g.add_subgraph("S");
+        g.put_nodes(&[40]).inside(sg).unwrap();
+        assert_eq!(usize::from(g.add_node(AUTO, "after-place")), 42);
+    }
+
+    #[test]
+    fn batch_constructors_seed_the_counter() {
+        let mut g = Graph::from_edges(&[(100, "a"), (7, "b")], &[(100, 7)]);
+        assert_eq!(usize::from(g.add_node(AUTO, "c")), 101);
+        let mut g2 = Graph::from_edges_labeled(&[(5, "x")], &[(5, 30, Some("l"))]);
+        // Edge auto-created node 30 bumps past the batch maximum.
+        assert_eq!(usize::from(g2.add_node(AUTO, "y")), 31);
+    }
+
+    #[test]
+    fn implicit_then_explicit_falls_through_to_replace() {
+        let mut g = Graph::new();
+        g.add_node(AUTO, "zero");
+        let one = g.add_node(AUTO, "one");
+        g.add_node(AUTO, "two");
+        // Explicit reuse of a small integer is the standing
+        // replace-on-duplicate semantic (D5) — no new node.
+        g.add_node(1, "replaced");
+        assert_eq!(g.nodes.len(), 3);
+        assert_eq!(usize::from(one), 1);
+        assert_eq!(g.nodes[1].1, "replaced");
+        // The counter keeps counting above everything seen.
+        assert_eq!(usize::from(g.add_node(AUTO, "three")), 3);
+    }
+
+    /// The counter invariant under pseudo-random op sequences
+    /// (deterministic LCG — the crate takes no dev-deps, so no
+    /// proptest): after every operation, `next_auto` strictly exceeds
+    /// every id the graph has seen.
+    #[test]
+    fn auto_counter_invariant_over_random_ops() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) as usize
+        };
+        let mut g = Graph::new();
+        let mut max_seen: Option<usize> = None;
+        for _ in 0..500 {
+            let id = match next() % 3 {
+                0 => usize::from(g.add_node(next() % 1000, "n")),
+                1 => usize::from(g.add_node(AUTO, "a")),
+                _ => {
+                    let (f, t) = (next() % 1000, next() % 1000);
+                    g.add_edge(f, t, None);
+                    f.max(t)
+                }
+            };
+            max_seen = Some(max_seen.map_or(id, |m| m.max(id)));
+            assert!(
+                g.next_auto > max_seen.unwrap(),
+                "next_auto {} must exceed max seen id {}",
+                g.next_auto,
+                max_seen.unwrap()
+            );
+        }
+    }
+
+    /// The state machine behind the D5/D7 replace diagnostics: ids
+    /// gain the auto mark when AUTO assigns them, lose it when an
+    /// explicit id overwrites them (the transition that fires the
+    /// `W.Graph.Node.007` warning), and a saturated AUTO re-marks.
+    /// The emitted text goes to stderr (not capturable portably);
+    /// the set drives every emission decision, so it is the pin.
+    #[cfg(feature = "warnings")]
+    #[test]
+    fn auto_numbered_tracking_powers_replace_diagnostics() {
+        let mut g = Graph::new();
+        let a = g.add_node(AUTO, "a");
+        assert!(g.auto_numbered.contains(&a.id()));
+        // Explicit replace clears the mark (and fires the diagnostic).
+        g.add_node(a.id(), "explicit");
+        assert!(!g.auto_numbered.contains(&a.id()));
+        // Saturated AUTO replaces at the top and marks the id.
+        g.add_node(usize::MAX, "top");
+        let s = g.add_node(AUTO, "sat");
+        assert_eq!(s.id(), usize::MAX);
+        assert!(g.auto_numbered.contains(&usize::MAX));
+        // add_node_with_size is an explicit path too — it clears.
+        g.add_node_with_size(usize::MAX, "sized", 8, 1);
+        assert!(!g.auto_numbered.contains(&usize::MAX));
+    }
+
+    #[test]
+    fn auto_counter_saturates_at_the_top() {
+        // D7: near usize::MAX the counter saturates; the next AUTO
+        // resolves to a taken id and falls through to replace — defined
+        // behavior, no panic, no wrap back to small ids.
+        let mut g = Graph::new();
+        g.add_node(usize::MAX, "top");
+        let next = g.add_node(AUTO, "saturated");
+        assert_eq!(usize::from(next), usize::MAX);
+        assert_eq!(g.nodes.len(), 1); // replaced, not appended
+        assert_eq!(g.nodes[0].1, "saturated");
+    }
 
     // ── Subgraph creation ──────────────────────────────────────────────
 
