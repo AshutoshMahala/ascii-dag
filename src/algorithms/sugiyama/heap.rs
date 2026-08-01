@@ -638,6 +638,14 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     };
 
     let mut current_offset = sg_initial_offset;
+    // D8(b) bookkeeping only exists where labels claim level-axis room
+    // (Horizontal with subgraphs) — the Vertical/no-cluster hot path
+    // allocates and traverses nothing extra.
+    let track_label_extras = A::LABEL_CLAIMS_LEVEL_AXIS && dag.has_subgraphs();
+    let mut level_heights = Vec::new();
+    if track_label_extras {
+        level_heights.reserve(max_level + 1);
+    }
 
     for level in 0..=max_level {
         level_offsets.push(current_offset);
@@ -661,6 +669,9 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             crate::algorithms::sugiyama::geometry::routing_overhead(level_labeled_src[level]);
         let height =
             max_node_height[level] + routing_overhead + extra_lines + sg_boundary_extras[level];
+        if track_label_extras {
+            level_heights.push(height);
+        }
         current_offset += height;
         // Extra vertical gap between levels only — not after the last one,
         // which would pad the bottom of the canvas with blank rows.
@@ -672,6 +683,35 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     // Total height: current_offset already includes all subgraph border spacing
     // plus trailing extra for subgraphs closing after the last level
     let total_height = current_offset + sg_trailing_extra;
+
+    // D8(b) second phase: reserve label room on the LEVEL axis
+    // (Horizontal-only — every extra is 0 under Vertical and the
+    // rebuild is skipped, keeping the frozen path untouched).
+    let (level_offsets, total_height) = if track_label_extras {
+        let label_extras = crate::algorithms::sugiyama::subgraph::compute_label_level_extras::<A>(
+            dag,
+            &node_levels,
+            &level_offsets,
+            &max_node_height,
+            max_level,
+        );
+        if label_extras.iter().any(|&e| e > 0) {
+            let mut offsets = Vec::with_capacity(max_level + 1);
+            let mut off = sg_initial_offset;
+            for level in 0..=max_level {
+                offsets.push(off);
+                off += level_heights[level] + label_extras[level];
+                if level < max_level {
+                    off += level_spacing;
+                }
+            }
+            (offsets, off + sg_trailing_extra)
+        } else {
+            (level_offsets, total_height)
+        }
+    } else {
+        (level_offsets, total_height)
+    };
 
     // Add real nodes to IR
     for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
@@ -1095,7 +1135,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     // space (`SubgraphInfo` is physical IR): the canvas must cover
     // every border — a label-widened cluster box can extend past the
     // node extent that `max_width` was derived from.
-    let (mut canvas_width, canvas_height) = A::materialize(total_height, max_width);
+    let (mut canvas_width, mut canvas_height) = A::materialize(total_height, max_width);
     if dag.has_subgraphs() {
         let sg_infos = crate::algorithms::sugiyama::subgraph::compute_bounding_boxes::<A>(
             dag,
@@ -1107,12 +1147,11 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         );
         for info in sg_infos {
             canvas_width = canvas_width.max(info.x + info.width + 1);
-            // LR-P1: fold `info.y + info.height` into the canvas height
-            // here — materialized Horizontal boxes can grow that axis.
-            // Not folded yet: Vertical's routing-row push can (rarely)
-            // move a box bottom past the level total, and today that
-            // corner CLIPS; growing instead is a behavior change the
-            // P0 gate cannot carry.
+            // Cover every border on both axes: materialized Horizontal
+            // boxes can grow the height, and a Vertical bottom border
+            // pushed off a routing row now grows the canvas instead of
+            // clipping (rare corner, disclosed in the changelog).
+            canvas_height = canvas_height.max(info.y + info.height);
             builder.add_subgraph(info);
         }
     }
@@ -1191,7 +1230,7 @@ fn refine_x_positions<A: Axis>(
             return 0;
         }
         let sg = vnode_subgraph(dag, &virtual_levels[level][0]);
-        if sg.is_some() { A::SG_PAD_CROSS.0 } else { 0 }
+        crate::algorithms::sugiyama::subgraph::leading_cross_pad::<A>(dag, sg)
     };
 
     // Helper: compute median center-x of connected neighbors on an adjacent level.
@@ -1411,7 +1450,7 @@ fn compact_subgraphs<A: Axis>(
                 // Can't push past left edge
                 let margin = if i - 1 == 0 {
                     let sg = vnode_subgraph(dag, &virtual_levels[level][0]);
-                    if sg.is_some() { A::SG_PAD_CROSS.0 } else { 0 }
+                    crate::algorithms::sugiyama::subgraph::leading_cross_pad::<A>(dag, sg)
                 } else {
                     0
                 };
@@ -1493,7 +1532,7 @@ fn compact_subgraphs<A: Axis>(
             let n = x_coords[level].len();
             let min_x = if pos == 0 {
                 let sg = vnode_subgraph(dag, &virtual_levels[level][0]);
-                if sg.is_some() { A::SG_PAD_CROSS.0 } else { 0 }
+                crate::algorithms::sugiyama::subgraph::leading_cross_pad::<A>(dag, sg)
             } else {
                 let g = gap_between(level, pos - 1, pos);
                 x_coords[level][pos - 1] + widths[level][pos - 1] + g
@@ -2110,5 +2149,76 @@ mod horizontal_profile {
                 assert!(!overlap, "spans of {id_a} and {id_b} overlap");
             }
         }
+    }
+
+    /// P1-S3: a cluster box under `Horizontal` wraps its members with
+    /// the D3 pads — cross-leading 3 (border + label row + blank),
+    /// cross-trailing 2, level pads 2 each side — and outside nodes
+    /// stay clear of the box.
+    #[test]
+    fn lr_box_wraps_members_with_d3_pads() {
+        let mut g = Graph::new();
+        g.add_node(1, "in");
+        g.add_node(2, "a");
+        g.add_node(3, "b");
+        g.add_node(4, "out");
+        g.add_edge(1, 2, None);
+        g.add_edge(1, 3, None);
+        g.add_edge(2, 4, None);
+        g.add_edge(3, 4, None);
+        let sg = g.add_subgraph("Box");
+        g.put_nodes(&[2usize, 3]).inside(sg).unwrap();
+        let ir = compute_layout_cfg::<Horizontal>(&g, &LayoutConfig::standard());
+        let b = &ir.subgraphs[0];
+        let n = |id: usize| ir.nodes.iter().find(|n| n.id == id).expect("node");
+        for id in [2usize, 3] {
+            let m = n(id);
+            assert!(m.y >= b.y + 3, "cross-leading pad (border+label+blank)");
+            assert!(m.y + m.height + 2 <= b.y + b.height, "cross-trailing pad");
+            assert!(m.x >= b.x + 2, "level leading pad");
+            assert!(m.x + m.width + 2 <= b.x + b.width, "level trailing pad");
+        }
+        for id in [1usize, 4] {
+            let o = n(id);
+            let overlap = o.x < b.x + b.width
+                && b.x < o.x + o.width
+                && o.y < b.y + b.height
+                && b.y < o.y + o.height;
+            assert!(!overlap, "outside node {id} overlaps the box");
+        }
+    }
+
+    /// P1-S3 / D8(b): a long box label widens the box on the LEVEL
+    /// axis (x in LR) — never its height — and the offset reservation
+    /// keeps the next column clear of the widened box.
+    #[test]
+    fn lr_long_label_widens_box_not_height() {
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(2, "next");
+        g.add_edge(1, 2, None);
+        let sg = g.add_subgraph("A Rather Long Cluster Label");
+        g.put_nodes(&[1usize]).inside(sg).unwrap();
+        let ir = compute_layout_cfg::<Horizontal>(&g, &LayoutConfig::standard());
+        let b = &ir.subgraphs[0];
+        let label_min = "A Rather Long Cluster Label".len() + 4;
+        assert!(
+            b.width >= label_min,
+            "label widens the box: width {} < {label_min}",
+            b.width
+        );
+        let member = ir.nodes.iter().find(|n| n.id == 1).expect("member");
+        assert_eq!(
+            b.height,
+            member.height + 3 + 2,
+            "height stays member + cross pads — labels never grow it"
+        );
+        let next = ir.nodes.iter().find(|n| n.id == 2).expect("next");
+        assert!(
+            next.x >= b.x + b.width,
+            "next column ({}) clear of the widened box (ends {})",
+            next.x,
+            b.x + b.width
+        );
     }
 }

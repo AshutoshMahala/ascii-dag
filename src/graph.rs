@@ -1199,9 +1199,21 @@ impl<'a> Graph<'a> {
     pub fn compute_layout(&self) -> crate::ir::LayoutIR<'a> {
         let mut config: LayoutConfig<'_> = LayoutConfig::from(&self.sugiyama_config);
         config.direction = self.direction;
+        self.layout_with(&config)
+    }
+
+    /// Layout dispatch (temp/08 D1). The `Horizontal` profile is
+    /// implemented and invariant-gated, but the PUBLIC flip lands
+    /// atomically after LR-P2..P4: the renderer is y-primary until
+    /// P3, the CSR backend dispatches `Vertical` until P2, and
+    /// `RightLeft` lacks its x-mirror until P4 — flipping earlier
+    /// would hand users unusable geometry. Until then `LeftRight`/
+    /// `RightLeft` keep the documented behavior: recorded on the IR,
+    /// laid out vertically.
+    fn layout_with(&self, config: &LayoutConfig<'_>) -> crate::ir::LayoutIR<'a> {
         crate::algorithms::sugiyama::heap::compute_layout_cfg::<
             crate::algorithms::sugiyama::geometry::Vertical,
-        >(self, &config)
+        >(self, config)
     }
 
     /// Compute the layout using a custom [`LayoutConfig`].
@@ -1225,9 +1237,7 @@ impl<'a> Graph<'a> {
     pub fn compute_layout_with_config(&self, config: &LayoutConfig<'_>) -> crate::ir::LayoutIR<'a> {
         let mut dag = self.clone();
         dag.render_mode = config.render_mode;
-        crate::algorithms::sugiyama::heap::compute_layout_cfg::<
-            crate::algorithms::sugiyama::geometry::Vertical,
-        >(&dag, config)
+        dag.layout_with(config)
     }
 
     /// Compute the layout using a custom [`SugiyamaConfig`].
@@ -1474,6 +1484,27 @@ impl<'g, 'a> SubgraphPlacer<'g, 'a> {
 #[cfg(feature = "alloc")]
 mod tests {
     use super::*;
+
+    /// Until the LR-P2..P4 atomic flip, `LeftRight`/`RightLeft`
+    /// publicly keep the documented "recorded but laid out
+    /// vertically" behavior — the `Horizontal` profile is reachable
+    /// only through the layout-internal tests. This pin prevents an
+    /// accidental early flip (slices review, P0).
+    #[test]
+    fn lr_direction_stays_vertical_until_the_atomic_flip() {
+        for dir in [Direction::LeftRight, Direction::RightLeft] {
+            let mut g = Graph::new();
+            g.add_node(1, "a");
+            g.add_node(2, "b");
+            g.add_edge(1, 2, None);
+            g.set_direction(dir);
+            let ir = g.compute_layout();
+            assert_eq!(ir.edges()[0].flow_axis, crate::ir::FlowAxis::Y);
+            let a = ir.nodes().iter().find(|n| n.id == 1).unwrap();
+            let b = ir.nodes().iter().find(|n| n.id == 2).unwrap();
+            assert!(b.y >= a.y + a.height, "levels stay rows under {dir:?}");
+        }
+    }
 
     // ── Node handles & AUTO numbering (NC-P1) ──────────────────────────
 

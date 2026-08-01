@@ -10,10 +10,7 @@ use crate::graph::arena::Arena;
 use crate::graph::csr::CsrGraph;
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
 
-use super::geometry::{
-    ARROW_CELL_PAD, Axis, EDGE_START_OFFSET, edge_label_offset,
-    label_min_width as sg_label_min_width,
-};
+use super::geometry::{ARROW_CELL_PAD, Axis, EDGE_START_OFFSET, edge_label_offset};
 
 // ── Packed vnode encoding accessors ──────────────────────────────────────
 // `vnode_data` stores two `Idx` per virtual node: `[kind, payload]`.
@@ -189,6 +186,10 @@ fn slot_collides(
 ///
 /// This avoids all heap allocations and HashMap lookups by using the CSR indices directly.
 /// The `config` parameter controls the layout pipeline (crossing reduction, spacing, etc.).
+///
+/// Direction note: this backend currently lays out through `Vertical`
+/// for every direction — `LeftRight`/`RightLeft` gain their native
+/// `Horizontal` dispatch with LR-P2 (the heap backend already has it).
 pub fn compute_layout_arena_csr<'b>(
     graph: &CsrGraph<'_>,
     config: &LayoutConfig<'_>,
@@ -1378,7 +1379,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
 
     // Step 10: Compute subgraph bounding boxes and add to builder
     if graph.has_subgraphs() {
-        let (sg_max_right, _sg_max_bottom) = compute_sg_bounding_boxes::<A>(
+        let (sg_max_right, sg_max_bottom) = compute_sg_bounding_boxes::<A>(
             graph,
             temps.real_coords,
             temps.level_offsets,
@@ -1388,14 +1389,16 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             temps.level_routing_floor,
             &mut builder,
         );
-        // The canvas must cover every border: a label-widened cluster box
-        // can extend past the node extent `canvas_width` was derived from.
-        // LR-P1: fold `_sg_max_bottom` into the height here (Horizontal
-        // boxes can grow that axis; Vertical's rare routing-row push
-        // past the level total currently CLIPS — growing is a behavior
-        // change the P0 gate cannot carry).
-        if sg_max_right + 1 > canvas_width {
-            builder.set_dimensions(sg_max_right + 1, canvas_height);
+        // The canvas must cover every border on BOTH physical axes: a
+        // label-widened cluster box can extend past the node extent
+        // `canvas_width` was derived from, and a materialized
+        // Horizontal box (or a Vertical bottom border pushed off a
+        // routing row) can extend past the height.
+        if sg_max_right + 1 > canvas_width || sg_max_bottom > canvas_height {
+            builder.set_dimensions(
+                canvas_width.max(sg_max_right + 1),
+                canvas_height.max(sg_max_bottom),
+            );
         }
     }
 
@@ -2254,7 +2257,7 @@ fn project_sg_envelopes_csr<A: Axis>(
         }
         let left = l.saturating_sub(A::SG_PAD_CROSS.0);
         let mut right = r + A::SG_PAD_CROSS.1;
-        let min_label_width = sg_label_min_width(graph.subgraph_label(si));
+        let min_label_width = A::label_cross_extent(graph.subgraph_label(si));
         if right - left < min_label_width {
             right = left + min_label_width;
         }
@@ -2282,8 +2285,8 @@ fn project_sg_envelopes_csr<A: Axis>(
                 // only its border column. (This projection previously
                 // used the full box pad and silently disagreed with the
                 // heap twin by one column per nesting level.)
-                let exp_l = cl.saturating_sub(A::PARENT_CHILD_GAP_CROSS);
-                let exp_r = cr + A::PARENT_CHILD_GAP_CROSS;
+                let exp_l = cl.saturating_sub(A::PARENT_CHILD_PAD_CROSS.0);
+                let exp_r = cr + A::PARENT_CHILD_PAD_CROSS.1;
                 let p = &mut sg_envelopes[pi];
                 if p.0 == usize::MAX {
                     p.0 = exp_l;
@@ -2308,7 +2311,7 @@ fn project_sg_envelopes_csr<A: Axis>(
         if l == usize::MAX {
             continue;
         }
-        let min_label_width = sg_label_min_width(graph.subgraph_label(si));
+        let min_label_width = A::label_cross_extent(graph.subgraph_label(si));
         if r - l < min_label_width {
             sg_envelopes[si].1 = l + min_label_width;
         }
@@ -3299,8 +3302,8 @@ fn fix_subgraph_overlaps_csr<A: Axis>(
                     if cx == usize::MAX {
                         continue;
                     }
-                    let exp_l = cx.saturating_sub(A::PARENT_CHILD_GAP_CROSS);
-                    let exp_r = cr + A::PARENT_CHILD_GAP_CROSS;
+                    let exp_l = cx.saturating_sub(A::PARENT_CHILD_PAD_CROSS.0);
+                    let exp_r = cr + A::PARENT_CHILD_PAD_CROSS.1;
                     let (ref mut pl, ref mut pr, _, _) = sg_envelopes[pidx];
                     if exp_l < *pl {
                         *pl = exp_l;
@@ -3319,7 +3322,7 @@ fn fix_subgraph_overlaps_csr<A: Axis>(
             }
             let left = mn.saturating_sub(A::SG_PAD_CROSS.0);
             let mut right = mx + A::SG_PAD_CROSS.1;
-            let label_w = sg_label_min_width(graph.subgraph_label(sg_idx));
+            let label_w = A::label_cross_extent(graph.subgraph_label(sg_idx));
             if right.saturating_sub(left) < label_w {
                 right = left + label_w;
             }
@@ -3649,9 +3652,8 @@ fn compute_sg_level_extras<A: Axis>(
 /// `level_routing_floor` contains the max Y used by edge routing at each level,
 /// so bottom borders can be placed below the routing area.
 /// Returns the maximum physical right and bottom edges across all
-/// subgraphs. The caller widens the canvas from the right edge today;
-/// the bottom edge is plumbed for LR-P1's height fold (see the call
-/// site for why it is not folded yet).
+/// subgraphs, so the caller can grow BOTH canvas dimensions to cover
+/// every border.
 fn compute_sg_bounding_boxes<A: Axis>(
     graph: &CsrGraph<'_>,
     real_coords: &[(usize, usize, usize, usize)], // (level, pos, x, width)
@@ -3684,7 +3686,9 @@ fn compute_sg_bounding_boxes<A: Axis>(
             }
             let (level, _, x, width) = real_coords[node_idx];
             let y = level_offsets.get(level).copied().unwrap_or(0);
-            let node_max_y = y + 1;
+            // Member LEVEL extent from declared dimensions (matches heap).
+            let node_max_y =
+                y + A::level_extent(graph.node_width(node_idx), graph.node_height(node_idx));
             let node_max_x = x + width;
 
             if sg_idx < 64 {
@@ -3735,7 +3739,7 @@ fn compute_sg_bounding_boxes<A: Axis>(
 
         // Ensure width fits label
         let label = graph.subgraph_label(sg_idx);
-        let min_label_width = sg_label_min_width(label);
+        let min_label_width = A::label_cross_extent(label);
         let width = right.saturating_sub(x);
         let right = if width < min_label_width {
             x + min_label_width
@@ -3777,10 +3781,10 @@ fn compute_sg_bounding_boxes<A: Axis>(
             // the parent adds only its border column (shared rule with heap —
             // using the full pad here made CSR parents one column wider per side).
             let expanded = (
-                cx.saturating_sub(A::PARENT_CHILD_GAP_CROSS),
-                cy.saturating_sub(A::SG_PAD_LEVEL.0),
-                cr + A::PARENT_CHILD_GAP_CROSS,
-                cb + A::SG_PAD_LEVEL.1,
+                cx.saturating_sub(A::PARENT_CHILD_PAD_CROSS.0),
+                cy.saturating_sub(A::PARENT_CHILD_PAD_LEVEL.0),
+                cr + A::PARENT_CHILD_PAD_CROSS.1,
+                cb + A::PARENT_CHILD_PAD_LEVEL.1,
             );
             let (ref mut px, ref mut py, ref mut pr, ref mut pb) = sg_envelopes[parent_idx];
             if *px == usize::MAX {

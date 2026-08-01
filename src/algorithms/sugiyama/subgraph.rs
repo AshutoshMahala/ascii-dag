@@ -24,7 +24,7 @@
 //! [`block_partition_level`] which the heap pipeline calls in place of
 //! its default ordering pass when subgraphs are present.
 
-use super::geometry::{Axis, label_min_width};
+use super::geometry::Axis;
 use super::heap::VNode;
 use crate::graph::Graph;
 use crate::ir::SubgraphInfo;
@@ -78,6 +78,41 @@ fn root_subgraph(dag: &Graph<'_>, sg_id: Option<usize>) -> Option<usize> {
             .and_then(|s| s.parent_id);
     }
     root
+}
+
+/// Number of ancestors ABOVE a box (0 for a root box). Used by the
+/// non-merging profiles to reserve nesting pads in the packing.
+fn ancestor_count(dag: &Graph<'_>, sg_id: usize) -> usize {
+    let mut n = 0;
+    let mut cur = dag
+        .subgraphs
+        .iter()
+        .find(|s| s.id == sg_id)
+        .and_then(|s| s.parent_id);
+    while let Some(id) = cur {
+        n += 1;
+        cur = dag
+            .subgraphs
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.parent_id);
+    }
+    n
+}
+
+/// Leading cross-axis margin a node inside `sg` needs: the immediate
+/// box pad, plus — for non-merging profiles — one label-side pad per
+/// ancestor (see `Axis::NESTED_PADS_MERGE`). The compaction and
+/// refinement margins must agree with `subgraph_padding`'s
+/// reservation or they squeeze it back out.
+pub(crate) fn leading_cross_pad<A: Axis>(dag: &Graph<'_>, sg: Option<usize>) -> usize {
+    match sg {
+        Some(sg_id) if !A::NESTED_PADS_MERGE => {
+            A::SG_PAD_CROSS.0 + ancestor_count(dag, sg_id) * A::PARENT_CHILD_PAD_CROSS.0
+        }
+        Some(_) => A::SG_PAD_CROSS.0,
+        None => 0,
+    }
 }
 
 /// Partition a single virtual level into per-subgraph blocks.
@@ -167,8 +202,14 @@ pub(crate) fn subgraph_padding<A: Axis>(
         // The bbox pass handles nesting expansion, so we only need the
         // immediate border's padding here — not the full ancestry chain.
         let first_sg = vnode_subgraph(dag, &vnodes[0]);
-        if first_sg.is_some() {
+        if let Some(sg_id) = first_sg {
             x += A::SG_PAD_CROSS.0;
+            // Non-merging profiles (Horizontal): each ANCESTOR box
+            // needs its own label-side pad — coincident borders can't
+            // merge when the pad carries the label row.
+            if !A::NESTED_PADS_MERGE {
+                x += ancestor_count(dag, sg_id) * A::PARENT_CHILD_PAD_CROSS.0;
+            }
         }
 
         for (i, vnode) in vnodes.iter().enumerate() {
@@ -178,8 +219,19 @@ pub(crate) fn subgraph_padding<A: Axis>(
                 if prev_sg != curr_sg {
                     // Constant padding per boundary transition: one exit margin
                     // + one entry margin. The bbox pass handles depth-proportional
-                    // expansion, so we only need a fixed gap here.
+                    // expansion (merging profiles), so a fixed gap suffices there.
                     x += A::SG_PAD_CROSS.1 + A::SG_PAD_CROSS.0;
+                    // Non-merging profiles reserve the full chains (may
+                    // over-pad between siblings of one parent — safe,
+                    // refined with LR tuning).
+                    if !A::NESTED_PADS_MERGE {
+                        if let Some(id) = prev_sg {
+                            x += ancestor_count(dag, id) * A::PARENT_CHILD_PAD_CROSS.1;
+                        }
+                        if let Some(id) = curr_sg {
+                            x += ancestor_count(dag, id) * A::PARENT_CHILD_PAD_CROSS.0;
+                        }
+                    }
                 }
             }
             new_x.push(x);
@@ -189,10 +241,12 @@ pub(crate) fn subgraph_padding<A: Axis>(
 
         // Right-side padding: one border's worth if last node is inside a subgraph.
         let last_sg = vnode_subgraph(dag, vnodes.last().unwrap());
-        let right_extra = if last_sg.is_some() {
-            A::SG_PAD_CROSS.1
-        } else {
-            0
+        let right_extra = match last_sg {
+            Some(sg_id) if !A::NESTED_PADS_MERGE => {
+                A::SG_PAD_CROSS.1 + ancestor_count(dag, sg_id) * A::PARENT_CHILD_PAD_CROSS.1
+            }
+            Some(_) => A::SG_PAD_CROSS.1,
+            None => 0,
         };
 
         let total = new_x
@@ -298,7 +352,7 @@ pub(crate) fn tighten_levels<A: Axis>(
 
                 let mut min_x = if k == 0 {
                     if node_sg[ni].is_some() {
-                        A::SG_PAD_CROSS.0
+                        leading_cross_pad::<A>(dag, node_sg[ni])
                     } else {
                         0
                     }
@@ -542,14 +596,14 @@ fn project_envelopes<A: Axis>(
     }
 
     // Pad + label minimum (mirrors compute_bounding_boxes pass 1.5).
-    // Label text spans the PHYSICAL x axis; folding it into the cross
-    // extent is Vertical-only (cross == x). Horizontal needs the
-    // label-span rule (temp/08 D8) before this pass can serve it.
+    // The fold is axis-routed (D8): `label_cross_extent` is 0 under
+    // Horizontal, whose label claim lands on the level axis instead
+    // (`label_level_extent` + the label-extras phase).
     for (si, b) in bbox.iter_mut().enumerate() {
         if let Some((l, r)) = *b {
             let left = l.saturating_sub(A::SG_PAD_CROSS.0);
             let mut right = r + A::SG_PAD_CROSS.1;
-            let min_label_width = label_min_width(dag.subgraphs[si].label);
+            let min_label_width = A::label_cross_extent(dag.subgraphs[si].label);
             if right - left < min_label_width {
                 right = left + min_label_width;
             }
@@ -561,8 +615,8 @@ fn project_envelopes<A: Axis>(
     for &si in order {
         if let (Some((cl, cr)), Some(pi)) = (bbox[si], parent_idx[si]) {
             let exp = (
-                cl.saturating_sub(A::PARENT_CHILD_GAP_CROSS),
-                cr + A::PARENT_CHILD_GAP_CROSS,
+                cl.saturating_sub(A::PARENT_CHILD_PAD_CROSS.0),
+                cr + A::PARENT_CHILD_PAD_CROSS.1,
             );
             bbox[pi] = Some(match bbox[pi] {
                 None => exp,
@@ -572,7 +626,7 @@ fn project_envelopes<A: Axis>(
     }
     for (si, b) in bbox.iter_mut().enumerate() {
         if let Some((l, r)) = *b {
-            let min_label_width = label_min_width(dag.subgraphs[si].label);
+            let min_label_width = A::label_cross_extent(dag.subgraphs[si].label);
             if r - l < min_label_width {
                 *b = Some((l, l + min_label_width));
             }
@@ -1001,8 +1055,8 @@ pub(crate) fn fix_subgraph_overlaps<A: Axis>(
                     if let Some(&pidx) = sg_id_to_idx.get(&parent_id) {
                         if let Some((cx, cr)) = envs[sg_idx] {
                             let exp = (
-                                cx.saturating_sub(A::PARENT_CHILD_GAP_CROSS),
-                                cr + A::PARENT_CHILD_GAP_CROSS,
+                                cx.saturating_sub(A::PARENT_CHILD_PAD_CROSS.0),
+                                cr + A::PARENT_CHILD_PAD_CROSS.1,
                             );
                             envs[pidx] = Some(match envs[pidx] {
                                 None => exp,
@@ -1019,7 +1073,7 @@ pub(crate) fn fix_subgraph_overlaps<A: Axis>(
                 env.map(|(mn, mx)| {
                     let left = mn.saturating_sub(A::SG_PAD_CROSS.0);
                     let right = mx + A::SG_PAD_CROSS.1;
-                    let label_w = label_min_width(dag.subgraphs[sg_idx].label);
+                    let label_w = A::label_cross_extent(dag.subgraphs[sg_idx].label);
                     let width = right.saturating_sub(left);
                     let right = if width < label_w {
                         left + label_w
@@ -1139,6 +1193,93 @@ pub(crate) fn fix_subgraph_overlaps<A: Axis>(
 
 // ── Bounding box computation ─────────────────────────────────────────────
 
+/// Per-box `(first_level, last_level)` from member-node levels, with
+/// child ranges propagated to parents (a parent's border encloses its
+/// descendants). `None` for boxes without nodes.
+fn sg_level_ranges(dag: &Graph<'_>, node_levels: &[usize]) -> Vec<Option<(usize, usize)>> {
+    let mut sg_ranges: Vec<Option<(usize, usize)>> = Vec::with_capacity(dag.subgraphs.len());
+
+    for sg in &dag.subgraphs {
+        let mut first = usize::MAX;
+        let mut last = 0usize;
+        let mut has_nodes = false;
+
+        for (node_idx, &(id, _)) in dag.nodes.iter().enumerate() {
+            if dag.node_subgraph.get(&id).copied() == Some(sg.id) {
+                let lvl = node_levels[node_idx];
+                first = first.min(lvl);
+                last = last.max(lvl);
+                has_nodes = true;
+            }
+        }
+
+        if has_nodes {
+            sg_ranges.push(Some((first, last)));
+        } else {
+            sg_ranges.push(None);
+        }
+    }
+
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for i in 0..dag.subgraphs.len() {
+            if let (Some((cf, cl)), Some(parent_id)) = (sg_ranges[i], dag.subgraphs[i].parent_id) {
+                if let Some(pi) = dag.subgraphs.iter().position(|s| s.id == parent_id) {
+                    let was_none = sg_ranges[pi].is_none();
+                    let (pf, pl) = sg_ranges[pi].unwrap_or((cf, cl));
+                    let new_pf = pf.min(cf);
+                    let new_pl = pl.max(cl);
+                    if was_none || new_pf != pf || new_pl != pl {
+                        sg_ranges[pi] = Some((new_pf, new_pl));
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    sg_ranges
+}
+
+/// D8(b): per-level LEVEL-axis reservations for box labels
+/// (Horizontal-only — `label_level_extent` is 0 under Vertical, and
+/// the caller skips the offset rebuild when every entry is 0).
+///
+/// A box whose level span cannot fit its label gets the deficit
+/// reserved as extra trailing pad at its CLOSING level, so the
+/// label-widened bbox cannot overlap the next column. The box extent
+/// estimate is the level-band span including one border pad per side;
+/// the P1-S4 invariant suite judges its adequacy for nested shapes.
+pub(crate) fn compute_label_level_extras<A: Axis>(
+    dag: &Graph<'_>,
+    node_levels: &[usize],
+    level_offsets: &[usize],
+    level_extents: &[usize],
+    max_level: usize,
+) -> Vec<usize> {
+    let mut extras = vec![0usize; max_level + 1];
+    if dag.subgraphs.is_empty() {
+        return extras;
+    }
+    let ranges = sg_level_ranges(dag, node_levels);
+    for (si, range) in ranges.iter().enumerate() {
+        let Some((first, last)) = *range else {
+            continue;
+        };
+        let need = A::label_level_extent(dag.subgraphs[si].label);
+        if need == 0 || last > max_level {
+            continue;
+        }
+        let start = level_offsets[first].saturating_sub(A::SG_PAD_LEVEL.0);
+        let end = level_offsets[last] + level_extents[last] + A::SG_PAD_LEVEL.1;
+        let deficit = need.saturating_sub(end.saturating_sub(start));
+        if deficit > 0 {
+            extras[last] = extras[last].max(deficit);
+        }
+    }
+    extras
+}
+
 /// Compute extra vertical rows needed at each level boundary for subgraph
 /// borders that open or close.
 ///
@@ -1171,50 +1312,7 @@ pub(crate) fn compute_level_extras<A: Axis>(
         return (0, vec![0; max_level + 1], 0);
     }
 
-    // For each subgraph, find (first_level, last_level).
-    let mut sg_ranges: Vec<Option<(usize, usize)>> = Vec::with_capacity(dag.subgraphs.len());
-
-    for sg in &dag.subgraphs {
-        let mut first = usize::MAX;
-        let mut last = 0usize;
-        let mut has_nodes = false;
-
-        for (node_idx, &(id, _)) in dag.nodes.iter().enumerate() {
-            if dag.node_subgraph.get(&id).copied() == Some(sg.id) {
-                let lvl = node_levels[node_idx];
-                first = first.min(lvl);
-                last = last.max(lvl);
-                has_nodes = true;
-            }
-        }
-
-        if has_nodes {
-            sg_ranges.push(Some((first, last)));
-        } else {
-            sg_ranges.push(None);
-        }
-    }
-
-    // Propagate child ranges to parents so a parent's first/last covers
-    // all descendants (a parent's border encloses its children).
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for i in 0..dag.subgraphs.len() {
-            if let (Some((cf, cl)), Some(parent_id)) = (sg_ranges[i], dag.subgraphs[i].parent_id) {
-                if let Some(pi) = dag.subgraphs.iter().position(|s| s.id == parent_id) {
-                    let was_none = sg_ranges[pi].is_none();
-                    let (pf, pl) = sg_ranges[pi].unwrap_or((cf, cl));
-                    let new_pf = pf.min(cf);
-                    let new_pl = pl.max(cl);
-                    if was_none || new_pf != pf || new_pl != pl {
-                        sg_ranges[pi] = Some((new_pf, new_pl));
-                        changed = true;
-                    }
-                }
-            }
-        }
-    }
+    let sg_ranges = sg_level_ranges(dag, node_levels);
 
     /// Count how many borders stack at a boundary for a given subgraph.
     ///
@@ -1374,8 +1472,13 @@ pub(crate) fn compute_bounding_boxes<'a, A: Axis>(
                 } else {
                     0
                 };
-                // Node occupies 1 line of height
-                let node_max_y = y + 1;
+                // Member LEVEL extent from the declared dimensions —
+                // "one line" was a masked assumption (multi-row members
+                // under Vertical, any wide member under Horizontal).
+                let node_max_y = y + A::level_extent(
+                    dag.get_node_width(node_idx),
+                    dag.get_node_height(node_idx),
+                );
                 let node_max_x = x + width;
 
                 sg_max_level[sg_idx] = sg_max_level[sg_idx].max(level);
@@ -1437,14 +1540,23 @@ pub(crate) fn compute_bounding_boxes<'a, A: Axis>(
             } else {
                 base_bottom.min(total_height)
             };
-            // Ensure width fits the label: ║ Label ║ needs label_len + 4.
-            // Physical-x label fold — Vertical-only (temp/08 D8).
+            // D8: the label's claim, per axis. The cross fold is the
+            // legacy ║ Label ║ widening (label_len + 4; 0 under
+            // Horizontal); the level fold is D8(b)'s other half
+            // (0 under Vertical) — the two-phase offset build reserved
+            // the room at this box's closing level.
             let width = right.saturating_sub(x);
-            let min_label_width = label_min_width(sg.label);
+            let min_label_width = A::label_cross_extent(sg.label);
             let right = if width < min_label_width {
                 x + min_label_width
             } else {
                 right
+            };
+            let min_label_level = A::label_level_extent(sg.label);
+            let bottom = if bottom.saturating_sub(y) < min_label_level {
+                y + min_label_level
+            } else {
+                bottom
             };
             (x, y, right, bottom)
         }));
@@ -1459,10 +1571,10 @@ pub(crate) fn compute_bounding_boxes<'a, A: Axis>(
             if let Some(&parent_idx) = sg_id_to_idx.get(&parent_id) {
                 if let Some((cx, cy, cr, cb)) = bboxes[sg_idx] {
                     let expanded = (
-                        cx.saturating_sub(A::PARENT_CHILD_GAP_CROSS),
-                        cy.saturating_sub(A::SG_PAD_LEVEL.0),
-                        cr + A::PARENT_CHILD_GAP_CROSS,
-                        cb + A::SG_PAD_LEVEL.1,
+                        cx.saturating_sub(A::PARENT_CHILD_PAD_CROSS.0),
+                        cy.saturating_sub(A::PARENT_CHILD_PAD_LEVEL.0),
+                        cr + A::PARENT_CHILD_PAD_CROSS.1,
+                        cb + A::PARENT_CHILD_PAD_LEVEL.1,
                     );
                     bboxes[parent_idx] = Some(match bboxes[parent_idx] {
                         None => expanded,
@@ -1485,13 +1597,20 @@ pub(crate) fn compute_bounding_boxes<'a, A: Axis>(
     for &sg_idx in &top_down_order {
         let sg = &dag.subgraphs[sg_idx];
         if let Some((x, y, right, bottom)) = bboxes[sg_idx] {
-            // Re-check label width (parent may have grown but label still needs room)
+            // Re-check the label claims (parent may have grown but the
+            // label still needs room) — per axis, mirroring pass 1.5.
             let width = right.saturating_sub(x);
-            let min_label_width = label_min_width(sg.label);
+            let min_label_width = A::label_cross_extent(sg.label);
             let right = if width < min_label_width {
                 x + min_label_width
             } else {
                 right
+            };
+            let min_label_level = A::label_level_extent(sg.label);
+            let bottom = if bottom.saturating_sub(y) < min_label_level {
+                y + min_label_level
+            } else {
+                bottom
             };
             // Apply parent-level H_PAD around entire bbox (if it grew from children)
             bboxes[sg_idx] = Some((x, y, right, bottom));

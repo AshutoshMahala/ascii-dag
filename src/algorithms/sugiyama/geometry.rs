@@ -94,6 +94,21 @@ pub(crate) trait Axis {
     // no caller.
     #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     fn dummy_draw_offset(edge_idx: usize) -> usize;
+    /// The box label's claim on the CROSS axis (temp/08 D8). Label
+    /// text is a physical x-width; it constrains the cross extent
+    /// only while cross == x. Vertical: `label_min_width`;
+    /// Horizontal: 0 — folding it into cross extents would make LR
+    /// boxes TALLER by character count.
+    fn label_cross_extent(label: &str) -> usize;
+    /// The box label's claim on the LEVEL axis — the D8(b) rule's
+    /// other half. Vertical: 0 (the cross fold covers it);
+    /// Horizontal: `label_min_width`, reserved as extra trailing
+    /// level pad at the box's closing level so the widened box
+    /// cannot overlap the next column.
+    // CSR consumer lands at LR-P2 — until then arena-only builds see
+    // no caller.
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    fn label_level_extent(label: &str) -> usize;
     /// Subgraph border padding along the level axis (before, after
     /// content). Vertical: (`SUBGRAPH_V_PAD_TOP`, `SUBGRAPH_V_PAD_BOTTOM`).
     const SG_PAD_LEVEL: (usize, usize);
@@ -112,10 +127,35 @@ pub(crate) trait Axis {
     /// Cross-axis clearance between a cluster's envelope and an
     /// external node. Vertical: `ENVELOPE_CLEARANCE`.
     const ENVELOPE_CLEARANCE_CROSS: usize;
-    /// Cross-axis expansion of a parent envelope around a child box
-    /// (the parent's border line; the child carries its own pads).
-    /// Vertical: `PARENT_CHILD_H_GAP`.
-    const PARENT_CHILD_GAP_CROSS: usize;
+    /// Parent-envelope expansion around a child box, as (before,
+    /// after) pairs PER AXIS. The child carries its own pads; the
+    /// parent adds only its border line on the label-free axis — but
+    /// the LABEL-side axis needs the full border + label + blank
+    /// block, and which axis that is rotates with the profile (D3).
+    /// Vertical: level = (`SUBGRAPH_V_PAD_TOP`,
+    /// `SUBGRAPH_V_PAD_BOTTOM`), cross = (`PARENT_CHILD_H_GAP`,
+    /// `PARENT_CHILD_H_GAP`).
+    const PARENT_CHILD_PAD_LEVEL: (usize, usize);
+    /// See [`Axis::PARENT_CHILD_PAD_LEVEL`].
+    const PARENT_CHILD_PAD_CROSS: (usize, usize);
+    /// Whether box labels claim LEVEL-axis room (D8b) — gates the
+    /// label-extras phase so `Vertical` never allocates or traverses
+    /// for a claim that is statically zero.
+    // CSR consumer lands at LR-P2 — until then arena-only builds see
+    // no reader.
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    const LABEL_CLAIMS_LEVEL_AXIS: bool;
+    /// Whether nested boxes' CROSS pads may share cells. Vertical:
+    /// true — coincident borders merge into junction glyphs at render
+    /// time (the class-B ruling), so packing reserves only the
+    /// immediate box's pad. Horizontal: false — the cross-leading pad
+    /// carries the LABEL ROW, which cannot merge; packing must
+    /// reserve the full ancestry chain
+    /// (`PARENT_CHILD_PAD_CROSS` per ancestor).
+    // CSR consumer lands at LR-P2 — until then arena-only builds see
+    // no reader.
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    const NESTED_PADS_MERGE: bool;
     /// Cross-axis gap between adjacent nodes of different clusters:
     /// one box's trailing pad + the sibling gap + the other's leading
     /// pad. Derived — do not override.
@@ -158,13 +198,26 @@ impl Axis for Vertical {
         edge_idx % 4
     }
 
+    #[inline]
+    fn label_cross_extent(label: &str) -> usize {
+        label_min_width(label)
+    }
+
+    #[inline]
+    fn label_level_extent(_label: &str) -> usize {
+        0
+    }
+
     const FLOW_AXIS: crate::ir::FlowAxis = crate::ir::FlowAxis::Y;
     const SG_PAD_LEVEL: (usize, usize) = (SUBGRAPH_V_PAD_TOP, SUBGRAPH_V_PAD_BOTTOM);
     const SG_PAD_CROSS: (usize, usize) = (SUBGRAPH_H_PAD, SUBGRAPH_H_PAD);
     const DUMMY_CROSS: usize = DUMMY_WIDTH;
     const SIBLING_GAP_CROSS: usize = SIBLING_GAP;
     const ENVELOPE_CLEARANCE_CROSS: usize = ENVELOPE_CLEARANCE;
-    const PARENT_CHILD_GAP_CROSS: usize = PARENT_CHILD_H_GAP;
+    const PARENT_CHILD_PAD_LEVEL: (usize, usize) = (SUBGRAPH_V_PAD_TOP, SUBGRAPH_V_PAD_BOTTOM);
+    const PARENT_CHILD_PAD_CROSS: (usize, usize) = (PARENT_CHILD_H_GAP, PARENT_CHILD_H_GAP);
+    const LABEL_CLAIMS_LEVEL_AXIS: bool = false;
+    const NESTED_PADS_MERGE: bool = true;
 }
 
 /// The LeftRight/RightLeft profile (temp/08 D1/D3): levels are
@@ -172,8 +225,9 @@ impl Axis for Vertical {
 /// node heights. The box label still reads horizontally and stays
 /// physically at the top, so it lives in the cross-axis *leading*
 /// pad (D3) — hence the asymmetric `SG_PAD_CROSS`.
-// Dispatch is wired at the end of LR-P1 (temp/08 §6 P1-S4); until
-// then only tests instantiate this profile.
+// The PUBLIC dispatch flips atomically after LR-P2..P4 (renderer,
+// CSR, and the RL mirror must all be usable first — slices review,
+// P0); until then only tests instantiate this profile.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct Horizontal;
 
@@ -208,6 +262,16 @@ impl Axis for Horizontal {
         0
     }
 
+    #[inline]
+    fn label_cross_extent(_label: &str) -> usize {
+        0
+    }
+
+    #[inline]
+    fn label_level_extent(label: &str) -> usize {
+        label_min_width(label)
+    }
+
     const FLOW_AXIS: crate::ir::FlowAxis = crate::ir::FlowAxis::X;
     /// Level-axis pads are the box's left/right borders: border +
     /// one space, mirroring `SUBGRAPH_H_PAD`'s shape.
@@ -222,7 +286,13 @@ impl Axis for Horizontal {
     const DUMMY_CROSS: usize = 1;
     const SIBLING_GAP_CROSS: usize = 1;
     const ENVELOPE_CLEARANCE_CROSS: usize = 1;
-    const PARENT_CHILD_GAP_CROSS: usize = 1;
+    /// Level-axis: border column each side. Cross-axis: the label
+    /// block leads (border + label row + blank), blank + border
+    /// trails — same shape as `SG_PAD_CROSS`.
+    const PARENT_CHILD_PAD_LEVEL: (usize, usize) = (1, 1);
+    const PARENT_CHILD_PAD_CROSS: (usize, usize) = (3, 2);
+    const LABEL_CLAIMS_LEVEL_AXIS: bool = true;
+    const NESTED_PADS_MERGE: bool = false;
 }
 
 /// Cap on how far a subgraph *label* may widen its bounding box.
@@ -237,10 +307,11 @@ pub(crate) const SUBGRAPH_LABEL_BOX_CAP: usize = 40;
 /// Minimum box width needed to show `label` (borders + spaces), capped.
 ///
 /// This is a **physical x-width** — label text always reads
-/// horizontally. The cluster passes fold it into their *cross-axis*
-/// extents, which is valid only while cross == x (`Vertical`).
-/// `Horizontal` needs a separate label-span rule (temp/08 D8) before
-/// those passes can serve it.
+/// horizontally. The cluster passes route it through the D8 axis
+/// hooks: [`Axis::label_cross_extent`] folds it into cross extents
+/// under `Vertical` only, and [`Axis::label_level_extent`] carries
+/// the claim to the level axis under `Horizontal` (with room
+/// reserved by the label-extras phase).
 #[inline]
 pub(crate) fn label_min_width(label: &str) -> usize {
     (label.len() + 4).min(SUBGRAPH_LABEL_BOX_CAP)

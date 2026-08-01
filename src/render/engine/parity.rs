@@ -1997,3 +1997,293 @@ mod node_painters {
         );
     }
 }
+
+// ── LR-P1 S4: Horizontal geometry-invariant acceptance (temp/08) ────────
+//
+// IR-only judgment of the native LR layout: the compositor stays
+// y-primary until LR-P3, so nothing here renders — the invariants ARE
+// the acceptance gate for the dispatch flip.
+mod lr_invariants {
+    use super::*;
+    use crate::algorithms::sugiyama::geometry::Horizontal;
+    use crate::algorithms::sugiyama::heap::compute_layout_cfg;
+    use crate::ir::{EdgePath, FlowAxis, LayoutIR, LayoutNode};
+
+    fn lr<'a>(g: &Graph<'a>) -> LayoutIR<'a> {
+        compute_layout_cfg::<Horizontal>(g, &LayoutConfig::standard())
+    }
+
+    fn on_rows(y: usize, n: &LayoutNode<'_>) -> bool {
+        n.y <= y && y < n.y + n.height
+    }
+
+    /// The P1 exit invariants over one Horizontal IR.
+    fn check_invariants(tag: &str, ir: &LayoutIR<'_>) {
+        let nodes = ir.nodes();
+        // I1: node spans pairwise disjoint and inside the canvas.
+        for (i, a) in nodes.iter().enumerate() {
+            assert!(
+                a.x + a.width <= ir.width() && a.y + a.height <= ir.height(),
+                "{tag}: node {} ({},{} {}x{}) exceeds canvas {}x{}",
+                a.id,
+                a.x,
+                a.y,
+                a.width,
+                a.height,
+                ir.width(),
+                ir.height()
+            );
+            for b in nodes.iter().skip(i + 1) {
+                let overlap = a.x < b.x + b.width
+                    && b.x < a.x + a.width
+                    && a.y < b.y + b.height
+                    && b.y < a.y + a.height;
+                assert!(!overlap, "{tag}: nodes {} and {} overlap", a.id, b.id);
+            }
+        }
+        let by_id = |id: usize| {
+            nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap_or_else(|| panic!("{tag}: node {id}"))
+        };
+        for e in ir.edges() {
+            if e.from_id == e.to_id {
+                continue;
+            }
+            // I2: every Horizontal edge has a horizontal trunk.
+            assert_eq!(e.flow_axis, FlowAxis::X, "{tag}: {}→{}", e.from_id, e.to_id);
+            let (s, t) = (by_id(e.from_id), by_id(e.to_id));
+            // I3: endpoints on the pair's faces at their port rows.
+            // Coordinates are layout-order for reversed edges, so accept
+            // either orientation of the pair.
+            let fwd_ok = e.from_x == s.x + s.width - 1
+                && e.to_x == t.x
+                && on_rows(e.from_y, s)
+                && on_rows(e.to_y, t);
+            let rev_ok = e.from_x == t.x + t.width - 1
+                && e.to_x == s.x
+                && on_rows(e.from_y, t)
+                && on_rows(e.to_y, s);
+            assert!(
+                fwd_ok || rev_ok,
+                "{tag}: {}→{} endpoints off the node faces: from ({}, {}), to ({}, {}); \
+                 s=({},{} {}x{}), t=({},{} {}x{})",
+                e.from_id,
+                e.to_id,
+                e.from_x,
+                e.from_y,
+                e.to_x,
+                e.to_y,
+                s.x,
+                s.y,
+                s.width,
+                s.height,
+                t.x,
+                t.y,
+                t.width,
+                t.height
+            );
+            // I4: trunk-band geometry inside the canvas; corner bends
+            // strictly between the two faces.
+            match &e.path {
+                EdgePath::Corner { horizontal_y } => {
+                    let (lo, hi) = if fwd_ok {
+                        (s.x + s.width - 1, t.x)
+                    } else {
+                        (t.x + t.width - 1, s.x)
+                    };
+                    assert!(
+                        *horizontal_y > lo && *horizontal_y < hi,
+                        "{tag}: {}→{} bend {} outside the gap ({lo}, {hi})",
+                        e.from_id,
+                        e.to_id,
+                        horizontal_y
+                    );
+                }
+                EdgePath::MultiSegment { waypoints, .. } => {
+                    for &(wx, wy) in waypoints {
+                        assert!(
+                            wx < ir.width() && wy < ir.height(),
+                            "{tag}: {}→{} waypoint ({wx}, {wy}) outside canvas",
+                            e.from_id,
+                            e.to_id
+                        );
+                    }
+                }
+                _ => {}
+            }
+            // I5: label seeds inside the canvas.
+            if e.label.is_some() {
+                assert!(
+                    e.label_x < ir.width() && e.label_y < ir.height(),
+                    "{tag}: {}→{} label at ({}, {}) outside canvas {}x{}",
+                    e.from_id,
+                    e.to_id,
+                    e.label_x,
+                    e.label_y,
+                    ir.width(),
+                    ir.height()
+                );
+            }
+        }
+        // I6: self-loop markers — invariant, reserved cell, in canvas.
+        for n in nodes {
+            assert_eq!(n.has_self_loop, n.self_loop_at.is_some(), "{tag}: {}", n.id);
+            if let Some((mx, my)) = n.self_loop_at {
+                assert!(
+                    mx < ir.width() && my < ir.height(),
+                    "{tag}: {} marker ({mx}, {my}) outside canvas {}x{}",
+                    n.id,
+                    ir.width(),
+                    ir.height()
+                );
+                for o in nodes {
+                    let covers =
+                        o.x <= mx && mx < o.x + o.width && o.y <= my && my < o.y + o.height;
+                    assert!(!covers, "{tag}: node {} covers {}'s marker", o.id, n.id);
+                }
+            }
+        }
+        // I7: boxes inside the canvas; LR labels fit the box width.
+        for sg in ir.subgraphs() {
+            assert!(
+                sg.x + sg.width <= ir.width() && sg.y + sg.height <= ir.height(),
+                "{tag}: box {} exceeds canvas",
+                sg.id
+            );
+            let label_min = (sg.label.len() + 4).min(40);
+            assert!(
+                sg.width >= label_min,
+                "{tag}: box {} width {} cannot show its label (needs {label_min})",
+                sg.id,
+                sg.width
+            );
+        }
+        // I8: no node straddles a box border — every node is strictly
+        // inside (borders clear) or fully outside every box.
+        for sg in ir.subgraphs() {
+            for n in nodes {
+                let inside = n.x > sg.x
+                    && n.x + n.width < sg.x + sg.width
+                    && n.y > sg.y
+                    && n.y + n.height < sg.y + sg.height;
+                let outside = n.x + n.width <= sg.x
+                    || n.x >= sg.x + sg.width
+                    || n.y + n.height <= sg.y
+                    || n.y >= sg.y + sg.height;
+                assert!(
+                    inside || outside,
+                    "{tag}: node {} straddles box {}'s border",
+                    n.id,
+                    sg.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn corpus_invariants() {
+        let corpus: [(&str, Graph<'static>); 9] = [
+            ("fan", fan()),
+            ("stage", stage()),
+            ("skip", skip()),
+            ("back", back_edges()),
+            ("two_cycle", two_cycle()),
+            ("self_loop", self_loop()),
+            ("labels", colliding_labels()),
+            ("nested", nested_boxes()),
+            ("hero", hero_graph()),
+        ];
+        for (tag, g) in corpus {
+            check_invariants(tag, &lr(&g));
+        }
+    }
+
+    /// Hero-LR numeric sanity: same elements as the TD layout, wide
+    /// canvas, all invariants — the phase's rendered acceptance stays
+    /// at P3.
+    #[test]
+    fn hero_lr_numeric_sanity() {
+        let td = hero_graph().compute_layout();
+        let ir = lr(&hero_graph());
+        assert_eq!(td.nodes().len(), ir.nodes().len());
+        assert_eq!(td.edges().len(), ir.edges().len());
+        assert_eq!(td.level_count(), ir.level_count());
+        assert!(
+            ir.width() > ir.height(),
+            "LR hero should be wide: {}x{}",
+            ir.width(),
+            ir.height()
+        );
+        check_invariants("hero-lr", &ir);
+    }
+
+    /// Slices review: a WIDE member must not escape through the box's
+    /// trailing level border (the member extent was hardcoded to one
+    /// line before).
+    #[test]
+    fn lr_wide_member_stays_inside_box() {
+        use crate::render::engine::CustomNode;
+        let mut g = Graph::new();
+        g.add_node(1, "in");
+        g.add_node(
+            2,
+            CustomNode {
+                label: "wide-member",
+                width: 16,
+                height: 1,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_node(3, "out");
+        g.add_edge(1, 2, None);
+        g.add_edge(2, 3, None);
+        let sg = g.add_subgraph("W");
+        g.put_nodes(&[2]).inside(sg).unwrap();
+        let ir = lr(&g);
+        check_invariants("wide-member", &ir);
+        let b = &ir.subgraphs()[0];
+        let m = ir.nodes().iter().find(|n| n.id == 2).unwrap();
+        assert!(
+            m.x + m.width + 2 <= b.x + b.width,
+            "trailing level pad after the wide member: node ends {}, box ends {}",
+            m.x + m.width,
+            b.x + b.width
+        );
+    }
+
+    /// Slices review: a parent whose only content is a child box must
+    /// keep its label block clear of the child's top border — the
+    /// parent/child cross expansion is the full (3, 2) label-side pad
+    /// under Horizontal, not a symmetric border cell.
+    #[test]
+    fn lr_child_only_parent_has_label_room() {
+        let mut g = Graph::new();
+        g.add_node(1, "in");
+        g.add_node(2, "core");
+        g.add_node(3, "out");
+        g.add_edge(1, 2, None);
+        g.add_edge(2, 3, None);
+        let outer = g.add_subgraph("Parent");
+        let inner = g.add_subgraph("Child");
+        g.put_subgraphs(&[inner]).inside(outer).unwrap();
+        g.put_nodes(&[2]).inside(inner).unwrap();
+        let ir = lr(&g);
+        check_invariants("child-only-parent", &ir);
+        let parent = ir.subgraphs().iter().find(|s| s.label == "Parent").unwrap();
+        let child = ir.subgraphs().iter().find(|s| s.label == "Child").unwrap();
+        assert!(
+            child.y >= parent.y + 3,
+            "parent label block above the child top border: parent.y {}, child.y {}",
+            parent.y,
+            child.y
+        );
+        assert!(
+            child.y + child.height + 2 <= parent.y + parent.height,
+            "trailing cross pad below the child"
+        );
+        assert!(child.x > parent.x && child.x + child.width < parent.x + parent.width);
+    }
+}
