@@ -629,7 +629,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         // a row (straight pass-throughs are pure verticals), plus the
         // bend row below the deepest jog (shared rule with CSR).
         let skip_slots =
-            crate::algorithms::sugiyama::geometry::passthrough_rows(level_jog_count[level]);
+            crate::algorithms::sugiyama::geometry::passthrough_extent(level_jog_count[level]);
 
         // Determine max slots needed for this specific level
         let slots_needed = adjacent_slots.max(skip_slots);
@@ -804,7 +804,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             // Edge routing starts one row below the source node. Reversed
             // edges' arrowheads on that row are protected by the arrow-cell
             // reservation in the slot allocator, not by shifting corners.
-            let edge_start_row = crate::algorithms::sugiyama::geometry::EDGE_START_ROW;
+            let edge_start_row = crate::algorithms::sugiyama::geometry::EDGE_START_OFFSET;
 
             let path = if layout_to_level == layout_from_level + 1 {
                 // Adjacent levels - direct or corner connection
@@ -930,7 +930,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                     // First row below the source level's routing block — shared
                     // with the CSR backend so label rows cannot drift.
                     let label_y = from_y
-                        + crate::algorithms::sugiyama::geometry::edge_label_row_offset(
+                        + crate::algorithms::sugiyama::geometry::edge_label_offset(
                             level_occupied_slots[layout_from_level].len(),
                         );
 

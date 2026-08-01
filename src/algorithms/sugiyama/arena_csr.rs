@@ -11,7 +11,7 @@ use crate::graph::csr::CsrGraph;
 use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutIRArenaBuilder};
 
 use super::geometry::{
-    ARROW_CELL_PAD, Axis, EDGE_START_ROW, edge_label_row_offset,
+    ARROW_CELL_PAD, Axis, EDGE_START_OFFSET, edge_label_offset,
     label_min_width as sg_label_min_width,
 };
 
@@ -917,7 +917,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         let slot_count = temps.level_slot_next[level] as usize;
         // Jog rows plus the bend row below the deepest jog (shared rule
         // with the heap backend).
-        let diff = slot_count.max(super::geometry::passthrough_rows(
+        let diff = slot_count.max(super::geometry::passthrough_extent(
             temps.dummy_counts[level] as usize,
         ));
         // Per-level overhead: the label row is budgeted only where a
@@ -1138,7 +1138,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         // Edge routing starts one row below the source node. Reversed
         // edges' arrowheads on that row are protected by the arrow-cell
         // reservation in the slot allocator, not by shifting corners.
-        let edge_start_row = EDGE_START_ROW;
+        let edge_start_row = EDGE_START_OFFSET;
 
         // 2-node cycle: A→B (forward) + B→A (reversed) sharing the same
         // column. Offset forward edge left by 1 and back edge right by 1
@@ -1284,8 +1284,8 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                 // with the heap backend so label rows cannot drift. (A label
                 // on a routing row collides with `─` and is skipped by the
                 // renderer's collision check.)
-                let l_y = from_y
-                    + edge_label_row_offset(temps.level_slot_next[src_level as usize] as usize);
+                let l_y =
+                    from_y + edge_label_offset(temps.level_slot_next[src_level as usize] as usize);
                 let edge_x_at_label = match &path {
                     EdgePathArena::Direct => eff_from_x,
                     EdgePathArena::Corner { horizontal_y } => {

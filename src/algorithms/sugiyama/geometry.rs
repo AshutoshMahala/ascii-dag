@@ -131,34 +131,44 @@ pub(crate) fn label_min_width(label: &str) -> usize {
     (label.len() + 4).min(SUBGRAPH_LABEL_BOX_CAP)
 }
 
-/// First routing row below a source node's bottom row.
+// ── Routing geometry (level-axis budgets; temp/08 slice 4) ──────────────
+//
+// Everything below measures LEVEL-AXIS cells in the routing band that
+// follows a level's nodes: rows below the nodes in TD, columns to
+// their right in LR. The values are shared across axes; only the
+// physical meaning of "line" rotates.
+
+/// First routing line past a source node's trailing edge, in
+/// level-axis cells (TD: the row below the node's bottom row).
 ///
-/// Reversed edges paint their `⇡` arrowhead on this row, directly below
+/// Reversed edges paint their arrowhead on this line, directly beyond
 /// their layout-source. Those cells are protected by **arrow-cell
-/// reservation**: the slot allocators pre-occupy the arrow's interval on
-/// slot 0, so a horizontal span that would run through an arrowhead
-/// (`──⇡──`, unreadable) is pushed to a deeper slot by the normal
-/// interval-collision logic instead of shifting every corner down.
-pub(crate) const EDGE_START_ROW: usize = 1;
+/// reservation**: the slot allocators pre-occupy the arrow's interval
+/// on slot 0, so a cross-cutting span that would run through an
+/// arrowhead (`──⇡──`, unreadable) is pushed to a deeper slot by the
+/// normal interval-collision logic instead of shifting every corner.
+pub(crate) const EDGE_START_OFFSET: usize = 1;
 
 /// Half-width of the reserved interval around a reversed edge's
-/// arrowhead column on the first routing row (one breathing cell on
-/// each side, so no horizontal run abuts the `⇡` directly).
+/// arrowhead on the first routing line, in cross-axis cells (one
+/// breathing cell on each side, so no routed span abuts the arrowhead
+/// directly).
 pub(crate) const ARROW_CELL_PAD: usize = 1;
 
-/// Row offset below a source node's bottom row where an edge label is
-/// painted: the first row beneath the level's corner-routing block
-/// (`EDGE_START_ROW + one row per allocated slot`), over the vertical
-/// segments running toward the targets — labels replace `│` cells,
-/// never `─` cells, so they must clear every routing row.
+/// Level-axis offset past a source node's trailing edge where an edge
+/// label is painted: the first line beneath the level's corner-routing
+/// block (`EDGE_START_OFFSET + one line per allocated slot`), over the
+/// flow segments running toward the targets — labels replace flow
+/// cells (`│` in TD), never trunk cells (`─` in TD), so they must
+/// clear every routing line.
 #[inline]
-pub(crate) fn edge_label_row_offset(level_slots: usize) -> usize {
-    EDGE_START_ROW + level_slots.max(1)
+pub(crate) fn edge_label_offset(level_slots: usize) -> usize {
+    EDGE_START_OFFSET + level_slots.max(1)
 }
 
-/// Vertical routing budget below a level's nodes, excluding the
-/// per-slot extra rows: one corner row plus one arrow-clearance row
-/// above the next level — plus one label row, budgeted **only** for
+/// Level-axis routing budget past a level's nodes, excluding the
+/// per-slot extra lines: one corner line plus one arrow-clearance line
+/// before the next level — plus one label line, budgeted **only** for
 /// levels that actually source a labeled edge (labels paint in the
 /// layout-source's band). Shared by both backends.
 #[inline]
@@ -166,12 +176,13 @@ pub(crate) fn routing_overhead(level_sources_labeled_edge: bool) -> usize {
     2 + usize::from(level_sources_labeled_edge)
 }
 
-/// Rows claimed by pass-through waypoints at a level: one per jogging
-/// waypoint, **plus one bend row below the deepest jog** — every kept
-/// waypoint bends at `wp_y + 1`, and without this extra row the deepest
-/// bend lands on the arrow-clearance row above the next level
-/// (`↓┈┈┈┘` collisions). Shared by both backends.
+/// Level-axis cells claimed by pass-through waypoints at a level: one
+/// per jogging waypoint, **plus one bend line past the deepest jog** —
+/// every kept waypoint bends one line beyond itself (`wp_y + 1` in
+/// TD), and without this extra line the deepest bend lands on the
+/// arrow-clearance line before the next level (`↓┈┈┈┘` collisions).
+/// Shared by both backends.
 #[inline]
-pub(crate) fn passthrough_rows(jogging_waypoints: usize) -> usize {
+pub(crate) fn passthrough_extent(jogging_waypoints: usize) -> usize {
     jogging_waypoints + usize::from(jogging_waypoints > 0)
 }
