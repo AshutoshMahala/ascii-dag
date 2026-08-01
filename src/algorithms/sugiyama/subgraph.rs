@@ -799,7 +799,7 @@ pub(crate) fn compact_clusters<A: Axis>(
 /// span. An edge crossing a subgraph *border* renders with junction
 /// glyphs and is acceptable; crossing a *node* never is, so only node
 /// spans are avoided.
-pub(crate) fn nudge_dummies_off_nodes(
+pub(crate) fn nudge_dummies_off_nodes<A: Axis>(
     virtual_levels: &[Vec<VNode>],
     x_coords: &mut [Vec<usize>],
     real_node_coords: &[(usize, usize, usize, usize)], // (level, pos, x, width)
@@ -820,8 +820,9 @@ pub(crate) fn nudge_dummies_off_nodes(
             let VNode::Dummy { edge_idx } = vnode else {
                 continue;
             };
-            // The renderer draws this edge's vertical at x + (edge_idx % 4).
-            let off = edge_idx % 4;
+            // The renderer draws this edge's flow segment at
+            // x + dummy_draw_offset (axis-profiled).
+            let off = A::dummy_draw_offset(*edge_idx);
             let Some(&x) = x_coords.get(lvl).and_then(|l| l.get(pos)) else {
                 continue;
             };

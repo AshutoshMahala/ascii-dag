@@ -193,6 +193,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             level_position,
             kind,
             has_self_loop: false,
+            self_loop_at: (usize::MAX, usize::MAX),
             edge_index,
             content_tag,
         };
@@ -245,10 +246,15 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         Some(edge_idx)
     }
 
-    /// Mark a node as having a self-loop edge.
+    /// Mark a node as having a self-loop edge. Also derives the
+    /// marker cell (`self_loop_at`, temp/08 D5): one cell right of
+    /// the node's top row — the legacy `↺` position for vertical
+    /// flows. Horizontal layout (LR-P2) overrides the cell.
     pub fn set_self_loop(&mut self, node_idx: usize) {
         if node_idx < self.node_count {
-            self.nodes[node_idx].has_self_loop = true;
+            let n = &mut self.nodes[node_idx];
+            n.has_self_loop = true;
+            n.self_loop_at = (n.x + n.width, n.y);
         }
     }
 
@@ -374,6 +380,11 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         for node in &mut self.nodes[..self.node_count] {
             node.y = h.saturating_sub(node.y + node.height);
             node.center_y = flip_row(node.center_y);
+            // Re-anchor (not point-map): the marker stays one cell right
+            // of the FINAL top row — the engine's direction-blind rule.
+            if node.self_loop_at != (usize::MAX, usize::MAX) {
+                node.self_loop_at = (node.x + node.width, node.y);
+            }
         }
 
         for edge in &mut self.edges[..self.edge_count] {

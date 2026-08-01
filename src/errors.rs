@@ -486,9 +486,7 @@ impl GraphError {
             Self::ExceedsMaxLevels { .. } => {
                 "Reduce chain depth or use a different layout strategy"
             }
-            Self::RenderPlanOom => {
-                "Increase the render arena; use estimate_render_arena_size()"
-            }
+            Self::RenderPlanOom => "Increase the render arena; use estimate_render_arena_size()",
             Self::RenderCanvasTooSmall { .. } => {
                 "Provide at least width × band_rows cells; lower band_rows_cap to shrink bands"
             }
@@ -704,16 +702,17 @@ mod tests {
             GraphError::RenderCanvasTooSmall { needed: 0, got: 0 }.code(),
             "E.Render.Canvas.026"
         );
-        assert_eq!(
-            GraphError::RenderOutputTooSmall.code(),
-            "E.Render.Sink.026"
-        );
+        assert_eq!(GraphError::RenderOutputTooSmall.code(), "E.Render.Sink.026");
         for e in [
             GraphError::RenderPlanOom,
             GraphError::RenderCanvasTooSmall { needed: 8, got: 4 },
             GraphError::RenderOutputTooSmall,
         ] {
-            assert!(!e.hint().is_empty(), "{}: hint must be actionable", e.code());
+            assert!(
+                !e.hint().is_empty(),
+                "{}: hint must be actionable",
+                e.code()
+            );
         }
     }
 }

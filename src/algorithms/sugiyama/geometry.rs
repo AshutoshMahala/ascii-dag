@@ -66,6 +66,34 @@ pub(crate) trait Axis {
     /// computes in role space; physical axes exist only at IR
     /// emission and beyond.
     fn materialize(level: usize, cross: usize) -> (usize, usize);
+    /// Physical axis of this profile's edge trunks (flow segments) —
+    /// stamped on every emitted edge (temp/08 D2).
+    const FLOW_AXIS: crate::ir::FlowAxis;
+    /// Cross-axis PORT line of a node span — the line an edge
+    /// attaches to. Matches the IR center-field formulas exactly:
+    /// Vertical `center_x = x + w/2`, Horizontal
+    /// `center_y = y + (h − 1)/2`.
+    fn cross_port(cross: usize, extent: usize) -> usize;
+    /// Level-axis line of a source node's PORT. Vertical keeps the
+    /// legacy band-trailing endpoint (the level's tallest node decides
+    /// where every edge starts — byte-frozen behavior); Horizontal
+    /// ports sit on the node's OWN trailing face, since column widths
+    /// vary far more than row heights and a detached port is plainly
+    /// visible.
+    // CSR consumer lands at LR-P2 — until then arena-only builds see
+    // no caller.
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    fn source_port_level(band_start: usize, node_extent: usize, band_extent: usize) -> usize;
+    /// Cross-axis draw offset of a dummy waypoint (visual separation
+    /// of convergent skip edges). Vertical spreads edges over
+    /// `edge_idx % 4` columns inside the `DUMMY_CROSS = 3` clearance;
+    /// Horizontal reserves a single row (`DUMMY_CROSS = 1`), so the
+    /// offset is always 0 — a nonzero offset would escape the
+    /// reservation and can enter the next span at `node_spacing = 1`.
+    // CSR consumer lands at LR-P2 — until then arena-only builds see
+    // no caller.
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    fn dummy_draw_offset(edge_idx: usize) -> usize;
     /// Subgraph border padding along the level axis (before, after
     /// content). Vertical: (`SUBGRAPH_V_PAD_TOP`, `SUBGRAPH_V_PAD_BOTTOM`).
     const SG_PAD_LEVEL: (usize, usize);
@@ -96,7 +124,7 @@ pub(crate) trait Axis {
 }
 
 /// The TopDown/BottomUp profile: levels are rows, in-level order is
-/// columns. (`Horizontal` arrives with LR-P1.)
+/// columns.
 pub(crate) struct Vertical;
 
 impl Axis for Vertical {
@@ -115,12 +143,86 @@ impl Axis for Vertical {
         (cross, level)
     }
 
+    #[inline]
+    fn cross_port(cross: usize, extent: usize) -> usize {
+        cross + extent / 2
+    }
+
+    #[inline]
+    fn source_port_level(band_start: usize, _node_extent: usize, band_extent: usize) -> usize {
+        band_start + band_extent - 1
+    }
+
+    #[inline]
+    fn dummy_draw_offset(edge_idx: usize) -> usize {
+        edge_idx % 4
+    }
+
+    const FLOW_AXIS: crate::ir::FlowAxis = crate::ir::FlowAxis::Y;
     const SG_PAD_LEVEL: (usize, usize) = (SUBGRAPH_V_PAD_TOP, SUBGRAPH_V_PAD_BOTTOM);
     const SG_PAD_CROSS: (usize, usize) = (SUBGRAPH_H_PAD, SUBGRAPH_H_PAD);
     const DUMMY_CROSS: usize = DUMMY_WIDTH;
     const SIBLING_GAP_CROSS: usize = SIBLING_GAP;
     const ENVELOPE_CLEARANCE_CROSS: usize = ENVELOPE_CLEARANCE;
     const PARENT_CHILD_GAP_CROSS: usize = PARENT_CHILD_H_GAP;
+}
+
+/// The LeftRight/RightLeft profile (temp/08 D1/D3): levels are
+/// COLUMNS sized by node widths, in-level stacking is vertical by
+/// node heights. The box label still reads horizontally and stays
+/// physically at the top, so it lives in the cross-axis *leading*
+/// pad (D3) — hence the asymmetric `SG_PAD_CROSS`.
+// Dispatch is wired at the end of LR-P1 (temp/08 §6 P1-S4); until
+// then only tests instantiate this profile.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct Horizontal;
+
+impl Axis for Horizontal {
+    #[inline]
+    fn level_extent(width: usize, _height: usize) -> usize {
+        width
+    }
+
+    #[inline]
+    fn cross_extent(_width: usize, height: usize) -> usize {
+        height
+    }
+
+    #[inline]
+    fn materialize(level: usize, cross: usize) -> (usize, usize) {
+        (level, cross)
+    }
+
+    #[inline]
+    fn cross_port(cross: usize, extent: usize) -> usize {
+        cross + extent.saturating_sub(1) / 2
+    }
+
+    #[inline]
+    fn source_port_level(band_start: usize, node_extent: usize, _band_extent: usize) -> usize {
+        band_start + node_extent - 1
+    }
+
+    #[inline]
+    fn dummy_draw_offset(_edge_idx: usize) -> usize {
+        0
+    }
+
+    const FLOW_AXIS: crate::ir::FlowAxis = crate::ir::FlowAxis::X;
+    /// Level-axis pads are the box's left/right borders: border +
+    /// one space, mirroring `SUBGRAPH_H_PAD`'s shape.
+    const SG_PAD_LEVEL: (usize, usize) = (2, 2);
+    /// Cross-axis pads: the leading (top) pad carries border +
+    /// label row + blank (like `SUBGRAPH_V_PAD_TOP`); the trailing
+    /// (bottom) pad is blank + border.
+    const SG_PAD_CROSS: (usize, usize) = (3, 2);
+    /// LR dummies occupy one row of stacking space — the TD value 3
+    /// covers the `edge_idx % 4` DRAW offset, a cross-axis concern
+    /// only when cross is horizontal.
+    const DUMMY_CROSS: usize = 1;
+    const SIBLING_GAP_CROSS: usize = 1;
+    const ENVELOPE_CLEARANCE_CROSS: usize = 1;
+    const PARENT_CHILD_GAP_CROSS: usize = 1;
 }
 
 /// Cap on how far a subgraph *label* may widen its bounding box.
@@ -198,4 +300,30 @@ pub(crate) fn routing_overhead(level_sources_labeled_edge: bool) -> usize {
 #[inline]
 pub(crate) fn passthrough_extent(jogging_waypoints: usize) -> usize {
     jogging_waypoints + usize::from(jogging_waypoints > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profiles_map_roles_to_opposite_axes() {
+        // Vertical: level → y, cross → x. Horizontal: level → x, cross → y.
+        assert_eq!(Vertical::materialize(7, 3), (3, 7));
+        assert_eq!(Horizontal::materialize(7, 3), (7, 3));
+        // A 12×5 node: Vertical levels are sized by heights,
+        // Horizontal levels by widths.
+        assert_eq!(Vertical::level_extent(12, 5), 5);
+        assert_eq!(Vertical::cross_extent(12, 5), 12);
+        assert_eq!(Horizontal::level_extent(12, 5), 12);
+        assert_eq!(Horizontal::cross_extent(12, 5), 5);
+    }
+
+    #[test]
+    fn derived_cluster_gap_follows_the_pads() {
+        assert_eq!(Vertical::SG_GAP_CROSS, SUBGRAPH_H_PAD * 2 + SIBLING_GAP);
+        // Horizontal: trailing (bottom) pad 2 + sibling 1 + leading
+        // (top: border + label + blank) pad 3.
+        assert_eq!(Horizontal::SG_GAP_CROSS, 6);
+    }
 }

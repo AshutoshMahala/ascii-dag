@@ -200,6 +200,17 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         }
     }
 
+    // Self-loop flags in one O(E) pass (was a full edge scan per node —
+    // O(N·E), the dominant cost on large fan-in graphs).
+    let mut node_has_self_loop = vec![false; dag.nodes.len()];
+    for &(f, t, _) in &dag.edges {
+        if f == t {
+            if let Some(idx) = dag.node_index(f) {
+                node_has_self_loop[idx] = true;
+            }
+        }
+    }
+
     // Step 4: Assign x-coordinates to virtual nodes
     let mut x_coords: Vec<Vec<usize>> = Vec::with_capacity(virtual_levels.len());
     let mut widths: Vec<Vec<usize>> = Vec::with_capacity(virtual_levels.len());
@@ -213,7 +224,16 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             let width = match vnode {
                 // Cross-axis extent (Vertical: the node's width).
                 VNode::Real(idx) => {
-                    A::cross_extent(dag.get_node_width(*idx), dag.get_node_height(*idx))
+                    let ext = A::cross_extent(dag.get_node_width(*idx), dag.get_node_height(*idx));
+                    // D5(ii): at `node_spacing == 0` a self-loop node's
+                    // packed extent reserves its marker cell, so no
+                    // downstream pass can place the next node on it.
+                    // Inert at spacing ≥ 1 (the gap already hosts it).
+                    if node_spacing == 0 && node_has_self_loop[*idx] {
+                        ext + 1
+                    } else {
+                        ext
+                    }
                 }
                 VNode::Dummy { .. } => A::DUMMY_CROSS,
             };
@@ -366,7 +386,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         );
         // Waypoints must never cross node text (crossing a border renders
         // as a junction and is acceptable; crossing a node is not).
-        crate::algorithms::sugiyama::subgraph::nudge_dummies_off_nodes(
+        crate::algorithms::sugiyama::subgraph::nudge_dummies_off_nodes::<A>(
             &virtual_levels,
             &mut x_coords,
             &real_node_coords,
@@ -528,7 +548,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 let base_x = x_coords[level_idx][pos] + level_offset;
                 // Add bounded offset for visual separation between skip-level edges
                 // This keeps convergent edges from merging visually
-                let edge_offset = (*edge_idx % 4) as usize; // 0, 1, 2, or 3 chars
+                let edge_offset = A::dummy_draw_offset(*edge_idx);
                 let x = base_x + edge_offset;
                 dummy_positions[*edge_idx].push((level_idx, x));
             }
@@ -653,17 +673,6 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     // plus trailing extra for subgraphs closing after the last level
     let total_height = current_offset + sg_trailing_extra;
 
-    // Self-loop flags in one O(E) pass (was a full edge scan per node —
-    // O(N·E), the dominant cost on large fan-in graphs).
-    let mut node_has_self_loop = vec![false; dag.nodes.len()];
-    for &(f, t, _) in &dag.edges {
-        if f == t {
-            if let Some(idx) = dag.node_index(f) {
-                node_has_self_loop[idx] = true;
-            }
-        }
-    }
-
     // Add real nodes to IR
     for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
         for vnode in level_vnodes {
@@ -682,6 +691,15 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 // cross extent (== width only in Vertical).
                 let node_width = dag.get_node_width(*idx);
                 let node_height = dag.get_node_height(*idx);
+                // D5: the marker cell is IR geometry — one cell past the
+                // node on the cross axis, at its level-leading line
+                // (Vertical: right of the top row, the legacy `↺` cell).
+                let self_loop_at = node_has_self_loop[*idx].then(|| {
+                    A::materialize(
+                        level_offsets[level],
+                        cross + A::cross_extent(node_width, node_height),
+                    )
+                });
                 builder.add_node(LayoutNode {
                     id,
                     label,
@@ -694,7 +712,8 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                     level: level_idx,
                     level_position: pos,
                     kind,
-                    has_self_loop: node_has_self_loop[*idx],
+                    has_self_loop: self_loop_at.is_some(),
+                    self_loop_at,
                     edge_index: None,
                     content_tag: dag.node_kind_tag[*idx],
                 });
@@ -722,7 +741,8 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             };
             for (pos, vnode) in level_vnodes.iter().enumerate() {
                 if let VNode::Dummy { edge_idx } = vnode {
-                    let cross = x_coords[level_idx][pos] + level_offset + (*edge_idx % 4);
+                    let cross =
+                        x_coords[level_idx][pos] + level_offset + A::dummy_draw_offset(*edge_idx);
                     let (x, y) = A::materialize(level_offsets[level_idx], cross);
                     // Synthetic id, excluded from id_to_index by the builder.
                     let id = usize::MAX - synthetic;
@@ -740,6 +760,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                         level_position: pos,
                         kind: NodeKind::Dummy,
                         has_self_loop: false,
+                        self_loop_at: None,
                         edge_index: Some(*edge_idx),
                         content_tag: 0,
                     });
@@ -779,17 +800,37 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             let layout_from_level = node_levels[layout_src_idx];
             let layout_to_level = node_levels[layout_dst_idx];
 
-            let (_, _, src_x_base, src_width) = real_node_coords[layout_src_idx];
-            let (_, _, dst_x_base, dst_width) = real_node_coords[layout_dst_idx];
+            let (_, _, src_x_base, _) = real_node_coords[layout_src_idx];
+            let (_, _, dst_x_base, _) = real_node_coords[layout_dst_idx];
 
-            let from_x = src_x_base + src_width / 2;
-            let to_x = dst_x_base + dst_width / 2;
+            // Ports sit on the node's DECLARED span — the packed tuple
+            // extent may carry the D5(ii) marker reserve.
+            let from_x = A::cross_port(
+                src_x_base,
+                A::cross_extent(
+                    dag.get_node_width(layout_src_idx),
+                    dag.get_node_height(layout_src_idx),
+                ),
+            );
+            let to_x = A::cross_port(
+                dst_x_base,
+                A::cross_extent(
+                    dag.get_node_width(layout_dst_idx),
+                    dag.get_node_height(layout_dst_idx),
+                ),
+            );
             // 2-node cycle sharing a column: offset the forward edge left
             // and the back edge right so the anti-parallel pair renders
             // side by side (↓ next to ⇡) instead of overlapping. Matches
             // the CSR backend.
+            // Endpoint-shift separation needs cross-wide nodes
+            // (Vertical: every node spans ≥3 columns). Horizontal nodes
+            // are typically ONE row tall — shifted endpoints leave the
+            // node face, so the pair keeps its shared port and lane
+            // separation becomes paint-time work (temp/08 P3).
             let (from_x, to_x) = if from_x == to_x
                 && from_id != to_id
+                && matches!(A::FLOW_AXIS, crate::ir::FlowAxis::Y)
                 && edge_in_two_cycle.get(edge_idx).copied().unwrap_or(false)
             {
                 if is_back {
@@ -800,11 +841,24 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             } else {
                 (from_x, to_x)
             };
-            // ── Physical-space boundary ── edge paths are computed and
-            // emitted y-primary; LR-P1 rewrites routing in role space and
-            // materializes per edge (with `flow_axis`, temp/08 D2).
-            // from_y = bottom row of source node (so edges start below it)
-            let from_y = level_offsets[layout_from_level] + max_node_height[layout_from_level] - 1;
+            // Everything below computes in ROLE values (x/`_x` = cross,
+            // y/`_y` = level — legacy names); pairs materialize at the
+            // `add_edge` literal, and level-axis path scalars stay
+            // role-valued with `flow_axis` naming their physical axis
+            // (temp/08 D2).
+            // The routing band starts after the level's FULL extent;
+            // the IR endpoint sits on the source's port line (per-axis:
+            // Vertical = band-trailing, Horizontal = own face).
+            let band_trailing =
+                level_offsets[layout_from_level] + max_node_height[layout_from_level] - 1;
+            let from_y = A::source_port_level(
+                level_offsets[layout_from_level],
+                A::level_extent(
+                    dag.get_node_width(layout_src_idx),
+                    dag.get_node_height(layout_src_idx),
+                ),
+                max_node_height[layout_from_level],
+            );
             let to_y = level_offsets[layout_to_level];
 
             // Edge routing starts one row below the source node. Reversed
@@ -824,7 +878,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                         0
                     };
 
-                    let hy = from_y + edge_start_row + slot;
+                    let hy = band_trailing + edge_start_row + slot;
                     edge_routing_ys.insert(hy);
                     if layout_from_level < level_routing_floor.len() {
                         level_routing_floor[layout_from_level] =
@@ -842,7 +896,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                     } else {
                         0
                     };
-                    let hy = from_y + edge_start_row + slot;
+                    let hy = band_trailing + edge_start_row + slot;
                     edge_routing_ys.insert(hy);
                     if layout_from_level < level_routing_floor.len() {
                         level_routing_floor[layout_from_level] =
@@ -887,7 +941,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                             } else {
                                 0
                             };
-                            let hy = from_y + edge_start_row + slot;
+                            let hy = band_trailing + edge_start_row + slot;
                             edge_routing_ys.insert(hy);
                             if layout_from_level < level_routing_floor.len() {
                                 level_routing_floor[layout_from_level] =
@@ -906,9 +960,9 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                         let start_y_offset = (edge_start_row + slot).saturating_sub(1);
 
                         // Record the INITIAL corner Y (first segment routing) — the paint
-                        // code draws a horizontal segment at from_y + 1 + start_y_offset,
+                        // code draws a horizontal segment at band_trailing + 1 + start_y_offset,
                         // which is NOT a waypoint Y but still occupies a row.
-                        let initial_corner_y = from_y + 1 + start_y_offset;
+                        let initial_corner_y = band_trailing + 1 + start_y_offset;
                         edge_routing_ys.insert(initial_corner_y);
                         if layout_from_level < level_routing_floor.len() {
                             level_routing_floor[layout_from_level] =
@@ -923,19 +977,20 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 }
             };
 
-            // Label placement row layout (from_y = bottom row of source node):
-            //   from_y:   [Source Node bottom]
-            //   from_y+1: horizontal edge routing
-            //   from_y+2: vertical connector
-            //   from_y+3: label text row
-            //   to_y:     [Target Node]
+            // Label placement row layout (band_trailing = last line of
+            // the source level's full extent):
+            //   band_trailing:   [source level bottom]
+            //   band_trailing+1: corner routing
+            //   band_trailing+2: flow connector
+            //   band_trailing+3: label line
+            //   to_y:            [target node]
             let (label_x, label_y) = label
                 .map(|lbl| {
                     let label_len = lbl.chars().count() + 2; // +2 for quotes
 
                     // First row below the source level's routing block — shared
                     // with the CSR backend so label rows cannot drift.
-                    let label_y = from_y
+                    let label_y = band_trailing
                         + crate::algorithms::sugiyama::geometry::edge_label_offset(
                             level_occupied_slots[layout_from_level].len(),
                         );
@@ -969,7 +1024,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                         } => {
                             // Find which segment the label row falls into
                             // from_y is bottom of source node, +1 goes to routing area
-                            let horizontal_y = from_y + 1 + start_y_offset;
+                            let horizontal_y = band_trailing + 1 + start_y_offset;
 
                             if label_y <= horizontal_y || waypoints.is_empty() {
                                 from_x
@@ -980,22 +1035,41 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                         EdgePath::Spline { .. } => from_x,
                     };
 
-                    // Center the label on the edge's X position
-                    // Label goes through the line: the edge character is replaced by label
+                    // Materialize the anchor; label text spreads along
+                    // PHYSICAL x whichever role that is (temp/08 D9), so
+                    // centering and the canvas clamp apply afterwards.
+                    let (anchor_x, anchor_y) = A::materialize(label_y, edge_x_at_label);
+                    let (phys_w, _) = A::materialize(total_height, max_width);
                     let half_len = label_len / 2;
-                    let label_x = edge_x_at_label.saturating_sub(half_len);
-
-                    // Ensure label fits within width
-                    let clamped_x = if label_x + label_len > max_width {
-                        max_width.saturating_sub(label_len)
+                    let label_x = anchor_x.saturating_sub(half_len);
+                    let clamped_x = if label_x + label_len > phys_w {
+                        phys_w.saturating_sub(label_len)
                     } else {
                         label_x
                     };
-                    (clamped_x, label_y)
+                    (clamped_x, anchor_y)
                 })
                 .unwrap_or((0, 0));
 
             let reversed = back_edges.get(edge_idx).copied().unwrap_or(false);
+            // ── Materialization: role pairs → physical (x, y). The
+            // label logic above consumed the role values, so this is
+            // the last stop before the IR.
+            let (from_x, from_y) = A::materialize(from_y, from_x);
+            let (to_x, to_y) = A::materialize(to_y, to_x);
+            let path = match path {
+                EdgePath::MultiSegment {
+                    waypoints,
+                    start_y_offset,
+                } => EdgePath::MultiSegment {
+                    waypoints: waypoints
+                        .into_iter()
+                        .map(|(cross, lvl)| A::materialize(lvl, cross))
+                        .collect(),
+                    start_y_offset,
+                },
+                p => p,
+            };
             builder.add_edge(LayoutEdge {
                 from_id,
                 to_id,
@@ -1004,6 +1078,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 to_x,
                 to_y,
                 path,
+                flow_axis: A::FLOW_AXIS,
                 edge_index: edge_idx,
                 label,
                 label_x,
@@ -1817,5 +1892,223 @@ fn order_virtual_by_median(
     level_nodes.clear();
     for (v, _) in node_medians.iter() {
         level_nodes.push(*v);
+    }
+}
+
+#[cfg(test)]
+mod horizontal_profile {
+    use super::compute_layout_cfg;
+    use crate::algorithms::sugiyama::config::LayoutConfig;
+    use crate::algorithms::sugiyama::geometry::Horizontal;
+    use crate::graph::Graph;
+    use crate::render::engine::CustomNode;
+
+    /// P1-S1 node spine (temp/08): under `Horizontal`, levels become
+    /// COLUMNS (x grows with level) and declared node dimensions
+    /// reach the IR unchanged. Edge geometry is NOT asserted — the
+    /// routing region rewrites in P1-S2.
+    #[test]
+    fn chain_levels_become_columns() {
+        let mut g = Graph::new();
+        g.add_node(1, "one");
+        g.add_node(
+            2,
+            CustomNode {
+                label: "wide",
+                width: 12,
+                height: 5,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_node(3, "three");
+        g.add_edge(1, 2, None);
+        g.add_edge(2, 3, None);
+        let ir = compute_layout_cfg::<Horizontal>(&g, &LayoutConfig::standard());
+
+        let n = |id: usize| ir.nodes.iter().find(|n| n.id == id).expect("node");
+        assert!(n(2).x >= n(1).x + n(1).width, "level 1 starts past level 0");
+        assert!(n(3).x >= n(2).x + n(2).width, "level 2 starts past level 1");
+        assert_eq!((n(2).width, n(2).height), (12, 5));
+        assert!(ir.height >= 5, "canvas covers the tallest node");
+        assert!(
+            ir.width >= n(3).x + n(3).width,
+            "canvas covers the level span"
+        );
+    }
+
+    /// Siblings on one level stack vertically with disjoint spans.
+    #[test]
+    fn siblings_stack_vertically() {
+        let mut g = Graph::new();
+        g.add_node(0, "root");
+        g.add_node(1, "a");
+        g.add_node(2, "b");
+        g.add_edge(0, 1, None);
+        g.add_edge(0, 2, None);
+        let ir = compute_layout_cfg::<Horizontal>(&g, &LayoutConfig::standard());
+        let n = |id: usize| ir.nodes.iter().find(|n| n.id == id).expect("node");
+        assert_eq!(n(1).x, n(2).x, "same level, same column start");
+        let (top, bot) = if n(1).y <= n(2).y {
+            (n(1), n(2))
+        } else {
+            (n(2), n(1))
+        };
+        assert!(top.y + top.height <= bot.y, "disjoint vertical spans");
+    }
+
+    /// P1-S2: edges materialize with horizontal trunks — `flow_axis`
+    /// is `X`, the source port sits at (or past) the source's right
+    /// face, the target port on the target's left column, and both
+    /// port rows are the nodes' cross-port lines (`y + (h−1)/2`).
+    #[test]
+    fn edges_materialize_with_horizontal_trunks() {
+        use crate::ir::FlowAxis;
+        let mut g = Graph::new();
+        g.add_node(1, "one");
+        g.add_node(
+            2,
+            CustomNode {
+                label: "tall",
+                width: 8,
+                height: 5,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_edge(1, 2, None);
+        let ir = compute_layout_cfg::<Horizontal>(&g, &LayoutConfig::standard());
+        let n = |id: usize| ir.nodes.iter().find(|n| n.id == id).expect("node");
+        let e = &ir.edges[0];
+        assert_eq!(e.flow_axis, FlowAxis::X);
+        assert_eq!(
+            e.from_x,
+            n(1).x + n(1).width - 1,
+            "source port exactly on the node's right face"
+        );
+        assert_eq!(e.to_x, n(2).x, "target port on the left column");
+        assert_eq!(e.from_y, n(1).y + (n(1).height - 1) / 2);
+        assert_eq!(e.to_y, n(2).y + (n(2).height - 1) / 2);
+    }
+
+    /// P1-S2: a self-loop marker under `Horizontal` sits one row BELOW
+    /// the node's bottom at its leading column (cross-trailing,
+    /// level-leading — D5a), with the derived-`has_self_loop`
+    /// invariant intact.
+    #[test]
+    fn self_loop_marker_sits_below_in_lr() {
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(2, "b");
+        g.add_edge(1, 2, None);
+        g.add_edge(1, 1, None);
+        let ir = compute_layout_cfg::<Horizontal>(&g, &LayoutConfig::standard());
+        let n = |id: usize| ir.nodes.iter().find(|n| n.id == id).expect("node");
+        let a = n(1);
+        assert!(a.has_self_loop);
+        assert_eq!(a.self_loop_at, Some((a.x, a.y + a.height)));
+        assert_eq!(n(2).self_loop_at, None);
+    }
+
+    /// Slices-2 review: in a MIXED-WIDTH level, each source's port
+    /// sits on its OWN right face — not the widest sibling's line.
+    #[test]
+    fn mixed_width_level_ports_sit_on_own_faces() {
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(
+            2,
+            CustomNode {
+                label: "very-wide",
+                width: 14,
+                height: 1,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_node(3, "sink");
+        g.add_edge(1, 3, None);
+        g.add_edge(2, 3, None);
+        let ir = compute_layout_cfg::<Horizontal>(&g, &LayoutConfig::standard());
+        let n = |id: usize| ir.nodes.iter().find(|n| n.id == id).expect("node");
+        for e in ir.edges.iter() {
+            let src = n(e.from_id);
+            assert_eq!(
+                e.from_x,
+                src.x + src.width - 1,
+                "edge {}→{} port on its own face",
+                e.from_id,
+                e.to_id
+            );
+            assert_eq!(e.to_x, n(e.to_id).x);
+        }
+    }
+
+    /// Slices-2 review: a two-node cycle must NOT shift its endpoints
+    /// off the shared port — Horizontal nodes are one row tall, so
+    /// the Vertical ±1 separation would leave the node face entirely.
+    /// (Trunk-lane separation for the overlapping pair is paint-time
+    /// work — temp/08 P3.)
+    #[test]
+    fn two_cycle_keeps_ports_on_faces() {
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(2, "b");
+        g.add_edge(1, 2, None);
+        g.add_edge(2, 1, None);
+        let ir = compute_layout_cfg::<Horizontal>(&g, &LayoutConfig::standard());
+        let n = |id: usize| ir.nodes.iter().find(|n| n.id == id).expect("node");
+        for e in ir.edges.iter() {
+            for (x, y, node) in [
+                (e.from_x, e.from_y, n(e.from_id)),
+                (e.to_x, e.to_y, n(e.to_id)),
+            ] {
+                // Endpoints are computed in layout order (back edges
+                // swap), so check against BOTH endpoints' spans.
+                let on_a = n(1).y <= y && y < n(1).y + n(1).height;
+                let on_b = n(2).y <= y && y < n(2).y + n(2).height;
+                assert!(
+                    on_a || on_b,
+                    "endpoint ({x}, {y}) of {}→{} is on neither node's rows ({:?})",
+                    e.from_id,
+                    e.to_id,
+                    (node.y, node.height)
+                );
+            }
+        }
+    }
+
+    /// Slices-2 review: dummy draw offsets must stay inside their
+    /// packed reservation — under `Horizontal` (DUMMY_CROSS = 1, the
+    /// recommended `node_spacing = 1`) the Vertical `edge_idx % 4`
+    /// spread would walk into the next span. Emitted dummies must not
+    /// overlap any node or each other.
+    #[test]
+    fn dummy_offsets_stay_inside_their_reservation() {
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(2, "b");
+        g.add_node(3, "c");
+        g.add_node(4, "d");
+        g.add_edge(1, 2, None);
+        g.add_edge(2, 3, None);
+        g.add_edge(1, 3, None); // skip level 1
+        g.add_edge(1, 4, None);
+        g.add_edge(2, 4, None); // more skips through level 2
+        let mut config = LayoutConfig::standard();
+        config.node_spacing = 1;
+        config.include_dummy_nodes = true;
+        let ir = compute_layout_cfg::<Horizontal>(&g, &config);
+        let spans: alloc::vec::Vec<_> = ir
+            .nodes
+            .iter()
+            .map(|n| (n.id, n.x, n.y, n.width, n.height))
+            .collect();
+        for (i, &(id_a, ax, ay, aw, ah)) in spans.iter().enumerate() {
+            for &(id_b, bx, by, bw, bh) in spans.iter().skip(i + 1) {
+                let overlap = ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
+                assert!(!overlap, "spans of {id_a} and {id_b} overlap");
+            }
+        }
     }
 }

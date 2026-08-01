@@ -53,7 +53,8 @@ fn decode_stroke(up: Weight, down: Weight, left: Weight, right: Weight) -> char 
     // folds dashed arms to light (legacy: corners and junctions have no
     // dashed variants — `to_dashed` keeps them solid, and a dashed
     // stroke crossed by anything renders as a solid junction).
-    let any_dashed = up == W::Dashed || down == W::Dashed || left == W::Dashed || right == W::Dashed;
+    let any_dashed =
+        up == W::Dashed || down == W::Dashed || left == W::Dashed || right == W::Dashed;
     if any_dashed {
         let pure_dashed_v = vertical_only && up != W::Light && down != W::Light;
         if pure_dashed_v && up != W::Double && down != W::Double {
@@ -230,11 +231,7 @@ mod tests {
                 let cell_a = encode_legacy(a);
                 let (u, d, l, r) = encode_legacy(b).arms();
                 let merged = cell_a.painted_stroke(u, d, l, r);
-                assert_eq!(
-                    decode(merged),
-                    merge_chars(a, b),
-                    "merging {a:?} + {b:?}"
-                );
+                assert_eq!(decode(merged), merge_chars(a, b), "merging {a:?} + {b:?}");
             }
         }
     }
@@ -338,10 +335,7 @@ mod tests {
         assert_eq!(decode(encode_legacy('↓')), '↓');
         assert_eq!(decode(encode_legacy('⇡')), '⇡');
         assert_eq!(decode(encode_legacy('↺')), '↺');
-        assert_eq!(
-            decode(Cell::marker(MarkerKind::Dummy, Dir::Up, false)),
-            '◍'
-        );
+        assert_eq!(decode(Cell::marker(MarkerKind::Dummy, Dir::Up, false)), '◍');
         assert_eq!(decode(encode_legacy('┊')), '┊');
         assert_eq!(decode(encode_legacy('┈')), '┈');
         assert_eq!(decode(Cell::text('Æ')), 'Æ');

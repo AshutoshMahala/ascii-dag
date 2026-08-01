@@ -1555,6 +1555,7 @@ mod node_painters {
             level_position: 0,
             kind: crate::ir::NodeKind::Explicit,
             has_self_loop: false,
+            self_loop_at: None,
             edge_index: None,
             content_tag: 1, // boxed
         });
@@ -1697,6 +1698,70 @@ mod node_painters {
         assert_eq!((n.width, n.height), (12, 5));
         assert_eq!(n.center_x, n.x + 6);
         assert_eq!(n.center_y, n.y + 2);
+    }
+
+    /// D5(ii) (temp/08): at `node_spacing == 0` a self-loop node's
+    /// marker cell is reserved — no neighbor may start on it (the
+    /// legacy behavior silently painted the neighbor over the `↺`).
+    /// Also pins the D5 invariant `has_self_loop ==
+    /// self_loop_at.is_some()` and the marker cell formula, plus
+    /// cross-backend byte parity for the corner.
+    #[test]
+    fn spacing_zero_reserves_self_loop_marker() {
+        let build = || {
+            let mut g = Graph::new();
+            g.add_node(1, "a");
+            g.add_node(2, "b");
+            g.add_node(3, "c");
+            g.add_edge(1, 2, None);
+            g.add_edge(1, 3, None);
+            g.add_edge(2, 2, None);
+            g
+        };
+        let mut config = LayoutConfig::standard();
+        config.node_spacing = 0;
+
+        let heap_ir = build().compute_layout_with_config(&config);
+        for n in heap_ir.nodes.iter() {
+            assert_eq!(n.has_self_loop, n.self_loop_at.is_some(), "D5 invariant");
+        }
+        let b = heap_ir.nodes.iter().find(|n| n.id == 2).expect("node 2");
+        let (mx, my) = b.self_loop_at.expect("loop node has a marker cell");
+        assert_eq!((mx, my), (b.x + b.width, b.y), "legacy marker cell");
+        for n in heap_ir.nodes.iter() {
+            let covers = n.x <= mx && mx < n.x + n.width && n.y <= my && my < n.y + n.height;
+            assert!(!covers, "node {} overlaps the reserved marker cell", n.id);
+        }
+
+        // CSR twin: identical bytes for the corner graph.
+        let g = build();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+            .expect("CSR layout");
+        let bc = ir.nodes().iter().find(|n| n.id == 2).expect("node 2");
+        assert!(bc.has_self_loop);
+        assert_eq!(bc.self_loop_at, (bc.x + bc.width, bc.y));
+
+        let options = RenderOptions::plain();
+        let mut heap_out = alloc::string::String::new();
+        heap_ir
+            .render_with(&options, &mut heap_out)
+            .expect("heap render");
+        let mut csr_out = alloc::string::String::new();
+        ir.render_with(&options, &mut csr_out).expect("csr render");
+        assert_same(
+            "spacing-0 self-loop graph (heap vs csr)",
+            &heap_out,
+            &csr_out,
+        );
     }
 
     /// D8 — the embedded front door: the same declared content built

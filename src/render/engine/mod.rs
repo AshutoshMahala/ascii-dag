@@ -143,13 +143,8 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
     let mut sink = emit::ByteSink::new(out);
     let mut write = || -> core::fmt::Result {
         for &(y0, rows) in plan.band_ranges() {
-            let mut canvas = compose::BandCanvas::new(
-                cells,
-                colors.as_deref_mut(),
-                plan.width(),
-                y0,
-                rows,
-            );
+            let mut canvas =
+                compose::BandCanvas::new(cells, colors.as_deref_mut(), plan.width(), y0, rows);
             compose::composite_band(view_ref, &plan, options, &mut canvas, &mut scratch);
             if colored {
                 emit::emit_colored_band(&canvas, options.charset, options.color_mode, &mut sink)?;
@@ -158,7 +153,13 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
             }
         }
         if colored && options.legend {
-            emit::emit_legend(view_ref, &plan, options.charset, options.color_mode, &mut sink)?;
+            emit::emit_legend(
+                view_ref,
+                &plan,
+                options.charset,
+                options.color_mode,
+                &mut sink,
+            )?;
         }
         Ok(())
     };
@@ -201,6 +202,5 @@ pub use plan::{HitResult, RenderPlan};
 pub use region::{NodePaintCtx, NodeRegion};
 pub use style::{
     EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPlacement, LabelPosition, LineWeight,
-    MarkerShape, NodePaintFn, SubgraphBorder,
-    SubgraphStyle, SubgraphStyleCtx,
+    MarkerShape, NodePaintFn, SubgraphBorder, SubgraphStyle, SubgraphStyleCtx,
 };

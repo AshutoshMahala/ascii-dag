@@ -1121,11 +1121,25 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             (from_idx, to_idx)
         };
 
-        let (src_level, _, src_x_base, src_width) = temps.real_coords[layout_src_idx];
-        let (dst_level, _, dst_x_base, dst_width) = temps.real_coords[layout_dst_idx];
+        let (src_level, _, src_x_base, _) = temps.real_coords[layout_src_idx];
+        let (dst_level, _, dst_x_base, _) = temps.real_coords[layout_dst_idx];
 
-        let from_x = (src_x_base + src_width / 2) as usize;
-        let to_x = (dst_x_base + dst_width / 2) as usize;
+        // Ports sit on the node's DECLARED span — the packed tuple
+        // extent may carry the D5(ii) marker reserve (matches heap).
+        let from_x = A::cross_port(
+            src_x_base,
+            A::cross_extent(
+                graph.node_width(layout_src_idx),
+                graph.node_height(layout_src_idx),
+            ),
+        );
+        let to_x = A::cross_port(
+            dst_x_base,
+            A::cross_extent(
+                graph.node_width(layout_dst_idx),
+                graph.node_height(layout_dst_idx),
+            ),
+        );
         // from_y = bottom of source node (top + max_node_height - 1)
         let from_y =
             level_offsets[src_level as usize] + max_node_heights[src_level as usize] as usize - 1;
@@ -1341,6 +1355,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         };
 
         builder.add_edge(LayoutEdgeArena {
+            flow_axis: A::FLOW_AXIS,
             from_id,
             to_id,
             from_x: eff_from_x,
@@ -4005,7 +4020,15 @@ fn assign_x_coords_csr<A: Axis>(
 
             let width: Coord = if vnode_type == 0 {
                 // Cross-axis extent (Vertical: the stored width).
-                A::cross_extent(graph.node_width(vnode_idx), graph.node_height(vnode_idx)) as Coord
+                let ext =
+                    A::cross_extent(graph.node_width(vnode_idx), graph.node_height(vnode_idx));
+                // D5(ii): reserve the self-loop marker cell at
+                // `node_spacing == 0` (matches heap; inert otherwise).
+                if node_spacing == 0 && graph.children(vnode_idx).contains(&(vnode_idx as u32)) {
+                    (ext + 1) as Coord
+                } else {
+                    ext as Coord
+                }
             } else {
                 // Dummy clearance — shared constant, matches heap mode.
                 A::DUMMY_CROSS as Coord

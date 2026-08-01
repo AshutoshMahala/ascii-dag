@@ -13,9 +13,9 @@
 
 use super::config::RenderOptions;
 use super::plan::{HitResult, RenderPlan};
+use crate::GraphError;
 use crate::graph::arena::Arena;
 use crate::ir::arena::LayoutIRArena;
-use crate::GraphError;
 
 #[cfg(feature = "alloc")]
 use crate::ir::LayoutIR;

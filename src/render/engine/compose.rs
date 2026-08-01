@@ -212,11 +212,7 @@ impl<'a> PaintScratch<'a> {
         colored: bool,
         band_rows: usize,
     ) -> Self {
-        let seq_cells = if colored {
-            plan.width() * band_rows
-        } else {
-            0
-        };
+        let seq_cells = if colored { plan.width() * band_rows } else { 0 };
         Self {
             runs: PlanBuf::heap(plan.run_capacity()),
             heap: PlanBuf::heap(plan.run_capacity()),
@@ -243,11 +239,7 @@ impl<'a> PaintScratch<'a> {
             needed: plan.width() * band_rows,
             got: 0,
         };
-        let seq_cells = if colored {
-            plan.width() * band_rows
-        } else {
-            0
-        };
+        let seq_cells = if colored { plan.width() * band_rows } else { 0 };
         Ok(Self {
             runs: PlanBuf::carve(arena, plan.run_capacity(), oom())?,
             heap: PlanBuf::carve(arena, plan.run_capacity(), oom())?,

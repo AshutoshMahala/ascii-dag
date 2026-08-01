@@ -58,6 +58,15 @@ pub struct LayoutNodeArena {
     pub kind: NodeKind,
     /// Whether this node has a self-loop edge (A → A)
     pub has_self_loop: bool,
+    /// Physical cell of the self-loop marker (temp/08 D5):
+    /// `(usize::MAX, usize::MAX)` = none. Set together with
+    /// `has_self_loop` by [`set_self_loop`] (which derives the legacy
+    /// cell, one right of the top row) — builder-produced IRs never
+    /// disagree; hand-built literals own the pair's consistency.
+    /// Direction flips re-anchor it to the same node-relative corner.
+    ///
+    /// [`set_self_loop`]: crate::ir::arena::LayoutIRArenaBuilder::set_self_loop
+    pub self_loop_at: (usize, usize),
     /// For dummy nodes: the index of the edge this dummy belongs to.
     /// `usize::MAX` = none (real node) — same sentinel convention as
     /// `SubgraphInfoArena::parent_idx`. Mirrors zigraph.
@@ -149,6 +158,10 @@ pub struct LayoutEdgeArena {
     pub reversed: bool,
     /// How the edge is routed
     pub path: EdgePathArena,
+    /// Which physical axis the trunk runs along (see
+    /// [`FlowAxis`](crate::ir::FlowAxis)). Every TopDown/BottomUp
+    /// edge is `Y`. Flips copy it verbatim (mirror-invariant).
+    pub flow_axis: crate::ir::FlowAxis,
     /// Edge index (for consistent coloring)
     pub edge_index: usize,
     /// Offset into labels array for edge label (0 = no label)

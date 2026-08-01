@@ -36,6 +36,9 @@ pub(crate) struct NodeRef<'a> {
     pub level_position: usize,
     pub kind: NodeKind,
     pub has_self_loop: bool,
+    /// Self-loop marker cell (arena sentinel normalized to `None`).
+    #[allow(dead_code)] // paint consumer lands at LR-P3 (parity contract, N1)
+    pub self_loop_at: Option<(usize, usize)>,
     /// Owning edge for dummy nodes; `None` for real nodes.
     #[allow(dead_code)] // consumer lands with RW7 dummy introspection
     pub edge_index: Option<usize>,
@@ -87,6 +90,9 @@ pub(crate) struct EdgeRef<'a> {
     pub label_y: usize,
     pub directed: bool,
     pub reversed: bool,
+    /// Physical axis of the edge's trunk (temp/08 D2).
+    #[allow(dead_code)] // paint consumer lands at LR-P3 (parity contract, N1)
+    pub flow_axis: crate::ir::FlowAxis,
     pub path: PathRef<'a>,
 }
 
@@ -165,6 +171,7 @@ impl LayoutView for crate::ir::LayoutIR<'_> {
             level_position: n.level_position,
             kind: n.kind,
             has_self_loop: n.has_self_loop,
+            self_loop_at: n.self_loop_at,
             edge_index: n.edge_index,
             content_tag: n.content_tag,
         }
@@ -235,6 +242,7 @@ impl LayoutView for crate::ir::LayoutIR<'_> {
             label_y: e.label_y,
             directed: e.directed,
             reversed: e.reversed,
+            flow_axis: e.flow_axis,
             path,
         }
     }
@@ -295,6 +303,11 @@ impl LayoutView for crate::ir::arena::LayoutIRArena<'_> {
             level_position: n.level_position,
             kind: n.kind,
             has_self_loop: n.has_self_loop,
+            self_loop_at: if n.self_loop_at == (usize::MAX, usize::MAX) {
+                None
+            } else {
+                Some(n.self_loop_at)
+            },
             edge_index: if n.edge_index == usize::MAX {
                 None
             } else {
@@ -372,6 +385,7 @@ impl LayoutView for crate::ir::arena::LayoutIRArena<'_> {
             label_y: e.label_y,
             directed: e.directed,
             reversed: e.reversed,
+            flow_axis: e.flow_axis,
             path,
         }
     }
@@ -492,6 +506,7 @@ mod tests {
             n.kind,
             n.has_self_loop,
         );
+        let _ = write!(s, " loop_at={:?}", n.self_loop_at);
         s
     }
 
@@ -514,6 +529,7 @@ mod tests {
             e.reversed,
             e.path,
         );
+        let _ = write!(s, " axis={:?}", e.flow_axis);
         s
     }
 
@@ -533,16 +549,17 @@ mod tests {
                 // Nodes: emission order differs between backends
                 // (level-major vs graph-index-major) — compare keyed sets.
                 assert_eq!(LayoutView::node_count(heap), LayoutView::node_count(csr));
-                let collect_nodes = |view: &dyn LayoutView| -> Vec<((usize, usize, usize), String)> {
-                    let mut v: Vec<_> = (0..view.node_count())
-                        .map(|i| {
-                            let n = view.node(i);
-                            (node_key(&n), node_fingerprint(&n))
-                        })
-                        .collect();
-                    v.sort();
-                    v
-                };
+                let collect_nodes =
+                    |view: &dyn LayoutView| -> Vec<((usize, usize, usize), String)> {
+                        let mut v: Vec<_> = (0..view.node_count())
+                            .map(|i| {
+                                let n = view.node(i);
+                                (node_key(&n), node_fingerprint(&n))
+                            })
+                            .collect();
+                        v.sort();
+                        v
+                    };
                 assert_eq!(
                     collect_nodes(heap),
                     collect_nodes(csr),

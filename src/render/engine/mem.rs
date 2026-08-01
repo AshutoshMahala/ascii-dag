@@ -11,8 +11,8 @@
 //! the failure domain (`Plan` for plan structures, `Canvas` for band
 //! compositing memory) at the carve site.
 
-use crate::graph::arena::Arena;
 use crate::GraphError;
+use crate::graph::arena::Arena;
 
 /// A bounded push buffer over caller or heap memory.
 pub(crate) enum PlanBuf<'a, T: Copy + Default> {
@@ -228,12 +228,12 @@ mod tests {
         buf.clear();
         assert_eq!(buf.len(), 0);
         // Exhaustion maps to the caller's WDP domain.
-        let huge: Result<PlanBuf<'_, u64>, _> =
-            PlanBuf::carve(&arena, 1 << 20, GraphError::RenderCanvasTooSmall { needed: 0, got: 0 });
-        assert!(matches!(
-            huge,
-            Err(GraphError::RenderCanvasTooSmall { .. })
-        ));
+        let huge: Result<PlanBuf<'_, u64>, _> = PlanBuf::carve(
+            &arena,
+            1 << 20,
+            GraphError::RenderCanvasTooSmall { needed: 0, got: 0 },
+        );
+        assert!(matches!(huge, Err(GraphError::RenderCanvasTooSmall { .. })));
     }
 
     #[test]

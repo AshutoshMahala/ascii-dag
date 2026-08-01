@@ -39,8 +39,8 @@
 
 pub mod arena;
 pub(crate) mod arena_builder;
-mod legacy;
 pub mod json;
+mod legacy;
 
 #[cfg(feature = "alloc")]
 use alloc::vec;
@@ -93,6 +93,26 @@ pub enum NodeKind {
     Dummy,
 }
 
+/// Which physical axis an edge's trunk (flow segment) runs along
+/// (temp/08 D2). Per-edge GEOMETRY set by layout — never consult
+/// `Direction` to interpret a path: a corner edge's endpoints differ
+/// on both axes, so orientation is not inferable from coordinates.
+///
+/// `Y` for vertical trunks (every TopDown/BottomUp edge); `X` for
+/// horizontal trunks (LeftRight/RightLeft). Mirror-invariant: both
+/// the BottomUp y-flip and the RightLeft x-flip leave the trunk axis
+/// unchanged, so flips copy it verbatim. Level-axis scalars inside
+/// [`EdgePath`] (`horizontal_y`, `channel_x`, …) live on the axis
+/// this field names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowAxis {
+    /// The trunk runs vertically; level-axis path scalars are rows.
+    Y,
+    /// The trunk runs horizontally; level-axis path scalars are
+    /// columns.
+    X,
+}
+
 /// A node in the laid-out graph with computed position and dimensions.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
@@ -123,6 +143,16 @@ pub struct LayoutNode<'a> {
     /// Whether this node has a self-loop edge (A → A).
     /// When true, renderers paint a `↺` indicator after the node bracket.
     pub has_self_loop: bool,
+    /// Physical cell of the self-loop marker, computed by layout
+    /// (temp/08 D5): one cell past the node on the cross axis, at its
+    /// level-leading line — for vertical flows that is `(x + width,
+    /// y)`, the legacy `↺` position. `Some` iff `has_self_loop`
+    /// (`has_self_loop` is DERIVED from this field at emission, so
+    /// layout-generated IRs never disagree; hand-built literals are
+    /// responsible for keeping the pair consistent). Direction flips
+    /// re-anchor the cell to the
+    /// same node-relative corner rather than point-mapping it.
+    pub self_loop_at: Option<(usize, usize)>,
     /// For dummy nodes: the index of the edge this dummy belongs to.
     /// `None` for real (explicit/implicit) nodes. Mirrors zigraph's
     /// `LayoutNode.edge_index`.
@@ -201,6 +231,9 @@ pub struct LayoutEdge<'a> {
     pub to_y: usize,
     /// How the edge is routed
     pub path: EdgePath,
+    /// Which physical axis the trunk runs along (see [`FlowAxis`]).
+    /// Every TopDown/BottomUp edge is `Y`.
+    pub flow_axis: FlowAxis,
     /// Edge index (for consistent coloring)
     pub edge_index: usize,
     /// Optional edge label (e.g., "depends on", "uses")
@@ -311,6 +344,9 @@ impl<'a> LayoutIR<'a> {
         for node in &mut self.nodes {
             node.y = h.saturating_sub(node.y + node.height);
             node.center_y = flip_row(node.center_y);
+            // Re-anchor (not point-map): the marker stays one cell right
+            // of the FINAL top row — the engine's direction-blind rule.
+            node.self_loop_at = node.self_loop_at.map(|_| (node.x + node.width, node.y));
         }
         for edge in &mut self.edges {
             edge.from_y = flip_row(edge.from_y);

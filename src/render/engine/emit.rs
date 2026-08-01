@@ -121,11 +121,7 @@ pub(crate) fn emit_legend<V: LayoutView, W: core::fmt::Write>(
 /// bounds plain output; colored rows add at most one escape per cell
 /// (worst case truecolor, 19 bytes) plus a reset. The legend bound
 /// assumes every labeled edge lands in the legend.
-pub(crate) fn estimate_output_size<V: LayoutView>(
-    view: &V,
-    colored: bool,
-    legend: bool,
-) -> usize {
+pub(crate) fn estimate_output_size<V: LayoutView>(view: &V, colored: bool, legend: bool) -> usize {
     let per_cell = if colored { 4 + 19 } else { 4 };
     let mut size = view
         .height()

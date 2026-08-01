@@ -28,9 +28,9 @@ use super::style::{
     SubgraphStyleCtx,
 };
 use super::view::{LayoutView, PathRef};
+use crate::GraphError;
 use crate::graph::arena::Arena;
 use crate::render::colors;
-use crate::GraphError;
 
 /// Where plan storage comes from: the heap (std/alloc convenience) or a
 /// caller-provided arena (the no-alloc surface, N2).
@@ -260,7 +260,6 @@ impl<'buf> RenderPlan<'buf> {
                 label_pos: style.label_pos,
             });
         }
-
 
         // ── Spatial index + run capacity ───────────────────────────────
         let mut index: PlanBuf<'buf, PlanElement> = mem.buf(
@@ -549,7 +548,12 @@ impl<'buf> RenderPlan<'buf> {
 
     /// Rows of the tallest band — the reusable band buffer's height.
     pub(crate) fn max_band_rows(&self) -> usize {
-        self.band_ranges.as_slice().iter().map(|b| b.1).max().unwrap_or(0)
+        self.band_ranges
+            .as_slice()
+            .iter()
+            .map(|b| b.1)
+            .max()
+            .unwrap_or(0)
     }
 
     /// Exact h-run interior count — sizes the compositor's run scratch.
@@ -651,14 +655,17 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
         let ed = view.edge(i);
         run_capacity += count_h_runs(&ed.path, ed.from_x, ed.to_x);
     }
-    let bands = 2usize.saturating_mul(height.div_ceil(cap)).saturating_add(2);
+    let bands = 2usize
+        .saturating_mul(height.div_ceil(cap))
+        .saturating_add(2);
     let band_rows = cap.min(height).max(1);
     let area = width.saturating_mul(band_rows);
 
     let plan_bytes = e * size_of::<EdgePlan>()
         + s * size_of::<SubgraphPlan>()
         + (n + e + s) * size_of::<PlanElement>()
-        + labeled * (size_of::<LabelPlan>() + size_of::<usize>() + size_of::<(usize, usize, usize)>())
+        + labeled
+            * (size_of::<LabelPlan>() + size_of::<usize>() + size_of::<(usize, usize, usize)>())
         + n * size_of::<usize>()
         + bands * size_of::<(usize, usize)>();
     let scratch_bytes = super::compose::PaintScratch::estimate_bytes(
@@ -770,15 +777,9 @@ fn span_blocked<V: LayoutView>(
         // allowed — including other edges' (legacy checks only the char).
         if i != label_edge && e.reversed {
             let mut col_blocked = false;
-            for_each_v_col(
-                &e.path,
-                e.from_x,
-                e.from_y,
-                e.to_x,
-                e.to_y,
-                row,
-                &mut |c| col_blocked |= c >= x0 && c < x1,
-            );
+            for_each_v_col(&e.path, e.from_x, e.from_y, e.to_x, e.to_y, row, &mut |c| {
+                col_blocked |= c >= x0 && c < x1
+            });
             if col_blocked {
                 return true;
             }
@@ -1050,11 +1051,7 @@ mod tests {
         let g = stage_graph();
         let ir = g.compute_layout();
         let plan = RenderPlan::build(&ir, &RenderOptions::plain());
-        assert!(
-            plan.elements()
-                .windows(2)
-                .all(|w| w[0].y_min <= w[1].y_min)
-        );
+        assert!(plan.elements().windows(2).all(|w| w[0].y_min <= w[1].y_min));
         assert_eq!(plan.band_count(), 1);
         assert_eq!(plan.band_ranges()[0], (0, plan.height()));
         assert_eq!(plan.width(), ir.width());

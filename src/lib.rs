@@ -155,7 +155,7 @@ pub use graph::{AUTO, Auto, IdOrAuto, NodeId};
 pub use graph::{Direction, Graph, Subgraph};
 pub use ir::NodeKind;
 #[cfg(feature = "alloc")]
-pub use ir::{EdgePath, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};
+pub use ir::{EdgePath, FlowAxis, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};
 pub use render::colors::Palette;
 pub use render::engine::{BoxedNode, CustomNode, NodeContent, SimpleNode};
 pub use render::engine::{Charset, ColorMode, RenderOptions};
