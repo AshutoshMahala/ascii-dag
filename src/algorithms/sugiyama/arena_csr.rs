@@ -88,7 +88,7 @@ pub(crate) struct LayoutTemps<'a> {
     pub(crate) node_is_source: &'a mut [bool],
     pub(crate) source_counts: &'a mut [Idx],
     pub(crate) dummy_counts: &'a mut [Idx],
-    pub(crate) level_y_offsets: &'a mut [usize],
+    pub(crate) level_offsets: &'a mut [usize],
     pub(crate) node_slots: &'a mut [usize],
     pub(crate) level_slot_next: &'a mut [Idx],
     /// Interval pool for slot allocation: (min_x, max_x, next) linked
@@ -891,12 +891,12 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         }
     }
 
-    temps.level_y_offsets.fill(0);
+    temps.level_offsets.fill(0);
     let level_spacing: usize = config.level_spacing;
 
     // Compute subgraph Y extras (vertical border space)
     let (sg_initial_offset, sg_trailing_extra) = if graph.has_subgraphs() {
-        compute_sg_y_extras::<A>(
+        compute_sg_level_extras::<A>(
             graph,
             temps.node_levels,
             max_level as usize,
@@ -911,7 +911,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     let mut current_offset = sg_initial_offset;
 
     for level in 0..=max_level as usize {
-        temps.level_y_offsets[level] = current_offset;
+        temps.level_offsets[level] = current_offset;
         let node_height = max_node_heights[level] as usize;
         // Use actual geometry-aware slot count (not naive source count)
         let slot_count = temps.level_slot_next[level] as usize;
@@ -937,7 +937,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         }
     }
     current_offset += sg_trailing_extra;
-    temps.level_y_offsets[max_level as usize + 1] = current_offset;
+    temps.level_offsets[max_level as usize + 1] = current_offset;
     let total_height = current_offset;
 
     // Step 9: Build LayoutIRArena
@@ -982,14 +982,16 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     // margins (see its computation after refinement) — adding them again
     // here double-counted 12 columns vs the heap backend, caught by the
     // LayoutView equivalence tests.
-    let canvas_width = max_width as usize;
-    builder.set_dimensions(canvas_width, total_height);
+    // ── Materialization point for canvas extents: (level, cross)
+    // totals → (width, height).
+    let (canvas_width, canvas_height) = A::materialize(total_height, max_width as usize);
+    builder.set_dimensions(canvas_width, canvas_height);
     builder.set_level_count(max_level as usize + 1);
 
     // Add nodes
     for idx in 0..node_count {
-        let (level, pos, x, width) = temps.real_coords[idx];
-        let y = temps.level_y_offsets[level as usize]; // Use dynamic offset
+        let (level, pos, cross, _) = temps.real_coords[idx];
+        let (x, y) = A::materialize(temps.level_offsets[level as usize], cross as usize);
         let id = graph.node_id(idx);
         let label = graph.node_label(idx);
 
@@ -997,9 +999,11 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             .add_node(
                 id,
                 label,
-                x as usize,
+                x,
                 y,
-                width as usize,
+                // Physical extents from the declared dimensions — the
+                // packed tuple's extent is the role-space cross extent.
+                graph.node_width(idx),
                 graph.node_height(idx),
                 level as usize,
                 pos as usize,
@@ -1051,14 +1055,14 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                 else {
                     continue;
                 };
-                let y = temps.level_y_offsets[level];
+                let (x, y) = A::materialize(temps.level_offsets[level], x as usize);
                 let id = usize::MAX - synthetic;
                 synthetic += 1;
                 let node_idx = builder
                     .add_node(
                         id,
                         "",
-                        x as usize,
+                        x,
                         y,
                         1,
                         1,
@@ -1089,7 +1093,10 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     let node_slots = &temps.node_slots;
     let level_dummy_next = &mut temps.level_dummy_next;
     let waypoint_scratch = &mut temps.waypoint_scratch;
-    let level_y_offsets = &temps.level_y_offsets;
+    // ── Physical-space boundary ── edge paths below are computed and
+    // emitted y-primary; LR-P1 rewrites routing in role space and
+    // materializes per edge (with `flow_axis`, temp/08 D2).
+    let level_offsets = &temps.level_offsets;
     let max_node_heights = &temps.level_vdummy_counts;
     let level_labeled_src = &temps.level_labeled_src;
     let level_routing_floor = &mut temps.level_routing_floor;
@@ -1121,8 +1128,8 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         let to_x = (dst_x_base + dst_width / 2) as usize;
         // from_y = bottom of source node (top + max_node_height - 1)
         let from_y =
-            level_y_offsets[src_level as usize] + max_node_heights[src_level as usize] as usize - 1;
-        let to_y = level_y_offsets[dst_level as usize];
+            level_offsets[src_level as usize] + max_node_heights[src_level as usize] as usize - 1;
+        let to_y = level_offsets[dst_level as usize];
 
         // Store original semantic IDs (not layout-direction IDs)
         let from_id = graph.node_id(from_idx);
@@ -1204,8 +1211,8 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                         0
                     };
 
-                    // Calculate Y using level_y_offsets + max_node_height at intermediate level
-                    let y_base = level_y_offsets[lvl_idx]
+                    // Calculate Y using level_offsets + max_node_height at intermediate level
+                    let y_base = level_offsets[lvl_idx]
                         + max_node_heights.get(lvl_idx).copied().unwrap_or(1) as usize
                         - 1;
                     // Waypoint rows budget the label offset only on levels
@@ -1356,10 +1363,10 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
 
     // Step 10: Compute subgraph bounding boxes and add to builder
     if graph.has_subgraphs() {
-        let sg_max_right = compute_sg_bounding_boxes::<A>(
+        let (sg_max_right, _sg_max_bottom) = compute_sg_bounding_boxes::<A>(
             graph,
             temps.real_coords,
-            temps.level_y_offsets,
+            temps.level_offsets,
             total_height,
             temps.sg_depths,
             temps.sg_envelopes,
@@ -1368,8 +1375,12 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         );
         // The canvas must cover every border: a label-widened cluster box
         // can extend past the node extent `canvas_width` was derived from.
+        // LR-P1: fold `_sg_max_bottom` into the height here (Horizontal
+        // boxes can grow that axis; Vertical's rare routing-row push
+        // past the level total currently CLIPS — growing is a behavior
+        // change the P0 gate cannot carry).
         if sg_max_right + 1 > canvas_width {
-            builder.set_dimensions(sg_max_right + 1, total_height);
+            builder.set_dimensions(sg_max_right + 1, canvas_height);
         }
     }
 
@@ -1496,7 +1507,7 @@ fn alloc_layout_temps_csr<'b>(
             node_is_source: core::slice::from_raw_parts_mut(node_is_source_ptr, node_count),
             source_counts: core::slice::from_raw_parts_mut(source_counts_ptr, max_levels + 1),
             dummy_counts: core::slice::from_raw_parts_mut(dummy_counts_ptr, max_levels + 1),
-            level_y_offsets: core::slice::from_raw_parts_mut(level_y_offsets_ptr, max_levels + 2),
+            level_offsets: core::slice::from_raw_parts_mut(level_y_offsets_ptr, max_levels + 2),
             node_slots: core::slice::from_raw_parts_mut(node_slots_ptr, node_count),
             level_slot_next: core::slice::from_raw_parts_mut(level_slot_next_ptr, max_levels + 1),
             level_labeled_src: core::slice::from_raw_parts_mut(
@@ -3439,7 +3450,7 @@ fn fix_subgraph_overlaps_csr<A: Axis>(
 /// Compute per-level Y extras for subgraph borders.
 /// Populates `sg_ranges`, `sg_depths`, `sg_y_extras` in temps and returns
 /// (initial_offset, trailing_extra).
-fn compute_sg_y_extras<A: Axis>(
+fn compute_sg_level_extras<A: Axis>(
     graph: &CsrGraph<'_>,
     node_levels: &[Idx],
     max_level: usize,
@@ -3622,21 +3633,23 @@ fn compute_sg_y_extras<A: Axis>(
 /// Uses sg_envelopes as scratch space.
 /// `level_routing_floor` contains the max Y used by edge routing at each level,
 /// so bottom borders can be placed below the routing area.
-/// Returns the maximum bounding-box right edge (`x + width`) across all
-/// subgraphs, so the caller can widen the canvas to cover every border.
+/// Returns the maximum physical right and bottom edges across all
+/// subgraphs. The caller widens the canvas from the right edge today;
+/// the bottom edge is plumbed for LR-P1's height fold (see the call
+/// site for why it is not folded yet).
 fn compute_sg_bounding_boxes<A: Axis>(
     graph: &CsrGraph<'_>,
     real_coords: &[(usize, usize, usize, usize)], // (level, pos, x, width)
-    level_y_offsets: &[usize],
+    level_offsets: &[usize],
     total_height: usize,
     sg_depths: &[usize],
     sg_envelopes: &mut [(usize, usize, usize, usize)],
     level_routing_floor: &[usize],
     builder: &mut LayoutIRArenaBuilder<'_>,
-) -> usize {
+) -> (usize, usize) {
     let sg_count = graph.subgraph_count();
     if sg_count == 0 {
-        return 0;
+        return (0, 0);
     }
 
     // Pass 1: compute node envelope per subgraph
@@ -3655,7 +3668,7 @@ fn compute_sg_bounding_boxes<A: Axis>(
                 continue;
             }
             let (level, _, x, width) = real_coords[node_idx];
-            let y = level_y_offsets.get(level).copied().unwrap_or(0);
+            let y = level_offsets.get(level).copied().unwrap_or(0);
             let node_max_y = y + 1;
             let node_max_x = x + width;
 
@@ -3814,22 +3827,34 @@ fn compute_sg_bounding_boxes<A: Axis>(
         }
     }
 
-    // Add subgraph bounding boxes to builder
+    // Add subgraph bounding boxes to builder — materialize the role
+    // rect into physical IR (`x`/`right` cross-axis, `y`/`bottom`
+    // level-axis; identity for Vertical).
     let mut max_right = 0usize;
+    let mut max_bottom = 0usize;
     for sg_idx in 0..effective_sg {
         let (x, y, right, bottom) = sg_envelopes[sg_idx];
         if x == usize::MAX {
             continue;
         }
-        let width = right.saturating_sub(x);
-        let height = bottom.saturating_sub(y);
+        let (px, py) = A::materialize(y, x);
+        let (pr, pb) = A::materialize(bottom, right);
         let sg_id = graph.subgraph_id(sg_idx);
         let parent_id = graph.subgraph_parent(sg_idx).map(|p| graph.subgraph_id(p));
         let label = graph.subgraph_label(sg_idx);
-        builder.add_subgraph(sg_id, parent_id, label, x, y, width, height);
-        max_right = max_right.max(x + width);
+        builder.add_subgraph(
+            sg_id,
+            parent_id,
+            label,
+            px,
+            py,
+            pr.saturating_sub(px),
+            pb.saturating_sub(py),
+        );
+        max_right = max_right.max(pr);
+        max_bottom = max_bottom.max(pb);
     }
-    max_right
+    (max_right, max_bottom)
 }
 
 fn calculate_levels_csr(graph: &CsrGraph<'_>, levels: &mut [Idx], back_edges: &[bool]) -> Idx {
@@ -4742,7 +4767,7 @@ impl<'a> Graph<'a> {
             item(node_count, core::mem::size_of::<bool>()),        // node_is_source
             item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // source_counts
             item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // dummy_counts
-            item(max_levels.saturating_add(2), core::mem::size_of::<usize>()), // level_y_offsets
+            item(max_levels.saturating_add(2), core::mem::size_of::<usize>()), // level_offsets
             item(node_count, core::mem::size_of::<usize>()),       // node_slots
             item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // level_slot_next
             item(

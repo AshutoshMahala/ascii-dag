@@ -13,10 +13,10 @@
 
 use super::config::RenderOptions;
 use super::{render_colored, render_plain};
-use crate::render::colors::Palette;
 use crate::algorithms::sugiyama::config::LayoutConfig;
 use crate::graph::Graph;
 use crate::graph::arena::Arena;
+use crate::render::colors::Palette;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -246,7 +246,11 @@ fn engine_self_parity_across_backends() {
         let ir = g.compute_layout();
         let heap_out = render_plain(&ir, &RenderOptions::plain());
         let csr_out = csr_engine(&g, &RenderOptions::plain());
-        assert_same(&format!("{tag} (engine heap vs engine csr)"), &heap_out, &csr_out);
+        assert_same(
+            &format!("{tag} (engine heap vs engine csr)"),
+            &heap_out,
+            &csr_out,
+        );
     }
 }
 
@@ -269,7 +273,10 @@ fn ruled_classes_render_canonically() {
 
     // Class D: unfittable edge labels are skipped — never truncated
     // without a closing quote.
-    let collide = render_plain(&colliding_labels().compute_layout(), &RenderOptions::plain());
+    let collide = render_plain(
+        &colliding_labels().compute_layout(),
+        &RenderOptions::plain(),
+    );
     assert_eq!(collide.matches('"').count() % 2, 0, "{collide}");
 }
 
@@ -381,7 +388,11 @@ mod bt {
                 .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
                 .expect("CSR layout");
             let csr_col = render_colored(&csr_ir, &colored);
-            assert_same(&format!("{tag} (BT colored heap vs csr)"), &heap_col, &csr_col);
+            assert_same(
+                &format!("{tag} (BT colored heap vs csr)"),
+                &heap_col,
+                &csr_col,
+            );
         }
     }
 
@@ -404,7 +415,11 @@ mod bt {
 
         // Box label at the physical top of the box (content atomicity).
         let sg = &ir.subgraphs()[0];
-        assert_eq!(row_of("Stage"), sg.y + 1, "box label just below top border:\n{out}");
+        assert_eq!(
+            row_of("Stage"),
+            sg.y + 1,
+            "box label just below top border:\n{out}"
+        );
         assert!(lines[sg.y].contains('╔'), "top border row:\n{out}");
 
         // The edge label renders too (its row is IR-physical).
@@ -416,7 +431,10 @@ mod bt {
     #[test]
     fn bt_back_edges_semantics() {
         let out = render_plain(&bt_heap_ir(back_edges), &RenderOptions::plain());
-        assert!(out.contains('⇣'), "reversed arrow points down in BT:\n{out}");
+        assert!(
+            out.contains('⇣'),
+            "reversed arrow points down in BT:\n{out}"
+        );
         assert!(!out.contains('⇡'), "no upward dashed arrows in BT:\n{out}");
         assert!(out.contains('↑'), "forward arrows point up:\n{out}");
     }
@@ -508,7 +526,11 @@ mod bands {
                 let colored_ref = render_colored(&ir, &RenderOptions::colored(Palette::Ansi));
                 for cap in CAPS {
                     let plain = render_plain(&ir, &with_cap(RenderOptions::plain(), cap));
-                    assert_same(&format!("{tag} {direction:?} plain cap={cap}"), &plain_ref, &plain);
+                    assert_same(
+                        &format!("{tag} {direction:?} plain cap={cap}"),
+                        &plain_ref,
+                        &plain,
+                    );
                     let colored =
                         render_colored(&ir, &with_cap(RenderOptions::colored(Palette::Ansi), cap));
                     assert_same(
@@ -525,8 +547,10 @@ mod bands {
     #[test]
     fn small_caps_produce_multiple_bands() {
         let ir = hero_graph().compute_layout();
-        let plan =
-            crate::render::engine::plan::RenderPlan::build(&ir, &with_cap(RenderOptions::plain(), 5));
+        let plan = crate::render::engine::plan::RenderPlan::build(
+            &ir,
+            &with_cap(RenderOptions::plain(), 5),
+        );
         assert!(plan.band_count() > 1, "hero at cap 5 must band");
         // Bands tile the height exactly, in order, no gaps.
         let mut next = 0usize;
@@ -560,8 +584,10 @@ mod bands {
     #[test]
     fn banded_self_parity_across_backends() {
         for build in [nested_boxes as fn() -> Graph<'static>, hero_graph] {
-            let heap_out =
-                render_plain(&build().compute_layout(), &with_cap(RenderOptions::plain(), 3));
+            let heap_out = render_plain(
+                &build().compute_layout(),
+                &with_cap(RenderOptions::plain(), 3),
+            );
             let mut opts = RenderOptions::plain();
             opts.band_rows_cap = 3;
             let csr_out = csr_engine(&build(), &opts);
@@ -589,7 +615,11 @@ mod bands {
             .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
             .expect("CSR layout");
         let csr_out = render_plain(&ir, &with_cap(RenderOptions::plain(), 3));
-        assert_same("nested_boxes banded cap=3 (heap vs csr)", &heap_out, &csr_out);
+        assert_same(
+            "nested_boxes banded cap=3 (heap vs csr)",
+            &heap_out,
+            &csr_out,
+        );
     }
 }
 
@@ -597,12 +627,12 @@ mod bands {
 
 mod no_alloc {
     use super::*;
+    use crate::GraphError;
     use crate::graph::Direction;
     use crate::render::engine::color::ColorMode;
     use crate::render::engine::{
         estimate_render_arena_size, estimate_render_output_size, render_to_bytes,
     };
-    use crate::GraphError;
 
     /// The byte surface must match the String surface exactly — plain
     /// and colored, TD and BT, banded and not — using estimate-sized
@@ -638,9 +668,7 @@ mod no_alloc {
                         let arena = Arena::new(&mut backing);
                         let mut out = vec![0u8; out_size];
                         let written = render_to_bytes(&ir, &options, &arena, &mut out)
-                            .unwrap_or_else(|e| {
-                                panic!("{tag} {direction:?} cap={cap}: {e}")
-                            });
+                            .unwrap_or_else(|e| panic!("{tag} {direction:?} cap={cap}: {e}"));
                         let got = core::str::from_utf8(&out[..written]).unwrap();
                         assert_same(
                             &format!("{tag} {direction:?} cap={cap} (bytes vs string)"),
@@ -721,11 +749,11 @@ mod no_alloc {
 mod styles {
     use super::*;
     use crate::graph::Direction;
+    use crate::render::engine::CellColor;
     use crate::render::engine::style::{
         EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPosition, MarkerShape, SubgraphBorder,
         SubgraphStyle, SubgraphStyleCtx,
     };
-    use crate::render::engine::CellColor;
 
     // Style fns are plain `fn` items — the no_std-safe callback shape.
     fn no_arrowheads(_: EdgeStyleCtx<'_>) -> EdgeStyle {
@@ -836,7 +864,10 @@ mod styles {
         for border in ['\u{2554}', '\u{2550}', '\u{2551}', '\u{255a}'] {
             assert!(!out.contains(border), "no box ink:\n{out}");
         }
-        assert!(out.contains("Outer") && out.contains("Inner"), "labels stay:\n{out}");
+        assert!(
+            out.contains("Outer") && out.contains("Inner"),
+            "labels stay:\n{out}"
+        );
         assert!(out.contains("[Work]"), "content stays:\n{out}");
     }
 
@@ -847,8 +878,14 @@ mod styles {
         options.subgraph_style_fn = green_boxes;
         options.edge_label_style_fn = magenta_labels;
         let out = render_colored(&ir, &options);
-        assert!(out.contains("\x1b[38;5;42m"), "border color escapes:\n{out:?}");
-        assert!(out.contains("\x1b[38;5;201m"), "label color escapes:\n{out:?}");
+        assert!(
+            out.contains("\x1b[38;5;42m"),
+            "border color escapes:\n{out:?}"
+        );
+        assert!(
+            out.contains("\x1b[38;5;201m"),
+            "label color escapes:\n{out:?}"
+        );
     }
 
     #[test]
@@ -863,7 +900,11 @@ mod styles {
             .iter()
             .position(|l| l.contains("Stage"))
             .expect("label present");
-        assert_eq!(label_row, sg.y + sg.height - 2, "label at box bottom:\n{out}");
+        assert_eq!(
+            label_row,
+            sg.y + sg.height - 2,
+            "label at box bottom:\n{out}"
+        );
     }
 
     #[test]
@@ -877,9 +918,15 @@ mod styles {
         let ir = colliding_labels().compute_layout();
         let unicode = render_colored(&ir, &RenderOptions::colored(Palette::Ansi));
         let ascii = render_colored(&ir, &RenderOptions::ascii_colored(Palette::Ansi));
-        assert!(unicode.contains(" \u{2192} "), "unicode legend arrow:\n{unicode:?}");
+        assert!(
+            unicode.contains(" \u{2192} "),
+            "unicode legend arrow:\n{unicode:?}"
+        );
         assert!(ascii.contains(" -> "), "ascii legend arrow:\n{ascii:?}");
-        assert!(!ascii.contains('\u{2192}'), "no unicode arrow in ascii legend:\n{ascii:?}");
+        assert!(
+            !ascii.contains('\u{2192}'),
+            "no unicode arrow in ascii legend:\n{ascii:?}"
+        );
     }
 
     fn stage_graph_for_styles() -> Graph<'static> {
@@ -905,7 +952,10 @@ mod styles {
 
         let heap_ir = stage().compute_layout();
         let heap_out = render_colored(&heap_ir, &options);
-        assert!(heap_out.contains("\x1b[38;5;196m"), "edge override:\n{heap_out:?}");
+        assert!(
+            heap_out.contains("\x1b[38;5;196m"),
+            "edge override:\n{heap_out:?}"
+        );
         let sg = &heap_ir.subgraphs()[0];
         let label_row = heap_out
             .lines()
@@ -942,7 +992,10 @@ mod wrapper_compat {
     fn heap_wrappers_match_engine() {
         for build in [stage as fn() -> Graph<'static>, hero_graph] {
             let ir = build().compute_layout();
-            assert_eq!(ir.render_scanline(), render_plain(&ir, &RenderOptions::plain()));
+            assert_eq!(
+                ir.render_scanline(),
+                render_plain(&ir, &RenderOptions::plain())
+            );
 
             let mut to = String::new();
             ir.render_scanline_to(&mut to);
@@ -1005,7 +1058,10 @@ mod wrapper_compat {
 
         // Undersized scratch still reports None, never panics.
         let mut tiny = vec![0usize; 4];
-        assert!(ir.render_to_buffer(&mut buffer, &mut line, &mut tiny).is_none());
+        assert!(
+            ir.render_to_buffer(&mut buffer, &mut line, &mut tiny)
+                .is_none()
+        );
 
         // Colored wrappers match the engine's colored output.
         let mut edge_colors = vec![0usize; ir.edge_count()];
@@ -1035,9 +1091,9 @@ mod wrapper_compat {
 
 mod review_fixes {
     use super::*;
+    use crate::render::engine::CellColor;
     use crate::render::engine::HitResult;
     use crate::render::engine::style::{EdgeStyle, EdgeStyleCtx};
-    use crate::render::engine::CellColor;
 
     /// Long Unicode endpoint + edge labels forced into the legend: an
     /// exactly estimate-sized output buffer must still suffice.
@@ -1061,7 +1117,10 @@ mod review_fixes {
             .expect("estimate-sized output buffer must fit the legend");
         let text = core::str::from_utf8(&out[..n]).unwrap();
         assert!(text.contains("Edge labels:"), "legend present:\n{text}");
-        assert!(text.contains("Ünïcödé-Nödé"), "endpoint label in full:\n{text}");
+        assert!(
+            text.contains("Ünïcödé-Nödé"),
+            "endpoint label in full:\n{text}"
+        );
     }
 
     /// Property: hit-testing agrees with the painted canvas. Every cell
@@ -1155,7 +1214,10 @@ mod review_fixes {
         );
         // With the default border the same cell hits the box.
         let bordered = ir.render_plan(&RenderOptions::plain());
-        assert_eq!(ir.hit_test(&bordered, sg.x, sg.y), HitResult::Subgraph(sg.id));
+        assert_eq!(
+            ir.hit_test(&bordered, sg.x, sg.y),
+            HitResult::Subgraph(sg.id)
+        );
     }
 
     /// TrueColor renders emit 24-bit escapes in the legend too — never
@@ -1347,7 +1409,11 @@ mod node_painters {
             for cap in [1usize, 2, 3] {
                 let mut capped = options;
                 capped.band_rows_cap = cap;
-                assert_same("painted node banding", &reference, &render_plain(&ir, &capped));
+                assert_same(
+                    "painted node banding",
+                    &reference,
+                    &render_plain(&ir, &capped),
+                );
             }
         }
     }
@@ -1582,6 +1648,57 @@ mod node_painters {
         assert_same("content-tag graph (heap vs csr)", &heap_out, &csr_out);
     }
 
+    /// Slice-5 guard (temp/08): physical node extents are emitted from
+    /// the node's DECLARED dimensions, not the role-space packing
+    /// extent — an asymmetric 12×5 node must reach the IR as 12×5 in
+    /// both backends. (Under `Horizontal`, the packing extent is the
+    /// height; emitting it as the width would corrupt centers, ports,
+    /// and content bounds.)
+    #[test]
+    fn asymmetric_node_extents_reach_the_ir() {
+        let build = || {
+            let mut g = Graph::new();
+            g.add_node(1, "a");
+            g.add_node(
+                2,
+                CustomNode {
+                    label: "wide",
+                    width: 12,
+                    height: 5,
+                    painter: None,
+                    payload: "",
+                },
+            );
+            g.add_node(3, "b");
+            g.add_edge(1, 2, None);
+            g.add_edge(2, 3, None);
+            g
+        };
+        let heap_ir = build().compute_layout();
+        let n = heap_ir.nodes.iter().find(|n| n.id == 2).expect("node 2");
+        assert_eq!((n.width, n.height), (12, 5));
+        assert_eq!(n.center_x, n.x + 6);
+        assert_eq!(n.center_y, n.y + 2);
+
+        let g = build();
+        let config = LayoutConfig::standard();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+            .expect("CSR layout");
+        let n = ir.nodes().iter().find(|n| n.id == 2).expect("node 2");
+        assert_eq!((n.width, n.height), (12, 5));
+        assert_eq!(n.center_x, n.x + 6);
+        assert_eq!(n.center_y, n.y + 2);
+    }
+
     /// D8 — the embedded front door: the same declared content built
     /// directly on `CsrGraphBuilder` (no `Graph`, no alloc-side
     /// construction) renders byte-identically to the Graph → to_csr
@@ -1765,9 +1882,11 @@ mod node_painters {
         }
         let build = || {
             let mut g = Graph::new();
-            for (id, label, payload) in
-                [(1, "alpha", "first"), (2, "beta", "second"), (3, "gamma", "third")]
-            {
+            for (id, label, payload) in [
+                (1, "alpha", "first"),
+                (2, "beta", "second"),
+                (3, "gamma", "third"),
+            ] {
                 g.add_node(
                     id,
                     CustomNode {

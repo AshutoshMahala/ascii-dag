@@ -58,6 +58,14 @@ pub(crate) trait Axis {
     fn level_extent(width: usize, height: usize) -> usize;
     /// Node extent across the flow. Vertical: width.
     fn cross_extent(width: usize, height: usize) -> usize;
+    /// THE materialization point (temp/08 slice 5): turn a role-space
+    /// position into physical coordinates, returning `(x, y)`.
+    /// Vertical: level → y, cross → x. Extents map identically —
+    /// feeding `(level_total, cross_total)` yields the canvas
+    /// `(width, height)`. Everything upstream of a `materialize` call
+    /// computes in role space; physical axes exist only at IR
+    /// emission and beyond.
+    fn materialize(level: usize, cross: usize) -> (usize, usize);
     /// Subgraph border padding along the level axis (before, after
     /// content). Vertical: (`SUBGRAPH_V_PAD_TOP`, `SUBGRAPH_V_PAD_BOTTOM`).
     const SG_PAD_LEVEL: (usize, usize);
@@ -100,6 +108,11 @@ impl Axis for Vertical {
     #[inline]
     fn cross_extent(width: usize, _height: usize) -> usize {
         width
+    }
+
+    #[inline]
+    fn materialize(level: usize, cross: usize) -> (usize, usize) {
+        (cross, level)
     }
 
     const SG_PAD_LEVEL: (usize, usize) = (SUBGRAPH_V_PAD_TOP, SUBGRAPH_V_PAD_BOTTOM);

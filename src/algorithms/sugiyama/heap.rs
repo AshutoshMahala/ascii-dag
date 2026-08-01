@@ -604,11 +604,11 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             }
         }
     }
-    let mut level_y_offsets = Vec::with_capacity(max_level + 1);
+    let mut level_offsets = Vec::with_capacity(max_level + 1);
 
     // When subgraphs exist, compute per-boundary extra rows for opening/closing borders
     let (sg_initial_offset, sg_boundary_extras, sg_trailing_extra) = if dag.has_subgraphs() {
-        crate::algorithms::sugiyama::subgraph::compute_level_y_extras::<A>(
+        crate::algorithms::sugiyama::subgraph::compute_level_extras::<A>(
             dag,
             &node_levels,
             max_level,
@@ -620,7 +620,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     let mut current_offset = sg_initial_offset;
 
     for level in 0..=max_level {
-        level_y_offsets.push(current_offset);
+        level_offsets.push(current_offset);
 
         // 1. Slots for edges originating at this level (adjacent or skip)
         let adjacent_slots = level_occupied_slots[level].len();
@@ -668,8 +668,8 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
         for vnode in level_vnodes {
             if let VNode::Real(idx) = vnode {
-                let (level, pos, x, width) = real_node_coords[*idx];
-                let y = level_y_offsets[level];
+                let (level, pos, cross, _) = real_node_coords[*idx];
+                let (x, y) = A::materialize(level_offsets[level], cross);
 
                 let (id, label) = dag.nodes[*idx];
                 let kind = if dag.auto_created.contains(&id) {
@@ -677,15 +677,19 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 } else {
                     NodeKind::Explicit
                 };
+                // Physical IR extents come from the node's declared
+                // dimensions — the packed tuple's extent is the role-space
+                // cross extent (== width only in Vertical).
+                let node_width = dag.get_node_width(*idx);
                 let node_height = dag.get_node_height(*idx);
                 builder.add_node(LayoutNode {
                     id,
                     label,
                     y,
                     x,
-                    width,
+                    width: node_width,
                     height: node_height,
-                    center_x: x + width / 2,
+                    center_x: x + node_width / 2,
                     center_y: y + node_height.saturating_sub(1) / 2,
                     level: level_idx,
                     level_position: pos,
@@ -718,8 +722,8 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             };
             for (pos, vnode) in level_vnodes.iter().enumerate() {
                 if let VNode::Dummy { edge_idx } = vnode {
-                    let x = x_coords[level_idx][pos] + level_offset + (*edge_idx % 4);
-                    let y = level_y_offsets[level_idx];
+                    let cross = x_coords[level_idx][pos] + level_offset + (*edge_idx % 4);
+                    let (x, y) = A::materialize(level_offsets[level_idx], cross);
                     // Synthetic id, excluded from id_to_index by the builder.
                     let id = usize::MAX - synthetic;
                     synthetic += 1;
@@ -796,10 +800,12 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             } else {
                 (from_x, to_x)
             };
+            // ── Physical-space boundary ── edge paths are computed and
+            // emitted y-primary; LR-P1 rewrites routing in role space and
+            // materializes per edge (with `flow_axis`, temp/08 D2).
             // from_y = bottom row of source node (so edges start below it)
-            let from_y =
-                level_y_offsets[layout_from_level] + max_node_height[layout_from_level] - 1;
-            let to_y = level_y_offsets[layout_to_level];
+            let from_y = level_offsets[layout_from_level] + max_node_height[layout_from_level] - 1;
+            let to_y = level_offsets[layout_to_level];
 
             // Edge routing starts one row below the source node. Reversed
             // edges' arrowheads on that row are protected by the arrow-cell
@@ -859,7 +865,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
 
                         let wp_edge_start_row =
                             max_node_height[level] + usize::from(level_labeled_src[level]);
-                        let wp_y = level_y_offsets[level] + wp_edge_start_row + slot;
+                        let wp_y = level_offsets[level] + wp_edge_start_row + slot;
                         edge_routing_ys.insert(wp_y);
                         // Every kept waypoint bends right below its row (its
                         // x differs from the next column by construction).
@@ -1009,24 +1015,33 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     }
 
     // Compute subgraph bounding boxes if any subgraphs are defined.
-    // The canvas must cover every border: a label-widened cluster box can
-    // extend past the node extent that `max_width` was derived from.
-    let mut canvas_width = max_width;
+    // ── Materialization point for canvas extents: (level, cross)
+    // totals → (width, height). Adjustments below work in PHYSICAL
+    // space (`SubgraphInfo` is physical IR): the canvas must cover
+    // every border — a label-widened cluster box can extend past the
+    // node extent that `max_width` was derived from.
+    let (mut canvas_width, canvas_height) = A::materialize(total_height, max_width);
     if dag.has_subgraphs() {
         let sg_infos = crate::algorithms::sugiyama::subgraph::compute_bounding_boxes::<A>(
             dag,
             &real_node_coords,
-            &level_y_offsets,
+            &level_offsets,
             total_height,
             &edge_routing_ys,
             &level_routing_floor,
         );
         for info in sg_infos {
             canvas_width = canvas_width.max(info.x + info.width + 1);
+            // LR-P1: fold `info.y + info.height` into the canvas height
+            // here — materialized Horizontal boxes can grow that axis.
+            // Not folded yet: Vertical's routing-row push can (rarely)
+            // move a box bottom past the level total, and today that
+            // corner CLIPS; growing instead is a behavior change the
+            // P0 gate cannot carry.
             builder.add_subgraph(info);
         }
     }
-    builder.set_dimensions(canvas_width, total_height);
+    builder.set_dimensions(canvas_width, canvas_height);
     builder.set_direction(config.direction);
 
     let mut ir = builder.build();

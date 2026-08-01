@@ -1161,7 +1161,7 @@ pub(crate) fn fix_subgraph_overlaps<A: Axis>(
 ///   base height (for `L = 0..max_level`).
 /// - `trailing_extra` — extra rows after the last level (for subgraphs
 ///   closing there).
-pub(crate) fn compute_level_y_extras<A: Axis>(
+pub(crate) fn compute_level_extras<A: Axis>(
     dag: &Graph<'_>,
     node_levels: &[usize],
     max_level: usize,
@@ -1339,7 +1339,7 @@ pub(crate) fn compute_level_y_extras<A: Axis>(
 pub(crate) fn compute_bounding_boxes<'a, A: Axis>(
     dag: &Graph<'a>,
     real_node_coords: &[(usize, usize, usize, usize)], // (level, pos, x, width) per node_idx
-    level_y_offsets: &[usize],
+    level_offsets: &[usize],
     total_height: usize,
     edge_routing_ys: &HashSet<usize>,
     level_routing_floor: &[usize],
@@ -1368,8 +1368,8 @@ pub(crate) fn compute_bounding_boxes<'a, A: Axis>(
         if let Some(&sg_id) = dag.node_subgraph.get(&id) {
             if let Some(&sg_idx) = sg_id_to_idx.get(&sg_id) {
                 let (level, _pos, x, width) = real_node_coords[node_idx];
-                let y = if level < level_y_offsets.len() {
-                    level_y_offsets[level]
+                let y = if level < level_offsets.len() {
+                    level_offsets[level]
                 } else {
                     0
                 };
@@ -1524,20 +1524,22 @@ pub(crate) fn compute_bounding_boxes<'a, A: Axis>(
         }
     }
 
-    // Build SubgraphInfo entries
+    // Build SubgraphInfo entries — materialize the role rect into
+    // physical IR (`x`/`right` are cross-axis, `y`/`bottom` level-axis
+    // throughout this pass; for Vertical this is the identity).
     let mut result = Vec::with_capacity(sg_count);
     for (sg_idx, sg) in dag.subgraphs.iter().enumerate() {
         if let Some((x, y, right, bottom)) = bboxes[sg_idx] {
-            let width = right.saturating_sub(x);
-            let height = bottom.saturating_sub(y);
+            let (px, py) = A::materialize(y, x);
+            let (pr, pb) = A::materialize(bottom, right);
             result.push(SubgraphInfo {
                 id: sg.id,
                 parent_id: sg.parent_id,
                 label: sg.label,
-                x,
-                y,
-                width,
-                height,
+                x: px,
+                y: py,
+                width: pr.saturating_sub(px),
+                height: pb.saturating_sub(py),
             });
         }
     }
