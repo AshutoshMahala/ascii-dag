@@ -249,12 +249,26 @@ impl<'a> LayoutIRArenaBuilder<'a> {
     /// Mark a node as having a self-loop edge. Also derives the
     /// marker cell (`self_loop_at`, temp/08 D5): one cell right of
     /// the node's top row — the legacy `↺` position for vertical
-    /// flows. Horizontal layout (LR-P2) overrides the cell.
+    /// flows. Layout uses [`set_self_loop_at`](Self::set_self_loop_at)
+    /// to place the cell axis-correctly; this derivation serves
+    /// hand-built vertical IRs.
     pub fn set_self_loop(&mut self, node_idx: usize) {
         if node_idx < self.node_count {
             let n = &mut self.nodes[node_idx];
             n.has_self_loop = true;
             n.self_loop_at = (n.x + n.width, n.y);
+        }
+    }
+
+    /// Mark a node as having a self-loop edge, with the marker cell
+    /// computed by layout (temp/08 D5: one cell past the node on the
+    /// cross axis, at its level-leading line — axis-dependent, so the
+    /// layout supplies it).
+    pub fn set_self_loop_at(&mut self, node_idx: usize, cell: (usize, usize)) {
+        if node_idx < self.node_count {
+            let n = &mut self.nodes[node_idx];
+            n.has_self_loop = true;
+            n.self_loop_at = cell;
         }
     }
 

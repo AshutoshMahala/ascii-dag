@@ -2182,9 +2182,8 @@ mod lr_invariants {
         }
     }
 
-    #[test]
-    fn corpus_invariants() {
-        let corpus: [(&str, Graph<'static>); 9] = [
+    fn corpus() -> [(&'static str, Graph<'static>); 9] {
+        [
             ("fan", fan()),
             ("stage", stage()),
             ("skip", skip()),
@@ -2194,9 +2193,84 @@ mod lr_invariants {
             ("labels", colliding_labels()),
             ("nested", nested_boxes()),
             ("hero", hero_graph()),
-        ];
-        for (tag, g) in corpus {
+        ]
+    }
+
+    #[test]
+    fn corpus_invariants() {
+        for (tag, g) in corpus() {
             check_invariants(tag, &lr(&g));
+        }
+    }
+
+    /// LR-P2 exit gate: the LR corpus is FIELD-identical across
+    /// backends — every node/edge/subgraph through the `LayoutView`
+    /// lens plus the canvas — with exactly estimate-sized arenas.
+    /// (Rendered byte-parity joins at P3 when the compositor learns
+    /// horizontal trunks.)
+    #[test]
+    fn lr_corpus_matches_across_backends() {
+        use crate::algorithms::sugiyama::arena_csr::compute_layout_arena_csr_axis;
+        use crate::render::engine::view::LayoutView;
+
+        fn sorted_debug<T: core::fmt::Debug>(items: impl Iterator<Item = T>) -> Vec<String> {
+            let mut v: Vec<String> = items.map(|x| format!("{x:?}")).collect();
+            v.sort();
+            v
+        }
+
+        let config = LayoutConfig::standard();
+        for (tag, g) in corpus() {
+            let heap_ir = lr(&g);
+
+            let mut csr_buf = vec![0u8; g.estimate_csr_arena_size()];
+            let mut csr_arena = Arena::new(&mut csr_buf);
+            let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+            let size = g.estimate_layout_arena_size_with(&config);
+            let mut temp_buf = vec![0u8; size];
+            let mut out_buf = vec![0u8; size];
+            let mut temp_arena = Arena::new(&mut temp_buf);
+            let mut out_arena = Arena::new(&mut out_buf);
+            let csr_ir = compute_layout_arena_csr_axis::<Horizontal>(
+                &csr,
+                &config,
+                &mut temp_arena,
+                &mut out_arena,
+            )
+            .unwrap_or_else(|e| panic!("{tag}: CSR LR layout failed: {e:?}"));
+
+            assert_eq!(
+                (LayoutView::width(&heap_ir), LayoutView::height(&heap_ir)),
+                (LayoutView::width(&csr_ir), LayoutView::height(&csr_ir)),
+                "{tag}: canvas"
+            );
+            assert_eq!(
+                LayoutView::node_count(&heap_ir),
+                LayoutView::node_count(&csr_ir),
+                "{tag}: node count"
+            );
+            let hn = sorted_debug(
+                (0..LayoutView::node_count(&heap_ir)).map(|i| LayoutView::node(&heap_ir, i)),
+            );
+            let cn = sorted_debug(
+                (0..LayoutView::node_count(&csr_ir)).map(|i| LayoutView::node(&csr_ir, i)),
+            );
+            assert_eq!(hn, cn, "{tag}: nodes");
+            let he = sorted_debug(
+                (0..LayoutView::edge_count(&heap_ir)).map(|i| LayoutView::edge(&heap_ir, i)),
+            );
+            let ce = sorted_debug(
+                (0..LayoutView::edge_count(&csr_ir)).map(|i| LayoutView::edge(&csr_ir, i)),
+            );
+            assert_eq!(he, ce, "{tag}: edges");
+            let hs = sorted_debug(
+                (0..LayoutView::subgraph_count(&heap_ir))
+                    .map(|i| LayoutView::subgraph(&heap_ir, i)),
+            );
+            let cs = sorted_debug(
+                (0..LayoutView::subgraph_count(&csr_ir)).map(|i| LayoutView::subgraph(&csr_ir, i)),
+            );
+            assert_eq!(hs, cs, "{tag}: subgraphs");
         }
     }
 
