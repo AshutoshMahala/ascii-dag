@@ -2495,9 +2495,9 @@ mod lr_invariants {
         assert!(out.contains('↺'), "self-loop marker:\n{out}");
     }
 
-    /// P3-S2: a labeled LR edge paints its label — inline on the trunk
-    /// or floated above it (D9 ladder) — and the label cell hit-tests
-    /// to its edge.
+    /// P3-S2: a labeled LR edge paints its label — wherever the D9
+    /// ladder lands it (own cross segment, inline on the trunk, or
+    /// floated) — and the label cell hit-tests to its edge.
     #[test]
     fn lr_labeled_edge_renders_and_hits() {
         use crate::render::engine::HitResult;
@@ -2520,6 +2520,52 @@ mod lr_invariants {
             HitResult::Edge(0),
             "label cell owns its edge:\n{out}"
         );
+    }
+
+    /// D9 host 1 (Ash's ruling, temp/08): a labeled LR edge that jogs
+    /// puts its label on its OWN cross segment — the direct mirror of
+    /// the TD picture, where the label interrupts the line it
+    /// annotates. The label row must therefore be strictly BETWEEN
+    /// the two trunk rows (not on either trunk, not floated above).
+    #[test]
+    fn lr_label_prefers_its_own_cross_segment() {
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(2, "b");
+        g.add_node(3, "c");
+        g.add_edge(1, 2, Some("up"));
+        g.add_edge(1, 3, Some("down"));
+        let ir = lr(&g);
+        let out = render_plain(&ir, &RenderOptions::plain());
+        for (idx, text) in [(0usize, "up"), (1, "down")] {
+            let needle = alloc::format!("\"{text}\"");
+            // Character-cell column, not `str::find`'s byte offset.
+            let (row, col) = out
+                .lines()
+                .enumerate()
+                .find_map(|(r, l)| l.find(&needle).map(|b| (r, l[..b].chars().count())))
+                .unwrap_or_else(|| panic!("label {text:?} painted:\n{out}"));
+            let e = &ir.edges()[idx];
+            let (lo, hi) = (e.from_y.min(e.to_y), e.from_y.max(e.to_y));
+            assert!(
+                row > lo && row < hi,
+                "label {text:?} sits between the trunk rows (row {row} strictly \
+                 inside {lo}..{hi}):\n{out}"
+            );
+            // Between the trunk rows alone would also admit an upward
+            // float — prove the span actually CROSSES the edge's own
+            // bend column, which only the cross host does.
+            let crate::ir::EdgePath::Corner { bend_at } = e.path else {
+                panic!("fan edges route as corners; got {:?}", e.path);
+            };
+            let span = needle.chars().count();
+            assert!(
+                bend_at >= col && bend_at < col + span,
+                "label {text:?} at cols {col}..{} covers its own bend column \
+                 {bend_at}:\n{out}",
+                col + span
+            );
+        }
     }
 
     /// P3-S2 glyph⇄hit over the LR corpus: every edge-ink glyph in a
