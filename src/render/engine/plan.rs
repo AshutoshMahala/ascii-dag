@@ -269,17 +269,26 @@ impl<'buf> RenderPlan<'buf> {
         let mut run_capacity = 0usize;
         for i in 0..view.node_count() {
             let n = view.node(i);
+            // The self-loop marker cell can sit outside the node's own
+            // rows (below it, for horizontal flows) — the index span
+            // must cover it or hit-testing prunes the node early.
+            let mut y_min = n.y;
+            let mut y_max = n.y + n.height.saturating_sub(1);
+            if let Some((_, my)) = n.self_loop_at {
+                y_min = y_min.min(my);
+                y_max = y_max.max(my);
+            }
             index.push(PlanElement {
                 kind: ElementKind::Node,
                 index: i,
-                y_min: n.y,
-                y_max: n.y + n.height.saturating_sub(1),
+                y_min,
+                y_max,
             });
         }
         for i in 0..view.edge_count() {
             let e = view.edge(i);
-            let (y_min, y_max) = edge_row_span(&e.path, e.from_y, e.to_y);
-            run_capacity += count_h_runs(&e.path, e.from_x, e.to_x);
+            let (y_min, y_max) = edge_row_span(&e.path, e.from_y, e.to_y, e.flow_axis);
+            run_capacity += count_h_runs(&e.path, e.from_x, e.to_x, e.flow_axis);
             index.push(PlanElement {
                 kind: ElementKind::Edge,
                 index: i,
@@ -313,16 +322,36 @@ impl<'buf> RenderPlan<'buf> {
             let e = view.edge(i);
             let Some(text) = e.label else { continue };
             let len = text.chars().count() + 2;
-            let (x, y) = (e.label_x, e.label_y);
+            let (mut x, mut y) = (e.label_x, e.label_y);
+
+            let mut placeable = x + len <= width
+                && !span_blocked(view, i, y, x, x + len, claimed.as_slice())
+                && y < height;
+
+            // D9 host ladder (X flows only): a blocked seed retries as
+            // a FLOAT on the row above the source trunk, centered on
+            // the endpoint gap — borrowing empty cells over the node
+            // columns, never widening anything. The legend remains the
+            // final fallback, exactly like Y.
+            if !placeable && matches!(e.flow_axis, crate::ir::FlowAxis::X) && e.from_y >= 1 {
+                let mid = (e.from_x.min(e.to_x) + e.from_x.abs_diff(e.to_x) / 2).max(len / 2);
+                let fx = mid - len / 2;
+                let fy = e.from_y - 1;
+                if (fx, fy) != (x, y)
+                    && fx + len <= width
+                    && fy < height
+                    && !span_blocked(view, i, fy, fx, fx + len, claimed.as_slice())
+                {
+                    x = fx;
+                    y = fy;
+                    placeable = true;
+                }
+            }
 
             let row_has_node = (0..view.node_count()).any(|ni| {
                 let n = view.node(ni);
                 y >= n.y && y < n.y + n.height
             });
-
-            let placeable = x + len <= width
-                && !span_blocked(view, i, y, x, x + len, claimed.as_slice())
-                && y < height;
 
             if placeable {
                 claimed.push((y, x, x + len));
@@ -458,10 +487,12 @@ impl<'buf> RenderPlan<'buf> {
                     }
                     // The node owns its full reserved area (painters
                     // may fill any of it); the self-loop marker (`↺`)
-                    // adds one cell on the top row.
+                    // adds its IR cell (right of the top row for
+                    // vertical flows, below the leading column for
+                    // horizontal ones).
                     let in_rows = y >= n.y && y < n.y + n.height.max(1);
-                    let span = n.width + usize::from(n.has_self_loop && y == n.y);
-                    if in_rows && x >= n.x && x < n.x + span {
+                    if (in_rows && x >= n.x && x < n.x + n.width) || n.self_loop_at == Some((x, y))
+                    {
                         return HitResult::Node(n.id);
                     }
                 }
@@ -469,9 +500,18 @@ impl<'buf> RenderPlan<'buf> {
                     if hit_edge == HitResult::None {
                         let e = view.edge(el.index);
                         let mut on_ink = false;
-                        for_each_v_col(&e.path, e.from_x, e.from_y, e.to_x, e.to_y, y, &mut |c| {
-                            on_ink |= c == x;
-                        });
+                        for_each_v_col(
+                            &e.path,
+                            e.from_x,
+                            e.from_y,
+                            e.to_x,
+                            e.to_y,
+                            y,
+                            e.flow_axis,
+                            &mut |c| {
+                                on_ink |= c == x;
+                            },
+                        );
                         for_each_h_run(
                             &e.path,
                             e.from_x,
@@ -479,6 +519,7 @@ impl<'buf> RenderPlan<'buf> {
                             e.to_x,
                             e.to_y,
                             y,
+                            e.flow_axis,
                             &mut |x0, x1| on_ink |= x >= x0 && x <= x1,
                         );
                         if on_ink {
@@ -602,13 +643,29 @@ fn dedup_in_place<'a, 'buf>(buf: &'a mut PlanBuf<'buf, usize>) -> &'a [usize] {
 
 /// The rows a path can paint, from the same formulas the painter uses
 /// (bend rows included — a band must replay every edge that touches it).
-fn edge_row_span(path: &PathRef<'_>, from_y: usize, to_y: usize) -> (usize, usize) {
+fn edge_row_span(
+    path: &PathRef<'_>,
+    from_y: usize,
+    to_y: usize,
+    axis: crate::ir::FlowAxis,
+) -> (usize, usize) {
     let mut lo = from_y.min(to_y);
     let mut hi = from_y.max(to_y);
     let mut take = |y: usize| {
         lo = lo.min(y);
         hi = hi.max(y);
     };
+    // X flows: rows are the trunk rows — ports plus every waypoint's
+    // row (waypoint excursions exceed the port span; bends are
+    // columns and add no rows).
+    if matches!(axis, crate::ir::FlowAxis::X) {
+        if let PathRef::MultiSegment { waypoints, .. } = *path {
+            for &(_, wy) in waypoints {
+                take(wy);
+            }
+        }
+        return (lo, hi);
+    }
     match *path {
         PathRef::Direct | PathRef::Spline { .. } => {}
         PathRef::Corner { horizontal_y } => take(horizontal_y),
@@ -653,7 +710,7 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
     let mut run_capacity = 0usize;
     for i in 0..e {
         let ed = view.edge(i);
-        run_capacity += count_h_runs(&ed.path, ed.from_x, ed.to_x);
+        run_capacity += count_h_runs(&ed.path, ed.from_x, ed.to_x, ed.flow_axis);
     }
     let bands = 2usize
         .saturating_mul(height.div_ceil(cap))
@@ -689,7 +746,16 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
 
 /// Structural count of horizontal-run interiors a path paints — the
 /// same segments `h_run_with_corners` collects, counted without cells.
-fn count_h_runs(path: &PathRef<'_>, from_x: usize, to_x: usize) -> usize {
+fn count_h_runs(
+    path: &PathRef<'_>,
+    from_x: usize,
+    to_x: usize,
+    axis: crate::ir::FlowAxis,
+) -> usize {
+    // The X paint path strokes per-cell and never defers runs.
+    if matches!(axis, crate::ir::FlowAxis::X) {
+        return 0;
+    }
     match *path {
         PathRef::Direct | PathRef::Spline { .. } => 0,
         PathRef::Corner { .. } => 1,
@@ -739,6 +805,18 @@ fn span_blocked<V: LayoutView>(
         return true;
     }
 
+    // X flows: label rows are node rows — node areas block (Y label
+    // rows sit below their level by construction, so this cannot fire
+    // there and the Y path stays frozen).
+    if matches!(view.edge(label_edge).flow_axis, crate::ir::FlowAxis::X) {
+        for ni in 0..view.node_count() {
+            let n = view.node(ni);
+            if row >= n.y && row < n.y + n.height && n.x < x1 && n.x + n.width > x0 {
+                return true;
+            }
+        }
+    }
+
     for i in 0..view.subgraph_count() {
         let sg = view.subgraph(i);
         let bottom = sg.y + sg.height.saturating_sub(1);
@@ -756,32 +834,84 @@ fn span_blocked<V: LayoutView>(
 
     for i in 0..view.edge_count() {
         let e = view.edge(i);
-        if row < e.from_y.min(e.to_y) || row > e.from_y.max(e.to_y) {
-            continue;
-        }
-        // Horizontal runs (with their corner endpoints) block.
-        let mut run_blocked = false;
-        for_each_h_run(
-            &e.path,
-            e.from_x,
-            e.from_y,
-            e.to_x,
-            e.to_y,
-            row,
-            &mut |r0, r1| run_blocked |= r0 < x1 && r1 + 1 > x0,
-        );
-        if run_blocked {
-            return true;
-        }
-        // Dashed verticals block ('┊' is not '│'); solid verticals are
-        // allowed — including other edges' (legacy checks only the char).
-        if i != label_edge && e.reversed {
-            let mut col_blocked = false;
-            for_each_v_col(&e.path, e.from_x, e.from_y, e.to_x, e.to_y, row, &mut |c| {
-                col_blocked |= c >= x0 && c < x1
-            });
-            if col_blocked {
-                return true;
+        match e.flow_axis {
+            crate::ir::FlowAxis::Y => {
+                if row < e.from_y.min(e.to_y) || row > e.from_y.max(e.to_y) {
+                    continue;
+                }
+                // Horizontal runs (with their corner endpoints) block.
+                let mut run_blocked = false;
+                for_each_h_run(
+                    &e.path,
+                    e.from_x,
+                    e.from_y,
+                    e.to_x,
+                    e.to_y,
+                    row,
+                    e.flow_axis,
+                    &mut |r0, r1| run_blocked |= r0 < x1 && r1 + 1 > x0,
+                );
+                if run_blocked {
+                    return true;
+                }
+                // Dashed verticals block ('┊' is not '│'); solid verticals are
+                // allowed — including other edges' (legacy checks only the char).
+                if i != label_edge && e.reversed {
+                    let mut col_blocked = false;
+                    for_each_v_col(
+                        &e.path,
+                        e.from_x,
+                        e.from_y,
+                        e.to_x,
+                        e.to_y,
+                        row,
+                        e.flow_axis,
+                        &mut |c| col_blocked |= c >= x0 && c < x1,
+                    );
+                    if col_blocked {
+                        return true;
+                    }
+                }
+            }
+            crate::ir::FlowAxis::X => {
+                // The role mirror of the Y rule: labels replace FLOW
+                // cells, never CROSS cells. Cross ink is the vertical
+                // bend runs (always block); flow trunks are
+                // replaceable unless dashed (another edge, reversed).
+                let (lo, hi) = edge_row_span(&e.path, e.from_y, e.to_y, e.flow_axis);
+                if row < lo || row > hi {
+                    continue;
+                }
+                let mut col_blocked = false;
+                for_each_v_col(
+                    &e.path,
+                    e.from_x,
+                    e.from_y,
+                    e.to_x,
+                    e.to_y,
+                    row,
+                    e.flow_axis,
+                    &mut |c| col_blocked |= c >= x0 && c < x1,
+                );
+                if col_blocked {
+                    return true;
+                }
+                if i != label_edge && e.reversed {
+                    let mut run_blocked = false;
+                    for_each_h_run(
+                        &e.path,
+                        e.from_x,
+                        e.from_y,
+                        e.to_x,
+                        e.to_y,
+                        row,
+                        e.flow_axis,
+                        &mut |r0, r1| run_blocked |= r0 < x1 && r1 + 1 > x0,
+                    );
+                    if run_blocked {
+                        return true;
+                    }
+                }
             }
         }
     }
@@ -798,9 +928,79 @@ fn for_each_h_run(
     to_x: usize,
     to_y: usize,
     row: usize,
+    axis: crate::ir::FlowAxis,
     f: &mut dyn FnMut(usize, usize),
 ) {
     let mut push = |x0: usize, x1: usize| f(x0.min(x1), x0.max(x1));
+    // X flows: horizontal ink is the TRUNK segments (node faces
+    // trimmed, arrow cells included, bend corners included) — the
+    // exact mirror of the compositor's `paint_edge_x`.
+    if matches!(axis, crate::ir::FlowAxis::X) {
+        let step: isize = if to_x >= from_x { 1 } else { -1 };
+        let trim = |x: usize| (x as isize + step) as usize;
+        let back = |x: usize| (x as isize - step) as usize;
+        match *path {
+            PathRef::Direct | PathRef::Spline { .. } => {
+                if row == from_y && from_x.abs_diff(to_x) > 1 {
+                    push(trim(from_x), back(to_x));
+                }
+            }
+            PathRef::Corner {
+                horizontal_y: bend_x,
+            } => {
+                if row == from_y {
+                    push(trim(from_x), bend_x);
+                }
+                if row == to_y {
+                    push(bend_x, back(to_x));
+                }
+            }
+            PathRef::SideChannel { .. } => {}
+            PathRef::MultiSegment {
+                waypoints,
+                start_y_offset,
+            } => {
+                let mut px = from_x;
+                let mut py = from_y;
+                let mut first = true;
+                for i in 0..=waypoints.len() {
+                    let (nx, ny) = if i < waypoints.len() {
+                        waypoints[i]
+                    } else {
+                        (to_x, to_y)
+                    };
+                    let last = i == waypoints.len();
+                    if py == ny {
+                        if row == py && px != nx {
+                            let a = if first { trim(px) } else { px };
+                            let b = if last { back(nx) } else { nx };
+                            push(a, b);
+                        }
+                    } else {
+                        let bend_x = (px as isize
+                            + step * (1 + if first { start_y_offset as isize } else { 0 }))
+                            as usize;
+                        if row == py {
+                            let a = if first && start_y_offset > 0 {
+                                trim(px)
+                            } else {
+                                px
+                            };
+                            push(a, bend_x);
+                        }
+                        if row == ny {
+                            let b = if last { back(nx) } else { nx };
+                            push(bend_x, b);
+                        }
+                    }
+                    px = nx;
+                    py = ny;
+                    first = false;
+                }
+            }
+        }
+        return;
+    }
     match *path {
         PathRef::Direct | PathRef::Spline { .. } => {}
         PathRef::Corner { horizontal_y } => {
@@ -861,11 +1061,55 @@ fn for_each_v_col(
     to_x: usize,
     to_y: usize,
     row: usize,
+    axis: crate::ir::FlowAxis,
     f: &mut dyn FnMut(usize),
 ) {
     let mut push = |c: usize| f(c);
     // Order-free strictly-between test (works for either flow).
     let betw = |a: usize, b: usize, r: usize| r > a.min(b) && r < a.max(b);
+    // X flows: vertical ink is the CROSS runs at the bend columns,
+    // strictly between the trunk rows (corner cells belong to the
+    // trunk rows' horizontal ink).
+    if matches!(axis, crate::ir::FlowAxis::X) {
+        match *path {
+            PathRef::Direct | PathRef::Spline { .. } | PathRef::SideChannel { .. } => {}
+            PathRef::Corner {
+                horizontal_y: bend_x,
+            } => {
+                if betw(from_y, to_y, row) {
+                    push(bend_x);
+                }
+            }
+            PathRef::MultiSegment {
+                waypoints,
+                start_y_offset,
+            } => {
+                let step: isize = if to_x >= from_x { 1 } else { -1 };
+                let mut px = from_x;
+                let mut py = from_y;
+                let mut first = true;
+                for i in 0..=waypoints.len() {
+                    let (nx, ny) = if i < waypoints.len() {
+                        waypoints[i]
+                    } else {
+                        (to_x, to_y)
+                    };
+                    if py != ny {
+                        let bend_x = (px as isize
+                            + step * (1 + if first { start_y_offset as isize } else { 0 }))
+                            as usize;
+                        if betw(py, ny, row) {
+                            push(bend_x);
+                        }
+                    }
+                    px = nx;
+                    py = ny;
+                    first = false;
+                }
+            }
+        }
+        return;
+    }
     match *path {
         PathRef::Direct | PathRef::Spline { .. } => {
             if betw(from_y, to_y, row) {

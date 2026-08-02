@@ -2450,4 +2450,58 @@ mod lr_invariants {
         );
         assert!(out.contains('↺'), "self-loop marker:\n{out}");
     }
+
+    /// P3-S2: a labeled LR edge paints its label — inline on the trunk
+    /// or floated above it (D9 ladder) — and the label cell hit-tests
+    /// to its edge.
+    #[test]
+    fn lr_labeled_edge_renders_and_hits() {
+        use crate::render::engine::HitResult;
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(2, "b");
+        g.add_edge(1, 2, Some("go"));
+        let ir = lr(&g);
+        let options = RenderOptions::plain();
+        let out = render_plain(&ir, &options);
+        assert!(out.contains("\"go\""), "label painted:\n{out}");
+        let (row_i, col) = out
+            .lines()
+            .enumerate()
+            .find_map(|(r, l)| l.find("\"go\"").map(|c| (r, c)))
+            .expect("label location");
+        let plan = ir.render_plan(&options);
+        assert_eq!(
+            ir.hit_test(&plan, col + 1, row_i),
+            HitResult::Edge(0),
+            "label cell owns its edge:\n{out}"
+        );
+    }
+
+    /// P3-S2 glyph⇄hit over the LR corpus: every edge-ink glyph in a
+    /// rendered LR graph hit-tests to SOME element — no orphan ink.
+    #[test]
+    fn lr_ink_always_hits() {
+        use crate::render::engine::HitResult;
+        let options = RenderOptions::plain();
+        let ink = [
+            '─', '│', '→', '←', '┌', '┐', '└', '┘', '┬', '┴', '├', '┤', '┼', '↺', '┊', '┈', '⇢',
+            '⇠',
+        ];
+        for (tag, g) in corpus() {
+            let ir = lr(&g);
+            let out = render_plain(&ir, &options);
+            let plan = ir.render_plan(&options);
+            for (r, line) in out.lines().enumerate() {
+                for (c, ch) in line.chars().enumerate() {
+                    if ink.contains(&ch) {
+                        assert!(
+                            ir.hit_test(&plan, c, r) != HitResult::None,
+                            "{tag}: orphan ink {ch:?} at ({c}, {r})\n{out}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

@@ -35,6 +35,9 @@ pub(crate) struct NodeRef<'a> {
     #[allow(dead_code)] // no paint consumer yet (parity contract, N1)
     pub level_position: usize,
     pub kind: NodeKind,
+    /// `self_loop_at.is_some()` by the D5 invariant — paint and
+    /// hit-testing read the cell directly.
+    #[allow(dead_code)] // superseded by self_loop_at (parity contract, N1)
     pub has_self_loop: bool,
     /// Self-loop marker cell (arena sentinel normalized to `None`).
     pub self_loop_at: Option<(usize, usize)>,
