@@ -110,7 +110,11 @@ pub(crate) fn emit_legend<V: LayoutView, W: core::fmt::Write>(
         let arrow = charset.legend_arrow();
         write_fg(out, plan.edge_plan(ei).color, mode)?;
         write!(out, "{from} {arrow} {to}: \"{label}\"")?;
-        out.write_str("\x1b[0m")?;
+        // Plain legends emit no escapes at all (D4) — the reset only
+        // closes a color that was actually opened.
+        if !matches!(mode, super::color::ColorMode::None) {
+            out.write_str("\x1b[0m")?;
+        }
         out.write_char('\n')?;
     }
     Ok(())

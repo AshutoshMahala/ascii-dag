@@ -73,7 +73,12 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
             emit::emit_plain_band(&canvas, options.charset, out)?;
         }
     }
-    if colored && options.legend {
+    // D4 (temp/08): the legend works in plain mode too — labels that
+    // don't fit go to the legend regardless of color mode; a plain
+    // legend is self-keying (`from -> to: label`). `ColorMode::None`
+    // emits no escapes. Default plain options keep `legend = false`,
+    // so default output is unchanged.
+    if options.legend {
         emit::emit_legend(view_ref, &plan, options.charset, options.color_mode, out)?;
     }
     Ok(())

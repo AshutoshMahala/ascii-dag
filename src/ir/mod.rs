@@ -102,7 +102,7 @@ pub enum NodeKind {
 /// horizontal trunks (LeftRight/RightLeft). Mirror-invariant: both
 /// the BottomUp y-flip and the RightLeft x-flip leave the trunk axis
 /// unchanged, so flips copy it verbatim. Level-axis scalars inside
-/// [`EdgePath`] (`horizontal_y`, `channel_x`, …) live on the axis
+/// [`EdgePath`] (`bend_at`, `channel_at`, …) live on the axis
 /// this field names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowAxis {
@@ -168,32 +168,37 @@ pub struct LayoutNode<'a> {
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EdgePath {
-    /// Direct vertical connection (nodes are horizontally aligned or adjacent levels)
+    /// Straight flow segment — the endpoints share their cross-axis
+    /// line (`flow_axis: Y`: a vertical line; `X`: a horizontal one).
     Direct,
-    /// L-shaped connection with a horizontal segment
+    /// L-shaped connection with one cross-axis distribution segment.
     Corner {
-        /// Y coordinate of the horizontal segment
-        horizontal_y: usize,
+        /// The level-axis line the cross segment runs on. Which
+        /// physical axis that is comes from the edge's
+        /// [`flow_axis`](LayoutEdge::flow_axis): a ROW for `Y` trunks,
+        /// a COLUMN for `X` trunks.
+        bend_at: usize,
     },
-    /// Routed through a side channel (for skip-level edges).
-    ///
-    /// **Note:** The layout engine produces this variant for edges that skip multiple
-    /// levels. ASCII renderers render the full L-shaped channel routing. SVG/canvas
-    /// renderers may use the coordinates directly.
+    /// Routed through a far cross-axis channel (legacy skip-edge
+    /// shape; the current layout emits [`MultiSegment`](Self::MultiSegment)
+    /// instead — the variant survives for hand-built IRs).
     SideChannel {
-        /// X coordinate of the vertical channel
-        channel_x: usize,
-        /// Starting Y of the channel
-        start_y: usize,
-        /// Ending Y of the channel
-        end_y: usize,
+        /// Cross-axis line of the channel (`flow_axis: Y`: a column;
+        /// `X`: a row).
+        channel_at: usize,
+        /// Level-axis start of the channel span.
+        span_start: usize,
+        /// Level-axis end of the channel span.
+        span_end: usize,
     },
-    /// Multi-segment path through dummy nodes
+    /// Multi-segment path through dummy-node waypoints.
     MultiSegment {
-        /// Waypoints: (x, y) coordinates the edge passes through
+        /// Physical `(x, y)` cells the edge passes through — always
+        /// materialized coordinates, whatever the flow axis.
         waypoints: Vec<(usize, usize)>,
-        /// Vertical offset for the start of the edge (to prevent overlaps at source)
-        start_y_offset: usize,
+        /// Level-axis offset of the first bend past the source (keeps
+        /// fan-outs from overlapping at the source band).
+        start_offset: usize,
     },
     /// Bézier spline hint (for SVG/canvas renderers; ASCII renderers fall back to Direct).
     ///
@@ -357,16 +362,20 @@ impl<'a> LayoutIR<'a> {
                 edge.label_y = flip_row(edge.label_y);
             }
             match &mut edge.path {
-                EdgePath::Corner { horizontal_y } => *horizontal_y = flip_row(*horizontal_y),
+                EdgePath::Corner { bend_at } => *bend_at = flip_row(*bend_at),
                 EdgePath::MultiSegment { waypoints, .. } => {
                     for (_, wy) in waypoints.iter_mut() {
                         *wy = flip_row(*wy);
                     }
                 }
-                EdgePath::SideChannel { start_y, end_y, .. } => {
-                    let (s, e) = (flip_row(*end_y), flip_row(*start_y));
-                    *start_y = s;
-                    *end_y = e;
+                EdgePath::SideChannel {
+                    span_start,
+                    span_end,
+                    ..
+                } => {
+                    let (s, e) = (flip_row(*span_end), flip_row(*span_start));
+                    *span_start = s;
+                    *span_end = e;
                 }
                 // Spline is never produced by the layout engine today, but
                 // the flip must be total: both backends apply the identical

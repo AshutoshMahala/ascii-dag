@@ -924,7 +924,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                         level_routing_floor[layout_from_level] =
                             level_routing_floor[layout_from_level].max(hy);
                     }
-                    EdgePath::Corner { horizontal_y: hy }
+                    EdgePath::Corner { bend_at: hy }
                 }
             } else {
                 // Skip-level edge - use dummy node positions for MultiSegment path
@@ -942,7 +942,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                         level_routing_floor[layout_from_level] =
                             level_routing_floor[layout_from_level].max(hy);
                     }
-                    EdgePath::Corner { horizontal_y: hy }
+                    EdgePath::Corner { bend_at: hy }
                 } else {
                     // Build waypoints through the jogging dummies only —
                     // straight pass-throughs paint as part of a longer
@@ -987,7 +987,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                                 level_routing_floor[layout_from_level] =
                                     level_routing_floor[layout_from_level].max(hy);
                             }
-                            EdgePath::Corner { horizontal_y: hy }
+                            EdgePath::Corner { bend_at: hy }
                         }
                     } else {
                         let slot = if node_slots[layout_src_idx] != usize::MAX {
@@ -997,12 +997,12 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                         };
 
                         // Calculate offset from (y+1)
-                        let start_y_offset = (edge_start_row + slot).saturating_sub(1);
+                        let start_offset = (edge_start_row + slot).saturating_sub(1);
 
                         // Record the INITIAL corner Y (first segment routing) — the paint
-                        // code draws a horizontal segment at band_trailing + 1 + start_y_offset,
+                        // code draws a horizontal segment at band_trailing + 1 + start_offset,
                         // which is NOT a waypoint Y but still occupies a row.
-                        let initial_corner_y = band_trailing + 1 + start_y_offset;
+                        let initial_corner_y = band_trailing + 1 + start_offset;
                         edge_routing_ys.insert(initial_corner_y);
                         if layout_from_level < level_routing_floor.len() {
                             level_routing_floor[layout_from_level] =
@@ -1011,7 +1011,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
 
                         EdgePath::MultiSegment {
                             waypoints,
-                            start_y_offset,
+                            start_offset,
                         }
                     }
                 }
@@ -1038,35 +1038,33 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                     // Find the edge's X position at the label row
                     let edge_x_at_label = match &path {
                         EdgePath::Direct => from_x,
-                        EdgePath::Corner { horizontal_y } => {
+                        EdgePath::Corner { bend_at } => {
                             // If label row is before the corner, edge is at from_x
                             // If label row is after the corner, edge is at to_x
-                            if label_y <= *horizontal_y {
-                                from_x
-                            } else {
-                                to_x
-                            }
+                            if label_y <= *bend_at { from_x } else { to_x }
                         }
                         EdgePath::SideChannel {
-                            channel_x, start_y, ..
+                            channel_at,
+                            span_start,
+                            ..
                         } => {
                             // If before the horizontal segment, use from_x
-                            // Otherwise use channel_x
-                            if label_y < *start_y {
+                            // Otherwise use channel_at
+                            if label_y < *span_start {
                                 from_x
                             } else {
-                                *channel_x
+                                *channel_at
                             }
                         }
                         EdgePath::MultiSegment {
                             waypoints,
-                            start_y_offset,
+                            start_offset,
                         } => {
                             // Find which segment the label row falls into
                             // from_y is bottom of source node, +1 goes to routing area
-                            let horizontal_y = band_trailing + 1 + start_y_offset;
+                            let bend_at = band_trailing + 1 + start_offset;
 
-                            if label_y <= horizontal_y || waypoints.is_empty() {
+                            if label_y <= bend_at || waypoints.is_empty() {
                                 from_x
                             } else {
                                 waypoints[0].0
@@ -1100,13 +1098,13 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             let path = match path {
                 EdgePath::MultiSegment {
                     waypoints,
-                    start_y_offset,
+                    start_offset,
                 } => EdgePath::MultiSegment {
                     waypoints: waypoints
                         .into_iter()
                         .map(|(cross, lvl)| A::materialize(lvl, cross))
                         .collect(),
-                    start_y_offset,
+                    start_offset,
                 },
                 p => p,
             };

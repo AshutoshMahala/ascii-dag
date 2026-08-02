@@ -410,11 +410,15 @@ impl<'a> LayoutIRArenaBuilder<'a> {
                 edge.label_y = flip_row(edge.label_y);
             }
             match &mut edge.path {
-                EdgePathArena::Corner { horizontal_y } => *horizontal_y = flip_row(*horizontal_y),
-                EdgePathArena::SideChannel { start_y, end_y, .. } => {
-                    let (s, e) = (flip_row(*end_y), flip_row(*start_y));
-                    *start_y = s;
-                    *end_y = e;
+                EdgePathArena::Corner { bend_at } => *bend_at = flip_row(*bend_at),
+                EdgePathArena::SideChannel {
+                    span_start,
+                    span_end,
+                    ..
+                } => {
+                    let (s, e) = (flip_row(*span_end), flip_row(*span_start));
+                    *span_start = s;
+                    *span_end = e;
                 }
                 EdgePathArena::MultiSegment {
                     waypoints_start,

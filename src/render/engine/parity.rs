@@ -301,6 +301,34 @@ fn hero_self_parity_across_backends() {
     );
 }
 
+/// D4 (temp/08): the legend works in PLAIN mode — labels that fail
+/// geometric placement are listed as self-keying `from → to: label`
+/// lines, no color required, no escapes emitted. Off by default
+/// (`RenderOptions::plain()` keeps `legend = false`), so default
+/// plain output is unchanged.
+#[test]
+fn plain_legend_lists_unplaced_labels() {
+    let g = colliding_labels();
+    let ir = g.compute_layout();
+    let mut options = RenderOptions::plain();
+    options.legend = true;
+    let mut out = String::new();
+    ir.render_with(&options, &mut out).expect("render");
+    assert!(
+        !out.contains('\x1b'),
+        "no escapes in a plain legend:\n{out}"
+    );
+    assert!(
+        out.contains(" → "),
+        "legend lines present (colliding_labels always overflows):\n{out}"
+    );
+    // And the default stays legend-free.
+    let mut plain = String::new();
+    ir.render_with(&RenderOptions::plain(), &mut plain)
+        .expect("render");
+    assert!(!plain.contains(" → "), "no legend by default:\n{plain}");
+}
+
 /// The hero example against the golden snapshot (regenerated at RW8
 /// when the engine became the output of record).
 #[test]
@@ -2087,18 +2115,18 @@ mod lr_invariants {
             // I4: trunk-band geometry inside the canvas; corner bends
             // strictly between the two faces.
             match &e.path {
-                EdgePath::Corner { horizontal_y } => {
+                EdgePath::Corner { bend_at } => {
                     let (lo, hi) = if fwd_ok {
                         (s.x + s.width - 1, t.x)
                     } else {
                         (t.x + t.width - 1, s.x)
                     };
                     assert!(
-                        *horizontal_y > lo && *horizontal_y < hi,
+                        *bend_at > lo && *bend_at < hi,
                         "{tag}: {}→{} bend {} outside the gap ({lo}, {hi})",
                         e.from_id,
                         e.to_id,
-                        horizontal_y
+                        bend_at
                     );
                 }
                 EdgePath::MultiSegment { waypoints, .. } => {

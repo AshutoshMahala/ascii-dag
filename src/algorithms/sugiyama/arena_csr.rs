@@ -1299,7 +1299,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                 if src_lvl < level_routing_floor.len() {
                     level_routing_floor[src_lvl] = level_routing_floor[src_lvl].max(hy);
                 }
-                EdgePathArena::Corner { horizontal_y: hy }
+                EdgePathArena::Corner { bend_at: hy }
             }
         } else if dst_level > src_level + 1 {
             let dummy_start = temps.dummy_offsets[edge_idx] as usize;
@@ -1369,7 +1369,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                         if src_lvl < level_routing_floor.len() {
                             level_routing_floor[src_lvl] = level_routing_floor[src_lvl].max(hy);
                         }
-                        EdgePathArena::Corner { horizontal_y: hy }
+                        EdgePathArena::Corner { bend_at: hy }
                     }
                 } else {
                     // Capture the ROLE cross of the first waypoint for the
@@ -1392,10 +1392,10 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                         builder.add_waypoints(&waypoint_scratch[..waypoint_count])
                     {
                         first_wp_x = Some(first_wp_cross);
-                        let start_y_offset = (edge_start_row + slot).saturating_sub(1);
+                        let start_offset = (edge_start_row + slot).saturating_sub(1);
 
                         // Record the initial corner Y (first segment routing)
-                        let initial_corner_y = band_trailing + 1 + start_y_offset;
+                        let initial_corner_y = band_trailing + 1 + start_offset;
                         let src_lvl = src_level as usize;
                         if src_lvl < level_routing_floor.len() {
                             level_routing_floor[src_lvl] =
@@ -1405,7 +1405,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                         EdgePathArena::MultiSegment {
                             waypoints_start: start,
                             waypoints_len: len,
-                            start_y_offset,
+                            start_offset,
                         }
                     } else {
                         let hy = band_trailing + edge_start_row + slot;
@@ -1413,7 +1413,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                         if src_lvl < level_routing_floor.len() {
                             level_routing_floor[src_lvl] = level_routing_floor[src_lvl].max(hy);
                         }
-                        EdgePathArena::Corner { horizontal_y: hy }
+                        EdgePathArena::Corner { bend_at: hy }
                     }
                 }
             } else {
@@ -1422,7 +1422,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                 if src_lvl < level_routing_floor.len() {
                     level_routing_floor[src_lvl] = level_routing_floor[src_lvl].max(hy);
                 }
-                EdgePathArena::Corner { horizontal_y: hy }
+                EdgePathArena::Corner { bend_at: hy }
             }
         } else {
             EdgePathArena::Direct
@@ -1440,29 +1440,31 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                     + edge_label_offset(temps.level_slot_next[src_level as usize] as usize);
                 let edge_x_at_label = match &path {
                     EdgePathArena::Direct => eff_from_x,
-                    EdgePathArena::Corner { horizontal_y } => {
-                        if l_y <= *horizontal_y {
+                    EdgePathArena::Corner { bend_at } => {
+                        if l_y <= *bend_at {
                             eff_from_x
                         } else {
                             eff_to_x
                         }
                     }
-                    EdgePathArena::MultiSegment { start_y_offset, .. } => {
+                    EdgePathArena::MultiSegment { start_offset, .. } => {
                         // Anchor on the first waypoint once the label row
                         // is past the first bend (heap-backend rule).
-                        let horizontal_y = band_trailing + 1 + *start_y_offset;
+                        let bend_at = band_trailing + 1 + *start_offset;
                         match first_wp_x {
-                            Some(wx) if l_y > horizontal_y => wx,
+                            Some(wx) if l_y > bend_at => wx,
                             _ => eff_from_x,
                         }
                     }
                     EdgePathArena::SideChannel {
-                        channel_x, start_y, ..
+                        channel_at,
+                        span_start,
+                        ..
                     } => {
-                        if l_y < *start_y {
+                        if l_y < *span_start {
                             eff_from_x
                         } else {
-                            *channel_x
+                            *channel_at
                         }
                     }
                     // Spline: fall back to source X

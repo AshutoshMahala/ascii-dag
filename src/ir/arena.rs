@@ -96,31 +96,33 @@ pub struct CustomNodeArena {
 /// Edge routing type (no heap allocation version).
 #[derive(Debug, Clone, Copy)]
 pub enum EdgePathArena {
-    /// Direct vertical connection
+    /// Straight flow segment (endpoints share their cross-axis line).
     Direct,
-    /// L-shaped connection with a horizontal segment
+    /// L-shaped connection with one cross-axis distribution segment.
     Corner {
-        /// Y coordinate of the horizontal bend.
-        horizontal_y: usize,
+        /// The level-axis line the cross segment runs on — a ROW for
+        /// `flow_axis: Y` trunks, a COLUMN for `X` trunks.
+        bend_at: usize,
     },
-    /// Routed through a side channel (for skip-level edges).
-    /// Mirrors heap `EdgePath::SideChannel`.
+    /// Routed through a far cross-axis channel (legacy skip-edge
+    /// shape). Mirrors heap `EdgePath::SideChannel`.
     SideChannel {
-        /// X coordinate of the vertical channel
-        channel_x: usize,
-        /// Starting Y of the channel
-        start_y: usize,
-        /// Ending Y of the channel
-        end_y: usize,
+        /// Cross-axis line of the channel.
+        channel_at: usize,
+        /// Level-axis start of the channel span.
+        span_start: usize,
+        /// Level-axis end of the channel span.
+        span_end: usize,
     },
-    /// Multi-segment path (waypoints stored separately)
+    /// Multi-segment path (waypoints stored separately; always
+    /// materialized physical `(x, y)` cells).
     MultiSegment {
         /// Start index into waypoints array
         waypoints_start: usize,
         /// Number of waypoints
         waypoints_len: usize,
-        /// Vertical offset for the start of the edge
-        start_y_offset: usize,
+        /// Level-axis offset of the first bend past the source.
+        start_offset: usize,
     },
     /// Bézier spline hint (for SVG/canvas renderers; ASCII renderers fall back to Direct).
     /// Mirrors zigraph's `EdgePath.spline`.

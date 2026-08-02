@@ -616,18 +616,18 @@ fn paint_edge<V: LayoutView>(
                 }
             }
         }
-        PathRef::Corner { horizontal_y } => {
-            for y in between(e.from_y, horizontal_y) {
+        PathRef::Corner { bend_at } => {
+            for y in between(e.from_y, bend_at) {
                 if from_m && y == off(e.from_y, 1) {
                     p.marker(e.from_x, y, MarkerKind::Arrow, bwd, rev);
                 } else {
                     p.stroke(e.from_x, y, w, w, Weight::None, Weight::None);
                 }
             }
-            let bend_adjacent = (horizontal_y as isize - e.from_y as isize) * dir <= 1;
+            let bend_adjacent = (bend_at as isize - e.from_y as isize) * dir <= 1;
             h_run_with_corners(
                 p,
-                horizontal_y,
+                bend_at,
                 e.from_x,
                 e.to_x,
                 w,
@@ -635,7 +635,7 @@ fn paint_edge<V: LayoutView>(
                 rev,
                 dir,
             );
-            for y in between(horizontal_y, e.to_y) {
+            for y in between(bend_at, e.to_y) {
                 if to_m && y == off(e.to_y, -1) {
                     p.marker(e.to_x, y, MarkerKind::Arrow, fwd, rev);
                 } else {
@@ -644,16 +644,16 @@ fn paint_edge<V: LayoutView>(
             }
         }
         PathRef::SideChannel {
-            channel_x,
-            start_y,
-            end_y,
+            channel_at,
+            span_start,
+            span_end,
         } => {
-            h_run_with_corners(p, start_y, e.from_x, channel_x, w, false, rev, dir);
-            for y in between(start_y, end_y) {
-                p.stroke(channel_x, y, w, w, Weight::None, Weight::None);
+            h_run_with_corners(p, span_start, e.from_x, channel_at, w, false, rev, dir);
+            for y in between(span_start, span_end) {
+                p.stroke(channel_at, y, w, w, Weight::None, Weight::None);
             }
-            h_run_with_corners(p, end_y, channel_x, e.to_x, w, false, rev, dir);
-            for y in between(end_y, e.to_y) {
+            h_run_with_corners(p, span_end, channel_at, e.to_x, w, false, rev, dir);
+            for y in between(span_end, e.to_y) {
                 if to_m && y == off(e.to_y, -1) {
                     p.marker(e.to_x, y, MarkerKind::Arrow, fwd, rev);
                 } else {
@@ -663,7 +663,7 @@ fn paint_edge<V: LayoutView>(
         }
         PathRef::MultiSegment {
             waypoints,
-            start_y_offset,
+            start_offset,
         } => {
             let mut px = e.from_x;
             let mut py = e.from_y;
@@ -691,8 +691,8 @@ fn paint_edge<V: LayoutView>(
                         p.stroke(px, py, w, w, Weight::None, Weight::None);
                     }
                 } else {
-                    let corner_y = off(py, 1 + if first { start_y_offset as isize } else { 0 });
-                    if first && start_y_offset > 0 {
+                    let corner_y = off(py, 1 + if first { start_offset as isize } else { 0 });
+                    if first && start_offset > 0 {
                         for y in between(py, corner_y) {
                             if from_m && y == off(py, 1) {
                                 p.marker(px, y, MarkerKind::Arrow, bwd, rev);
@@ -776,9 +776,7 @@ fn paint_edge_x<V: LayoutView>(
                 }
             }
         }
-        PathRef::Corner {
-            horizontal_y: bend_x,
-        } => {
+        PathRef::Corner { bend_at: bend_x } => {
             for x in between(e.from_x, bend_x) {
                 if from_m && x == off(e.from_x, 1) {
                     p.marker(x, e.from_y, MarkerKind::Arrow, bwd, rev);
@@ -799,7 +797,7 @@ fn paint_edge_x<V: LayoutView>(
         PathRef::SideChannel { .. } => {}
         PathRef::MultiSegment {
             waypoints,
-            start_y_offset,
+            start_offset,
         } => {
             let mut px = e.from_x;
             let mut py = e.from_y;
@@ -827,8 +825,8 @@ fn paint_edge_x<V: LayoutView>(
                         p.stroke(px, py, n, n, w, w);
                     }
                 } else {
-                    let bend_x = off(px, 1 + if first { start_y_offset as isize } else { 0 });
-                    if first && start_y_offset > 0 {
+                    let bend_x = off(px, 1 + if first { start_offset as isize } else { 0 });
+                    if first && start_offset > 0 {
                         for x in between(px, bend_x) {
                             if from_m && x == off(px, 1) {
                                 p.marker(x, py, MarkerKind::Arrow, bwd, rev);

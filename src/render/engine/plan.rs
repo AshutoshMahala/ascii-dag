@@ -364,10 +364,16 @@ impl<'buf> RenderPlan<'buf> {
                 placeable,
                 row_has_node,
             };
-            // The legend exists only in colored renders with the legend
-            // enabled — `legend_entries` reflects the options this plan
-            // was built with.
-            if use_color && options.legend && !plan.placed_colored() {
+            // The legend lists exactly the labels that did NOT paint
+            // under the active gate (colored: row-veto; plain:
+            // geometric placement) — `legend_entries` reflects the
+            // options this plan was built with.
+            let painted = if use_color {
+                plan.placed_colored()
+            } else {
+                plan.placeable
+            };
+            if options.legend && !painted {
                 legend.push(i);
             }
             labels.push(plan);
@@ -668,21 +674,25 @@ fn edge_row_span(
     }
     match *path {
         PathRef::Direct | PathRef::Spline { .. } => {}
-        PathRef::Corner { horizontal_y } => take(horizontal_y),
-        PathRef::SideChannel { start_y, end_y, .. } => {
-            take(start_y);
-            take(end_y);
+        PathRef::Corner { bend_at } => take(bend_at),
+        PathRef::SideChannel {
+            span_start,
+            span_end,
+            ..
+        } => {
+            take(span_start);
+            take(span_end);
         }
         PathRef::MultiSegment {
             waypoints,
-            start_y_offset,
+            start_offset,
         } => {
             for &(_, wy) in waypoints {
                 take(wy);
             }
             // The first bend row can sit below the source row block.
             let dir: isize = if to_y >= from_y { 1 } else { -1 };
-            let first_bend = (from_y as isize + dir * (1 + start_y_offset as isize)) as usize;
+            let first_bend = (from_y as isize + dir * (1 + start_offset as isize)) as usize;
             take(first_bend);
         }
     }
@@ -945,9 +955,7 @@ fn for_each_h_run(
                     push(trim(from_x), back(to_x));
                 }
             }
-            PathRef::Corner {
-                horizontal_y: bend_x,
-            } => {
+            PathRef::Corner { bend_at: bend_x } => {
                 if row == from_y {
                     push(trim(from_x), bend_x);
                 }
@@ -958,7 +966,7 @@ fn for_each_h_run(
             PathRef::SideChannel { .. } => {}
             PathRef::MultiSegment {
                 waypoints,
-                start_y_offset,
+                start_offset,
             } => {
                 let mut px = from_x;
                 let mut py = from_y;
@@ -978,10 +986,10 @@ fn for_each_h_run(
                         }
                     } else {
                         let bend_x = (px as isize
-                            + step * (1 + if first { start_y_offset as isize } else { 0 }))
+                            + step * (1 + if first { start_offset as isize } else { 0 }))
                             as usize;
                         if row == py {
-                            let a = if first && start_y_offset > 0 {
+                            let a = if first && start_offset > 0 {
                                 trim(px)
                             } else {
                                 px
@@ -1003,26 +1011,26 @@ fn for_each_h_run(
     }
     match *path {
         PathRef::Direct | PathRef::Spline { .. } => {}
-        PathRef::Corner { horizontal_y } => {
-            if row == horizontal_y {
+        PathRef::Corner { bend_at } => {
+            if row == bend_at {
                 push(from_x, to_x);
             }
         }
         PathRef::SideChannel {
-            channel_x,
-            start_y,
-            end_y,
+            channel_at,
+            span_start,
+            span_end,
         } => {
-            if row == start_y {
-                push(from_x, channel_x);
+            if row == span_start {
+                push(from_x, channel_at);
             }
-            if row == end_y {
-                push(to_x, channel_x);
+            if row == span_end {
+                push(to_x, channel_at);
             }
         }
         PathRef::MultiSegment {
             waypoints,
-            start_y_offset,
+            start_offset,
         } => {
             // Flow sign from geometry (mirrors the compositor exactly).
             let dir: isize = if to_y >= from_y { 1 } else { -1 };
@@ -1036,7 +1044,7 @@ fn for_each_h_run(
                     (to_x, to_y)
                 };
                 if px != nx && py != ny {
-                    let step = 1 + if first { start_y_offset as isize } else { 0 };
+                    let step = 1 + if first { start_offset as isize } else { 0 };
                     let corner_y = (py as isize + dir * step) as usize;
                     if row == corner_y {
                         push(px, nx);
@@ -1073,16 +1081,14 @@ fn for_each_v_col(
     if matches!(axis, crate::ir::FlowAxis::X) {
         match *path {
             PathRef::Direct | PathRef::Spline { .. } | PathRef::SideChannel { .. } => {}
-            PathRef::Corner {
-                horizontal_y: bend_x,
-            } => {
+            PathRef::Corner { bend_at: bend_x } => {
                 if betw(from_y, to_y, row) {
                     push(bend_x);
                 }
             }
             PathRef::MultiSegment {
                 waypoints,
-                start_y_offset,
+                start_offset,
             } => {
                 let step: isize = if to_x >= from_x { 1 } else { -1 };
                 let mut px = from_x;
@@ -1096,7 +1102,7 @@ fn for_each_v_col(
                     };
                     if py != ny {
                         let bend_x = (px as isize
-                            + step * (1 + if first { start_y_offset as isize } else { 0 }))
+                            + step * (1 + if first { start_offset as isize } else { 0 }))
                             as usize;
                         if betw(py, ny, row) {
                             push(bend_x);
@@ -1116,29 +1122,29 @@ fn for_each_v_col(
                 push(from_x);
             }
         }
-        PathRef::Corner { horizontal_y } => {
-            if betw(from_y, horizontal_y, row) {
+        PathRef::Corner { bend_at } => {
+            if betw(from_y, bend_at, row) {
                 push(from_x);
             }
-            if betw(horizontal_y, to_y, row) {
+            if betw(bend_at, to_y, row) {
                 push(to_x);
             }
         }
         PathRef::SideChannel {
-            channel_x,
-            start_y,
-            end_y,
+            channel_at,
+            span_start,
+            span_end,
         } => {
-            if betw(start_y, end_y, row) {
-                push(channel_x);
+            if betw(span_start, span_end, row) {
+                push(channel_at);
             }
-            if betw(end_y, to_y, row) {
+            if betw(span_end, to_y, row) {
                 push(to_x);
             }
         }
         PathRef::MultiSegment {
             waypoints,
-            start_y_offset,
+            start_offset,
         } => {
             let dir: isize = if to_y >= from_y { 1 } else { -1 };
             let mut px = from_x;
@@ -1160,7 +1166,7 @@ fn for_each_v_col(
                         push(px);
                     }
                 } else if py != ny {
-                    let step = 1 + if first { start_y_offset as isize } else { 0 };
+                    let step = 1 + if first { start_offset as isize } else { 0 };
                     let corner_y = (py as isize + dir * step) as usize;
                     if betw(py, corner_y, row) {
                         push(px);

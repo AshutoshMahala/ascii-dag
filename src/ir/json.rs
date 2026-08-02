@@ -1,12 +1,14 @@
-//! JSON serialization for Layout IR (zigraph v1.2 compatible).
+//! JSON serialization for Layout IR (schema v1.3).
 //!
-//! Produces JSON output compatible with zigraph's JSON IR schema v1.2,
-//! enabling interchange between ascii-dag and zigraph renderers.
+//! Produces JSON output extending zigraph's JSON IR schema: v1.3 adds
+//! the per-edge `flow_axis` tag, the per-node `self_loop_at` cell, and
+//! renames the path fields axis-neutrally (`bend_at`, `channel_at`,
+//! `span_start`/`span_end` — a v1.2 `horizontal_y` is a v1.3 `bend_at`
+//! on a `flow_axis: "y"` edge).
 //!
 //! # Schema
 //!
-//! The output follows zigraph's JSON v1.2 schema:
-//! - `version`: always `"1.2"`
+//! - `version`: always `"1.3"`
 //! - `width`, `height`, `level_count`: top-level dimensions
 //! - `nodes[]`: positioned node objects with `id`, `label`, `x`, `y`, etc.
 //! - `edges[]`: routed edge objects with `from`, `to`, path info, etc.
@@ -17,8 +19,8 @@
 //! - **`alloc`**: Enables `LayoutIR::to_json() -> String`
 //! - **Always available**: `serialize_json_to_buffer()` for `LayoutIRArena`
 
-/// JSON schema version (matches zigraph).
-pub(crate) const VERSION: &str = "1.2";
+/// JSON schema version (zigraph v1.2 + the direction extensions).
+pub(crate) const VERSION: &str = "1.3";
 
 // ── Minimal no-alloc JSON writer ─────────────────────────────────────────
 
@@ -248,12 +250,13 @@ impl<'a> LayoutIRArena<'a> {
     ///
     /// Returns a conservative upper bound. The actual output is usually smaller.
     pub fn estimate_json_size(&self) -> usize {
-        // Base: {"version":"1.2","width":N,"height":N,"level_count":N,"nodes":[...],"edges":[...]}
+        // Base: {"version":"1.3","width":N,"height":N,"level_count":N,"nodes":[...],"edges":[...]}
         let base: usize = 100;
-        // Each node: fixed fields incl. `content_kind` (~180 bytes)
-        // plus its label at worst-case JSON escaping (6 bytes per input
-        // byte — \u00XX form).
-        let nodes = self.node_count().saturating_mul(180);
+        // Each node: fixed fields incl. `content_kind` and the v1.3
+        // `self_loop_at` cell (~210 bytes) plus its label at
+        // worst-case JSON escaping (6 bytes per input byte — \u00XX
+        // form).
+        let nodes = self.node_count().saturating_mul(210);
         let node_labels: usize = (0..self.node_count())
             .map(|i| self.node_label(i).len().saturating_mul(6))
             .fold(0usize, |a, b| a.saturating_add(b));
@@ -263,9 +266,9 @@ impl<'a> LayoutIRArena<'a> {
             .iter()
             .map(|entry| entry.payload_len.saturating_mul(6).saturating_add(16))
             .fold(0usize, |a, b| a.saturating_add(b));
-        // Each edge: fixed fields + path (~200 bytes) plus its label
-        // at worst-case escaping.
-        let edges = self.edge_count().saturating_mul(200);
+        // Each edge: fixed fields + path + the v1.3 `flow_axis` tag
+        // (~220 bytes) plus its label at worst-case escaping.
+        let edges = self.edge_count().saturating_mul(220);
         let edge_labels: usize = (0..self.edge_count())
             .map(|i| self.edge_label(i).len().saturating_mul(6))
             .fold(0usize, |a, b| a.saturating_add(b));
@@ -362,6 +365,17 @@ fn write_node_arena(
         w.write_byte(b',')?;
     }
 
+    // v1.3: the self-loop marker cell (only when the node has one).
+    if node.self_loop_at != (usize::MAX, usize::MAX) {
+        w.write_key("self_loop_at")?;
+        w.write_byte(b'[')?;
+        w.write_usize(node.self_loop_at.0)?;
+        w.write_byte(b',')?;
+        w.write_usize(node.self_loop_at.1)?;
+        w.write_byte(b']')?;
+        w.write_byte(b',')?;
+    }
+
     w.write_key("edge_index")?;
     if node.edge_index != usize::MAX {
         w.write_usize(node.edge_index)?;
@@ -406,6 +420,14 @@ fn write_edge_arena(
 
     w.write_key("directed")?;
     w.write_bool(edge.directed)?;
+    w.write_byte(b',')?;
+
+    // v1.3: which physical axis the trunk runs along.
+    w.write_key("flow_axis")?;
+    w.write_str(match edge.flow_axis {
+        crate::ir::FlowAxis::Y => "y",
+        crate::ir::FlowAxis::X => "x",
+    })?;
 
     // reversed: only emit when true (per v1.2 spec)
     if edge.reversed {
@@ -442,26 +464,26 @@ fn write_edge_path_arena(
 ) -> Option<()> {
     match edge.path {
         EdgePathArena::Direct => w.write_bytes(b"{\"type\":\"direct\"}"),
-        EdgePathArena::Corner { horizontal_y } => {
+        EdgePathArena::Corner { bend_at } => {
             w.write_bytes(b"{\"type\":\"corner\",")?;
-            w.write_key("horizontal_y")?;
-            w.write_usize(horizontal_y)?;
+            w.write_key("bend_at")?;
+            w.write_usize(bend_at)?;
             w.write_byte(b'}')
         }
         EdgePathArena::SideChannel {
-            channel_x,
-            start_y,
-            end_y,
+            channel_at,
+            span_start,
+            span_end,
         } => {
             w.write_bytes(b"{\"type\":\"side_channel\",")?;
-            w.write_key("channel_x")?;
-            w.write_usize(channel_x)?;
+            w.write_key("channel_at")?;
+            w.write_usize(channel_at)?;
             w.write_byte(b',')?;
-            w.write_key("start_y")?;
-            w.write_usize(start_y)?;
+            w.write_key("span_start")?;
+            w.write_usize(span_start)?;
             w.write_byte(b',')?;
-            w.write_key("end_y")?;
-            w.write_usize(end_y)?;
+            w.write_key("span_end")?;
+            w.write_usize(span_end)?;
             w.write_byte(b'}')
         }
         EdgePathArena::MultiSegment {
@@ -565,7 +587,7 @@ mod heap_json {
         /// );
         /// let ir = dag.compute_layout();
         /// let json = ir.to_json();
-        /// assert!(json.contains("\"version\":\"1.2\""));
+        /// assert!(json.contains("\"version\":\"1.3\""));
         /// assert!(json.contains("\"nodes\":["));
         /// ```
         pub fn to_json(&self) -> String {
@@ -644,8 +666,8 @@ mod heap_json {
 
         fn estimate_json_size(&self) -> usize {
             100usize
-                .saturating_add(self.nodes().len().saturating_mul(150))
-                .saturating_add(self.edges().len().saturating_mul(200))
+                .saturating_add(self.nodes().len().saturating_mul(180))
+                .saturating_add(self.edges().len().saturating_mul(220))
                 .saturating_add(self.subgraphs().len().saturating_mul(120))
         }
     }
@@ -743,6 +765,17 @@ mod heap_json {
             out.push(',');
         }
 
+        // v1.3: the self-loop marker cell (only when present).
+        if let Some((mx, my)) = node.self_loop_at {
+            push_key(out, "self_loop_at");
+            out.push('[');
+            push_usize(out, mx);
+            out.push(',');
+            push_usize(out, my);
+            out.push(']');
+            out.push(',');
+        }
+
         push_key(out, "edge_index");
         if let Some(ei) = node.edge_index {
             push_usize(out, ei);
@@ -779,6 +812,17 @@ mod heap_json {
         out.push(',');
         push_key(out, "directed");
         push_bool(out, edge.directed);
+        out.push(',');
+
+        // v1.3: which physical axis the trunk runs along.
+        push_key(out, "flow_axis");
+        push_json_str(
+            out,
+            match edge.flow_axis {
+                crate::ir::FlowAxis::Y => "y",
+                crate::ir::FlowAxis::X => "x",
+            },
+        );
 
         if edge.reversed {
             out.push(',');
@@ -810,26 +854,26 @@ mod heap_json {
             EdgePath::Direct => {
                 out.push_str("{\"type\":\"direct\"}");
             }
-            EdgePath::Corner { horizontal_y } => {
+            EdgePath::Corner { bend_at } => {
                 out.push_str("{\"type\":\"corner\",");
-                push_key(out, "horizontal_y");
-                push_usize(out, *horizontal_y);
+                push_key(out, "bend_at");
+                push_usize(out, *bend_at);
                 out.push('}');
             }
             EdgePath::SideChannel {
-                channel_x,
-                start_y,
-                end_y,
+                channel_at,
+                span_start,
+                span_end,
             } => {
                 out.push_str("{\"type\":\"side_channel\",");
-                push_key(out, "channel_x");
-                push_usize(out, *channel_x);
+                push_key(out, "channel_at");
+                push_usize(out, *channel_at);
                 out.push(',');
-                push_key(out, "start_y");
-                push_usize(out, *start_y);
+                push_key(out, "span_start");
+                push_usize(out, *span_start);
                 out.push(',');
-                push_key(out, "end_y");
-                push_usize(out, *end_y);
+                push_key(out, "span_end");
+                push_usize(out, *span_end);
                 out.push('}');
             }
             EdgePath::MultiSegment { waypoints, .. } => {
@@ -917,7 +961,7 @@ mod tests {
         // Validate structure
         assert!(json.starts_with('{'));
         assert!(json.ends_with('}'));
-        assert!(json.contains("\"version\":\"1.2\""));
+        assert!(json.contains("\"version\":\"1.3\""));
         assert!(json.contains("\"nodes\":["));
         assert!(json.contains("\"edges\":["));
 
@@ -1029,7 +1073,7 @@ mod arena_tests {
 
         assert!(json.starts_with('{'));
         assert!(json.ends_with('}'));
-        assert!(json.contains("\"version\":\"1.2\""));
+        assert!(json.contains("\"version\":\"1.3\""));
         assert!(json.contains("\"nodes\":["));
         assert!(json.contains("\"edges\":["));
         assert!(json.contains("\"label\":\"A\""));

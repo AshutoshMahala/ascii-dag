@@ -97,11 +97,11 @@ fn run_heap() {
     for edge in ir.edges() {
         let route_type = match &edge.path {
             ascii_dag::ir::EdgePath::Direct => "Direct (vertical line)".to_string(),
-            ascii_dag::ir::EdgePath::Corner { horizontal_y } => {
-                format!("Corner (L-shape at y={})", horizontal_y)
+            ascii_dag::ir::EdgePath::Corner { bend_at } => {
+                format!("Corner (L-shape at y={})", bend_at)
             }
-            ascii_dag::ir::EdgePath::SideChannel { channel_x, .. } => {
-                format!("SideChannel (routed via x={})", channel_x)
+            ascii_dag::ir::EdgePath::SideChannel { channel_at, .. } => {
+                format!("SideChannel (routed via x={})", channel_at)
             }
             ascii_dag::ir::EdgePath::MultiSegment { waypoints, .. } => {
                 format!("MultiSegment ({} waypoints)", waypoints.len())
