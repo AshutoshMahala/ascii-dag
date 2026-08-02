@@ -2298,7 +2298,6 @@ mod lr_invariants {
     /// horizontal trunks.)
     #[test]
     fn lr_corpus_matches_across_backends() {
-        use crate::algorithms::sugiyama::arena_csr::compute_layout_arena_csr_axis;
         use crate::render::engine::view::LayoutView;
 
         fn sorted_debug<T: core::fmt::Debug>(items: impl Iterator<Item = T>) -> Vec<String> {
@@ -2321,13 +2320,13 @@ mod lr_invariants {
                 let mut out_buf = vec![0u8; size];
                 let mut temp_arena = Arena::new(&mut temp_buf);
                 let mut out_arena = Arena::new(&mut out_buf);
-                let csr_ir = compute_layout_arena_csr_axis::<Horizontal>(
-                    &csr,
-                    &config,
-                    &mut temp_arena,
-                    &mut out_arena,
-                )
-                .unwrap_or_else(|e| panic!("{tag}: CSR LR layout failed: {e:?}"));
+                // The PUBLIC entry point — its direction dispatch is
+                // what these tests must pin, not the axis-parameterized
+                // internal (which would stay green if the public match
+                // regressed to `Vertical`).
+                let csr_ir = csr
+                    .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+                    .unwrap_or_else(|e| panic!("{tag}: CSR LR layout failed: {e:?}"));
 
                 assert_eq!(
                     (LayoutView::width(&heap_ir), LayoutView::height(&heap_ir)),
@@ -2670,7 +2669,6 @@ mod lr_invariants {
     /// identically, plain and colored.
     #[test]
     fn lr_corpus_renders_identically_across_backends() {
-        use crate::algorithms::sugiyama::arena_csr::compute_layout_arena_csr_axis;
         for (dir, (tag, g)) in [Direction::LeftRight, Direction::RightLeft]
             .into_iter()
             .flat_map(|d| corpus().into_iter().map(move |c| (d, c)))
@@ -2686,13 +2684,10 @@ mod lr_invariants {
             let mut out_buf = vec![0u8; size];
             let mut temp_arena = Arena::new(&mut temp_buf);
             let mut out_arena = Arena::new(&mut out_buf);
-            let csr_ir = compute_layout_arena_csr_axis::<Horizontal>(
-                &csr,
-                &config,
-                &mut temp_arena,
-                &mut out_arena,
-            )
-            .expect("CSR LR layout");
+            // The PUBLIC entry point (see the field-parity twin).
+            let csr_ir = csr
+                .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+                .expect("CSR LR layout");
 
             let plain = RenderOptions::plain();
             let mut heap_out = String::new();

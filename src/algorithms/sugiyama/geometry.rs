@@ -80,8 +80,6 @@ pub(crate) trait Axis {
     /// ports sit on the node's OWN trailing face, since column widths
     /// vary far more than row heights and a detached port is plainly
     /// visible.
-    // CSR consumer lands at LR-P2 — until then arena-only builds see
-    // no caller.
     #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     fn source_port_level(band_start: usize, node_extent: usize, band_extent: usize) -> usize;
     /// Cross-axis draw offset of a dummy waypoint (visual separation
@@ -90,8 +88,6 @@ pub(crate) trait Axis {
     /// Horizontal reserves a single row (`DUMMY_CROSS = 1`), so the
     /// offset is always 0 — a nonzero offset would escape the
     /// reservation and can enter the next span at `node_spacing = 1`.
-    // CSR consumer lands at LR-P2 — until then arena-only builds see
-    // no caller.
     #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     fn dummy_draw_offset(edge_idx: usize) -> usize;
     /// The box label's claim on the CROSS axis (temp/08 D8). Label
@@ -105,8 +101,6 @@ pub(crate) trait Axis {
     /// Horizontal: `label_min_width`, reserved as extra trailing
     /// level pad at the box's closing level so the widened box
     /// cannot overlap the next column.
-    // CSR consumer lands at LR-P2 — until then arena-only builds see
-    // no caller.
     #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     fn label_level_extent(label: &str) -> usize;
     /// Subgraph border padding along the level axis (before, after
@@ -141,8 +135,6 @@ pub(crate) trait Axis {
     /// Whether box labels claim LEVEL-axis room (D8b) — gates the
     /// label-extras phase so `Vertical` never allocates or traverses
     /// for a claim that is statically zero.
-    // CSR consumer lands at LR-P2 — until then arena-only builds see
-    // no reader.
     #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     const LABEL_CLAIMS_LEVEL_AXIS: bool;
     /// Whether nested boxes' CROSS pads may share cells. Vertical:
@@ -152,8 +144,6 @@ pub(crate) trait Axis {
     /// carries the LABEL ROW, which cannot merge; packing must
     /// reserve the full ancestry chain
     /// (`PARENT_CHILD_PAD_CROSS` per ancestor).
-    // CSR consumer lands at LR-P2 — until then arena-only builds see
-    // no reader.
     #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     const NESTED_PADS_MERGE: bool;
     /// Cross-axis gap between adjacent nodes of different clusters:
@@ -225,10 +215,6 @@ impl Axis for Vertical {
 /// node heights. The box label still reads horizontally and stays
 /// physically at the top, so it lives in the cross-axis *leading*
 /// pad (D3) — hence the asymmetric `SG_PAD_CROSS`.
-// The PUBLIC dispatch flips atomically after LR-P2..P4 (renderer,
-// CSR, and the RL mirror must all be usable first — slices review,
-// P0); until then only tests instantiate this profile.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct Horizontal;
 
 impl Axis for Horizontal {

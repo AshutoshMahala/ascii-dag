@@ -58,11 +58,17 @@ impl<'a> Graph<'a> {
             return;
         }
 
-        // Determine render mode
+        // Determine render mode. The simple-chain shortcut is a
+        // TopDown-only convenience: it traverses source→target and
+        // paints `→` unconditionally, so it cannot honor a rank
+        // direction. Under `Auto`, anything other than `TopDown` goes
+        // through the layout pipeline, which does. An EXPLICIT
+        // `RenderMode::Horizontal` still overrides — asking for the
+        // chain form is a deliberate choice.
         let is_chain = self.is_simple_chain();
         let mode = match self.render_mode {
             RenderMode::Auto => {
-                if is_chain {
+                if is_chain && self.direction == crate::graph::Direction::TopDown {
                     RenderMode::Horizontal
                 } else {
                     RenderMode::Vertical

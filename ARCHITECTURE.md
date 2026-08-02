@@ -95,7 +95,9 @@ One engine serves both IRs — the render layer has no "backends" (`LayoutView`
 lens over either IR, monomorphized). Semantic cells (tagged `u32`: text /
 stroke arms / marker) compose on a band-sized canvas and decode through a
 charset table at emission, so Unicode and ASCII are equal projections of one
-canvas and TopDown/BottomUp paint through the same geometry-driven primitives.
+canvas and all four directions paint through the same geometry-driven
+primitives — an edge's `flow_axis` selects the formulas, its coordinates the
+sign; the `Direction` enum is never consulted at paint time.
 
 | Module | Purpose | Key items |
 |--------|---------|-----------|
@@ -182,12 +184,19 @@ the same stages:
   horizontal run crosses an arrowhead
 
 ### 7. Rank Direction
-- `Direction` (TB/BT/LR/RL) is recorded on the IR. For `BottomUp`, both
-  backends flip the finished layout in place so **IR coordinates are always
-  physical** — they match rendered cells. The render engine paints
-  `TopDown` and `BottomUp` through the same geometry-driven primitives
-  (flow derives from coordinates, never from the enum). `LeftRight` /
-  `RightLeft` are parsed and recorded but not yet laid out.
+- `Direction` (TB/BT/LR/RL) is recorded on the IR and drives layout.
+  One pipeline serves all four: it computes in ROLE space (a level
+  axis and a cross axis) and an axis profile — a zero-sized type,
+  monomorphized away — says which physical axis each role maps to.
+  `TopDown`/`BottomUp` make levels rows; `LeftRight`/`RightLeft` make
+  them columns. Coordinates materialize to `(x, y)` at IR emission.
+- The mirrored directions are flips of the finished layout, in place
+  and pre-build: `BottomUp` on y, `RightLeft` on x. **IR coordinates
+  are always physical** — they match rendered cells.
+- Every edge carries a `flow_axis` (`Y` or `X`) naming the physical
+  axis its trunk runs along; paint, hit-testing, and label placement
+  select their formulas from it. Flow SIGN still derives from
+  coordinates, and the enum is never consulted at paint time.
 
 ---
 

@@ -113,12 +113,18 @@ Presets: `RenderOptions::plain()`, `::colored(palette)`, `::ascii()`,
 ### Layout settings
 
 ```rust
-g.set_direction(Direction::BottomUp);   // TB (default) or BT; parses "TB"/"BT"/…
+g.set_direction(Direction::LeftRight);   // TB (default), BT, LR, RL
 let mut config = LayoutConfig::standard();
-config.node_spacing = 4;                // horizontal gap
-config.level_spacing = 1;               // extra rows between levels
-config.include_dummy_nodes = true;      // emit routing waypoints into the IR
+config.node_spacing = 4;                 // gap between nodes within a level
+config.level_spacing = 1;                // extra gap between levels
+config.include_dummy_nodes = true;       // emit routing waypoints into the IR
 ```
+
+All four directions lay out natively: `TB`/`BT` stack levels as rows,
+`LR`/`RL` as columns (better for wide, shallow graphs). The spacing
+settings follow the direction — `node_spacing` separates nodes within
+a level, `level_spacing` separates levels — so the same config reads
+sensibly whichever way the graph flows.
 
 Crossing-reduction presets `FAST` / `STANDARD` / `QUALITY` (or a
 custom `CrossingReducer` pipeline) via `set_crossing_pipeline`. Full
@@ -175,9 +181,8 @@ with stderr closed):
 
 Text-grid output: edges route orthogonally (no diagonals), wide
 Unicode in labels counts as one cell per `char`, and layouts optimize
-for readability rather than minimal area. Layout directions `LR`/`RL`
-are parsed but not yet implemented. For heavy graph *algorithms* use
-`petgraph`; for image-quality output use Graphviz.
+for readability rather than minimal area. For heavy graph *algorithms*
+use `petgraph`; for image-quality output use Graphviz.
 
 ## License
 

@@ -50,9 +50,13 @@ pub enum RenderMode {
 /// Parses from the conventional short forms (case-insensitive):
 /// `"TB"`/`"TD"`, `"BT"`, `"LR"`, `"RL"`.
 ///
-/// The render engine paints `TopDown` and `BottomUp` layouts through
-/// the same geometry-driven primitives. `LeftRight`/`RightLeft` are
-/// parsed and recorded on the IR but not yet laid out.
+/// All four directions are laid out natively and painted through the
+/// same geometry-driven primitives. `TopDown`/`BottomUp` stack levels
+/// as rows; `LeftRight`/`RightLeft` make levels COLUMNS — sized by
+/// node widths, with edges running in horizontal trunks — so a wide,
+/// shallow graph reads better sideways. `BottomUp` and `RightLeft`
+/// are exact mirrors of their counterparts, applied to the finished
+/// layout, so IR coordinates always match rendered cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Direction {
     /// Levels flow top → bottom (default; edges point down).
@@ -468,7 +472,13 @@ impl<'a> Graph<'a> {
     /// [`compute_layout_with_config`](Self::compute_layout_with_config),
     /// the config's `direction` wins.
     ///
-    /// The built-in renderers currently paint `TopDown` layouts only.
+    /// All four directions render. One caveat on the
+    /// [`render`](Self::render) convenience: under
+    /// [`RenderMode::Auto`] a simple chain uses the compact
+    /// left-to-right form only for `TopDown`; any other direction is
+    /// laid out and painted normally. Asking for
+    /// [`RenderMode::Horizontal`] explicitly always gives the chain
+    /// form, whatever the direction.
     ///
     /// # Examples
     ///
@@ -1202,18 +1212,19 @@ impl<'a> Graph<'a> {
         self.layout_with(&config)
     }
 
-    /// Layout dispatch (temp/08 D1). The `Horizontal` profile is
-    /// implemented and invariant-gated, but the PUBLIC flip lands
-    /// atomically after LR-P2..P4: the renderer is y-primary until
-    /// P3, the CSR backend dispatches `Vertical` until P2, and
-    /// `RightLeft` lacks its x-mirror until P4 — flipping earlier
-    /// would hand users unusable geometry. Until then `LeftRight`/
-    /// `RightLeft` keep the documented behavior: recorded on the IR,
-    /// laid out vertically.
+    /// Dispatch to the axis profile the direction needs (temp/08 D1):
+    /// `LeftRight`/`RightLeft` lay out natively through `Horizontal`
+    /// — levels become columns, edges run in horizontal trunks —
+    /// everything else through `Vertical`. `RightLeft` is `LeftRight`
+    /// mirrored on x, applied inside the pipeline.
     fn layout_with(&self, config: &LayoutConfig<'_>) -> crate::ir::LayoutIR<'a> {
-        crate::algorithms::sugiyama::heap::compute_layout_cfg::<
-            crate::algorithms::sugiyama::geometry::Vertical,
-        >(self, config)
+        use crate::algorithms::sugiyama::geometry::{Horizontal, Vertical};
+        match config.direction {
+            Direction::LeftRight | Direction::RightLeft => {
+                crate::algorithms::sugiyama::heap::compute_layout_cfg::<Horizontal>(self, config)
+            }
+            _ => crate::algorithms::sugiyama::heap::compute_layout_cfg::<Vertical>(self, config),
+        }
     }
 
     /// Compute the layout using a custom [`LayoutConfig`].
@@ -1491,7 +1502,7 @@ mod tests {
     /// only through the layout-internal tests. This pin prevents an
     /// accidental early flip (slices review, P0).
     #[test]
-    fn lr_direction_stays_vertical_until_the_atomic_flip() {
+    fn lr_and_rl_lay_out_horizontally() {
         let build = || {
             let mut g = Graph::new();
             g.add_node(1, "a");
@@ -1502,44 +1513,92 @@ mod tests {
             g.add_edge(2, 2, None);
             g
         };
-        // Full geometry, not just ordering: `LeftRight`/`RightLeft`
-        // must be INDISTINGUISHABLE from `TopDown` until the atomic
-        // flip — an early or partial flip (a horizontal mirror applied
-        // to the still-vertical layout, say) fails here.
-        let baseline = build().compute_layout();
-        let fields = |ir: &crate::ir::LayoutIR<'_>| {
-            let nodes: Vec<_> = ir
-                .nodes()
-                .iter()
-                .map(|n| (n.id, n.x, n.y, n.width, n.height, n.self_loop_at))
-                .collect();
-            let edges: Vec<_> = ir
-                .edges()
-                .iter()
-                .map(|e| {
-                    (
-                        e.from_x,
-                        e.from_y,
-                        e.to_x,
-                        e.to_y,
-                        e.label_x,
-                        e.label_y,
-                        e.flow_axis,
-                    )
-                })
-                .collect();
-            (ir.width(), ir.height(), nodes, edges)
+        let td = build().compute_layout();
+        let node = |ir: &crate::ir::LayoutIR<'_>, id: usize| {
+            let n = ir.nodes().iter().find(|n| n.id == id).expect("node");
+            (n.x, n.y, n.width, n.height)
         };
         for dir in [Direction::LeftRight, Direction::RightLeft] {
             let mut g = build();
             g.set_direction(dir);
             let ir = g.compute_layout();
-            assert_eq!(
-                fields(&ir),
-                fields(&baseline),
-                "{dir:?} still lays out exactly like TopDown"
+            assert_eq!(ir.direction(), dir, "{dir:?} recorded on the IR");
+            // Levels are COLUMNS: every trunk runs horizontally.
+            for e in ir.edges() {
+                assert_eq!(e.flow_axis, crate::ir::FlowAxis::X, "{dir:?} trunks");
+            }
+            let (ax, _, aw, _) = node(&ir, 1);
+            let (bx, _, bw, _) = node(&ir, 2);
+            if matches!(dir, Direction::LeftRight) {
+                assert!(bx >= ax + aw, "LeftRight: level 1 sits to the right");
+            } else {
+                assert!(ax >= bx + bw, "RightLeft: level 1 sits to the LEFT");
+            }
+            // …and it is genuinely not the vertical layout.
+            assert_ne!(
+                (ir.width(), ir.height()),
+                (td.width(), td.height()),
+                "{dir:?} is not the TopDown layout"
             );
         }
+
+        // RL is the exact x-mirror of LR through the PUBLIC entry.
+        let mut g = build();
+        g.set_direction(Direction::LeftRight);
+        let lr = g.compute_layout();
+        let mut g = build();
+        g.set_direction(Direction::RightLeft);
+        let rl = g.compute_layout();
+        let w = lr.width();
+        assert_eq!(w, rl.width());
+        for (p, q) in lr.nodes().iter().zip(rl.nodes().iter()) {
+            assert_eq!(q.x, w - p.x - p.width, "node {} mirrors", p.id);
+            assert_eq!(q.y, p.y);
+        }
+    }
+
+    /// The `render()` convenience honors the rank direction. A simple
+    /// chain under `RenderMode::Auto` takes the compact left-to-right
+    /// form ONLY for `TopDown` — its arrow and traversal are
+    /// hard-coded, so it cannot express any other direction; the rest
+    /// go through the layout pipeline. An explicit
+    /// `RenderMode::Horizontal` remains a deliberate override.
+    #[test]
+    fn render_honors_direction_for_simple_chains() {
+        let chain = || {
+            let mut g = Graph::new();
+            g.add_node(1, "A");
+            g.add_node(2, "B");
+            g.add_edge(1, 2, None);
+            g
+        };
+        // TopDown keeps the compact chain form (byte-frozen).
+        assert!(
+            chain().render().contains('→'),
+            "TopDown Auto keeps the chain shortcut"
+        );
+        // RightLeft must not silently render left-to-right.
+        let mut g = chain();
+        g.set_direction(Direction::RightLeft);
+        let out = g.render();
+        assert!(
+            out.contains('←') && !out.contains('→'),
+            "RightLeft flows right-to-left:\n{out}"
+        );
+        // BottomUp likewise reaches the pipeline instead of the
+        // unconditionally-downward shortcut.
+        let mut g = chain();
+        g.set_direction(Direction::BottomUp);
+        let out = g.render();
+        assert!(out.contains('↑'), "BottomUp flows upward:\n{out}");
+        // An explicit Horizontal request still overrides.
+        let mut g = chain();
+        g.set_direction(Direction::RightLeft);
+        g.set_render_mode(crate::RenderMode::Horizontal);
+        assert!(
+            g.render().contains('→'),
+            "explicit Horizontal is a deliberate override"
+        );
     }
 
     // ── Node handles & AUTO numbering (NC-P1) ──────────────────────────

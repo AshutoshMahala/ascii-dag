@@ -191,27 +191,37 @@ fn slot_collides(
 /// This avoids all heap allocations and HashMap lookups by using the CSR indices directly.
 /// The `config` parameter controls the layout pipeline (crossing reduction, spacing, etc.).
 ///
-/// Direction note: this backend currently lays out through `Vertical`
-/// for every direction — the `Horizontal` machinery is fully mirrored,
-/// and the PUBLIC dispatch for both backends flips atomically at LR-P4
-/// once every direction is usable end-to-end.
+/// Dispatches on the direction exactly as the heap backend does:
+/// `LeftRight`/`RightLeft` lay out through `Horizontal`, everything
+/// else through `Vertical`. The two backends must agree — the parity
+/// rule is not optional.
 pub fn compute_layout_arena_csr<'b>(
     graph: &CsrGraph<'_>,
     config: &LayoutConfig<'_>,
     temp_arena: &mut Arena<'_>,
     output_arena: &'b mut Arena<'b>,
 ) -> Result<LayoutIRArena<'b>, GraphError> {
-    compute_layout_arena_csr_axis::<super::geometry::Vertical>(
-        graph,
-        config,
-        temp_arena,
-        output_arena,
-    )
+    match config.direction {
+        crate::graph::Direction::LeftRight | crate::graph::Direction::RightLeft => {
+            compute_layout_arena_csr_axis::<super::geometry::Horizontal>(
+                graph,
+                config,
+                temp_arena,
+                output_arena,
+            )
+        }
+        _ => compute_layout_arena_csr_axis::<super::geometry::Vertical>(
+            graph,
+            config,
+            temp_arena,
+            output_arena,
+        ),
+    }
 }
 
-/// Axis-parameterized CSR layout (temp/08 D1). The body currently
-/// spells the roles as y/x — LR-P0 threads `A` inward slice by slice,
-/// each slice gated on byte-identical TD/BT output.
+/// Axis-parameterized CSR layout (temp/08 D1): one pipeline computing
+/// in role space, with `A` naming which physical axis each role maps
+/// to. The public wrapper picks the profile from the direction.
 pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     graph: &CsrGraph<'_>,
     config: &LayoutConfig<'_>,
