@@ -292,12 +292,12 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         })
         .collect();
 
-    // Add small buffer for bounded edge offsets (max 3 chars) plus 1 for routing
-    // Also add limited expansion for labels (4 chars each side) if any edges have labels
+    // Cross-axis safety margin: routing/draw offsets, label overhang,
+    // cluster borders — all physical-x concerns, so the profile
+    // decides how much of it lands on THIS axis (temp/08 P5).
     let has_labeled_edges = dag.edges.iter().any(|(_, _, label)| label.is_some());
-    let label_margin = if has_labeled_edges { 8 } else { 0 }; // 4 chars each side
-    let subgraph_margin = if dag.has_subgraphs() { 4 } else { 0 }; // border padding
-    let max_width = level_widths.iter().max().unwrap_or(&0) + 4 + label_margin + subgraph_margin;
+    let max_width = level_widths.iter().max().unwrap_or(&0)
+        + A::cross_margin(has_labeled_edges, dag.has_subgraphs());
 
     // Step 5: Build LayoutIR
     let mut builder = LayoutIRBuilder::new().with_levels(max_level + 1);
@@ -1162,11 +1162,9 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         ir.flip_vertical();
     }
     // RL is LR mirrored on x — the same contract, other axis. Gated
-    // on the PROFILE, not just the direction: while the public
-    // dispatcher still selects `Vertical` for every direction
-    // (the atomic flip lands at LR-P4-S3), a `RightLeft` request must
-    // keep its documented "recorded, laid out vertically" behavior —
-    // mirroring a vertical layout would change public output early.
+    // on the PROFILE, not just the direction: a `RightLeft` request
+    // that somehow reached the `Vertical` profile must not have its
+    // vertical layout mirrored, which would be neither direction.
     if config.direction == crate::graph::Direction::RightLeft
         && matches!(A::FLOW_AXIS, crate::ir::FlowAxis::X)
     {

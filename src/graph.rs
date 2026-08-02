@@ -1496,11 +1496,9 @@ impl<'g, 'a> SubgraphPlacer<'g, 'a> {
 mod tests {
     use super::*;
 
-    /// Until the LR-P2..P4 atomic flip, `LeftRight`/`RightLeft`
-    /// publicly keep the documented "recorded but laid out
-    /// vertically" behavior — the `Horizontal` profile is reachable
-    /// only through the layout-internal tests. This pin prevents an
-    /// accidental early flip (slices review, P0).
+    /// `LeftRight`/`RightLeft` lay out natively through the public
+    /// entry point: levels become columns, trunks run horizontally,
+    /// and RL is the exact x-mirror of LR.
     #[test]
     fn lr_and_rl_lay_out_horizontally() {
         let build = || {

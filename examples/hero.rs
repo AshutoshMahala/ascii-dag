@@ -9,19 +9,21 @@
 //! - Junction characters where edges cross subgraph borders
 //! - Self-cycle (node loops back to itself)
 //! - Reversed edge (back-edge, renders with dashed lines)
-//! - BottomUp direction (graph grows upward, arrows point up)
+//! - All four rank directions (levels as rows, or as columns)
 //! - ASCII charset (pure-ASCII glyph projection of the same canvas)
 //!
 //! Run:
-//!   cargo run --example hero              # plain
+//!   cargo run --example hero              # plain (TopDown)
 //!   cargo run --example hero -- --color   # ANSI colors + legend
-//!   cargo run --example hero -- --bt      # BottomUp (flags combine)
+//!   cargo run --example hero -- --bt      # BottomUp  (flags combine)
+//!   cargo run --example hero -- --lr      # LeftRight (flags combine)
+//!   cargo run --example hero -- --rl      # RightLeft (flags combine)
 //!   cargo run --example hero -- --ascii   # ASCII glyphs (flags combine)
+//!   cargo run --example hero -- --csr     # arena pipeline (byte-identical)
 //!
-//! The unflagged and --color-only paths render through the legacy
-//! scanline renderers (they are the golden-snapshot authority until
-//! RW8); --bt and --ascii render through the new engine — the only
-//! paint path with direction and charset support.
+//! `--lr`/`--rl` lay the same graph out sideways: levels become
+//! columns and edges run in horizontal trunks, which suits wide,
+//! shallow graphs. Every flag combines with every other.
 
 use ascii_dag::Direction;
 use ascii_dag::render::colors::Palette;
@@ -38,11 +40,16 @@ fn main() {
     // ── Render ───────────────────────────────────────────────────
     let args: Vec<String> = std::env::args().collect();
     let use_color = args.iter().any(|a| a == "--color" || a == "-c");
-    let bottom_up = args.iter().any(|a| a == "--bt");
     let ascii = args.iter().any(|a| a == "--ascii" || a == "-a");
-
-    if bottom_up {
-        g.set_direction(Direction::BottomUp);
+    // Last direction flag wins (scanning from the end finds it
+    // first), so `--lr --rl` is RightLeft. Unflagged stays TopDown.
+    if let Some(dir) = args.iter().rev().find_map(|a| match a.as_str() {
+        "--bt" => Some(Direction::BottomUp),
+        "--lr" => Some(Direction::LeftRight),
+        "--rl" => Some(Direction::RightLeft),
+        _ => None,
+    }) {
+        g.set_direction(dir);
     }
 
     if csr::requested() {
@@ -61,23 +68,15 @@ fn main() {
 
     let ir = g.compute_layout();
 
-    let output = if bottom_up || ascii {
-        // Engine path: the only renderer with direction/charset support.
-        let mut opts = if use_color {
-            RenderOptions::colored(Palette::Ansi)
-        } else {
-            RenderOptions::plain()
-        };
-        if ascii {
-            opts.charset = Charset::Ascii;
-        }
-        ir.render_string(&opts)
-    } else if use_color {
-        ir.render_string(&RenderOptions::colored(Palette::Ansi))
+    let mut opts = if use_color {
+        RenderOptions::colored(Palette::Ansi)
     } else {
-        ir.render_string(&RenderOptions::plain())
+        RenderOptions::plain()
     };
-    println!("{}", output);
+    if ascii {
+        opts.charset = Charset::Ascii;
+    }
+    println!("{}", ir.render_string(&opts));
 
     // Print stats
     eprintln!(

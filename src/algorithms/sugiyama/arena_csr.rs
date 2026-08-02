@@ -542,12 +542,10 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                 }
             }
         }
-        let label_margin: Coord = if graph.has_edge_labels() { 8 } else { 0 };
-        let sg_margin: Coord = if graph.has_subgraphs() { 4 } else { 0 };
-        new_max
-            .saturating_add(4)
-            .saturating_add(label_margin)
-            .saturating_add(sg_margin)
+        // Cross-axis safety margin — profile-decided (see the heap twin).
+        new_max.saturating_add(
+            A::cross_margin(graph.has_edge_labels(), graph.has_subgraphs()) as Coord,
+        )
     };
 
     // Step 6: Build real node coordinates
@@ -1572,8 +1570,8 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
 
     // RL is LR mirrored on x — the same contract, other axis. Gated
     // on the PROFILE (see the heap twin): mirroring a vertical layout
-    // would change public `RightLeft` output before the atomic
-    // dispatch flip. Also pre-build, after the final set_dimensions.
+    // would be neither direction. Also pre-build, after the final
+    // set_dimensions.
     if config.direction == crate::graph::Direction::RightLeft
         && matches!(A::FLOW_AXIS, crate::ir::FlowAxis::X)
     {

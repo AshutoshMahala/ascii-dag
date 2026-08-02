@@ -24,7 +24,7 @@ cargo run --example node_painting --features arena -- --csr
 | `topological_sort` | Topological ordering (no rendering) |
 | `dummy_nodes` | Routing waypoints: `include_dummy_nodes` (IR) + `show_dummy_nodes` (◍ markers) |
 | `hit_test` | Interactive mouse hit-testing (raw ANSI mouse reports, zero deps); `--probe X Y` for scripts |
-| `hero` | The showcase graph; `--bt` (bottom-up), `--ascii`, `--color` |
+| `hero` | The showcase graph; `--bt`/`--lr`/`--rl` (direction), `--ascii`, `--color` |
 | `hero_colored` | Colored hero with the legend |
 | `layout_ir_demo` | The layout IR: positions, JSON export |
 | `lean_render` | Direct no-alloc build: `CsrGraphBuilder` + `render_to_bytes` |

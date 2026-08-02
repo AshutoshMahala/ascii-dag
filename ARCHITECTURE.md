@@ -169,19 +169,26 @@ the same stages:
   `AdjacentExchange(n)` passes, down-sweep then up-sweep each
 - Presets: `FAST`, `STANDARD`, `QUALITY` (see `config.rs`)
 
-### 5. X-Coordinate Assignment
-- Left-to-right packing with `node_spacing` (default 3); per-level centering
+### 5. Cross-Axis Assignment
+Packing along the CROSS axis with `node_spacing` (default 3), plus
+per-level centering. Which physical axis that is comes from the
+direction: columns for TB/BT, rows for LR/RL (see §7).
 - With subgraphs: block partitioning, boundary padding, iterative median
   refinement and cluster compaction
 
 ### 6. Edge Routing
 - **Direct**: aligned nodes; **Corner**: one bend; **MultiSegment**: through
-  jogging waypoints (straight pass-throughs collapse to verticals)
-- Per-level routing rows come from shared rules in `geometry.rs`: corner
-  slots, a per-level label row (only where a labeled edge is sourced), a
-  bend row under the deepest waypoint, and *arrow-cell reservation* — a
-  reversed edge's `⇡` cell is pre-occupied in the slot allocator so no
-  horizontal run crosses an arrowhead
+  jogging waypoints (straight pass-throughs collapse to plain flow runs)
+- Every level reserves a routing band along the LEVEL axis — rows below
+  the nodes in TB/BT, columns beside them in LR/RL — sized by shared
+  rules in `geometry.rs`: corner slots, a per-level label line (only
+  where a labeled edge is sourced), a bend line past the deepest
+  waypoint, and *arrow-cell reservation*, which pre-occupies a reversed
+  edge's arrowhead cell in the slot allocator so no cross-cutting run
+  crosses an arrowhead
+- Each edge records the physical axis its trunk runs along
+  (`flow_axis`); paint, hit-testing, and label placement read it rather
+  than guessing from endpoints, which is ambiguous for corner edges
 
 ### 7. Rank Direction
 - `Direction` (TB/BT/LR/RL) is recorded on the IR and drives layout.
@@ -243,8 +250,16 @@ arena-idx-u32  # Max 4B nodes, 4 bytes per index (default)
 - **Rendered-output tests**: `tests/layout_output.rs` asserts on the text a
   user sees, in both backends, plus a golden snapshot of the hero example
 - **Cross-backend parity tests**: same graph ⇒ identical IR geometry and
-  byte-identical rendered text across heap and CSR; BottomUp IRs must be
-  exact vertical mirrors of TopDown
+  byte-identical rendered text across heap and CSR, in every direction,
+  on exactly estimate-sized arenas
+- **Direction tests**: the mirrored directions must be exact mirrors of
+  their counterparts — `BottomUp` of `TopDown` on y, `RightLeft` of
+  `LeftRight` on x — asserted field by field against a mirror computed
+  independently in the test. A corpus of graphs is then run through the
+  full ladder in both horizontal orientations: geometric invariants
+  (ports on node faces, no overlaps, boxes containing their members),
+  a glyph⇄hit sweep proving no painted cell is orphaned, and
+  band-cap invariance
 - **Fuzz targets**: `fuzz/fuzz_targets/`; **Miri** / **cargo-careful** for
   unsafe-code validation
 

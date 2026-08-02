@@ -90,6 +90,17 @@ pub(crate) trait Axis {
     /// reservation and can enter the next span at `node_spacing = 1`.
     #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     fn dummy_draw_offset(edge_idx: usize) -> usize;
+    /// Safety margin added to the CROSS extent beyond the packed
+    /// levels: room for the dummy draw offset, edge-label overhang,
+    /// and cluster borders.
+    ///
+    /// Vertical needs all three — the cross axis is x, where labels
+    /// spread and dummies fan over `edge_idx % 4` columns. Horizontal
+    /// needs almost none: those are PHYSICAL-X concerns, which is its
+    /// LEVEL axis, and its `DUMMY_CROSS` reserves no draw offset. It
+    /// keeps one row for a trailing node's self-loop marker, which
+    /// sits one cell past the node on the cross axis (D5).
+    fn cross_margin(has_labeled_edges: bool, has_subgraphs: bool) -> usize;
     /// The box label's claim on the CROSS axis (temp/08 D8). Label
     /// text is a physical x-width; it constrains the cross extent
     /// only while cross == x. Vertical: `label_min_width`;
@@ -189,6 +200,13 @@ impl Axis for Vertical {
     }
 
     #[inline]
+    fn cross_margin(has_labeled_edges: bool, has_subgraphs: bool) -> usize {
+        // Bounded edge offsets (max 3) + 1 for routing; labels reach
+        // 4 columns each side; cluster borders their padding.
+        4 + if has_labeled_edges { 8 } else { 0 } + if has_subgraphs { 4 } else { 0 }
+    }
+
+    #[inline]
     fn label_cross_extent(label: &str) -> usize {
         label_min_width(label)
     }
@@ -246,6 +264,18 @@ impl Axis for Horizontal {
     #[inline]
     fn dummy_draw_offset(_edge_idx: usize) -> usize {
         0
+    }
+
+    #[inline]
+    fn cross_margin(has_labeled_edges: bool, _has_subgraphs: bool) -> usize {
+        // One row for a trailing node's self-loop marker (it sits one
+        // cell past the node on this axis, D5), plus one for D9's
+        // adjacent-row label float — the host needs a line above the
+        // source trunk to borrow. Everything else the vertical profile
+        // reserves here is physical-x work, which lands on this
+        // profile's LEVEL axis instead. Rows are the cheap direction
+        // in LR, which is exactly why the float spends one.
+        1 + usize::from(has_labeled_edges)
     }
 
     #[inline]

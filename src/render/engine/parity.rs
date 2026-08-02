@@ -345,6 +345,44 @@ fn plain_legend_lists_unplaced_labels() {
     );
 }
 
+/// The hero example laid out sideways, against its goldens — the
+/// LR/RL counterparts of `hero_matches_golden`. Regenerate with:
+///   cargo run --example hero -- --lr > tests/golden/hero-lr.txt
+///   cargo run --example hero -- --rl > tests/golden/hero-rl.txt
+#[test]
+fn hero_horizontal_matches_goldens() {
+    for (dir, golden) in [
+        (
+            crate::graph::Direction::LeftRight,
+            include_str!("../../../tests/golden/hero-lr.txt"),
+        ),
+        (
+            crate::graph::Direction::RightLeft,
+            include_str!("../../../tests/golden/hero-rl.txt"),
+        ),
+    ] {
+        let mut g = hero_graph();
+        g.set_direction(dir);
+        let ir = g.compute_layout();
+        // The visual comparison trims trailing blank rows, so pin the
+        // CANVAS too: `Axis::cross_margin` exists to keep the
+        // horizontal canvas tight, and a regression that puts the
+        // blank rows back would otherwise slip through a trimmed
+        // golden (P5 review).
+        assert_eq!(
+            (ir.width(), ir.height()),
+            (81, 24),
+            "hero {dir:?} canvas stays tight"
+        );
+        let engine = render_plain(&ir, &RenderOptions::plain());
+        assert_same(
+            &format!("hero {dir:?} (golden)"),
+            golden.trim_end(),
+            engine.trim_end(),
+        );
+    }
+}
+
 /// The hero example against the golden snapshot (regenerated at RW8
 /// when the engine became the output of record).
 #[test]
@@ -2042,11 +2080,12 @@ mod node_painters {
     }
 }
 
-// ── LR-P1 S4: Horizontal geometry-invariant acceptance (temp/08) ────────
+// ── Horizontal geometry invariants + rendering (temp/08) ───────────────
 //
-// IR-only judgment of the native LR layout: the compositor stays
-// y-primary until LR-P3, so nothing here renders — the invariants ARE
-// the acceptance gate for the dispatch flip.
+// The acceptance suite for native LR/RL layout, run over the whole
+// corpus in BOTH orientations: geometric invariants on the IR, the
+// glyph⇄hit ink sweep, band cap-invariance, and cross-backend parity
+// at field and byte level.
 mod lr_invariants {
     use super::*;
     use crate::algorithms::sugiyama::geometry::Horizontal;
