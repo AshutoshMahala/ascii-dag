@@ -27,7 +27,8 @@ fn main() {
 
     // Build Graph (Same as simulate_pure)
     println!("> Building Graph...");
-    let mut builder = CsrGraphBuilder::new(&mut graph_arena, 10, 10, 64, 0).expect("arena too small");
+    let mut builder =
+        CsrGraphBuilder::new(&mut graph_arena, 10, 10, 64, 0).expect("arena too small");
     let n0 = builder.add_node(0, "Source").expect("add Source");
     let n1 = builder.add_node(1, "Middle").expect("add Middle");
     let n2 = builder.add_node(2, "Sink").expect("add Sink");
@@ -82,9 +83,7 @@ fn main() {
         {
             let mut scratch_buffer = vec![0u8; layout.estimate_render_arena_size(&options)];
             let render_arena = ascii_dag::graph::arena::Arena::new(&mut scratch_buffer);
-            if let Ok(bytes) =
-                layout.render_to_bytes(&options, &render_arena, render_buffer)
-            {
+            if let Ok(bytes) = layout.render_to_bytes(&options, &render_arena, render_buffer) {
                 if let Ok(s) = core::str::from_utf8(&render_buffer[..bytes]) {
                     println!("\n{}", s);
                 }

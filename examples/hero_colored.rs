@@ -67,7 +67,10 @@ fn main() {
         }
     } else {
         let ir = dag.compute_layout();
-        println!("{}", ir.render_string(&RenderOptions::colored(Palette::Ansi)));
+        println!(
+            "{}",
+            ir.render_string(&RenderOptions::colored(Palette::Ansi))
+        );
     }
 
     // Benchmark: test with many labeled edges

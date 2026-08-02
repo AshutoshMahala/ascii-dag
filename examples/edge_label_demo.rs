@@ -50,16 +50,33 @@ fn run_heap() {
 
     println!("\nScanline render with colors:");
     let ir = dag.compute_layout();
-    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::Ansi); o.legend = false; o }));
+    println!(
+        "{}",
+        ir.render_string(&{
+            let mut o = RenderOptions::colored(Palette::Ansi);
+            o.legend = false;
+            o
+        })
+    );
 
     println!("Dark mode palette:");
-    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::AnsiDark); o.legend = false; o }));
+    println!(
+        "{}",
+        ir.render_string(&{
+            let mut o = RenderOptions::colored(Palette::AnsiDark);
+            o.legend = false;
+            o
+        })
+    );
 
     println!("\n--- Legend feature demo (complex graph) ---\n");
     let dag2 = build_complex_dag();
     let ir2 = dag2.compute_layout();
     println!("With legend for skipped labels:");
-    println!("{}", ir2.render_string(&RenderOptions::colored(Palette::Ansi)));
+    println!(
+        "{}",
+        ir2.render_string(&RenderOptions::colored(Palette::Ansi))
+    );
 }
 
 #[cfg(feature = "arena")]

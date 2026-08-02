@@ -194,8 +194,7 @@ fn run_csr_test(name: &str, dag: &Graph) {
                     let options = RenderOptions::plain();
                     let mut arena_buf = vec![0u8; layout.estimate_render_arena_size(&options)];
                     let render_arena = ascii_dag::graph::arena::Arena::new(&mut arena_buf);
-                    let mut render_buffer =
-                        vec![0u8; layout.estimate_render_output_size(&options)];
+                    let mut render_buffer = vec![0u8; layout.estimate_render_output_size(&options)];
                     let bytes_written = layout
                         .render_to_bytes(&options, &render_arena, &mut render_buffer)
                         .unwrap_or(0);

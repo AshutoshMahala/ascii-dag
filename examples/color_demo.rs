@@ -32,7 +32,14 @@ fn run_heap() {
     dag.add_edge(4, 5, None);
 
     let ir = dag.compute_layout();
-    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::Ansi); o.legend = false; o }));
+    println!(
+        "{}",
+        ir.render_string(&{
+            let mut o = RenderOptions::colored(Palette::Ansi);
+            o.legend = false;
+            o
+        })
+    );
 
     // Example 2: Diamond dependency (shows edge colors clearly)
     println!("2. Diamond Pattern:");
@@ -48,7 +55,14 @@ fn run_heap() {
     diamond.add_edge(3, 4, None);
 
     let ir = diamond.compute_layout();
-    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::Ansi); o.legend = false; o }));
+    println!(
+        "{}",
+        ir.render_string(&{
+            let mut o = RenderOptions::colored(Palette::Ansi);
+            o.legend = false;
+            o
+        })
+    );
 
     // Example 3: More complex graph
     println!("3. Module Dependencies:");
@@ -69,19 +83,47 @@ fn run_heap() {
     modules.add_edge(5, 6, None);
 
     let ir = modules.compute_layout();
-    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::Ansi); o.legend = false; o }));
+    println!(
+        "{}",
+        ir.render_string(&{
+            let mut o = RenderOptions::colored(Palette::Ansi);
+            o.legend = false;
+            o
+        })
+    );
 
     // Show different palettes
     println!("4. Same graph with different palettes:\n");
 
     println!("Default (Ansi):");
-    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::Ansi); o.legend = false; o }));
+    println!(
+        "{}",
+        ir.render_string(&{
+            let mut o = RenderOptions::colored(Palette::Ansi);
+            o.legend = false;
+            o
+        })
+    );
 
     println!("Dark Mode (AnsiDark):");
-    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::AnsiDark); o.legend = false; o }));
+    println!(
+        "{}",
+        ir.render_string(&{
+            let mut o = RenderOptions::colored(Palette::AnsiDark);
+            o.legend = false;
+            o
+        })
+    );
 
     println!("Light Mode (AnsiLight):");
-    println!("{}", ir.render_string(&{ let mut o = RenderOptions::colored(Palette::AnsiLight); o.legend = false; o }));
+    println!(
+        "{}",
+        ir.render_string(&{
+            let mut o = RenderOptions::colored(Palette::AnsiLight);
+            o.legend = false;
+            o
+        })
+    );
 }
 
 #[cfg(feature = "arena")]
