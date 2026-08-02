@@ -95,13 +95,19 @@ fn run_heap() {
     // Example: Analyze edge routing
     println!("Edge routing (for custom path drawing):");
     for edge in ir.edges() {
+        // Level-axis scalars are rows for `Y` trunks, columns for `X`
+        // — the edge's `flow_axis` says which.
+        let (level, cross) = match edge.flow_axis {
+            ascii_dag::FlowAxis::Y => ("y", "x"),
+            ascii_dag::FlowAxis::X => ("x", "y"),
+        };
         let route_type = match &edge.path {
-            ascii_dag::ir::EdgePath::Direct => "Direct (vertical line)".to_string(),
-            ascii_dag::ir::EdgePath::Corner { horizontal_y } => {
-                format!("Corner (L-shape at y={})", horizontal_y)
+            ascii_dag::ir::EdgePath::Direct => "Direct (straight flow segment)".to_string(),
+            ascii_dag::ir::EdgePath::Corner { bend_at } => {
+                format!("Corner (L-shape, bend at {level}={bend_at})")
             }
-            ascii_dag::ir::EdgePath::SideChannel { channel_x, .. } => {
-                format!("SideChannel (routed via x={})", channel_x)
+            ascii_dag::ir::EdgePath::SideChannel { channel_at, .. } => {
+                format!("SideChannel (routed via {cross}={channel_at})")
             }
             ascii_dag::ir::EdgePath::MultiSegment { waypoints, .. } => {
                 format!("MultiSegment ({} waypoints)", waypoints.len())

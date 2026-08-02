@@ -9,7 +9,10 @@ layout (cycle breaking, layering, crossing reduction, edge routing)
 with a terminal renderer. Zero dependencies. `no_std` ready — the
 arena pipeline runs without a heap allocator.
 
-<img src="assets/hero_colored_heap.png" alt="hero example — colored output" width="300"/>
+<img src="assets/hero_colored_heap.png" alt="hero example — heap colored output" height="700"/>
+<img src="assets/hero_arena_rl_dummy.png" alt="hero example — arena colored output with dummy enabled" height="300"/>
+<img src="assets/longan_nano.jpg" alt="longan_nano ascii output" height="300"/>
+
 
 ## Example
 
@@ -99,7 +102,7 @@ g.put_subgraphs(&[inner]).inside(sg)?; // nesting (cycle-checked)
 | `charset` | `Unicode` / `Ascii` (equal projections of one canvas) | `Unicode` |
 | `color_mode` | `None` / `Ansi256` / `TrueColor` | `None` |
 | `palette` | ANSI palette for edge coloring | `Ansi` |
-| `legend` | skipped-label legend (colored output) | off |
+| `legend` | list labels that could not be placed inline | off |
 | `band_rows_cap` | banded rendering: canvas memory = `width × cap` | 64 |
 | `show_dummy_nodes` | draw `◍` at routing waypoints | off |
 | `edge_style_fn` / `subgraph_style_fn` / `edge_label_style_fn` | per-element style callbacks (plain `fn`) | legacy look |
@@ -113,12 +116,32 @@ Presets: `RenderOptions::plain()`, `::colored(palette)`, `::ascii()`,
 ### Layout settings
 
 ```rust
-g.set_direction(Direction::BottomUp);   // TB (default) or BT; parses "TB"/"BT"/…
+g.set_direction(Direction::LeftRight);   // TB (default), BT, LR, RL
 let mut config = LayoutConfig::standard();
-config.node_spacing = 4;                // horizontal gap
-config.level_spacing = 1;               // extra rows between levels
-config.include_dummy_nodes = true;      // emit routing waypoints into the IR
+config.node_spacing = 4;                 // gap between nodes within a level
+config.level_spacing = 1;                // extra gap between levels
+config.include_dummy_nodes = true;       // emit routing waypoints into the IR
 ```
+
+All four directions lay out natively. `TB`/`BT` stack levels as rows;
+`LR`/`RL` make them columns, which suits wide, shallow graphs:
+
+```text
+TB (default)          LR
+                                       ┌→[Store]
+  [Fetch]                   "raw"      │
+     │ "raw"          [Fetch]──→[Parse]┤
+     ↓                                 │
+  [Parse]                              └→[Index]
+   ┌─┴──┐
+   ↓    ↓
+[Store] [Index]
+```
+
+`BT` and `RL` are exact mirrors of `TB` and `LR`. The spacing settings
+follow the direction — `node_spacing` separates nodes within a level,
+`level_spacing` separates levels — so the same config reads sensibly
+whichever way the graph flows.
 
 Crossing-reduction presets `FAST` / `STANDARD` / `QUALITY` (or a
 custom `CrossingReducer` pipeline) via `set_crossing_pipeline`. Full
@@ -175,9 +198,8 @@ with stderr closed):
 
 Text-grid output: edges route orthogonally (no diagonals), wide
 Unicode in labels counts as one cell per `char`, and layouts optimize
-for readability rather than minimal area. Layout directions `LR`/`RL`
-are parsed but not yet implemented. For heavy graph *algorithms* use
-`petgraph`; for image-quality output use Graphviz.
+for readability rather than minimal area. For heavy graph *algorithms*
+use `petgraph`; for image-quality output use Graphviz.
 
 ## License
 

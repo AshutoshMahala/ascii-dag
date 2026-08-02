@@ -54,7 +54,11 @@ impl Weight {
 
     /// The stronger of two arms (merge rule).
     pub(crate) fn max(self, other: Weight) -> Weight {
-        if (self as u32) >= (other as u32) { self } else { other }
+        if (self as u32) >= (other as u32) {
+            self
+        } else {
+            other
+        }
     }
 }
 
@@ -427,8 +431,7 @@ mod tests {
         // Legacy can_place_label: space or the edge's own '│' only.
         assert!(Cell::EMPTY.accepts_label());
         assert!(
-            Cell::stroke(Weight::Light, Weight::Light, Weight::None, Weight::None)
-                .accepts_label()
+            Cell::stroke(Weight::Light, Weight::Light, Weight::None, Weight::None).accepts_label()
         );
         assert!(
             Cell::stroke(Weight::Dashed, Weight::Dashed, Weight::None, Weight::None)
@@ -439,8 +442,6 @@ mod tests {
                 .accepts_label()
         );
         assert!(!Cell::text('q').accepts_label());
-        assert!(
-            !Cell::marker(MarkerKind::Arrow, Dir::Down, false).accepts_label()
-        );
+        assert!(!Cell::marker(MarkerKind::Arrow, Dir::Down, false).accepts_label());
     }
 }

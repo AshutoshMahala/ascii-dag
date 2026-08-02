@@ -110,7 +110,11 @@ pub(crate) fn emit_legend<V: LayoutView, W: core::fmt::Write>(
         let arrow = charset.legend_arrow();
         write_fg(out, plan.edge_plan(ei).color, mode)?;
         write!(out, "{from} {arrow} {to}: \"{label}\"")?;
-        out.write_str("\x1b[0m")?;
+        // Plain legends emit no escapes at all (D4) — the reset only
+        // closes a color that was actually opened.
+        if !matches!(mode, super::color::ColorMode::None) {
+            out.write_str("\x1b[0m")?;
+        }
         out.write_char('\n')?;
     }
     Ok(())
@@ -121,11 +125,7 @@ pub(crate) fn emit_legend<V: LayoutView, W: core::fmt::Write>(
 /// bounds plain output; colored rows add at most one escape per cell
 /// (worst case truecolor, 19 bytes) plus a reset. The legend bound
 /// assumes every labeled edge lands in the legend.
-pub(crate) fn estimate_output_size<V: LayoutView>(
-    view: &V,
-    colored: bool,
-    legend: bool,
-) -> usize {
+pub(crate) fn estimate_output_size<V: LayoutView>(view: &V, colored: bool, legend: bool) -> usize {
     let per_cell = if colored { 4 + 19 } else { 4 };
     let mut size = view
         .height()

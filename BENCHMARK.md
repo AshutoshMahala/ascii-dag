@@ -98,6 +98,38 @@ kinds cost nothing (the tag packs into existing per-node flags), and
 only nodes declaring a painter/payload pay — 32 B per entry plus their
 payload bytes. Render time is unaffected.
 
+## Rank-direction support: what LR/RL cost (0.10, measured)
+
+The four directions share **one** layout pipeline, parameterized by a
+zero-sized axis profile the compiler monomorphizes away. Both profiles
+(`Vertical` for TB/BT, `Horizontal` for LR/RL) are reachable from
+`compute_layout()`, so the binary carries two stamped copies of the
+layout stage.
+
+Measured against the pre-direction-block baseline, release build,
+stripped, Apple M2 Ultra:
+
+| Binary | Before | After | Delta |
+|---|---:|---:|---:|
+| `hero` example | 502,552 B | 585,976 B | **+16.6%** |
+| `benchmark` example | 519,048 B | 585,800 B | **+12.9%** |
+
+Layout time, min-of-3 interleaved runs (the two profiles execute the
+same algorithm — TD/BT output is byte-identical before and after — so
+any delta is scheduling plus instruction-cache pressure from the
+larger binary, not extra work):
+
+| Shape | Heap | Arena |
+|---|---:|---:|
+| Chain 100 / 250 | +9% / +7% | +6% / +20% |
+| Diamond 100 / 200 | +2% / +2% | +3% / +3% |
+| WideFan 100 / 500 | −1% / −2% | −2% / −11% |
+
+Net: a wash on time, ~13–17% on size. If the size matters more than
+the feature for a given target, the fallback D1 recorded is to trade
+the second monomorphization for an enum branch in the cold parts of
+the pipeline.
+
 ## Bundle size (WASM, `opt-level = "z"` + LTO + `wasm-opt -Oz`)
 
 - Arena mode (no-alloc): **~39 KB** (17 KB gzipped)

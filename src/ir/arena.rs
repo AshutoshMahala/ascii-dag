@@ -58,6 +58,17 @@ pub struct LayoutNodeArena {
     pub kind: NodeKind,
     /// Whether this node has a self-loop edge (A → A)
     pub has_self_loop: bool,
+    /// Physical cell of the self-loop marker (temp/08 D5):
+    /// `(usize::MAX, usize::MAX)` = none. Set together with
+    /// `has_self_loop` by [`set_self_loop`] (which derives the legacy
+    /// cell, one right of the top row) — builder-produced IRs never
+    /// disagree; hand-built literals own the pair's consistency.
+    /// The vertical flip re-anchors it to the same node-relative
+    /// corner; the horizontal flip point-maps, which on that axis is
+    /// the same answer.
+    ///
+    /// [`set_self_loop`]: crate::ir::arena::LayoutIRArenaBuilder::set_self_loop
+    pub self_loop_at: (usize, usize),
     /// For dummy nodes: the index of the edge this dummy belongs to.
     /// `usize::MAX` = none (real node) — same sentinel convention as
     /// `SubgraphInfoArena::parent_idx`. Mirrors zigraph.
@@ -87,31 +98,33 @@ pub struct CustomNodeArena {
 /// Edge routing type (no heap allocation version).
 #[derive(Debug, Clone, Copy)]
 pub enum EdgePathArena {
-    /// Direct vertical connection
+    /// Straight flow segment (endpoints share their cross-axis line).
     Direct,
-    /// L-shaped connection with a horizontal segment
+    /// L-shaped connection with one cross-axis distribution segment.
     Corner {
-        /// Y coordinate of the horizontal bend.
-        horizontal_y: usize,
+        /// The level-axis line the cross segment runs on — a ROW for
+        /// `flow_axis: Y` trunks, a COLUMN for `X` trunks.
+        bend_at: usize,
     },
-    /// Routed through a side channel (for skip-level edges).
-    /// Mirrors heap `EdgePath::SideChannel`.
+    /// Routed through a far cross-axis channel (legacy skip-edge
+    /// shape). Mirrors heap `EdgePath::SideChannel`.
     SideChannel {
-        /// X coordinate of the vertical channel
-        channel_x: usize,
-        /// Starting Y of the channel
-        start_y: usize,
-        /// Ending Y of the channel
-        end_y: usize,
+        /// Cross-axis line of the channel.
+        channel_at: usize,
+        /// Level-axis start of the channel span.
+        span_start: usize,
+        /// Level-axis end of the channel span.
+        span_end: usize,
     },
-    /// Multi-segment path (waypoints stored separately)
+    /// Multi-segment path (waypoints stored separately; always
+    /// materialized physical `(x, y)` cells).
     MultiSegment {
         /// Start index into waypoints array
         waypoints_start: usize,
         /// Number of waypoints
         waypoints_len: usize,
-        /// Vertical offset for the start of the edge
-        start_y_offset: usize,
+        /// Level-axis offset of the first bend past the source.
+        start_offset: usize,
     },
     /// Bézier spline hint (for SVG/canvas renderers; ASCII renderers fall back to Direct).
     /// Mirrors zigraph's `EdgePath.spline`.
@@ -149,6 +162,10 @@ pub struct LayoutEdgeArena {
     pub reversed: bool,
     /// How the edge is routed
     pub path: EdgePathArena,
+    /// Which physical axis the trunk runs along (see
+    /// [`FlowAxis`](crate::ir::FlowAxis)). Every TopDown/BottomUp
+    /// edge is `Y`. Flips copy it verbatim (mirror-invariant).
+    pub flow_axis: crate::ir::FlowAxis,
     /// Edge index (for consistent coloring)
     pub edge_index: usize,
     /// Offset into labels array for edge label (0 = no label)

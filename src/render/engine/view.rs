@@ -35,7 +35,12 @@ pub(crate) struct NodeRef<'a> {
     #[allow(dead_code)] // no paint consumer yet (parity contract, N1)
     pub level_position: usize,
     pub kind: NodeKind,
+    /// `self_loop_at.is_some()` by the D5 invariant — paint and
+    /// hit-testing read the cell directly.
+    #[allow(dead_code)] // superseded by self_loop_at (parity contract, N1)
     pub has_self_loop: bool,
+    /// Self-loop marker cell (arena sentinel normalized to `None`).
+    pub self_loop_at: Option<(usize, usize)>,
     /// Owning edge for dummy nodes; `None` for real nodes.
     #[allow(dead_code)] // consumer lands with RW7 dummy introspection
     pub edge_index: Option<usize>,
@@ -50,16 +55,16 @@ pub(crate) struct NodeRef<'a> {
 pub(crate) enum PathRef<'a> {
     Direct,
     Corner {
-        horizontal_y: usize,
+        bend_at: usize,
     },
     SideChannel {
-        channel_x: usize,
-        start_y: usize,
-        end_y: usize,
+        channel_at: usize,
+        span_start: usize,
+        span_end: usize,
     },
     MultiSegment {
         waypoints: &'a [(usize, usize)],
-        start_y_offset: usize,
+        start_offset: usize,
     },
     Spline {
         cp1_x: usize,
@@ -87,6 +92,9 @@ pub(crate) struct EdgeRef<'a> {
     pub label_y: usize,
     pub directed: bool,
     pub reversed: bool,
+    /// Physical axis of the edge's trunk (temp/08 D2) — selects the
+    /// compositor's paint path.
+    pub flow_axis: crate::ir::FlowAxis,
     pub path: PathRef<'a>,
 }
 
@@ -165,6 +173,7 @@ impl LayoutView for crate::ir::LayoutIR<'_> {
             level_position: n.level_position,
             kind: n.kind,
             has_self_loop: n.has_self_loop,
+            self_loop_at: n.self_loop_at,
             edge_index: n.edge_index,
             content_tag: n.content_tag,
         }
@@ -191,24 +200,22 @@ impl LayoutView for crate::ir::LayoutIR<'_> {
         let e = &self.edges()[index];
         let path = match &e.path {
             crate::ir::EdgePath::Direct => PathRef::Direct,
-            crate::ir::EdgePath::Corner { horizontal_y } => PathRef::Corner {
-                horizontal_y: *horizontal_y,
-            },
+            crate::ir::EdgePath::Corner { bend_at } => PathRef::Corner { bend_at: *bend_at },
             crate::ir::EdgePath::SideChannel {
-                channel_x,
-                start_y,
-                end_y,
+                channel_at,
+                span_start,
+                span_end,
             } => PathRef::SideChannel {
-                channel_x: *channel_x,
-                start_y: *start_y,
-                end_y: *end_y,
+                channel_at: *channel_at,
+                span_start: *span_start,
+                span_end: *span_end,
             },
             crate::ir::EdgePath::MultiSegment {
                 waypoints,
-                start_y_offset,
+                start_offset,
             } => PathRef::MultiSegment {
                 waypoints: waypoints.as_slice(),
-                start_y_offset: *start_y_offset,
+                start_offset: *start_offset,
             },
             crate::ir::EdgePath::Spline {
                 cp1_x,
@@ -235,6 +242,7 @@ impl LayoutView for crate::ir::LayoutIR<'_> {
             label_y: e.label_y,
             directed: e.directed,
             reversed: e.reversed,
+            flow_axis: e.flow_axis,
             path,
         }
     }
@@ -295,6 +303,11 @@ impl LayoutView for crate::ir::arena::LayoutIRArena<'_> {
             level_position: n.level_position,
             kind: n.kind,
             has_self_loop: n.has_self_loop,
+            self_loop_at: if n.self_loop_at == (usize::MAX, usize::MAX) {
+                None
+            } else {
+                Some(n.self_loop_at)
+            },
             edge_index: if n.edge_index == usize::MAX {
                 None
             } else {
@@ -323,25 +336,23 @@ impl LayoutView for crate::ir::arena::LayoutIRArena<'_> {
         let e = self.edge(index);
         let path = match e.path {
             crate::ir::arena::EdgePathArena::Direct => PathRef::Direct,
-            crate::ir::arena::EdgePathArena::Corner { horizontal_y } => {
-                PathRef::Corner { horizontal_y }
-            }
+            crate::ir::arena::EdgePathArena::Corner { bend_at } => PathRef::Corner { bend_at },
             crate::ir::arena::EdgePathArena::SideChannel {
-                channel_x,
-                start_y,
-                end_y,
+                channel_at,
+                span_start,
+                span_end,
             } => PathRef::SideChannel {
-                channel_x,
-                start_y,
-                end_y,
+                channel_at,
+                span_start,
+                span_end,
             },
             crate::ir::arena::EdgePathArena::MultiSegment {
                 waypoints_start,
                 waypoints_len,
-                start_y_offset,
+                start_offset,
             } => PathRef::MultiSegment {
                 waypoints: self.edge_waypoints_raw(waypoints_start, waypoints_len),
-                start_y_offset,
+                start_offset,
             },
             crate::ir::arena::EdgePathArena::Spline {
                 cp1_x,
@@ -372,6 +383,7 @@ impl LayoutView for crate::ir::arena::LayoutIRArena<'_> {
             label_y: e.label_y,
             directed: e.directed,
             reversed: e.reversed,
+            flow_axis: e.flow_axis,
             path,
         }
     }
@@ -492,6 +504,7 @@ mod tests {
             n.kind,
             n.has_self_loop,
         );
+        let _ = write!(s, " loop_at={:?}", n.self_loop_at);
         s
     }
 
@@ -514,6 +527,7 @@ mod tests {
             e.reversed,
             e.path,
         );
+        let _ = write!(s, " axis={:?}", e.flow_axis);
         s
     }
 
@@ -533,16 +547,17 @@ mod tests {
                 // Nodes: emission order differs between backends
                 // (level-major vs graph-index-major) — compare keyed sets.
                 assert_eq!(LayoutView::node_count(heap), LayoutView::node_count(csr));
-                let collect_nodes = |view: &dyn LayoutView| -> Vec<((usize, usize, usize), String)> {
-                    let mut v: Vec<_> = (0..view.node_count())
-                        .map(|i| {
-                            let n = view.node(i);
-                            (node_key(&n), node_fingerprint(&n))
-                        })
-                        .collect();
-                    v.sort();
-                    v
-                };
+                let collect_nodes =
+                    |view: &dyn LayoutView| -> Vec<((usize, usize, usize), String)> {
+                        let mut v: Vec<_> = (0..view.node_count())
+                            .map(|i| {
+                                let n = view.node(i);
+                                (node_key(&n), node_fingerprint(&n))
+                            })
+                            .collect();
+                        v.sort();
+                        v
+                    };
                 assert_eq!(
                     collect_nodes(heap),
                     collect_nodes(csr),

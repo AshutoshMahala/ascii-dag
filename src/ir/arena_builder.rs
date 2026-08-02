@@ -193,6 +193,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             level_position,
             kind,
             has_self_loop: false,
+            self_loop_at: (usize::MAX, usize::MAX),
             edge_index,
             content_tag,
         };
@@ -245,10 +246,29 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         Some(edge_idx)
     }
 
-    /// Mark a node as having a self-loop edge.
+    /// Mark a node as having a self-loop edge. Also derives the
+    /// marker cell (`self_loop_at`, temp/08 D5): one cell right of
+    /// the node's top row — the legacy `↺` position for vertical
+    /// flows. Layout uses [`set_self_loop_at`](Self::set_self_loop_at)
+    /// to place the cell axis-correctly; this derivation serves
+    /// hand-built vertical IRs.
     pub fn set_self_loop(&mut self, node_idx: usize) {
         if node_idx < self.node_count {
-            self.nodes[node_idx].has_self_loop = true;
+            let n = &mut self.nodes[node_idx];
+            n.has_self_loop = true;
+            n.self_loop_at = (n.x + n.width, n.y);
+        }
+    }
+
+    /// Mark a node as having a self-loop edge, with the marker cell
+    /// computed by layout (temp/08 D5: one cell past the node on the
+    /// cross axis, at its level-leading line — axis-dependent, so the
+    /// layout supplies it).
+    pub fn set_self_loop_at(&mut self, node_idx: usize, cell: (usize, usize)) {
+        if node_idx < self.node_count {
+            let n = &mut self.nodes[node_idx];
+            n.has_self_loop = true;
+            n.self_loop_at = cell;
         }
     }
 
@@ -374,6 +394,11 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         for node in &mut self.nodes[..self.node_count] {
             node.y = h.saturating_sub(node.y + node.height);
             node.center_y = flip_row(node.center_y);
+            // Re-anchor (not point-map): the marker stays one cell right
+            // of the FINAL top row — the engine's direction-blind rule.
+            if node.self_loop_at != (usize::MAX, usize::MAX) {
+                node.self_loop_at = (node.x + node.width, node.y);
+            }
         }
 
         for edge in &mut self.edges[..self.edge_count] {
@@ -385,11 +410,17 @@ impl<'a> LayoutIRArenaBuilder<'a> {
                 edge.label_y = flip_row(edge.label_y);
             }
             match &mut edge.path {
-                EdgePathArena::Corner { horizontal_y } => *horizontal_y = flip_row(*horizontal_y),
-                EdgePathArena::SideChannel { start_y, end_y, .. } => {
-                    let (s, e) = (flip_row(*end_y), flip_row(*start_y));
-                    *start_y = s;
-                    *end_y = e;
+                EdgePathArena::Corner { bend_at } => *bend_at = flip_row(*bend_at),
+                EdgePathArena::SideChannel {
+                    span_start,
+                    span_end,
+                    ..
+                } => {
+                    // Mirror each in place — never swap (see the heap
+                    // twin): the anchors carry source/target roles a
+                    // mirror does not exchange.
+                    *span_start = flip_row(*span_start);
+                    *span_end = flip_row(*span_end);
                 }
                 EdgePathArena::MultiSegment {
                     waypoints_start,
@@ -415,6 +446,97 @@ impl<'a> LayoutIRArenaBuilder<'a> {
 
         for sg in &mut self.subgraphs[..self.subgraph_count] {
             sg.y = h.saturating_sub(sg.y + sg.height);
+        }
+    }
+
+    /// Horizontally mirror every coordinate in place (involutive).
+    ///
+    /// The x-axis twin of [`flip_vertical`](Self::flip_vertical),
+    /// applied pre-build for `Direction::RightLeft` — after the final
+    /// `set_dimensions`, since the mirror is computed from
+    /// `self.width`. Both backends must apply the identical transform
+    /// to every path variant or their IRs can drift.
+    ///
+    /// The pair covers the axes their directions produce: `RightLeft`
+    /// mirrors horizontal layouts, `BottomUp` vertical ones.
+    pub(crate) fn flip_horizontal(&mut self) {
+        let w = self.width;
+        let flip_col = |x: usize| w.saturating_sub(1).saturating_sub(x);
+
+        for node in &mut self.nodes[..self.node_count] {
+            node.x = w.saturating_sub(node.x + node.width);
+            node.center_x = flip_col(node.center_x);
+            // Point-map (unlike the vertical flip's re-anchor): the LR
+            // marker sits at the node's LEADING column, and its mirror
+            // is the flipped node's trailing column — the leading side
+            // again under right-to-left flow. Role rule and point
+            // mirror coincide on this axis.
+            if node.self_loop_at != (usize::MAX, usize::MAX) {
+                node.self_loop_at = (flip_col(node.self_loop_at.0), node.self_loop_at.1);
+            }
+        }
+
+        for edge in &mut self.edges[..self.edge_count] {
+            edge.from_x = flip_col(edge.from_x);
+            edge.to_x = flip_col(edge.to_x);
+            // A label occupies a SPAN of cells and mirrors as one —
+            // measured in CHARACTERS (`label_len` is bytes) — and only
+            // when it exists.
+            if edge.label_len > 0 {
+                let bytes = &self.labels[edge.label_offset..edge.label_offset + edge.label_len];
+                let chars = core::str::from_utf8(bytes)
+                    .map(|t| t.chars().count())
+                    .unwrap_or(edge.label_len);
+                edge.label_x = w.saturating_sub(edge.label_x + chars + 2);
+            }
+            // `flow_axis` is mirror-invariant (D2); `start_offset` is
+            // flow-relative. The level-axis path scalars flip only when
+            // the level axis IS x — i.e. for horizontal trunks.
+            let x_flow = matches!(edge.flow_axis, crate::ir::FlowAxis::X);
+            match &mut edge.path {
+                EdgePathArena::Corner { bend_at } => {
+                    if x_flow {
+                        *bend_at = flip_col(*bend_at);
+                    }
+                }
+                EdgePathArena::SideChannel {
+                    channel_at,
+                    span_start,
+                    span_end,
+                } => {
+                    if x_flow {
+                        // Both spans are columns and each mirrors in
+                        // place — NOT swapped: `span_start` is
+                        // source-associated, `span_end`
+                        // target-associated. The channel line is a
+                        // row, untouched.
+                        *span_start = flip_col(*span_start);
+                        *span_end = flip_col(*span_end);
+                    } else {
+                        *channel_at = flip_col(*channel_at);
+                    }
+                }
+                EdgePathArena::MultiSegment {
+                    waypoints_start,
+                    waypoints_len,
+                    ..
+                } => {
+                    let range = *waypoints_start..*waypoints_start + *waypoints_len;
+                    for wp in &mut self.waypoints[range] {
+                        wp.0 = flip_col(wp.0);
+                    }
+                }
+                EdgePathArena::Spline { cp1_x, cp2_x, .. } => {
+                    *cp1_x = flip_col(*cp1_x);
+                    *cp2_x = flip_col(*cp2_x);
+                }
+                EdgePathArena::Direct => {}
+            }
+            // `min_y`/`max_y` are ROW bounds — an x-flip leaves them.
+        }
+
+        for sg in &mut self.subgraphs[..self.subgraph_count] {
+            sg.x = w.saturating_sub(sg.x + sg.width);
         }
     }
 

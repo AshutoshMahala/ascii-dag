@@ -73,7 +73,12 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
             emit::emit_plain_band(&canvas, options.charset, out)?;
         }
     }
-    if colored && options.legend {
+    // D4 (temp/08): the legend works in plain mode too — labels that
+    // don't fit go to the legend regardless of color mode; a plain
+    // legend is self-keying (`from -> to: label`). `ColorMode::None`
+    // emits no escapes. Default plain options keep `legend = false`,
+    // so default output is unchanged.
+    if options.legend {
         emit::emit_legend(view_ref, &plan, options.charset, options.color_mode, out)?;
     }
     Ok(())
@@ -143,13 +148,8 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
     let mut sink = emit::ByteSink::new(out);
     let mut write = || -> core::fmt::Result {
         for &(y0, rows) in plan.band_ranges() {
-            let mut canvas = compose::BandCanvas::new(
-                cells,
-                colors.as_deref_mut(),
-                plan.width(),
-                y0,
-                rows,
-            );
+            let mut canvas =
+                compose::BandCanvas::new(cells, colors.as_deref_mut(), plan.width(), y0, rows);
             compose::composite_band(view_ref, &plan, options, &mut canvas, &mut scratch);
             if colored {
                 emit::emit_colored_band(&canvas, options.charset, options.color_mode, &mut sink)?;
@@ -157,8 +157,15 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
                 emit::emit_plain_band(&canvas, options.charset, &mut sink)?;
             }
         }
-        if colored && options.legend {
-            emit::emit_legend(view_ref, &plan, options.charset, options.color_mode, &mut sink)?;
+        // D4: plain legends too — the same gate the alloc path uses.
+        if options.legend {
+            emit::emit_legend(
+                view_ref,
+                &plan,
+                options.charset,
+                options.color_mode,
+                &mut sink,
+            )?;
         }
         Ok(())
     };
@@ -190,7 +197,7 @@ pub(crate) fn estimate_render_output_size<V: view::LayoutView>(
     options: &config::RenderOptions,
 ) -> usize {
     let colored = !matches!(options.color_mode, color::ColorMode::None);
-    emit::estimate_output_size(view_ref, colored, colored && options.legend)
+    emit::estimate_output_size(view_ref, colored, options.legend)
 }
 
 pub use charset::Charset;
@@ -201,6 +208,5 @@ pub use plan::{HitResult, RenderPlan};
 pub use region::{NodePaintCtx, NodeRegion};
 pub use style::{
     EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPlacement, LabelPosition, LineWeight,
-    MarkerShape, NodePaintFn, SubgraphBorder,
-    SubgraphStyle, SubgraphStyleCtx,
+    MarkerShape, NodePaintFn, SubgraphBorder, SubgraphStyle, SubgraphStyleCtx,
 };

@@ -13,10 +13,10 @@
 
 use super::config::RenderOptions;
 use super::{render_colored, render_plain};
-use crate::render::colors::Palette;
 use crate::algorithms::sugiyama::config::LayoutConfig;
 use crate::graph::Graph;
 use crate::graph::arena::Arena;
+use crate::render::colors::Palette;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -246,7 +246,11 @@ fn engine_self_parity_across_backends() {
         let ir = g.compute_layout();
         let heap_out = render_plain(&ir, &RenderOptions::plain());
         let csr_out = csr_engine(&g, &RenderOptions::plain());
-        assert_same(&format!("{tag} (engine heap vs engine csr)"), &heap_out, &csr_out);
+        assert_same(
+            &format!("{tag} (engine heap vs engine csr)"),
+            &heap_out,
+            &csr_out,
+        );
     }
 }
 
@@ -269,7 +273,10 @@ fn ruled_classes_render_canonically() {
 
     // Class D: unfittable edge labels are skipped — never truncated
     // without a closing quote.
-    let collide = render_plain(&colliding_labels().compute_layout(), &RenderOptions::plain());
+    let collide = render_plain(
+        &colliding_labels().compute_layout(),
+        &RenderOptions::plain(),
+    );
     assert_eq!(collide.matches('"').count() % 2, 0, "{collide}");
 }
 
@@ -292,6 +299,88 @@ fn hero_self_parity_across_backends() {
         &render_colored(&ir, &colored),
         &csr_engine(&hero_graph(), &colored),
     );
+}
+
+/// D4 (temp/08): the legend works in PLAIN mode — labels that fail
+/// geometric placement are listed as self-keying `from → to: label`
+/// lines, no color required, no escapes emitted. Off by default
+/// (`RenderOptions::plain()` keeps `legend = false`), so default
+/// plain output is unchanged.
+#[test]
+fn plain_legend_lists_unplaced_labels() {
+    let g = colliding_labels();
+    let ir = g.compute_layout();
+    let mut options = RenderOptions::plain();
+    options.legend = true;
+    let mut out = String::new();
+    ir.render_with(&options, &mut out).expect("render");
+    assert!(
+        !out.contains('\x1b'),
+        "no escapes in a plain legend:\n{out}"
+    );
+    assert!(
+        out.contains(" → "),
+        "legend lines present (colliding_labels always overflows):\n{out}"
+    );
+    // And the default stays legend-free.
+    let mut plain = String::new();
+    ir.render_with(&RenderOptions::plain(), &mut plain)
+        .expect("render");
+    assert!(!plain.contains(" → "), "no legend by default:\n{plain}");
+
+    // Slices review [P1]: the no-alloc surface must agree — one
+    // assertion covering both the emission gate and the estimator.
+    use crate::render::engine::{
+        estimate_render_arena_size, estimate_render_output_size, render_to_bytes,
+    };
+    let mut arena_buf = vec![0u8; estimate_render_arena_size(&ir, &options)];
+    let arena = Arena::new(&mut arena_buf);
+    let mut bytes = vec![0u8; estimate_render_output_size(&ir, &options)];
+    let written = render_to_bytes(&ir, &options, &arena, &mut bytes)
+        .expect("plain legend fits its estimated output buffer");
+    assert_eq!(
+        core::str::from_utf8(&bytes[..written]).unwrap(),
+        out,
+        "byte surface matches the String surface with a plain legend"
+    );
+}
+
+/// The hero example laid out sideways, against its goldens — the
+/// LR/RL counterparts of `hero_matches_golden`. Regenerate with:
+///   cargo run --example hero -- --lr > tests/golden/hero-lr.txt
+///   cargo run --example hero -- --rl > tests/golden/hero-rl.txt
+#[test]
+fn hero_horizontal_matches_goldens() {
+    for (dir, golden) in [
+        (
+            crate::graph::Direction::LeftRight,
+            include_str!("../../../tests/golden/hero-lr.txt"),
+        ),
+        (
+            crate::graph::Direction::RightLeft,
+            include_str!("../../../tests/golden/hero-rl.txt"),
+        ),
+    ] {
+        let mut g = hero_graph();
+        g.set_direction(dir);
+        let ir = g.compute_layout();
+        // The visual comparison trims trailing blank rows, so pin the
+        // CANVAS too: `Axis::cross_margin` exists to keep the
+        // horizontal canvas tight, and a regression that puts the
+        // blank rows back would otherwise slip through a trimmed
+        // golden (P5 review).
+        assert_eq!(
+            (ir.width(), ir.height()),
+            (81, 24),
+            "hero {dir:?} canvas stays tight"
+        );
+        let engine = render_plain(&ir, &RenderOptions::plain());
+        assert_same(
+            &format!("hero {dir:?} (golden)"),
+            golden.trim_end(),
+            engine.trim_end(),
+        );
+    }
 }
 
 /// The hero example against the golden snapshot (regenerated at RW8
@@ -381,7 +470,11 @@ mod bt {
                 .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
                 .expect("CSR layout");
             let csr_col = render_colored(&csr_ir, &colored);
-            assert_same(&format!("{tag} (BT colored heap vs csr)"), &heap_col, &csr_col);
+            assert_same(
+                &format!("{tag} (BT colored heap vs csr)"),
+                &heap_col,
+                &csr_col,
+            );
         }
     }
 
@@ -404,7 +497,11 @@ mod bt {
 
         // Box label at the physical top of the box (content atomicity).
         let sg = &ir.subgraphs()[0];
-        assert_eq!(row_of("Stage"), sg.y + 1, "box label just below top border:\n{out}");
+        assert_eq!(
+            row_of("Stage"),
+            sg.y + 1,
+            "box label just below top border:\n{out}"
+        );
         assert!(lines[sg.y].contains('╔'), "top border row:\n{out}");
 
         // The edge label renders too (its row is IR-physical).
@@ -416,7 +513,10 @@ mod bt {
     #[test]
     fn bt_back_edges_semantics() {
         let out = render_plain(&bt_heap_ir(back_edges), &RenderOptions::plain());
-        assert!(out.contains('⇣'), "reversed arrow points down in BT:\n{out}");
+        assert!(
+            out.contains('⇣'),
+            "reversed arrow points down in BT:\n{out}"
+        );
         assert!(!out.contains('⇡'), "no upward dashed arrows in BT:\n{out}");
         assert!(out.contains('↑'), "forward arrows point up:\n{out}");
     }
@@ -508,7 +608,11 @@ mod bands {
                 let colored_ref = render_colored(&ir, &RenderOptions::colored(Palette::Ansi));
                 for cap in CAPS {
                     let plain = render_plain(&ir, &with_cap(RenderOptions::plain(), cap));
-                    assert_same(&format!("{tag} {direction:?} plain cap={cap}"), &plain_ref, &plain);
+                    assert_same(
+                        &format!("{tag} {direction:?} plain cap={cap}"),
+                        &plain_ref,
+                        &plain,
+                    );
                     let colored =
                         render_colored(&ir, &with_cap(RenderOptions::colored(Palette::Ansi), cap));
                     assert_same(
@@ -525,8 +629,10 @@ mod bands {
     #[test]
     fn small_caps_produce_multiple_bands() {
         let ir = hero_graph().compute_layout();
-        let plan =
-            crate::render::engine::plan::RenderPlan::build(&ir, &with_cap(RenderOptions::plain(), 5));
+        let plan = crate::render::engine::plan::RenderPlan::build(
+            &ir,
+            &with_cap(RenderOptions::plain(), 5),
+        );
         assert!(plan.band_count() > 1, "hero at cap 5 must band");
         // Bands tile the height exactly, in order, no gaps.
         let mut next = 0usize;
@@ -560,8 +666,10 @@ mod bands {
     #[test]
     fn banded_self_parity_across_backends() {
         for build in [nested_boxes as fn() -> Graph<'static>, hero_graph] {
-            let heap_out =
-                render_plain(&build().compute_layout(), &with_cap(RenderOptions::plain(), 3));
+            let heap_out = render_plain(
+                &build().compute_layout(),
+                &with_cap(RenderOptions::plain(), 3),
+            );
             let mut opts = RenderOptions::plain();
             opts.band_rows_cap = 3;
             let csr_out = csr_engine(&build(), &opts);
@@ -589,7 +697,11 @@ mod bands {
             .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
             .expect("CSR layout");
         let csr_out = render_plain(&ir, &with_cap(RenderOptions::plain(), 3));
-        assert_same("nested_boxes banded cap=3 (heap vs csr)", &heap_out, &csr_out);
+        assert_same(
+            "nested_boxes banded cap=3 (heap vs csr)",
+            &heap_out,
+            &csr_out,
+        );
     }
 }
 
@@ -597,12 +709,12 @@ mod bands {
 
 mod no_alloc {
     use super::*;
+    use crate::GraphError;
     use crate::graph::Direction;
     use crate::render::engine::color::ColorMode;
     use crate::render::engine::{
         estimate_render_arena_size, estimate_render_output_size, render_to_bytes,
     };
-    use crate::GraphError;
 
     /// The byte surface must match the String surface exactly — plain
     /// and colored, TD and BT, banded and not — using estimate-sized
@@ -638,9 +750,7 @@ mod no_alloc {
                         let arena = Arena::new(&mut backing);
                         let mut out = vec![0u8; out_size];
                         let written = render_to_bytes(&ir, &options, &arena, &mut out)
-                            .unwrap_or_else(|e| {
-                                panic!("{tag} {direction:?} cap={cap}: {e}")
-                            });
+                            .unwrap_or_else(|e| panic!("{tag} {direction:?} cap={cap}: {e}"));
                         let got = core::str::from_utf8(&out[..written]).unwrap();
                         assert_same(
                             &format!("{tag} {direction:?} cap={cap} (bytes vs string)"),
@@ -721,11 +831,11 @@ mod no_alloc {
 mod styles {
     use super::*;
     use crate::graph::Direction;
+    use crate::render::engine::CellColor;
     use crate::render::engine::style::{
         EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPosition, MarkerShape, SubgraphBorder,
         SubgraphStyle, SubgraphStyleCtx,
     };
-    use crate::render::engine::CellColor;
 
     // Style fns are plain `fn` items — the no_std-safe callback shape.
     fn no_arrowheads(_: EdgeStyleCtx<'_>) -> EdgeStyle {
@@ -836,7 +946,10 @@ mod styles {
         for border in ['\u{2554}', '\u{2550}', '\u{2551}', '\u{255a}'] {
             assert!(!out.contains(border), "no box ink:\n{out}");
         }
-        assert!(out.contains("Outer") && out.contains("Inner"), "labels stay:\n{out}");
+        assert!(
+            out.contains("Outer") && out.contains("Inner"),
+            "labels stay:\n{out}"
+        );
         assert!(out.contains("[Work]"), "content stays:\n{out}");
     }
 
@@ -847,8 +960,14 @@ mod styles {
         options.subgraph_style_fn = green_boxes;
         options.edge_label_style_fn = magenta_labels;
         let out = render_colored(&ir, &options);
-        assert!(out.contains("\x1b[38;5;42m"), "border color escapes:\n{out:?}");
-        assert!(out.contains("\x1b[38;5;201m"), "label color escapes:\n{out:?}");
+        assert!(
+            out.contains("\x1b[38;5;42m"),
+            "border color escapes:\n{out:?}"
+        );
+        assert!(
+            out.contains("\x1b[38;5;201m"),
+            "label color escapes:\n{out:?}"
+        );
     }
 
     #[test]
@@ -863,7 +982,11 @@ mod styles {
             .iter()
             .position(|l| l.contains("Stage"))
             .expect("label present");
-        assert_eq!(label_row, sg.y + sg.height - 2, "label at box bottom:\n{out}");
+        assert_eq!(
+            label_row,
+            sg.y + sg.height - 2,
+            "label at box bottom:\n{out}"
+        );
     }
 
     #[test]
@@ -877,9 +1000,15 @@ mod styles {
         let ir = colliding_labels().compute_layout();
         let unicode = render_colored(&ir, &RenderOptions::colored(Palette::Ansi));
         let ascii = render_colored(&ir, &RenderOptions::ascii_colored(Palette::Ansi));
-        assert!(unicode.contains(" \u{2192} "), "unicode legend arrow:\n{unicode:?}");
+        assert!(
+            unicode.contains(" \u{2192} "),
+            "unicode legend arrow:\n{unicode:?}"
+        );
         assert!(ascii.contains(" -> "), "ascii legend arrow:\n{ascii:?}");
-        assert!(!ascii.contains('\u{2192}'), "no unicode arrow in ascii legend:\n{ascii:?}");
+        assert!(
+            !ascii.contains('\u{2192}'),
+            "no unicode arrow in ascii legend:\n{ascii:?}"
+        );
     }
 
     fn stage_graph_for_styles() -> Graph<'static> {
@@ -905,7 +1034,10 @@ mod styles {
 
         let heap_ir = stage().compute_layout();
         let heap_out = render_colored(&heap_ir, &options);
-        assert!(heap_out.contains("\x1b[38;5;196m"), "edge override:\n{heap_out:?}");
+        assert!(
+            heap_out.contains("\x1b[38;5;196m"),
+            "edge override:\n{heap_out:?}"
+        );
         let sg = &heap_ir.subgraphs()[0];
         let label_row = heap_out
             .lines()
@@ -942,7 +1074,10 @@ mod wrapper_compat {
     fn heap_wrappers_match_engine() {
         for build in [stage as fn() -> Graph<'static>, hero_graph] {
             let ir = build().compute_layout();
-            assert_eq!(ir.render_scanline(), render_plain(&ir, &RenderOptions::plain()));
+            assert_eq!(
+                ir.render_scanline(),
+                render_plain(&ir, &RenderOptions::plain())
+            );
 
             let mut to = String::new();
             ir.render_scanline_to(&mut to);
@@ -1005,7 +1140,10 @@ mod wrapper_compat {
 
         // Undersized scratch still reports None, never panics.
         let mut tiny = vec![0usize; 4];
-        assert!(ir.render_to_buffer(&mut buffer, &mut line, &mut tiny).is_none());
+        assert!(
+            ir.render_to_buffer(&mut buffer, &mut line, &mut tiny)
+                .is_none()
+        );
 
         // Colored wrappers match the engine's colored output.
         let mut edge_colors = vec![0usize; ir.edge_count()];
@@ -1035,9 +1173,9 @@ mod wrapper_compat {
 
 mod review_fixes {
     use super::*;
+    use crate::render::engine::CellColor;
     use crate::render::engine::HitResult;
     use crate::render::engine::style::{EdgeStyle, EdgeStyleCtx};
-    use crate::render::engine::CellColor;
 
     /// Long Unicode endpoint + edge labels forced into the legend: an
     /// exactly estimate-sized output buffer must still suffice.
@@ -1061,7 +1199,10 @@ mod review_fixes {
             .expect("estimate-sized output buffer must fit the legend");
         let text = core::str::from_utf8(&out[..n]).unwrap();
         assert!(text.contains("Edge labels:"), "legend present:\n{text}");
-        assert!(text.contains("Ünïcödé-Nödé"), "endpoint label in full:\n{text}");
+        assert!(
+            text.contains("Ünïcödé-Nödé"),
+            "endpoint label in full:\n{text}"
+        );
     }
 
     /// Property: hit-testing agrees with the painted canvas. Every cell
@@ -1155,7 +1296,10 @@ mod review_fixes {
         );
         // With the default border the same cell hits the box.
         let bordered = ir.render_plan(&RenderOptions::plain());
-        assert_eq!(ir.hit_test(&bordered, sg.x, sg.y), HitResult::Subgraph(sg.id));
+        assert_eq!(
+            ir.hit_test(&bordered, sg.x, sg.y),
+            HitResult::Subgraph(sg.id)
+        );
     }
 
     /// TrueColor renders emit 24-bit escapes in the legend too — never
@@ -1347,7 +1491,11 @@ mod node_painters {
             for cap in [1usize, 2, 3] {
                 let mut capped = options;
                 capped.band_rows_cap = cap;
-                assert_same("painted node banding", &reference, &render_plain(&ir, &capped));
+                assert_same(
+                    "painted node banding",
+                    &reference,
+                    &render_plain(&ir, &capped),
+                );
             }
         }
     }
@@ -1489,6 +1637,7 @@ mod node_painters {
             level_position: 0,
             kind: crate::ir::NodeKind::Explicit,
             has_self_loop: false,
+            self_loop_at: None,
             edge_index: None,
             content_tag: 1, // boxed
         });
@@ -1580,6 +1729,121 @@ mod node_painters {
         let heap_out = render_plain(&heap_ir, &options);
         let csr_out = csr_engine(&build(), &options);
         assert_same("content-tag graph (heap vs csr)", &heap_out, &csr_out);
+    }
+
+    /// Slice-5 guard (temp/08): physical node extents are emitted from
+    /// the node's DECLARED dimensions, not the role-space packing
+    /// extent — an asymmetric 12×5 node must reach the IR as 12×5 in
+    /// both backends. (Under `Horizontal`, the packing extent is the
+    /// height; emitting it as the width would corrupt centers, ports,
+    /// and content bounds.)
+    #[test]
+    fn asymmetric_node_extents_reach_the_ir() {
+        let build = || {
+            let mut g = Graph::new();
+            g.add_node(1, "a");
+            g.add_node(
+                2,
+                CustomNode {
+                    label: "wide",
+                    width: 12,
+                    height: 5,
+                    painter: None,
+                    payload: "",
+                },
+            );
+            g.add_node(3, "b");
+            g.add_edge(1, 2, None);
+            g.add_edge(2, 3, None);
+            g
+        };
+        let heap_ir = build().compute_layout();
+        let n = heap_ir.nodes.iter().find(|n| n.id == 2).expect("node 2");
+        assert_eq!((n.width, n.height), (12, 5));
+        assert_eq!(n.center_x, n.x + 6);
+        assert_eq!(n.center_y, n.y + 2);
+
+        let g = build();
+        let config = LayoutConfig::standard();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+            .expect("CSR layout");
+        let n = ir.nodes().iter().find(|n| n.id == 2).expect("node 2");
+        assert_eq!((n.width, n.height), (12, 5));
+        assert_eq!(n.center_x, n.x + 6);
+        assert_eq!(n.center_y, n.y + 2);
+    }
+
+    /// D5(ii) (temp/08): at `node_spacing == 0` a self-loop node's
+    /// marker cell is reserved — no neighbor may start on it (the
+    /// legacy behavior silently painted the neighbor over the `↺`).
+    /// Also pins the D5 invariant `has_self_loop ==
+    /// self_loop_at.is_some()` and the marker cell formula, plus
+    /// cross-backend byte parity for the corner.
+    #[test]
+    fn spacing_zero_reserves_self_loop_marker() {
+        let build = || {
+            let mut g = Graph::new();
+            g.add_node(1, "a");
+            g.add_node(2, "b");
+            g.add_node(3, "c");
+            g.add_edge(1, 2, None);
+            g.add_edge(1, 3, None);
+            g.add_edge(2, 2, None);
+            g
+        };
+        let mut config = LayoutConfig::standard();
+        config.node_spacing = 0;
+
+        let heap_ir = build().compute_layout_with_config(&config);
+        for n in heap_ir.nodes.iter() {
+            assert_eq!(n.has_self_loop, n.self_loop_at.is_some(), "D5 invariant");
+        }
+        let b = heap_ir.nodes.iter().find(|n| n.id == 2).expect("node 2");
+        let (mx, my) = b.self_loop_at.expect("loop node has a marker cell");
+        assert_eq!((mx, my), (b.x + b.width, b.y), "legacy marker cell");
+        for n in heap_ir.nodes.iter() {
+            let covers = n.x <= mx && mx < n.x + n.width && n.y <= my && my < n.y + n.height;
+            assert!(!covers, "node {} overlaps the reserved marker cell", n.id);
+        }
+
+        // CSR twin: identical bytes for the corner graph.
+        let g = build();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+            .expect("CSR layout");
+        let bc = ir.nodes().iter().find(|n| n.id == 2).expect("node 2");
+        assert!(bc.has_self_loop);
+        assert_eq!(bc.self_loop_at, (bc.x + bc.width, bc.y));
+
+        let options = RenderOptions::plain();
+        let mut heap_out = alloc::string::String::new();
+        heap_ir
+            .render_with(&options, &mut heap_out)
+            .expect("heap render");
+        let mut csr_out = alloc::string::String::new();
+        ir.render_with(&options, &mut csr_out).expect("csr render");
+        assert_same(
+            "spacing-0 self-loop graph (heap vs csr)",
+            &heap_out,
+            &csr_out,
+        );
     }
 
     /// D8 — the embedded front door: the same declared content built
@@ -1765,9 +2029,11 @@ mod node_painters {
         }
         let build = || {
             let mut g = Graph::new();
-            for (id, label, payload) in
-                [(1, "alpha", "first"), (2, "beta", "second"), (3, "gamma", "third")]
-            {
+            for (id, label, payload) in [
+                (1, "alpha", "first"),
+                (2, "beta", "second"),
+                (3, "gamma", "third"),
+            ] {
                 g.add_node(
                     id,
                     CustomNode {
@@ -1811,5 +2077,1240 @@ mod node_painters {
             crate::render::engine::HitResult::Node(1),
             "below the reserved area"
         );
+    }
+}
+
+// ── Horizontal geometry invariants + rendering (temp/08) ───────────────
+//
+// The acceptance suite for native LR/RL layout, run over the whole
+// corpus in BOTH orientations: geometric invariants on the IR, the
+// glyph⇄hit ink sweep, band cap-invariance, and cross-backend parity
+// at field and byte level.
+mod lr_invariants {
+    use super::*;
+    use crate::algorithms::sugiyama::geometry::Horizontal;
+    use crate::algorithms::sugiyama::heap::compute_layout_cfg;
+    use crate::graph::Direction;
+    use crate::ir::{EdgePath, FlowAxis, LayoutIR, LayoutNode};
+
+    fn lr<'a>(g: &Graph<'a>) -> LayoutIR<'a> {
+        lr_rl(g, Direction::LeftRight)
+    }
+
+    fn on_rows(y: usize, n: &LayoutNode<'_>) -> bool {
+        n.y <= y && y < n.y + n.height
+    }
+
+    /// The P1 exit invariants over one Horizontal IR. `dir` selects
+    /// the flow orientation: under `RightLeft` the source port sits on
+    /// the LEFT face and the target entry on the right.
+    fn check_invariants(tag: &str, ir: &LayoutIR<'_>, dir: Direction) {
+        // The IR must RECORD the direction it was laid out for: a
+        // regression that mirrors geometry correctly but keeps the
+        // wrong tag would satisfy every geometric check here while
+        // feeding style callbacks the wrong context.
+        assert_eq!(ir.direction(), dir, "{tag}: recorded direction");
+        let rightward = !matches!(dir, Direction::RightLeft);
+        // Exit face of a source / entry face of a target, per flow.
+        let exit = |n: &LayoutNode<'_>| {
+            if rightward { n.x + n.width - 1 } else { n.x }
+        };
+        let entry = |n: &LayoutNode<'_>| {
+            if rightward { n.x } else { n.x + n.width - 1 }
+        };
+        let nodes = ir.nodes();
+        // I1: node spans pairwise disjoint and inside the canvas.
+        for (i, a) in nodes.iter().enumerate() {
+            assert!(
+                a.x + a.width <= ir.width() && a.y + a.height <= ir.height(),
+                "{tag}: node {} ({},{} {}x{}) exceeds canvas {}x{}",
+                a.id,
+                a.x,
+                a.y,
+                a.width,
+                a.height,
+                ir.width(),
+                ir.height()
+            );
+            for b in nodes.iter().skip(i + 1) {
+                let overlap = a.x < b.x + b.width
+                    && b.x < a.x + a.width
+                    && a.y < b.y + b.height
+                    && b.y < a.y + a.height;
+                assert!(!overlap, "{tag}: nodes {} and {} overlap", a.id, b.id);
+            }
+        }
+        let by_id = |id: usize| {
+            nodes
+                .iter()
+                .find(|n| n.id == id)
+                .unwrap_or_else(|| panic!("{tag}: node {id}"))
+        };
+        for e in ir.edges() {
+            if e.from_id == e.to_id {
+                continue;
+            }
+            // I2: every Horizontal edge has a horizontal trunk.
+            assert_eq!(e.flow_axis, FlowAxis::X, "{tag}: {}→{}", e.from_id, e.to_id);
+            let (s, t) = (by_id(e.from_id), by_id(e.to_id));
+            // I3: endpoints on the pair's faces at their port rows.
+            // Coordinates are layout-order for reversed edges, so accept
+            // either orientation of the pair.
+            let fwd_ok = e.from_x == exit(s)
+                && e.to_x == entry(t)
+                && on_rows(e.from_y, s)
+                && on_rows(e.to_y, t);
+            let rev_ok = e.from_x == exit(t)
+                && e.to_x == entry(s)
+                && on_rows(e.from_y, t)
+                && on_rows(e.to_y, s);
+            assert!(
+                fwd_ok || rev_ok,
+                "{tag}: {}→{} endpoints off the node faces: from ({}, {}), to ({}, {}); \
+                 s=({},{} {}x{}), t=({},{} {}x{})",
+                e.from_id,
+                e.to_id,
+                e.from_x,
+                e.from_y,
+                e.to_x,
+                e.to_y,
+                s.x,
+                s.y,
+                s.width,
+                s.height,
+                t.x,
+                t.y,
+                t.width,
+                t.height
+            );
+            // I4: trunk-band geometry inside the canvas; corner bends
+            // strictly between the two faces.
+            match &e.path {
+                EdgePath::Corner { bend_at } => {
+                    // Order-free: the flow may run either way.
+                    let (a, b) = if fwd_ok {
+                        (exit(s), entry(t))
+                    } else {
+                        (exit(t), entry(s))
+                    };
+                    let (lo, hi) = (a.min(b), a.max(b));
+                    assert!(
+                        *bend_at > lo && *bend_at < hi,
+                        "{tag}: {}→{} bend {} outside the gap ({lo}, {hi})",
+                        e.from_id,
+                        e.to_id,
+                        bend_at
+                    );
+                }
+                EdgePath::MultiSegment { waypoints, .. } => {
+                    for &(wx, wy) in waypoints {
+                        assert!(
+                            wx < ir.width() && wy < ir.height(),
+                            "{tag}: {}→{} waypoint ({wx}, {wy}) outside canvas",
+                            e.from_id,
+                            e.to_id
+                        );
+                    }
+                }
+                _ => {}
+            }
+            // I5: label seeds inside the canvas.
+            if e.label.is_some() {
+                assert!(
+                    e.label_x < ir.width() && e.label_y < ir.height(),
+                    "{tag}: {}→{} label at ({}, {}) outside canvas {}x{}",
+                    e.from_id,
+                    e.to_id,
+                    e.label_x,
+                    e.label_y,
+                    ir.width(),
+                    ir.height()
+                );
+            }
+        }
+        // I6: self-loop markers — invariant, reserved cell, in canvas.
+        for n in nodes {
+            assert_eq!(n.has_self_loop, n.self_loop_at.is_some(), "{tag}: {}", n.id);
+            if let Some((mx, my)) = n.self_loop_at {
+                assert!(
+                    mx < ir.width() && my < ir.height(),
+                    "{tag}: {} marker ({mx}, {my}) outside canvas {}x{}",
+                    n.id,
+                    ir.width(),
+                    ir.height()
+                );
+                for o in nodes {
+                    let covers =
+                        o.x <= mx && mx < o.x + o.width && o.y <= my && my < o.y + o.height;
+                    assert!(!covers, "{tag}: node {} covers {}'s marker", o.id, n.id);
+                }
+            }
+        }
+        // I7: boxes inside the canvas; LR labels fit the box width.
+        for sg in ir.subgraphs() {
+            assert!(
+                sg.x + sg.width <= ir.width() && sg.y + sg.height <= ir.height(),
+                "{tag}: box {} exceeds canvas",
+                sg.id
+            );
+            let label_min = (sg.label.len() + 4).min(40);
+            assert!(
+                sg.width >= label_min,
+                "{tag}: box {} width {} cannot show its label (needs {label_min})",
+                sg.id,
+                sg.width
+            );
+        }
+        // I8: no node straddles a box border — every node is strictly
+        // inside (borders clear) or fully outside every box.
+        for sg in ir.subgraphs() {
+            for n in nodes {
+                let inside = n.x > sg.x
+                    && n.x + n.width < sg.x + sg.width
+                    && n.y > sg.y
+                    && n.y + n.height < sg.y + sg.height;
+                let outside = n.x + n.width <= sg.x
+                    || n.x >= sg.x + sg.width
+                    || n.y + n.height <= sg.y
+                    || n.y >= sg.y + sg.height;
+                assert!(
+                    inside || outside,
+                    "{tag}: node {} straddles box {}'s border",
+                    n.id,
+                    sg.id
+                );
+            }
+        }
+    }
+
+    /// A node wider than `u8::MAX` — level extents are geometry and
+    /// must survive the smallest index configuration (they used to
+    /// wrap through an `Idx` cast under `arena-idx-u8`: 256 → 0).
+    fn wide_node() -> Graph<'static> {
+        use crate::render::engine::CustomNode;
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(
+            2,
+            CustomNode {
+                label: "very-wide",
+                width: 300,
+                height: 1,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_node(3, "b");
+        g.add_edge(1, 2, None);
+        g.add_edge(2, 3, None);
+        g
+    }
+
+    fn corpus() -> [(&'static str, Graph<'static>); 10] {
+        [
+            ("fan", fan()),
+            ("stage", stage()),
+            ("skip", skip()),
+            ("back", back_edges()),
+            ("two_cycle", two_cycle()),
+            ("self_loop", self_loop()),
+            ("labels", colliding_labels()),
+            ("nested", nested_boxes()),
+            ("hero", hero_graph()),
+            ("wide_node", wide_node()),
+        ]
+    }
+
+    #[test]
+    fn corpus_invariants() {
+        for dir in [Direction::LeftRight, Direction::RightLeft] {
+            for (tag, g) in corpus() {
+                check_invariants(&alloc::format!("{tag} {dir:?}"), &lr_rl(&g, dir), dir);
+            }
+        }
+    }
+
+    /// LR-P2 exit gate: the LR corpus is FIELD-identical across
+    /// backends — every node/edge/subgraph through the `LayoutView`
+    /// lens plus the canvas — with exactly estimate-sized arenas.
+    /// (Rendered byte-parity joins at P3 when the compositor learns
+    /// horizontal trunks.)
+    #[test]
+    fn lr_corpus_matches_across_backends() {
+        use crate::render::engine::view::LayoutView;
+
+        fn sorted_debug<T: core::fmt::Debug>(items: impl Iterator<Item = T>) -> Vec<String> {
+            let mut v: Vec<String> = items.map(|x| format!("{x:?}")).collect();
+            v.sort();
+            v
+        }
+
+        for dir in [Direction::LeftRight, Direction::RightLeft] {
+            let mut config = LayoutConfig::standard();
+            config.direction = dir;
+            for (tag, g) in corpus() {
+                let heap_ir = lr_rl(&g, dir);
+
+                let mut csr_buf = vec![0u8; g.estimate_csr_arena_size()];
+                let mut csr_arena = Arena::new(&mut csr_buf);
+                let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+                let size = g.estimate_layout_arena_size_with(&config);
+                let mut temp_buf = vec![0u8; size];
+                let mut out_buf = vec![0u8; size];
+                let mut temp_arena = Arena::new(&mut temp_buf);
+                let mut out_arena = Arena::new(&mut out_buf);
+                // The PUBLIC entry point — its direction dispatch is
+                // what these tests must pin, not the axis-parameterized
+                // internal (which would stay green if the public match
+                // regressed to `Vertical`).
+                let csr_ir = csr
+                    .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+                    .unwrap_or_else(|e| panic!("{tag}: CSR LR layout failed: {e:?}"));
+
+                assert_eq!(
+                    (LayoutView::width(&heap_ir), LayoutView::height(&heap_ir)),
+                    (LayoutView::width(&csr_ir), LayoutView::height(&csr_ir)),
+                    "{tag} {dir:?}: canvas"
+                );
+                assert_eq!(
+                    LayoutView::direction(&heap_ir),
+                    dir,
+                    "{tag}: heap direction"
+                );
+                assert_eq!(LayoutView::direction(&csr_ir), dir, "{tag}: csr direction");
+                assert_eq!(
+                    LayoutView::node_count(&heap_ir),
+                    LayoutView::node_count(&csr_ir),
+                    "{tag} {dir:?}: node count"
+                );
+                let hn = sorted_debug(
+                    (0..LayoutView::node_count(&heap_ir)).map(|i| LayoutView::node(&heap_ir, i)),
+                );
+                let cn = sorted_debug(
+                    (0..LayoutView::node_count(&csr_ir)).map(|i| LayoutView::node(&csr_ir, i)),
+                );
+                assert_eq!(hn, cn, "{tag} {dir:?}: nodes");
+                let he = sorted_debug(
+                    (0..LayoutView::edge_count(&heap_ir)).map(|i| LayoutView::edge(&heap_ir, i)),
+                );
+                let ce = sorted_debug(
+                    (0..LayoutView::edge_count(&csr_ir)).map(|i| LayoutView::edge(&csr_ir, i)),
+                );
+                assert_eq!(he, ce, "{tag} {dir:?}: edges");
+                let hs = sorted_debug(
+                    (0..LayoutView::subgraph_count(&heap_ir))
+                        .map(|i| LayoutView::subgraph(&heap_ir, i)),
+                );
+                let cs = sorted_debug(
+                    (0..LayoutView::subgraph_count(&csr_ir))
+                        .map(|i| LayoutView::subgraph(&csr_ir, i)),
+                );
+                assert_eq!(hs, cs, "{tag} {dir:?}: subgraphs");
+
+                // Arena-only `min_y`/`max_y` (not mirrored by the view):
+                // every physical y the edge touches — endpoints and
+                // waypoint rows — must sit inside the cached bounds
+                // (slices review: waypoint excursions used to escape).
+                use crate::render::engine::view::PathRef;
+                for i in 0..LayoutView::edge_count(&csr_ir) {
+                    let raw = *crate::ir::arena::LayoutIRArena::edge(&csr_ir, i);
+                    let v = LayoutView::edge(&csr_ir, i);
+                    let mut ys = alloc::vec![raw.from_y, raw.to_y];
+                    if let PathRef::MultiSegment { waypoints, .. } = v.path {
+                        ys.extend(waypoints.iter().map(|&(_, wy)| wy));
+                    }
+                    for y in ys {
+                        assert!(
+                            raw.min_y <= y && y <= raw.max_y,
+                            "{tag}: edge {i} touches y={y} outside cached bounds {}..={}",
+                            raw.min_y,
+                            raw.max_y
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hero-LR numeric sanity: same elements as the TD layout, wide
+    /// canvas, all invariants — the phase's rendered acceptance stays
+    /// at P3.
+    #[test]
+    fn hero_lr_numeric_sanity() {
+        let td = hero_graph().compute_layout();
+        let ir = lr(&hero_graph());
+        assert_eq!(td.nodes().len(), ir.nodes().len());
+        assert_eq!(td.edges().len(), ir.edges().len());
+        assert_eq!(td.level_count(), ir.level_count());
+        assert!(
+            ir.width() > ir.height(),
+            "LR hero should be wide: {}x{}",
+            ir.width(),
+            ir.height()
+        );
+        check_invariants("hero-lr", &ir, Direction::LeftRight);
+    }
+
+    /// Slices review: a WIDE member must not escape through the box's
+    /// trailing level border (the member extent was hardcoded to one
+    /// line before).
+    #[test]
+    fn lr_wide_member_stays_inside_box() {
+        use crate::render::engine::CustomNode;
+        let mut g = Graph::new();
+        g.add_node(1, "in");
+        g.add_node(
+            2,
+            CustomNode {
+                label: "wide-member",
+                width: 16,
+                height: 1,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_node(3, "out");
+        g.add_edge(1, 2, None);
+        g.add_edge(2, 3, None);
+        let sg = g.add_subgraph("W");
+        g.put_nodes(&[2]).inside(sg).unwrap();
+        let ir = lr(&g);
+        check_invariants("wide-member", &ir, Direction::LeftRight);
+        let b = &ir.subgraphs()[0];
+        let m = ir.nodes().iter().find(|n| n.id == 2).unwrap();
+        assert!(
+            m.x + m.width + 2 <= b.x + b.width,
+            "trailing level pad after the wide member: node ends {}, box ends {}",
+            m.x + m.width,
+            b.x + b.width
+        );
+    }
+
+    /// Slices review: a parent whose only content is a child box must
+    /// keep its label block clear of the child's top border — the
+    /// parent/child cross expansion is the full (3, 2) label-side pad
+    /// under Horizontal, not a symmetric border cell.
+    #[test]
+    fn lr_child_only_parent_has_label_room() {
+        let mut g = Graph::new();
+        g.add_node(1, "in");
+        g.add_node(2, "core");
+        g.add_node(3, "out");
+        g.add_edge(1, 2, None);
+        g.add_edge(2, 3, None);
+        let outer = g.add_subgraph("Parent");
+        let inner = g.add_subgraph("Child");
+        g.put_subgraphs(&[inner]).inside(outer).unwrap();
+        g.put_nodes(&[2]).inside(inner).unwrap();
+        let ir = lr(&g);
+        check_invariants("child-only-parent", &ir, Direction::LeftRight);
+        let parent = ir.subgraphs().iter().find(|s| s.label == "Parent").unwrap();
+        let child = ir.subgraphs().iter().find(|s| s.label == "Child").unwrap();
+        assert!(
+            child.y >= parent.y + 3,
+            "parent label block above the child top border: parent.y {}, child.y {}",
+            parent.y,
+            child.y
+        );
+        assert!(
+            child.y + child.height + 2 <= parent.y + parent.height,
+            "trailing cross pad below the child"
+        );
+        assert!(child.x > parent.x && child.x + child.width < parent.x + parent.width);
+    }
+
+    /// P3-S1: horizontal trunks render — a chain paints `[a]` and
+    /// `[b]` on one row joined by a `─` trunk with a `→` arrowhead.
+    #[test]
+    fn lr_chain_renders_horizontal_trunk() {
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(2, "b");
+        g.add_edge(1, 2, None);
+        let ir = lr(&g);
+        let out = render_plain(&ir, &RenderOptions::plain());
+        let row = out
+            .lines()
+            .find(|l| l.contains("[a]"))
+            .expect("row with [a]");
+        assert!(row.contains("[b]"), "same-row target: {row:?}");
+        assert!(row.contains('─'), "trunk: {row:?}");
+        assert!(row.contains('→'), "arrowhead: {row:?}");
+        let a = row.find("[a]").unwrap();
+        let arrow = row.find('→').unwrap();
+        let b = row.find("[b]").unwrap();
+        assert!(a < arrow && arrow < b, "order: {row:?}");
+    }
+
+    /// P3-S1: corner edges bend through vertical cross runs, and the
+    /// LR self-loop marker paints at its IR cell below the node.
+    #[test]
+    fn lr_corner_and_self_loop_render() {
+        let mut g = Graph::new();
+        g.add_node(1, "root");
+        g.add_node(2, "up");
+        g.add_node(3, "down");
+        g.add_edge(1, 2, None);
+        g.add_edge(1, 3, None);
+        g.add_edge(1, 1, None);
+        let ir = lr(&g);
+        let out = render_plain(&ir, &RenderOptions::plain());
+        assert!(out.contains('→'), "arrowheads:\n{out}");
+        assert!(
+            out.contains('│') || out.contains('┐') || out.contains('└'),
+            "vertical cross runs:\n{out}"
+        );
+        assert!(out.contains('↺'), "self-loop marker:\n{out}");
+    }
+
+    /// P3-S2: a labeled LR edge paints its label — wherever the D9
+    /// ladder lands it (own cross segment, inline on the trunk, or
+    /// floated) — and the label cell hit-tests to its edge.
+    #[test]
+    fn lr_labeled_edge_renders_and_hits() {
+        use crate::render::engine::HitResult;
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(2, "b");
+        g.add_edge(1, 2, Some("go"));
+        let ir = lr(&g);
+        let options = RenderOptions::plain();
+        let out = render_plain(&ir, &options);
+        assert!(out.contains("\"go\""), "label painted:\n{out}");
+        let (row_i, col) = out
+            .lines()
+            .enumerate()
+            .find_map(|(r, l)| l.find("\"go\"").map(|c| (r, c)))
+            .expect("label location");
+        let plan = ir.render_plan(&options);
+        assert_eq!(
+            ir.hit_test(&plan, col + 1, row_i),
+            HitResult::Edge(0),
+            "label cell owns its edge:\n{out}"
+        );
+    }
+
+    /// D9 host 1 (Ash's ruling, temp/08): a labeled LR edge that jogs
+    /// puts its label on its OWN cross segment — the direct mirror of
+    /// the TD picture, where the label interrupts the line it
+    /// annotates. The label row must therefore be strictly BETWEEN
+    /// the two trunk rows (not on either trunk, not floated above).
+    #[test]
+    fn lr_label_prefers_its_own_cross_segment() {
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(2, "b");
+        g.add_node(3, "c");
+        g.add_edge(1, 2, Some("up"));
+        g.add_edge(1, 3, Some("down"));
+        let ir = lr(&g);
+        let out = render_plain(&ir, &RenderOptions::plain());
+        for (idx, text) in [(0usize, "up"), (1, "down")] {
+            let needle = alloc::format!("\"{text}\"");
+            // Character-cell column, not `str::find`'s byte offset.
+            let (row, col) = out
+                .lines()
+                .enumerate()
+                .find_map(|(r, l)| l.find(&needle).map(|b| (r, l[..b].chars().count())))
+                .unwrap_or_else(|| panic!("label {text:?} painted:\n{out}"));
+            let e = &ir.edges()[idx];
+            let (lo, hi) = (e.from_y.min(e.to_y), e.from_y.max(e.to_y));
+            assert!(
+                row > lo && row < hi,
+                "label {text:?} sits between the trunk rows (row {row} strictly \
+                 inside {lo}..{hi}):\n{out}"
+            );
+            // Between the trunk rows alone would also admit an upward
+            // float — prove the span actually CROSSES the edge's own
+            // bend column, which only the cross host does.
+            let crate::ir::EdgePath::Corner { bend_at } = e.path else {
+                panic!("fan edges route as corners; got {:?}", e.path);
+            };
+            let span = needle.chars().count();
+            assert!(
+                bend_at >= col && bend_at < col + span,
+                "label {text:?} at cols {col}..{} covers its own bend column \
+                 {bend_at}:\n{out}",
+                col + span
+            );
+        }
+    }
+
+    /// P3-S2 glyph⇄hit over the LR corpus: every edge-ink glyph in a
+    /// rendered LR graph hit-tests to SOME element — no orphan ink.
+    #[test]
+    fn lr_ink_always_hits() {
+        use crate::render::engine::HitResult;
+        let options = RenderOptions::plain();
+        let ink = [
+            '─', '│', '→', '←', '┌', '┐', '└', '┘', '┬', '┴', '├', '┤', '┼', '↺', '┊', '┈', '⇢',
+            '⇠',
+        ];
+        for (dir, (tag, g)) in [Direction::LeftRight, Direction::RightLeft]
+            .into_iter()
+            .flat_map(|d| corpus().into_iter().map(move |c| (d, c)))
+        {
+            let ir = lr_rl(&g, dir);
+            let out = render_plain(&ir, &options);
+            let plan = ir.render_plan(&options);
+            for (r, line) in out.lines().enumerate() {
+                for (c, ch) in line.chars().enumerate() {
+                    if ink.contains(&ch) {
+                        assert!(
+                            ir.hit_test(&plan, c, r) != HitResult::None,
+                            "{tag} {dir:?}: orphan ink {ch:?} at ({c}, {r})\n{out}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// P3-S3 cap-invariance: banded LR renders are byte-identical at
+    /// every cap — bands lose level alignment under X flows, so the
+    /// hard-cut path carries the correctness (plain and colored).
+    #[test]
+    fn lr_band_cap_invariance() {
+        for (dir, (tag, g)) in [Direction::LeftRight, Direction::RightLeft]
+            .into_iter()
+            .flat_map(|d| corpus().into_iter().map(move |c| (d, c)))
+        {
+            let ir = lr_rl(&g, dir);
+            let tag = alloc::format!("{tag} {dir:?}");
+            for colored in [false, true] {
+                let mut base_opts = if colored {
+                    RenderOptions::colored(Palette::Ansi)
+                } else {
+                    RenderOptions::plain()
+                };
+                base_opts.band_rows_cap = 1000;
+                let base = if colored {
+                    render_colored(&ir, &base_opts)
+                } else {
+                    render_plain(&ir, &base_opts)
+                };
+                for cap in [1usize, 2, 3, 5, 7, 64] {
+                    let mut opts = base_opts;
+                    opts.band_rows_cap = cap;
+                    let out = if colored {
+                        render_colored(&ir, &opts)
+                    } else {
+                        render_plain(&ir, &opts)
+                    };
+                    assert_same(&format!("{tag} cap={cap} colored={colored}"), &base, &out);
+                }
+            }
+        }
+    }
+
+    /// P3-S3: rendered LR byte-parity across backends — the promise
+    /// deferred from the P2 field gate: identical IRs must render
+    /// identically, plain and colored.
+    #[test]
+    fn lr_corpus_renders_identically_across_backends() {
+        for (dir, (tag, g)) in [Direction::LeftRight, Direction::RightLeft]
+            .into_iter()
+            .flat_map(|d| corpus().into_iter().map(move |c| (d, c)))
+        {
+            let mut config = LayoutConfig::standard();
+            config.direction = dir;
+            let heap_ir = lr_rl(&g, dir);
+            let mut csr_buf = vec![0u8; g.estimate_csr_arena_size()];
+            let mut csr_arena = Arena::new(&mut csr_buf);
+            let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+            let size = g.estimate_layout_arena_size_with(&config);
+            let mut temp_buf = vec![0u8; size];
+            let mut out_buf = vec![0u8; size];
+            let mut temp_arena = Arena::new(&mut temp_buf);
+            let mut out_arena = Arena::new(&mut out_buf);
+            // The PUBLIC entry point (see the field-parity twin).
+            let csr_ir = csr
+                .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+                .expect("CSR LR layout");
+
+            let plain = RenderOptions::plain();
+            let mut heap_out = String::new();
+            heap_ir.render_with(&plain, &mut heap_out).expect("heap");
+            let mut csr_out = String::new();
+            csr_ir.render_with(&plain, &mut csr_out).expect("csr");
+            assert_same(
+                &format!("{tag} {dir:?} (heap vs csr, plain)"),
+                &heap_out,
+                &csr_out,
+            );
+
+            let colored = RenderOptions::colored(Palette::Ansi);
+            let mut heap_c = String::new();
+            heap_ir
+                .render_with(&colored, &mut heap_c)
+                .expect("heap colored");
+            let mut csr_c = String::new();
+            csr_ir
+                .render_with(&colored, &mut csr_c)
+                .expect("csr colored");
+            assert_same(
+                &format!("{tag} {dir:?} (heap vs csr, colored)"),
+                &heap_c,
+                &csr_c,
+            );
+        }
+    }
+
+    /// Hand-built X-flow IR: nodes on one row, an edge with the given
+    /// path, reversed as asked. Exercises the public compositor paths
+    /// the layout does not currently emit.
+    fn x_flow_ir(
+        path: crate::ir::EdgePath,
+        reversed: bool,
+        w: usize,
+        h: usize,
+        to_y: usize,
+    ) -> LayoutIR<'static> {
+        use crate::ir::{FlowAxis, LayoutEdge, LayoutIRBuilder, LayoutNode, NodeKind};
+        let mut b = LayoutIRBuilder::new();
+        b.set_dimensions(w, h);
+        for (i, (id, label, x, y)) in [(1usize, "a", 0usize, 0usize), (2, "b", 12, to_y)]
+            .into_iter()
+            .enumerate()
+        {
+            b.add_node(LayoutNode {
+                id,
+                label,
+                x,
+                y,
+                width: 3,
+                height: 1,
+                center_x: x + 1,
+                center_y: y,
+                level: i,
+                level_position: 0,
+                kind: NodeKind::Explicit,
+                has_self_loop: false,
+                self_loop_at: None,
+                edge_index: None,
+                content_tag: 0,
+            });
+        }
+        b.add_edge(LayoutEdge {
+            from_id: 1,
+            to_id: 2,
+            from_x: 2,
+            from_y: 0,
+            to_x: 12,
+            to_y,
+            path,
+            flow_axis: FlowAxis::X,
+            edge_index: 0,
+            label: None,
+            label_x: 0,
+            label_y: 0,
+            directed: true,
+            reversed,
+        });
+        b.build()
+    }
+
+    fn cell_at(out: &str, x: usize, y: usize) -> char {
+        out.lines()
+            .nth(y)
+            .and_then(|l| l.chars().nth(x))
+            .unwrap_or(' ')
+    }
+
+    /// Slices review [P1]: when the bend sits IMMEDIATELY past the
+    /// source face, the source-side marker has no trunk cell of its
+    /// own — it must take the corner cell rather than vanish. Pinned
+    /// per path variant on reversed edges (where the marker is the
+    /// arrow showing the original direction).
+    #[test]
+    fn x_adjacent_bend_keeps_the_source_marker() {
+        use crate::ir::EdgePath;
+        // Corner bending one column past the source face (x = 3).
+        let ir = x_flow_ir(EdgePath::Corner { bend_at: 3 }, true, 20, 6, 3);
+        let out = render_plain(&ir, &RenderOptions::plain());
+        assert_eq!(
+            cell_at(&out, 3, 0),
+            '⇠',
+            "reversed Corner keeps its source marker at the adjacent bend:\n{out}"
+        );
+
+        // MultiSegment with start_offset == 0 — same adjacency.
+        let ir = x_flow_ir(
+            EdgePath::MultiSegment {
+                waypoints: alloc::vec![(3, 3)],
+                start_offset: 0,
+            },
+            true,
+            20,
+            8,
+            3,
+        );
+        let out = render_plain(&ir, &RenderOptions::plain());
+        assert_eq!(
+            cell_at(&out, 3, 0),
+            '⇠',
+            "reversed MultiSegment keeps its source marker:\n{out}"
+        );
+    }
+
+    /// Slices review [P1]: `SideChannel` is public and JSON-roundtrippable,
+    /// so an X-flow one must actually paint — through the compositor AND
+    /// the plan (row spans, ink enumeration, hit-testing, banding). The
+    /// channel row sits outside the endpoint rows and the cap is 1, so
+    /// this fixture exercises all four at once.
+    #[test]
+    fn x_side_channel_paints_and_hits() {
+        use crate::render::engine::HitResult;
+        let ir = x_flow_ir(
+            crate::ir::EdgePath::SideChannel {
+                channel_at: 4,
+                span_start: 5,
+                span_end: 9,
+            },
+            false,
+            20,
+            8,
+            0,
+        );
+        let options = RenderOptions::plain();
+        let out = render_plain(&ir, &options);
+        assert!(
+            out.lines().nth(4).is_some_and(|l| l.contains('─')),
+            "the far channel row paints:\n{out}"
+        );
+        assert_eq!(
+            cell_at(&out, 11, 0),
+            '→',
+            "arrowhead into the target:\n{out}"
+        );
+        // Banding must not lose it: cap 1 forces a band per row.
+        let mut capped = options;
+        capped.band_rows_cap = 1;
+        assert_same("x side-channel banding", &out, &render_plain(&ir, &capped));
+        // And the channel ink hit-tests to its edge.
+        let plan = ir.render_plan(&options);
+        assert_eq!(
+            ir.hit_test(&plan, 7, 4),
+            HitResult::Edge(0),
+            "channel-row ink belongs to the edge:\n{out}"
+        );
+    }
+
+    fn lr_rl<'a>(g: &Graph<'a>, dir: Direction) -> LayoutIR<'a> {
+        let mut cfg = LayoutConfig::standard();
+        cfg.direction = dir;
+        compute_layout_cfg::<Horizontal>(g, &cfg)
+    }
+
+    /// P4-S1: RL is the EXACT x-mirror of LR. The mirror is applied by
+    /// hand here — not by calling `flip_horizontal` — so the assertion
+    /// is independent of the code it checks: a missed field, a double
+    /// flip, or a wiring gap all fail.
+    #[test]
+    fn rl_is_the_exact_x_mirror_of_lr() {
+        use crate::ir::EdgePath;
+        for (tag, g) in corpus() {
+            let a = lr_rl(&g, Direction::LeftRight);
+            let b = lr_rl(&g, Direction::RightLeft);
+            let w = a.width();
+            assert_eq!(
+                (a.width(), a.height()),
+                (b.width(), b.height()),
+                "{tag}: canvas"
+            );
+            // A cell mirrors to `w - 1 - x`; a SPAN of `n` cells
+            // starting at `x` mirrors to `w - x - n`. The span form
+            // saturates, matching the flip's contract: a label wider
+            // than the whole canvas (the `labels` fixture) has no
+            // meaningful mirror and both sides clamp to 0. `cell` is
+            // deliberately NOT saturating — a coordinate outside the
+            // canvas should fail this test, not be papered over.
+            let cell = |x: usize| w - 1 - x;
+            let span = |x: usize, n: usize| w.saturating_sub(x + n);
+            assert_eq!(a.nodes().len(), b.nodes().len(), "{tag}: node count");
+            for (p, q) in a.nodes().iter().zip(b.nodes().iter()) {
+                assert_eq!(p.id, q.id, "{tag}: node order");
+                assert_eq!(q.x, span(p.x, p.width), "{tag}: node {} x", p.id);
+                assert_eq!(
+                    (q.y, q.width, q.height),
+                    (p.y, p.width, p.height),
+                    "{tag}: node {}",
+                    p.id
+                );
+                assert_eq!(
+                    q.center_x,
+                    cell(p.center_x),
+                    "{tag}: node {} center_x",
+                    p.id
+                );
+                assert_eq!(q.center_y, p.center_y, "{tag}: node {} center_y", p.id);
+                match (p.self_loop_at, q.self_loop_at) {
+                    (Some((px, py)), Some((qx, qy))) => {
+                        assert_eq!((qx, qy), (cell(px), py), "{tag}: node {} marker", p.id);
+                        // …and it lands on the flipped node's leading
+                        // (right) column — the D5 role rule under RtL.
+                        assert_eq!(qx, q.x + q.width - 1, "{tag}: node {} marker side", p.id);
+                    }
+                    (None, None) => {}
+                    _ => panic!("{tag}: node {} marker presence differs", p.id),
+                }
+            }
+
+            assert_eq!(a.edges().len(), b.edges().len(), "{tag}: edge count");
+            for (p, q) in a.edges().iter().zip(b.edges().iter()) {
+                assert_eq!(
+                    (q.from_id, q.to_id),
+                    (p.from_id, p.to_id),
+                    "{tag}: edge order"
+                );
+                assert_eq!(
+                    q.flow_axis, p.flow_axis,
+                    "{tag}: flow_axis is mirror-invariant"
+                );
+                assert_eq!(
+                    q.from_x,
+                    cell(p.from_x),
+                    "{tag}: edge {} from_x",
+                    p.edge_index
+                );
+                assert_eq!(q.to_x, cell(p.to_x), "{tag}: edge {} to_x", p.edge_index);
+                assert_eq!(
+                    (q.from_y, q.to_y),
+                    (p.from_y, p.to_y),
+                    "{tag}: edge {} rows",
+                    p.edge_index
+                );
+                if let Some(text) = p.label {
+                    let n = text.chars().count() + 2;
+                    assert_eq!(
+                        q.label_x,
+                        span(p.label_x, n),
+                        "{tag}: edge {} label_x",
+                        p.edge_index
+                    );
+                    assert_eq!(q.label_y, p.label_y, "{tag}: edge {} label_y", p.edge_index);
+                } else {
+                    assert_eq!(q.label_x, p.label_x, "{tag}: unlabeled label_x untouched");
+                }
+                match (&p.path, &q.path) {
+                    (EdgePath::Direct, EdgePath::Direct) => {}
+                    (EdgePath::Corner { bend_at: pb }, EdgePath::Corner { bend_at: qb }) => {
+                        // X trunks: the bend line is a COLUMN.
+                        assert_eq!(*qb, cell(*pb), "{tag}: edge {} bend", p.edge_index);
+                    }
+                    (
+                        EdgePath::MultiSegment {
+                            waypoints: pw,
+                            start_offset: po,
+                        },
+                        EdgePath::MultiSegment {
+                            waypoints: qw,
+                            start_offset: qo,
+                        },
+                    ) => {
+                        assert_eq!(qo, po, "{tag}: start_offset is flow-relative");
+                        assert_eq!(pw.len(), qw.len(), "{tag}: waypoint count");
+                        for (&(px, py), &(qx, qy)) in pw.iter().zip(qw.iter()) {
+                            assert_eq!((qx, qy), (cell(px), py), "{tag}: waypoint");
+                        }
+                    }
+                    (x, y) => panic!("{tag}: path variant changed: {x:?} vs {y:?}"),
+                }
+            }
+
+            assert_eq!(a.subgraphs().len(), b.subgraphs().len(), "{tag}: box count");
+            for (p, q) in a.subgraphs().iter().zip(b.subgraphs().iter()) {
+                assert_eq!(q.x, span(p.x, p.width), "{tag}: box {} x", p.id);
+                assert_eq!(
+                    (q.y, q.width, q.height),
+                    (p.y, p.width, p.height),
+                    "{tag}: box {}",
+                    p.id
+                );
+            }
+        }
+    }
+
+    /// P4-S1: the flip is TOTAL over path variants the layout never
+    /// emits but the public IR accepts. Hand-built X `SideChannel`
+    /// and `Spline` edges, mirrored and checked field by field —
+    /// `span_start`/`span_end` carry source/target roles and must
+    /// mirror IN PLACE (swapping them would wire the source to the
+    /// target's leg), and `channel_at` is a ROW that an x-flip leaves
+    /// alone.
+    #[test]
+    fn flip_horizontal_is_total_over_path_variants() {
+        use crate::ir::EdgePath;
+        let w = 20;
+        let mut ir = x_flow_ir(
+            EdgePath::SideChannel {
+                channel_at: 4,
+                span_start: 5,
+                span_end: 9,
+            },
+            false,
+            w,
+            8,
+            0,
+        );
+        ir.flip_horizontal();
+        let EdgePath::SideChannel {
+            channel_at,
+            span_start,
+            span_end,
+        } = ir.edges()[0].path
+        else {
+            panic!("variant preserved");
+        };
+        assert_eq!(channel_at, 4, "the channel line is a row — untouched");
+        assert_eq!(span_start, w - 1 - 5, "source anchor mirrors in place");
+        assert_eq!(span_end, w - 1 - 9, "target anchor mirrors in place");
+
+        let mut ir = x_flow_ir(
+            EdgePath::Spline {
+                cp1_x: 4,
+                cp1_y: 1,
+                cp2_x: 9,
+                cp2_y: 2,
+            },
+            false,
+            w,
+            8,
+            0,
+        );
+        ir.flip_horizontal();
+        let EdgePath::Spline {
+            cp1_x,
+            cp1_y,
+            cp2_x,
+            cp2_y,
+        } = ir.edges()[0].path
+        else {
+            panic!("variant preserved");
+        };
+        assert_eq!((cp1_x, cp1_y), (w - 1 - 4, 1));
+        assert_eq!((cp2_x, cp2_y), (w - 1 - 9, 2));
+
+        // Involution: flipping twice restores the original.
+        let mut ir = x_flow_ir(
+            EdgePath::SideChannel {
+                channel_at: 4,
+                span_start: 5,
+                span_end: 9,
+            },
+            false,
+            w,
+            8,
+            0,
+        );
+        let before = alloc::format!("{:?}", ir.edges()[0]);
+        ir.flip_horizontal();
+        ir.flip_horizontal();
+        assert_eq!(
+            alloc::format!("{:?}", ir.edges()[0]),
+            before,
+            "the horizontal flip is involutive"
+        );
+    }
+
+    /// The ARENA twin of the totality check. The layout never emits
+    /// `SideChannel` or `Spline`, so those builder branches are
+    /// unreachable through generated layouts — only a hand-built IR
+    /// exercises them. Same rules as the heap flip (anchors mirror in
+    /// place, the channel line is a row and stays put), plus
+    /// involution over the raw arena fields.
+    #[test]
+    fn flip_horizontal_is_total_over_arena_path_variants() {
+        use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArenaBuilder};
+        let w = 20;
+        let edge = |path| LayoutEdgeArena {
+            from_id: 1,
+            to_id: 2,
+            from_x: 2,
+            from_y: 0,
+            to_x: 12,
+            to_y: 0,
+            directed: true,
+            reversed: false,
+            path,
+            flow_axis: crate::ir::FlowAxis::X,
+            edge_index: 0,
+            label_offset: 0,
+            label_len: 0,
+            label_x: 0,
+            label_y: 0,
+            min_y: 0,
+            max_y: 4,
+        };
+
+        // The flip is a pre-build pass, so build once per flip count
+        // and compare the resulting arena fields.
+        fn path_after(
+            w: usize,
+            path: EdgePathArena,
+            edge: impl Fn(EdgePathArena) -> LayoutEdgeArena,
+            times: usize,
+        ) -> String {
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut arena = Arena::new(&mut buf);
+            let mut b = LayoutIRArenaBuilder::new(&mut arena, 2, 1, 4, 16, 2).expect("builder");
+            b.set_dimensions(w, 8);
+            b.add_edge(edge(path)).expect("edge");
+            for _ in 0..times {
+                b.flip_horizontal();
+            }
+            alloc::format!("{:?}", b.build().edge(0).path)
+        }
+
+        for path in [
+            EdgePathArena::SideChannel {
+                channel_at: 4,
+                span_start: 5,
+                span_end: 9,
+            },
+            EdgePathArena::Spline {
+                cp1_x: 4,
+                cp1_y: 1,
+                cp2_x: 9,
+                cp2_y: 2,
+            },
+        ] {
+            let once = path_after(w, path, edge, 1);
+            assert_eq!(
+                path_after(w, path, edge, 0),
+                path_after(w, path, edge, 2),
+                "arena flip is involutive: {path:?}"
+            );
+            match path {
+                EdgePathArena::SideChannel { .. } => {
+                    assert!(
+                        once.contains("channel_at: 4"),
+                        "the channel line is a row — untouched: {once}"
+                    );
+                    assert!(
+                        once.contains(&alloc::format!("span_start: {}", w - 1 - 5)),
+                        "source anchor mirrors in place: {once}"
+                    );
+                    assert!(
+                        once.contains(&alloc::format!("span_end: {}", w - 1 - 9)),
+                        "target anchor mirrors in place: {once}"
+                    );
+                }
+                EdgePathArena::Spline { .. } => {
+                    assert!(
+                        once.contains(&alloc::format!("cp1_x: {}", w - 1 - 4)),
+                        "{once}"
+                    );
+                    assert!(
+                        once.contains(&alloc::format!("cp2_x: {}", w - 1 - 9)),
+                        "{once}"
+                    );
+                    assert!(
+                        once.contains("cp1_y: 1") && once.contains("cp2_y: 2"),
+                        "rows are untouched by an x-flip: {once}"
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    /// P4-S1: label PLACEMENT mirrors exactly — the planner's chosen
+    /// span under RL is the mirror of its LR span, at odd AND even
+    /// label widths (naive `len / 2` centering drifts one cell on
+    /// even widths, and the float's midpoint on odd gaps).
+    #[test]
+    fn label_spans_mirror_exactly() {
+        for text in ["go", "abc", "four", "fives"] {
+            let mut g = Graph::new();
+            g.add_node(1, "a");
+            g.add_node(2, "b");
+            g.add_node(3, "c");
+            g.add_edge(1, 2, Some(text));
+            g.add_edge(1, 3, None);
+            let len = text.chars().count() + 2;
+            let options = RenderOptions::plain();
+
+            let lr_ir = lr_rl(&g, Direction::LeftRight);
+            let rl_ir = lr_rl(&g, Direction::RightLeft);
+            let w = lr_ir.width();
+            assert_eq!(w, rl_ir.width(), "{text}: canvas width");
+
+            let lr_plan = lr_ir.render_plan(&options);
+            let rl_plan = rl_ir.render_plan(&options);
+            let pick = |p: &crate::render::engine::RenderPlan<'_>| {
+                p.labels()
+                    .iter()
+                    .find(|l| l.edge_index == 0)
+                    .map(|l| (l.x, l.y, l.placeable))
+                    .expect("label plan")
+            };
+            let (lx, ly, lp) = pick(&lr_plan);
+            let (rx, ry, rp) = pick(&rl_plan);
+            assert_eq!(lp, rp, "{text}: placement decision mirrors");
+            if lp {
+                assert_eq!(ry, ly, "{text}: label row is mirror-invariant");
+                assert_eq!(
+                    rx,
+                    w - lx - len,
+                    "{text} (len {len}): RL span is the exact mirror of the LR span"
+                );
+            }
+        }
+    }
+
+    /// P4-S1: an RL graph renders right-to-left — the first level sits
+    /// at the RIGHT, arrowheads point left, and the self-loop marker
+    /// moves to the node's right side.
+    #[test]
+    fn rl_renders_right_to_left() {
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(2, "b");
+        g.add_edge(1, 2, None);
+        g.add_edge(1, 1, None);
+        let ir = lr_rl(&g, Direction::RightLeft);
+        let out = render_plain(&ir, &RenderOptions::plain());
+        let row = out
+            .lines()
+            .find(|l| l.contains("[a]"))
+            .expect("row with [a]");
+        let a = row.find("[a]").expect("a");
+        let b = row.find("[b]").expect("same row");
+        assert!(b < a, "target left of source under RtL: {row:?}\n{out}");
+        assert!(row.contains('←'), "arrowheads point left: {row:?}\n{out}");
+        let n = ir.nodes().iter().find(|n| n.id == 1).expect("node a");
+        assert_eq!(
+            n.self_loop_at,
+            Some((n.x + n.width - 1, n.y + n.height)),
+            "marker on the leading (right) side under RtL:\n{out}"
+        );
+    }
+
+    /// P3-S3: the LR two-node-cycle presentation — the anti-parallel
+    /// pair shares its trunk row with BOTH arrowheads visible (`⇠` at
+    /// the source face, `→` at the target face); the solid trunk wins
+    /// the interior over the dashed back edge. Trunk-lane separation
+    /// was examined and deliberately not built: it would cost
+    /// cross-axis lane reservation machinery for a pair that is
+    /// already legible.
+    #[test]
+    fn lr_two_cycle_shares_trunk_with_both_arrowheads() {
+        let ir = lr(&two_cycle());
+        let out = render_plain(&ir, &RenderOptions::plain());
+        let row = out
+            .lines()
+            .find(|l| l.contains('→') || l.contains('⇢'))
+            .expect("trunk row");
+        assert!(
+            row.contains('⇠') || row.contains('←'),
+            "back arrowhead on the shared trunk: {row:?}\n{out}"
+        );
+        // Tight gaps render as adjacent arrowheads (`[A]⇠→[B]`); wider
+        // gaps fill the interior with the solid trunk. Both are the
+        // intended presentation.
+        let back = row.find(['⇠', '←']).unwrap();
+        let fwd = row.find(['→', '⇢']).unwrap();
+        assert!(back < fwd, "back arrow at the source face: {row:?}");
     }
 }

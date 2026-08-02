@@ -39,8 +39,8 @@
 
 pub mod arena;
 pub(crate) mod arena_builder;
-mod legacy;
 pub mod json;
+mod legacy;
 
 #[cfg(feature = "alloc")]
 use alloc::vec;
@@ -93,6 +93,26 @@ pub enum NodeKind {
     Dummy,
 }
 
+/// Which physical axis an edge's trunk (flow segment) runs along
+/// (temp/08 D2). Per-edge GEOMETRY set by layout — never consult
+/// `Direction` to interpret a path: a corner edge's endpoints differ
+/// on both axes, so orientation is not inferable from coordinates.
+///
+/// `Y` for vertical trunks (every TopDown/BottomUp edge); `X` for
+/// horizontal trunks (LeftRight/RightLeft). Mirror-invariant: both
+/// the BottomUp y-flip and the RightLeft x-flip leave the trunk axis
+/// unchanged, so flips copy it verbatim. Level-axis scalars inside
+/// [`EdgePath`] (`bend_at`, `channel_at`, …) live on the axis
+/// this field names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowAxis {
+    /// The trunk runs vertically; level-axis path scalars are rows.
+    Y,
+    /// The trunk runs horizontally; level-axis path scalars are
+    /// columns.
+    X,
+}
+
 /// A node in the laid-out graph with computed position and dimensions.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
@@ -123,6 +143,18 @@ pub struct LayoutNode<'a> {
     /// Whether this node has a self-loop edge (A → A).
     /// When true, renderers paint a `↺` indicator after the node bracket.
     pub has_self_loop: bool,
+    /// Physical cell of the self-loop marker, computed by layout
+    /// (temp/08 D5): one cell past the node on the cross axis, at its
+    /// level-leading line — for vertical flows that is `(x + width,
+    /// y)`, the legacy `↺` position. `Some` iff `has_self_loop`
+    /// (`has_self_loop` is DERIVED from this field at emission, so
+    /// layout-generated IRs never disagree; hand-built literals are
+    /// responsible for keeping the pair consistent). The vertical flip
+    /// RE-ANCHORS the cell to the same node-relative corner
+    /// (point-mapping would land it on a multi-row node's far row);
+    /// the horizontal flip point-maps, which on that axis *is* the
+    /// node-relative answer.
+    pub self_loop_at: Option<(usize, usize)>,
     /// For dummy nodes: the index of the edge this dummy belongs to.
     /// `None` for real (explicit/implicit) nodes. Mirrors zigraph's
     /// `LayoutNode.edge_index`.
@@ -138,32 +170,37 @@ pub struct LayoutNode<'a> {
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EdgePath {
-    /// Direct vertical connection (nodes are horizontally aligned or adjacent levels)
+    /// Straight flow segment — the endpoints share their cross-axis
+    /// line (`flow_axis: Y`: a vertical line; `X`: a horizontal one).
     Direct,
-    /// L-shaped connection with a horizontal segment
+    /// L-shaped connection with one cross-axis distribution segment.
     Corner {
-        /// Y coordinate of the horizontal segment
-        horizontal_y: usize,
+        /// The level-axis line the cross segment runs on. Which
+        /// physical axis that is comes from the edge's
+        /// [`flow_axis`](LayoutEdge::flow_axis): a ROW for `Y` trunks,
+        /// a COLUMN for `X` trunks.
+        bend_at: usize,
     },
-    /// Routed through a side channel (for skip-level edges).
-    ///
-    /// **Note:** The layout engine produces this variant for edges that skip multiple
-    /// levels. ASCII renderers render the full L-shaped channel routing. SVG/canvas
-    /// renderers may use the coordinates directly.
+    /// Routed through a far cross-axis channel (legacy skip-edge
+    /// shape; the current layout emits [`MultiSegment`](Self::MultiSegment)
+    /// instead — the variant survives for hand-built IRs).
     SideChannel {
-        /// X coordinate of the vertical channel
-        channel_x: usize,
-        /// Starting Y of the channel
-        start_y: usize,
-        /// Ending Y of the channel
-        end_y: usize,
+        /// Cross-axis line of the channel (`flow_axis: Y`: a column;
+        /// `X`: a row).
+        channel_at: usize,
+        /// Level-axis start of the channel span.
+        span_start: usize,
+        /// Level-axis end of the channel span.
+        span_end: usize,
     },
-    /// Multi-segment path through dummy nodes
+    /// Multi-segment path through dummy-node waypoints.
     MultiSegment {
-        /// Waypoints: (x, y) coordinates the edge passes through
+        /// Physical `(x, y)` cells the edge passes through — always
+        /// materialized coordinates, whatever the flow axis.
         waypoints: Vec<(usize, usize)>,
-        /// Vertical offset for the start of the edge (to prevent overlaps at source)
-        start_y_offset: usize,
+        /// Level-axis offset of the first bend past the source (keeps
+        /// fan-outs from overlapping at the source band).
+        start_offset: usize,
     },
     /// Bézier spline hint (for SVG/canvas renderers; ASCII renderers fall back to Direct).
     ///
@@ -201,6 +238,9 @@ pub struct LayoutEdge<'a> {
     pub to_y: usize,
     /// How the edge is routed
     pub path: EdgePath,
+    /// Which physical axis the trunk runs along (see [`FlowAxis`]).
+    /// Every TopDown/BottomUp edge is `Y`.
+    pub flow_axis: FlowAxis,
     /// Edge index (for consistent coloring)
     pub edge_index: usize,
     /// Optional edge label (e.g., "depends on", "uses")
@@ -311,6 +351,9 @@ impl<'a> LayoutIR<'a> {
         for node in &mut self.nodes {
             node.y = h.saturating_sub(node.y + node.height);
             node.center_y = flip_row(node.center_y);
+            // Re-anchor (not point-map): the marker stays one cell right
+            // of the FINAL top row — the engine's direction-blind rule.
+            node.self_loop_at = node.self_loop_at.map(|_| (node.x + node.width, node.y));
         }
         for edge in &mut self.edges {
             edge.from_y = flip_row(edge.from_y);
@@ -321,16 +364,27 @@ impl<'a> LayoutIR<'a> {
                 edge.label_y = flip_row(edge.label_y);
             }
             match &mut edge.path {
-                EdgePath::Corner { horizontal_y } => *horizontal_y = flip_row(*horizontal_y),
+                EdgePath::Corner { bend_at } => *bend_at = flip_row(*bend_at),
                 EdgePath::MultiSegment { waypoints, .. } => {
                     for (_, wy) in waypoints.iter_mut() {
                         *wy = flip_row(*wy);
                     }
                 }
-                EdgePath::SideChannel { start_y, end_y, .. } => {
-                    let (s, e) = (flip_row(*end_y), flip_row(*start_y));
-                    *start_y = s;
-                    *end_y = e;
+                EdgePath::SideChannel {
+                    span_start,
+                    span_end,
+                    ..
+                } => {
+                    // Mirror each in place — never swap. `span_start`
+                    // is SOURCE-associated and `span_end`
+                    // TARGET-associated (the compositor paints the
+                    // source run at one and the target run from the
+                    // other); a mirror moves them, it does not trade
+                    // their roles. Unobservable in generated output —
+                    // the layout never emits `SideChannel` — but wrong
+                    // for hand-built IRs.
+                    *span_start = flip_row(*span_start);
+                    *span_end = flip_row(*span_end);
                 }
                 // Spline is never produced by the layout engine today, but
                 // the flip must be total: both backends apply the identical
@@ -344,6 +398,88 @@ impl<'a> LayoutIR<'a> {
         }
         for sg in &mut self.subgraphs {
             sg.y = h.saturating_sub(sg.y + sg.height);
+        }
+        self.y_index = OnceCell::new();
+    }
+
+    /// Horizontally mirror every coordinate in place (involutive).
+    ///
+    /// Applied once at the end of layout for `Direction::RightLeft` to
+    /// turn the left-to-right logical result into physical
+    /// coordinates — the x-axis twin of [`flip_vertical`].
+    ///
+    /// [`flip_vertical`]: Self::flip_vertical
+    pub(crate) fn flip_horizontal(&mut self) {
+        let w = self.width;
+        let flip_col = |x: usize| w.saturating_sub(1).saturating_sub(x);
+        for node in &mut self.nodes {
+            node.x = w.saturating_sub(node.x + node.width);
+            node.center_x = flip_col(node.center_x);
+            // Point-mapping the marker is exactly right here (unlike
+            // the vertical flip, which must re-anchor): the LR cell
+            // sits at the node's LEADING column, and its mirror is the
+            // flipped node's trailing column — which is the leading
+            // side again under right-to-left flow. Role rule and point
+            // mirror coincide on this axis.
+            node.self_loop_at = node.self_loop_at.map(|(mx, my)| (flip_col(mx), my));
+        }
+        for edge in &mut self.edges {
+            edge.from_x = flip_col(edge.from_x);
+            edge.to_x = flip_col(edge.to_x);
+            // A label occupies a SPAN of cells, so it mirrors as one;
+            // and only when it exists (an unlabeled edge's 0-default
+            // must not become a right-edge coordinate).
+            if let Some(text) = edge.label {
+                let span = text.chars().count() + 2;
+                edge.label_x = w.saturating_sub(edge.label_x + span);
+            }
+            // `flow_axis` is mirror-invariant (D2) and copies verbatim;
+            // `start_offset` is flow-relative, so it too is unchanged.
+            // The level-axis path scalars flip only when the level axis
+            // IS x — i.e. for horizontal trunks.
+            let x_flow = matches!(edge.flow_axis, FlowAxis::X);
+            match &mut edge.path {
+                EdgePath::Corner { bend_at } => {
+                    if x_flow {
+                        *bend_at = flip_col(*bend_at);
+                    }
+                }
+                EdgePath::SideChannel {
+                    channel_at,
+                    span_start,
+                    span_end,
+                } => {
+                    if x_flow {
+                        // Both spans are columns and each mirrors in
+                        // place. They are NOT swapped: `span_start` is
+                        // where the SOURCE enters the channel and
+                        // `span_end` where it exits toward the TARGET
+                        // — roles a mirror does not exchange. The
+                        // channel line is a row, untouched.
+                        *span_start = flip_col(*span_start);
+                        *span_end = flip_col(*span_end);
+                    } else {
+                        // Y trunks: the channel line is the column.
+                        *channel_at = flip_col(*channel_at);
+                    }
+                }
+                EdgePath::MultiSegment { waypoints, .. } => {
+                    for (wx, _) in waypoints.iter_mut() {
+                        *wx = flip_col(*wx);
+                    }
+                }
+                // Never produced by the layout, but the flip must be
+                // total: both backends transform every variant or the
+                // two IRs can drift.
+                EdgePath::Spline { cp1_x, cp2_x, .. } => {
+                    *cp1_x = flip_col(*cp1_x);
+                    *cp2_x = flip_col(*cp2_x);
+                }
+                EdgePath::Direct => {}
+            }
+        }
+        for sg in &mut self.subgraphs {
+            sg.x = w.saturating_sub(sg.x + sg.width);
         }
         self.y_index = OnceCell::new();
     }

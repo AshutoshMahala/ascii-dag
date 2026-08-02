@@ -198,7 +198,10 @@ mod csr {
         );
         // The pair renders side by side: solid down-arrow next to the
         // dashed up-arrow, not overlapping in one column.
-        assert!(heap_out.contains('↓') && heap_out.contains('⇡'), "{heap_out}");
+        assert!(
+            heap_out.contains('↓') && heap_out.contains('⇡'),
+            "{heap_out}"
+        );
     }
 
     /// Strongest backend-parity assertion: the same graph renders to
@@ -550,7 +553,6 @@ mod direction {
             }
         }
     }
-
 }
 
 // ── Dummy-node emission (include_dummy_nodes) ────────────────────────────

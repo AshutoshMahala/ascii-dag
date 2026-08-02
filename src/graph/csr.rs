@@ -462,7 +462,8 @@ impl<'a> CsrGraph<'a> {
         edges: &[(usize, usize)],
     ) -> Option<CsrGraph<'a>> {
         let label_bytes: usize = nodes.iter().map(|(_, l)| l.len()).sum();
-        let mut builder = CsrGraphBuilder::new(arena, nodes.len(), edges.len(), label_bytes + 64, 0)?;
+        let mut builder =
+            CsrGraphBuilder::new(arena, nodes.len(), edges.len(), label_bytes + 64, 0)?;
 
         for &(id, label) in nodes {
             builder.add_node(id, label)?;

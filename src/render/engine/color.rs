@@ -188,14 +188,8 @@ pub(crate) fn ansi256_to_rgb(index: u8) -> (u8, u8, u8) {
         16..=231 => {
             // 6×6×6 color cube.
             let i = index as u16 - 16;
-            let level = |c: u16| -> u8 {
-                if c == 0 { 0 } else { (55 + 40 * c) as u8 }
-            };
-            (
-                level(i / 36),
-                level((i / 6) % 6),
-                level(i % 6),
-            )
+            let level = |c: u16| -> u8 { if c == 0 { 0 } else { (55 + 40 * c) as u8 } };
+            (level(i / 36), level((i / 6) % 6), level(i % 6))
         }
         232..=255 => {
             // Grayscale ramp: 8, 18, …, 238.

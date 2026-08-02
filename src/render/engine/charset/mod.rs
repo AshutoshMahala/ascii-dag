@@ -46,12 +46,7 @@ mod tests {
 
     #[test]
     fn charsets_are_equal_projections_of_one_cell() {
-        let cross = Cell::stroke(
-            Weight::Light,
-            Weight::Light,
-            Weight::Double,
-            Weight::Double,
-        );
+        let cross = Cell::stroke(Weight::Light, Weight::Light, Weight::Double, Weight::Double);
         assert_eq!(Charset::Unicode.decode(cross), '╪');
         assert_eq!(Charset::Ascii.decode(cross), '+');
         assert_eq!(Charset::default(), Charset::Unicode);

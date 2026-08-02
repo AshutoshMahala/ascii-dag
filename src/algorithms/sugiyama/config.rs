@@ -143,15 +143,23 @@ pub struct LayoutConfig<'a> {
     /// Edge routing algorithm.
     pub routing: Routing,
 
-    /// Horizontal spacing between adjacent nodes within a level (default: 3).
+    /// Gap between adjacent nodes *within* a level (default: 3).
+    ///
+    /// The physical axis follows the direction: columns between
+    /// side-by-side nodes in `TopDown`/`BottomUp`, rows between
+    /// stacked nodes in `LeftRight`/`RightLeft`. Rows are cheaper
+    /// than columns in a terminal, so a value of 1 often reads
+    /// better for the horizontal directions.
     pub node_spacing: usize,
 
-    /// Vertical spacing between levels (default: 0).
+    /// Gap *between* levels (default: 0) — rows in
+    /// `TopDown`/`BottomUp`, columns in `LeftRight`/`RightLeft`,
+    /// added on top of the space edge routing already needs.
     ///
     /// The default of 0 preserves the rendered output of releases prior to
     /// 0.10.0, which advertised `level_spacing` in the config but never
     /// applied it. Set to a positive value (e.g. 1–3) to add visible
-    /// vertical separation between layers.
+    /// separation between layers.
     pub level_spacing: usize,
 
     /// Rendering mode (Auto, Vertical, Horizontal).
@@ -159,10 +167,11 @@ pub struct LayoutConfig<'a> {
 
     /// Rank direction (default: [`Direction::TopDown`]).
     ///
-    /// Recorded on the layout IR; for `BottomUp` both layout paths flip
-    /// their result into physical coordinates and the render engine
-    /// paints it directly. `LeftRight`/`RightLeft` are recorded but not
-    /// yet laid out.
+    /// Recorded on the layout IR and honored by both layout paths.
+    /// `LeftRight`/`RightLeft` lay out with levels as columns; the
+    /// mirrored directions (`BottomUp`, `RightLeft`) flip the finished
+    /// result into physical coordinates, which the render engine
+    /// paints directly.
     pub direction: Direction,
 
     /// Include dummy (virtual) nodes in the output IR (default: `false`).

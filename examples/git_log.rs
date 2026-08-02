@@ -1,5 +1,5 @@
-use ascii_dag::graph::Graph;
 use ascii_dag::RenderOptions;
+use ascii_dag::graph::Graph;
 
 #[path = "support/csr.rs"]
 mod csr;
