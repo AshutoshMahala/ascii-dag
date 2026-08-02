@@ -2504,4 +2504,113 @@ mod lr_invariants {
             }
         }
     }
+
+    /// P3-S3 cap-invariance: banded LR renders are byte-identical at
+    /// every cap — bands lose level alignment under X flows, so the
+    /// hard-cut path carries the correctness (plain and colored).
+    #[test]
+    fn lr_band_cap_invariance() {
+        for (tag, g) in corpus() {
+            let ir = lr(&g);
+            for colored in [false, true] {
+                let mut base_opts = if colored {
+                    RenderOptions::colored(Palette::Ansi)
+                } else {
+                    RenderOptions::plain()
+                };
+                base_opts.band_rows_cap = 1000;
+                let base = if colored {
+                    render_colored(&ir, &base_opts)
+                } else {
+                    render_plain(&ir, &base_opts)
+                };
+                for cap in [1usize, 2, 3, 5, 7, 64] {
+                    let mut opts = base_opts;
+                    opts.band_rows_cap = cap;
+                    let out = if colored {
+                        render_colored(&ir, &opts)
+                    } else {
+                        render_plain(&ir, &opts)
+                    };
+                    assert_same(&format!("{tag} cap={cap} colored={colored}"), &base, &out);
+                }
+            }
+        }
+    }
+
+    /// P3-S3: rendered LR byte-parity across backends — the promise
+    /// deferred from the P2 field gate: identical IRs must render
+    /// identically, plain and colored.
+    #[test]
+    fn lr_corpus_renders_identically_across_backends() {
+        use crate::algorithms::sugiyama::arena_csr::compute_layout_arena_csr_axis;
+        let config = LayoutConfig::standard();
+        for (tag, g) in corpus() {
+            let heap_ir = lr(&g);
+            let mut csr_buf = vec![0u8; g.estimate_csr_arena_size()];
+            let mut csr_arena = Arena::new(&mut csr_buf);
+            let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+            let size = g.estimate_layout_arena_size_with(&config);
+            let mut temp_buf = vec![0u8; size];
+            let mut out_buf = vec![0u8; size];
+            let mut temp_arena = Arena::new(&mut temp_buf);
+            let mut out_arena = Arena::new(&mut out_buf);
+            let csr_ir = compute_layout_arena_csr_axis::<Horizontal>(
+                &csr,
+                &config,
+                &mut temp_arena,
+                &mut out_arena,
+            )
+            .expect("CSR LR layout");
+
+            let plain = RenderOptions::plain();
+            let mut heap_out = String::new();
+            heap_ir.render_with(&plain, &mut heap_out).expect("heap");
+            let mut csr_out = String::new();
+            csr_ir.render_with(&plain, &mut csr_out).expect("csr");
+            assert_same(
+                &format!("{tag} (LR heap vs csr, plain)"),
+                &heap_out,
+                &csr_out,
+            );
+
+            let colored = RenderOptions::colored(Palette::Ansi);
+            let mut heap_c = String::new();
+            heap_ir
+                .render_with(&colored, &mut heap_c)
+                .expect("heap colored");
+            let mut csr_c = String::new();
+            csr_ir
+                .render_with(&colored, &mut csr_c)
+                .expect("csr colored");
+            assert_same(&format!("{tag} (LR heap vs csr, colored)"), &heap_c, &csr_c);
+        }
+    }
+
+    /// P3-S3: the LR two-node-cycle presentation — the anti-parallel
+    /// pair shares its trunk row with BOTH arrowheads visible (`⇠` at
+    /// the source face, `→` at the target face); the solid trunk wins
+    /// the interior over the dashed back edge. Trunk-lane separation
+    /// was examined and deliberately not built: it would cost
+    /// cross-axis lane reservation machinery for a pair that is
+    /// already legible.
+    #[test]
+    fn lr_two_cycle_shares_trunk_with_both_arrowheads() {
+        let ir = lr(&two_cycle());
+        let out = render_plain(&ir, &RenderOptions::plain());
+        let row = out
+            .lines()
+            .find(|l| l.contains('→') || l.contains('⇢'))
+            .expect("trunk row");
+        assert!(
+            row.contains('⇠') || row.contains('←'),
+            "back arrowhead on the shared trunk: {row:?}\n{out}"
+        );
+        // Tight gaps render as adjacent arrowheads (`[A]⇠→[B]`); wider
+        // gaps fill the interior with the solid trunk. Both are the
+        // intended presentation.
+        let back = row.find(['⇠', '←']).unwrap();
+        let fwd = row.find(['→', '⇢']).unwrap();
+        assert!(back < fwd, "back arrow at the source face: {row:?}");
+    }
 }
