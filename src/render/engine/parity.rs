@@ -2055,15 +2055,30 @@ mod lr_invariants {
     use crate::ir::{EdgePath, FlowAxis, LayoutIR, LayoutNode};
 
     fn lr<'a>(g: &Graph<'a>) -> LayoutIR<'a> {
-        compute_layout_cfg::<Horizontal>(g, &LayoutConfig::standard())
+        lr_rl(g, Direction::LeftRight)
     }
 
     fn on_rows(y: usize, n: &LayoutNode<'_>) -> bool {
         n.y <= y && y < n.y + n.height
     }
 
-    /// The P1 exit invariants over one Horizontal IR.
-    fn check_invariants(tag: &str, ir: &LayoutIR<'_>) {
+    /// The P1 exit invariants over one Horizontal IR. `dir` selects
+    /// the flow orientation: under `RightLeft` the source port sits on
+    /// the LEFT face and the target entry on the right.
+    fn check_invariants(tag: &str, ir: &LayoutIR<'_>, dir: Direction) {
+        // The IR must RECORD the direction it was laid out for: a
+        // regression that mirrors geometry correctly but keeps the
+        // wrong tag would satisfy every geometric check here while
+        // feeding style callbacks the wrong context.
+        assert_eq!(ir.direction(), dir, "{tag}: recorded direction");
+        let rightward = !matches!(dir, Direction::RightLeft);
+        // Exit face of a source / entry face of a target, per flow.
+        let exit = |n: &LayoutNode<'_>| {
+            if rightward { n.x + n.width - 1 } else { n.x }
+        };
+        let entry = |n: &LayoutNode<'_>| {
+            if rightward { n.x } else { n.x + n.width - 1 }
+        };
         let nodes = ir.nodes();
         // I1: node spans pairwise disjoint and inside the canvas.
         for (i, a) in nodes.iter().enumerate() {
@@ -2102,12 +2117,12 @@ mod lr_invariants {
             // I3: endpoints on the pair's faces at their port rows.
             // Coordinates are layout-order for reversed edges, so accept
             // either orientation of the pair.
-            let fwd_ok = e.from_x == s.x + s.width - 1
-                && e.to_x == t.x
+            let fwd_ok = e.from_x == exit(s)
+                && e.to_x == entry(t)
                 && on_rows(e.from_y, s)
                 && on_rows(e.to_y, t);
-            let rev_ok = e.from_x == t.x + t.width - 1
-                && e.to_x == s.x
+            let rev_ok = e.from_x == exit(t)
+                && e.to_x == entry(s)
                 && on_rows(e.from_y, t)
                 && on_rows(e.to_y, s);
             assert!(
@@ -2133,11 +2148,13 @@ mod lr_invariants {
             // strictly between the two faces.
             match &e.path {
                 EdgePath::Corner { bend_at } => {
-                    let (lo, hi) = if fwd_ok {
-                        (s.x + s.width - 1, t.x)
+                    // Order-free: the flow may run either way.
+                    let (a, b) = if fwd_ok {
+                        (exit(s), entry(t))
                     } else {
-                        (t.x + t.width - 1, s.x)
+                        (exit(t), entry(s))
                     };
+                    let (lo, hi) = (a.min(b), a.max(b));
                     assert!(
                         *bend_at > lo && *bend_at < hi,
                         "{tag}: {}→{} bend {} outside the gap ({lo}, {hi})",
@@ -2267,8 +2284,10 @@ mod lr_invariants {
 
     #[test]
     fn corpus_invariants() {
-        for (tag, g) in corpus() {
-            check_invariants(tag, &lr(&g));
+        for dir in [Direction::LeftRight, Direction::RightLeft] {
+            for (tag, g) in corpus() {
+                check_invariants(&alloc::format!("{tag} {dir:?}"), &lr_rl(&g, dir), dir);
+            }
         }
     }
 
@@ -2315,6 +2334,12 @@ mod lr_invariants {
                     (LayoutView::width(&csr_ir), LayoutView::height(&csr_ir)),
                     "{tag} {dir:?}: canvas"
                 );
+                assert_eq!(
+                    LayoutView::direction(&heap_ir),
+                    dir,
+                    "{tag}: heap direction"
+                );
+                assert_eq!(LayoutView::direction(&csr_ir), dir, "{tag}: csr direction");
                 assert_eq!(
                     LayoutView::node_count(&heap_ir),
                     LayoutView::node_count(&csr_ir),
@@ -2385,7 +2410,7 @@ mod lr_invariants {
             ir.width(),
             ir.height()
         );
-        check_invariants("hero-lr", &ir);
+        check_invariants("hero-lr", &ir, Direction::LeftRight);
     }
 
     /// Slices review: a WIDE member must not escape through the box's
@@ -2412,7 +2437,7 @@ mod lr_invariants {
         let sg = g.add_subgraph("W");
         g.put_nodes(&[2]).inside(sg).unwrap();
         let ir = lr(&g);
-        check_invariants("wide-member", &ir);
+        check_invariants("wide-member", &ir, Direction::LeftRight);
         let b = &ir.subgraphs()[0];
         let m = ir.nodes().iter().find(|n| n.id == 2).unwrap();
         assert!(
@@ -2440,7 +2465,7 @@ mod lr_invariants {
         g.put_subgraphs(&[inner]).inside(outer).unwrap();
         g.put_nodes(&[2]).inside(inner).unwrap();
         let ir = lr(&g);
-        check_invariants("child-only-parent", &ir);
+        check_invariants("child-only-parent", &ir, Direction::LeftRight);
         let parent = ir.subgraphs().iter().find(|s| s.label == "Parent").unwrap();
         let child = ir.subgraphs().iter().find(|s| s.label == "Child").unwrap();
         assert!(
@@ -2583,8 +2608,11 @@ mod lr_invariants {
             '─', '│', '→', '←', '┌', '┐', '└', '┘', '┬', '┴', '├', '┤', '┼', '↺', '┊', '┈', '⇢',
             '⇠',
         ];
-        for (tag, g) in corpus() {
-            let ir = lr(&g);
+        for (dir, (tag, g)) in [Direction::LeftRight, Direction::RightLeft]
+            .into_iter()
+            .flat_map(|d| corpus().into_iter().map(move |c| (d, c)))
+        {
+            let ir = lr_rl(&g, dir);
             let out = render_plain(&ir, &options);
             let plan = ir.render_plan(&options);
             for (r, line) in out.lines().enumerate() {
@@ -2592,7 +2620,7 @@ mod lr_invariants {
                     if ink.contains(&ch) {
                         assert!(
                             ir.hit_test(&plan, c, r) != HitResult::None,
-                            "{tag}: orphan ink {ch:?} at ({c}, {r})\n{out}"
+                            "{tag} {dir:?}: orphan ink {ch:?} at ({c}, {r})\n{out}"
                         );
                     }
                 }
@@ -2605,8 +2633,12 @@ mod lr_invariants {
     /// hard-cut path carries the correctness (plain and colored).
     #[test]
     fn lr_band_cap_invariance() {
-        for (tag, g) in corpus() {
-            let ir = lr(&g);
+        for (dir, (tag, g)) in [Direction::LeftRight, Direction::RightLeft]
+            .into_iter()
+            .flat_map(|d| corpus().into_iter().map(move |c| (d, c)))
+        {
+            let ir = lr_rl(&g, dir);
+            let tag = alloc::format!("{tag} {dir:?}");
             for colored in [false, true] {
                 let mut base_opts = if colored {
                     RenderOptions::colored(Palette::Ansi)
@@ -2639,9 +2671,13 @@ mod lr_invariants {
     #[test]
     fn lr_corpus_renders_identically_across_backends() {
         use crate::algorithms::sugiyama::arena_csr::compute_layout_arena_csr_axis;
-        let config = LayoutConfig::standard();
-        for (tag, g) in corpus() {
-            let heap_ir = lr(&g);
+        for (dir, (tag, g)) in [Direction::LeftRight, Direction::RightLeft]
+            .into_iter()
+            .flat_map(|d| corpus().into_iter().map(move |c| (d, c)))
+        {
+            let mut config = LayoutConfig::standard();
+            config.direction = dir;
+            let heap_ir = lr_rl(&g, dir);
             let mut csr_buf = vec![0u8; g.estimate_csr_arena_size()];
             let mut csr_arena = Arena::new(&mut csr_buf);
             let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
@@ -2664,7 +2700,7 @@ mod lr_invariants {
             let mut csr_out = String::new();
             csr_ir.render_with(&plain, &mut csr_out).expect("csr");
             assert_same(
-                &format!("{tag} (LR heap vs csr, plain)"),
+                &format!("{tag} {dir:?} (heap vs csr, plain)"),
                 &heap_out,
                 &csr_out,
             );
@@ -2678,7 +2714,11 @@ mod lr_invariants {
             csr_ir
                 .render_with(&colored, &mut csr_c)
                 .expect("csr colored");
-            assert_same(&format!("{tag} (LR heap vs csr, colored)"), &heap_c, &csr_c);
+            assert_same(
+                &format!("{tag} {dir:?} (heap vs csr, colored)"),
+                &heap_c,
+                &csr_c,
+            );
         }
     }
 
@@ -3016,6 +3056,129 @@ mod lr_invariants {
         };
         assert_eq!((cp1_x, cp1_y), (w - 1 - 4, 1));
         assert_eq!((cp2_x, cp2_y), (w - 1 - 9, 2));
+
+        // Involution: flipping twice restores the original.
+        let mut ir = x_flow_ir(
+            EdgePath::SideChannel {
+                channel_at: 4,
+                span_start: 5,
+                span_end: 9,
+            },
+            false,
+            w,
+            8,
+            0,
+        );
+        let before = alloc::format!("{:?}", ir.edges()[0]);
+        ir.flip_horizontal();
+        ir.flip_horizontal();
+        assert_eq!(
+            alloc::format!("{:?}", ir.edges()[0]),
+            before,
+            "the horizontal flip is involutive"
+        );
+    }
+
+    /// The ARENA twin of the totality check. The layout never emits
+    /// `SideChannel` or `Spline`, so those builder branches are
+    /// unreachable through generated layouts — only a hand-built IR
+    /// exercises them. Same rules as the heap flip (anchors mirror in
+    /// place, the channel line is a row and stays put), plus
+    /// involution over the raw arena fields.
+    #[test]
+    fn flip_horizontal_is_total_over_arena_path_variants() {
+        use crate::ir::arena::{EdgePathArena, LayoutEdgeArena, LayoutIRArenaBuilder};
+        let w = 20;
+        let edge = |path| LayoutEdgeArena {
+            from_id: 1,
+            to_id: 2,
+            from_x: 2,
+            from_y: 0,
+            to_x: 12,
+            to_y: 0,
+            directed: true,
+            reversed: false,
+            path,
+            flow_axis: crate::ir::FlowAxis::X,
+            edge_index: 0,
+            label_offset: 0,
+            label_len: 0,
+            label_x: 0,
+            label_y: 0,
+            min_y: 0,
+            max_y: 4,
+        };
+
+        // The flip is a pre-build pass, so build once per flip count
+        // and compare the resulting arena fields.
+        fn path_after(
+            w: usize,
+            path: EdgePathArena,
+            edge: impl Fn(EdgePathArena) -> LayoutEdgeArena,
+            times: usize,
+        ) -> String {
+            let mut buf = vec![0u8; 64 * 1024];
+            let mut arena = Arena::new(&mut buf);
+            let mut b = LayoutIRArenaBuilder::new(&mut arena, 2, 1, 4, 16, 2).expect("builder");
+            b.set_dimensions(w, 8);
+            b.add_edge(edge(path)).expect("edge");
+            for _ in 0..times {
+                b.flip_horizontal();
+            }
+            alloc::format!("{:?}", b.build().edge(0).path)
+        }
+
+        for path in [
+            EdgePathArena::SideChannel {
+                channel_at: 4,
+                span_start: 5,
+                span_end: 9,
+            },
+            EdgePathArena::Spline {
+                cp1_x: 4,
+                cp1_y: 1,
+                cp2_x: 9,
+                cp2_y: 2,
+            },
+        ] {
+            let once = path_after(w, path, edge, 1);
+            assert_eq!(
+                path_after(w, path, edge, 0),
+                path_after(w, path, edge, 2),
+                "arena flip is involutive: {path:?}"
+            );
+            match path {
+                EdgePathArena::SideChannel { .. } => {
+                    assert!(
+                        once.contains("channel_at: 4"),
+                        "the channel line is a row — untouched: {once}"
+                    );
+                    assert!(
+                        once.contains(&alloc::format!("span_start: {}", w - 1 - 5)),
+                        "source anchor mirrors in place: {once}"
+                    );
+                    assert!(
+                        once.contains(&alloc::format!("span_end: {}", w - 1 - 9)),
+                        "target anchor mirrors in place: {once}"
+                    );
+                }
+                EdgePathArena::Spline { .. } => {
+                    assert!(
+                        once.contains(&alloc::format!("cp1_x: {}", w - 1 - 4)),
+                        "{once}"
+                    );
+                    assert!(
+                        once.contains(&alloc::format!("cp2_x: {}", w - 1 - 9)),
+                        "{once}"
+                    );
+                    assert!(
+                        once.contains("cp1_y: 1") && once.contains("cp2_y: 2"),
+                        "rows are untouched by an x-flip: {once}"
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 
     /// P4-S1: label PLACEMENT mirrors exactly — the planner's chosen
