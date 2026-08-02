@@ -113,6 +113,10 @@ pub(crate) struct LayoutTemps<'a> {
     /// Per-level routing floor: max Y used by edge routing at each level.
     /// Bottom borders of subgraphs closing at level L must be placed BELOW this floor.
     pub(crate) level_routing_floor: &'a mut [usize],
+    /// Per-level max node LEVEL extent. Geometry stays `usize` — the
+    /// configurable index type must never hold extents (a 256-wide LR
+    /// node would wrap to 0 under `arena-idx-u8`).
+    pub(crate) level_max_extents: &'a mut [usize],
 
     // ── Subgraph temporaries ─────────────────────────────────────────
     /// Per-subgraph (first_level, last_level) range; usize::MAX = unset
@@ -188,8 +192,9 @@ fn slot_collides(
 /// The `config` parameter controls the layout pipeline (crossing reduction, spacing, etc.).
 ///
 /// Direction note: this backend currently lays out through `Vertical`
-/// for every direction — `LeftRight`/`RightLeft` gain their native
-/// `Horizontal` dispatch with LR-P2 (the heap backend already has it).
+/// for every direction — the `Horizontal` machinery is fully mirrored,
+/// and the PUBLIC dispatch for both backends flips atomically at LR-P4
+/// once every direction is usable end-to-end.
 pub fn compute_layout_arena_csr<'b>(
     graph: &CsrGraph<'_>,
     config: &LayoutConfig<'_>,
@@ -877,18 +882,17 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         }
     }
 
-    // 4. Compute per-level max node height and Y offsets
-    // Repurpose level_vdummy_counts for max_node_heights (no longer needed after crossing reduction)
-    let max_node_heights = &mut temps.level_vdummy_counts[..alloc_size];
-    for h in max_node_heights.iter_mut() {
-        *h = 1 as Idx; // default height 1
-    }
+    // 4. Compute per-level max node LEVEL extents and offsets.
+    // Geometry stays `usize` — the configurable index type must never
+    // hold extents (a 256-wide LR node would wrap to 0 under u8).
+    let max_node_extents = &mut temps.level_max_extents[..alloc_size];
+    max_node_extents.fill(1);
     for idx in 0..node_count {
         let level = temps.real_coords[idx].0;
         // Level-axis extent (Vertical: the node's height).
-        let h = A::level_extent(graph.node_width(idx), graph.node_height(idx)) as Idx;
-        if level < alloc_size && h > max_node_heights[level] {
-            max_node_heights[level] = h;
+        let extent = A::level_extent(graph.node_width(idx), graph.node_height(idx));
+        if level < alloc_size && extent > max_node_extents[level] {
+            max_node_extents[level] = extent;
         }
     }
 
@@ -914,7 +918,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     // with subgraphs only).
     fn accumulate_offsets(
         level_offsets: &mut [usize],
-        max_node_heights: &[Idx],
+        max_node_extents: &[usize],
         level_slot_next: &[Idx],
         dummy_counts: &[Idx],
         level_labeled_src: &[Idx],
@@ -928,7 +932,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         let mut current_offset = sg_initial_offset;
         for level in 0..=max_level {
             level_offsets[level] = current_offset;
-            let node_height = max_node_heights[level] as usize;
+            let node_height = max_node_extents[level];
             // Use actual geometry-aware slot count (not naive source count)
             let slot_count = level_slot_next[level] as usize;
             // Jog rows plus the bend row below the deepest jog (shared rule
@@ -957,7 +961,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     }
     let mut total_height = accumulate_offsets(
         temps.level_offsets,
-        max_node_heights,
+        max_node_extents,
         temps.level_slot_next,
         temps.dummy_counts,
         temps.level_labeled_src,
@@ -975,23 +979,28 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     // re-runs. Vertical claims are statically zero — it never re-runs.
     if A::LABEL_CLAIMS_LEVEL_AXIS && graph.has_subgraphs() {
         let mut any = false;
-        for level in 0..=max_level as usize {
-            let mut extra = 0usize;
-            for sg_idx in 0..graph.subgraph_count() {
-                let (first, last) = temps.sg_ranges[sg_idx];
-                if last != level || first == usize::MAX {
-                    continue;
-                }
-                let need = A::label_level_extent(graph.subgraph_label(sg_idx));
-                if need == 0 {
-                    continue;
-                }
-                let start = temps.level_offsets[first].saturating_sub(A::SG_PAD_LEVEL.0);
-                let end = temps.level_offsets[level]
-                    + max_node_heights[level] as usize
-                    + A::SG_PAD_LEVEL.1;
-                extra = extra.max(need.saturating_sub(end.saturating_sub(start)));
+        // One pass over subgraphs, maxima accumulated per closing level.
+        // `level_routing_floor` is not populated until the edge loop
+        // (it is filled(0) there), so it serves as the per-level
+        // scratch here — no new allocation, no O(levels × subgraphs)
+        // scan (slices review).
+        let label_extras = &mut temps.level_routing_floor[..alloc_size];
+        label_extras.fill(0);
+        for sg_idx in 0..graph.subgraph_count() {
+            let (first, last) = temps.sg_ranges[sg_idx];
+            if first == usize::MAX || last >= alloc_size {
+                continue;
             }
+            let need = A::label_level_extent(graph.subgraph_label(sg_idx));
+            if need == 0 {
+                continue;
+            }
+            let start = temps.level_offsets[first].saturating_sub(A::SG_PAD_LEVEL.0);
+            let end = temps.level_offsets[last] + max_node_extents[last] + A::SG_PAD_LEVEL.1;
+            let deficit = need.saturating_sub(end.saturating_sub(start));
+            label_extras[last] = label_extras[last].max(deficit);
+        }
+        for (level, &extra) in label_extras.iter().enumerate() {
             if extra > 0 && level < temps.sg_y_extras.len() {
                 temps.sg_y_extras[level] += extra;
                 any = true;
@@ -1000,7 +1009,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         if any {
             total_height = accumulate_offsets(
                 temps.level_offsets,
-                max_node_heights,
+                max_node_extents,
                 temps.level_slot_next,
                 temps.dummy_counts,
                 temps.level_labeled_src,
@@ -1172,7 +1181,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     // emitted y-primary; LR-P1 rewrites routing in role space and
     // materializes per edge (with `flow_axis`, temp/08 D2).
     let level_offsets = &temps.level_offsets;
-    let max_node_heights = &temps.level_vdummy_counts;
+    let max_node_extents = &temps.level_max_extents;
     let level_labeled_src = &temps.level_labeled_src;
     let level_routing_floor = &mut temps.level_routing_floor;
 
@@ -1181,6 +1190,9 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         // First kept waypoint's x — the label anchor for skip-level
         // paths (mirrors the heap backend's `waypoints[0].0`).
         let mut first_wp_x: Option<usize> = None;
+        // Physical y-bounds of materialized waypoints (Horizontal only:
+        // waypoint rows can lie outside the port-row span).
+        let mut waypoint_y_bounds: Option<(usize, usize)> = None;
         // Self-loops: mark the node and skip edge routing.
         // D5(a): the marker cell is layout geometry — one cell past the
         // node on the cross axis, at its level-leading line (matches
@@ -1230,14 +1242,14 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         // endpoint sits on the source's port line (per-axis: Vertical =
         // band-trailing, Horizontal = own face). Matches heap.
         let band_trailing =
-            level_offsets[src_level as usize] + max_node_heights[src_level as usize] as usize - 1;
+            level_offsets[src_level as usize] + max_node_extents[src_level as usize] - 1;
         let from_y = A::source_port_level(
             level_offsets[src_level as usize],
             A::level_extent(
                 graph.node_width(layout_src_idx),
                 graph.node_height(layout_src_idx),
             ),
-            max_node_heights[src_level as usize] as usize,
+            max_node_extents[src_level as usize],
         );
         let to_y = level_offsets[dst_level as usize];
 
@@ -1328,7 +1340,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
 
                     // Calculate Y using level_offsets + max_node_height at intermediate level
                     let y_base = level_offsets[lvl_idx]
-                        + max_node_heights.get(lvl_idx).copied().unwrap_or(1) as usize
+                        + max_node_extents.get(lvl_idx).copied().unwrap_or(1)
                         - 1;
                     // Waypoint rows budget the label offset only on levels
                     // that source a labeled edge — matches the heap path.
@@ -1366,6 +1378,15 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                     let first_wp_cross = waypoint_scratch[0].0;
                     for wp in waypoint_scratch[..waypoint_count].iter_mut() {
                         *wp = A::materialize(wp.1, wp.0);
+                    }
+                    if matches!(A::FLOW_AXIS, crate::ir::FlowAxis::X) {
+                        let mut wp_min = usize::MAX;
+                        let mut wp_max = 0usize;
+                        for &(_, wy) in &waypoint_scratch[..waypoint_count] {
+                            wp_min = wp_min.min(wy);
+                            wp_max = wp_max.max(wy);
+                        }
+                        waypoint_y_bounds = Some((wp_min, wp_max));
                     }
                     if let Some((start, len)) =
                         builder.add_waypoints(&waypoint_scratch[..waypoint_count])
@@ -1475,11 +1496,16 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         // Physical y-span for band culling: between the node faces in
         // Vertical (ink starts below/above them), the port-row span in
         // Horizontal (the P3 banding audit revisits).
-        let (e_min_y, e_max_y) = if matches!(A::FLOW_AXIS, crate::ir::FlowAxis::Y) {
+        let (mut e_min_y, mut e_max_y) = if matches!(A::FLOW_AXIS, crate::ir::FlowAxis::Y) {
             (from_y_p + 1, to_y_p.saturating_sub(1))
         } else {
             (from_y_p.min(to_y_p), from_y_p.max(to_y_p))
         };
+        // Waypoint rows can exceed the port span (slices review).
+        if let Some((wp_min, wp_max)) = waypoint_y_bounds {
+            e_min_y = e_min_y.min(wp_min);
+            e_max_y = e_max_y.max(wp_max);
+        }
         builder.add_edge(LayoutEdgeArena {
             flow_axis: A::FLOW_AXIS,
             from_id,
@@ -1599,6 +1625,7 @@ fn alloc_layout_temps_csr<'b>(
     let (edge_in_two_cycle_ptr, _) = arena.alloc_raw::<bool>(edge_count)?;
     let (waypoint_scratch_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(max_levels + 1)?;
     let (level_vdummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
+    let (level_max_extents_ptr, _) = arena.alloc_raw_uninit::<usize>(max_levels + 1)?;
     let (level_routing_floor_ptr, _) = arena.alloc_raw_uninit::<usize>(max_levels + 1)?;
 
     // Subgraph temporaries (0-length if no subgraphs)
@@ -1663,6 +1690,10 @@ fn alloc_layout_temps_csr<'b>(
             slot_tails: core::slice::from_raw_parts_mut(slot_tails_ptr, slot_list_size),
             level_dummy_next: core::slice::from_raw_parts_mut(level_dummy_next_ptr, max_levels + 1),
             waypoint_scratch: core::slice::from_raw_parts_mut(waypoint_scratch_ptr, max_levels + 1),
+            level_max_extents: core::slice::from_raw_parts_mut(
+                level_max_extents_ptr,
+                max_levels + 1,
+            ),
             level_vdummy_counts: core::slice::from_raw_parts_mut(
                 level_vdummy_counts_ptr,
                 max_levels + 1,
@@ -4989,6 +5020,7 @@ impl<'a> Graph<'a> {
                 core::mem::size_of::<(usize, usize)>(),
             ), // waypoint_scratch
             item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // level_vdummy_counts
+            item(max_levels.saturating_add(1), core::mem::size_of::<usize>()), // level_max_extents
             item(max_levels.saturating_add(1), core::mem::size_of::<usize>()), // level_routing_floor
             // Subgraph temporaries (allocated only when clustered, but
             // an estimate must cover the clustered case).

@@ -2182,7 +2182,30 @@ mod lr_invariants {
         }
     }
 
-    fn corpus() -> [(&'static str, Graph<'static>); 9] {
+    /// A node wider than `u8::MAX` — level extents are geometry and
+    /// must survive the smallest index configuration (they used to
+    /// wrap through an `Idx` cast under `arena-idx-u8`: 256 → 0).
+    fn wide_node() -> Graph<'static> {
+        use crate::render::engine::CustomNode;
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(
+            2,
+            CustomNode {
+                label: "very-wide",
+                width: 300,
+                height: 1,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_node(3, "b");
+        g.add_edge(1, 2, None);
+        g.add_edge(2, 3, None);
+        g
+    }
+
+    fn corpus() -> [(&'static str, Graph<'static>); 10] {
         [
             ("fan", fan()),
             ("stage", stage()),
@@ -2193,6 +2216,7 @@ mod lr_invariants {
             ("labels", colliding_labels()),
             ("nested", nested_boxes()),
             ("hero", hero_graph()),
+            ("wide_node", wide_node()),
         ]
     }
 
@@ -2271,6 +2295,28 @@ mod lr_invariants {
                 (0..LayoutView::subgraph_count(&csr_ir)).map(|i| LayoutView::subgraph(&csr_ir, i)),
             );
             assert_eq!(hs, cs, "{tag}: subgraphs");
+
+            // Arena-only `min_y`/`max_y` (not mirrored by the view):
+            // every physical y the edge touches — endpoints and
+            // waypoint rows — must sit inside the cached bounds
+            // (slices review: waypoint excursions used to escape).
+            use crate::render::engine::view::PathRef;
+            for i in 0..LayoutView::edge_count(&csr_ir) {
+                let raw = *crate::ir::arena::LayoutIRArena::edge(&csr_ir, i);
+                let v = LayoutView::edge(&csr_ir, i);
+                let mut ys = alloc::vec![raw.from_y, raw.to_y];
+                if let PathRef::MultiSegment { waypoints, .. } = v.path {
+                    ys.extend(waypoints.iter().map(|&(_, wy)| wy));
+                }
+                for y in ys {
+                    assert!(
+                        raw.min_y <= y && y <= raw.max_y,
+                        "{tag}: edge {i} touches y={y} outside cached bounds {}..={}",
+                        raw.min_y,
+                        raw.max_y
+                    );
+                }
+            }
         }
     }
 
