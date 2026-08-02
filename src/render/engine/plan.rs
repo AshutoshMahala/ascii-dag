@@ -431,9 +431,10 @@ impl<'buf> RenderPlan<'buf> {
     }
 
     /// Edge indices (IR-list order) whose labels go to the legend under
-    /// the options this plan was built with. Empty unless the options
-    /// enable colors *and* the legend — a plan for plain output reports
-    /// no legend, matching what actually renders.
+    /// the options this plan was built with: the labels that did not
+    /// paint under the active placement gate (colored: the row-veto
+    /// rule; plain: geometric placement). Empty unless the options
+    /// enable the legend — matching what actually renders.
     pub fn legend_entries(&self) -> &[usize] {
         self.legend.as_slice()
     }
@@ -665,10 +666,16 @@ fn edge_row_span(
     // row (waypoint excursions exceed the port span; bends are
     // columns and add no rows).
     if matches!(axis, crate::ir::FlowAxis::X) {
-        if let PathRef::MultiSegment { waypoints, .. } = *path {
-            for &(_, wy) in waypoints {
-                take(wy);
+        match *path {
+            PathRef::MultiSegment { waypoints, .. } => {
+                for &(_, wy) in waypoints {
+                    take(wy);
+                }
             }
+            // The far channel is a ROW under X flow — it can sit
+            // outside the endpoint rows entirely.
+            PathRef::SideChannel { channel_at, .. } => take(channel_at),
+            _ => {}
         }
         return (lo, hi);
     }
@@ -963,7 +970,23 @@ fn for_each_h_run(
                     push(bend_x, back(to_x));
                 }
             }
-            PathRef::SideChannel { .. } => {}
+            PathRef::SideChannel {
+                channel_at,
+                span_start,
+                span_end,
+            } => {
+                // Three flow segments: source → channel entry, along
+                // the far channel row, channel exit → target.
+                if row == from_y {
+                    push(trim(from_x), span_start);
+                }
+                if row == channel_at {
+                    push(span_start, span_end);
+                }
+                if row == to_y {
+                    push(span_end, back(to_x));
+                }
+            }
             PathRef::MultiSegment {
                 waypoints,
                 start_offset,
@@ -1080,7 +1103,20 @@ fn for_each_v_col(
     // trunk rows' horizontal ink).
     if matches!(axis, crate::ir::FlowAxis::X) {
         match *path {
-            PathRef::Direct | PathRef::Spline { .. } | PathRef::SideChannel { .. } => {}
+            PathRef::Direct | PathRef::Spline { .. } => {}
+            PathRef::SideChannel {
+                channel_at,
+                span_start,
+                span_end,
+            } => {
+                // Two cross runs: into the channel row and out of it.
+                if betw(from_y, channel_at, row) {
+                    push(span_start);
+                }
+                if betw(channel_at, to_y, row) {
+                    push(span_end);
+                }
+            }
             PathRef::Corner { bend_at: bend_x } => {
                 if betw(from_y, to_y, row) {
                     push(bend_x);

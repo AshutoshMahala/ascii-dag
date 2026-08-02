@@ -157,7 +157,8 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
                 emit::emit_plain_band(&canvas, options.charset, &mut sink)?;
             }
         }
-        if colored && options.legend {
+        // D4: plain legends too — the same gate the alloc path uses.
+        if options.legend {
             emit::emit_legend(
                 view_ref,
                 &plan,
@@ -196,7 +197,7 @@ pub(crate) fn estimate_render_output_size<V: view::LayoutView>(
     options: &config::RenderOptions,
 ) -> usize {
     let colored = !matches!(options.color_mode, color::ColorMode::None);
-    emit::estimate_output_size(view_ref, colored, colored && options.legend)
+    emit::estimate_output_size(view_ref, colored, options.legend)
 }
 
 pub use charset::Charset;

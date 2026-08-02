@@ -150,7 +150,8 @@ use super::arena::{
 };
 
 impl<'a> LayoutIRArena<'a> {
-    /// Serialize the layout IR to JSON (zigraph v1.2 schema).
+    /// Serialize the layout IR to JSON (schema v1.3 — zigraph v1.2
+    /// plus the direction extensions; see the module docs).
     ///
     /// Writes into `buffer` and returns the number of bytes written,
     /// or `None` if the buffer is too small.
@@ -163,7 +164,7 @@ impl<'a> LayoutIRArena<'a> {
     /// let mut buf = [0u8; 4096];
     /// if let Some(len) = ir.serialize_json(&mut buf) {
     ///     let json = core::str::from_utf8(&buf[..len]).unwrap();
-    ///     // json is zigraph-compatible JSON
+    ///     // json follows the v1.3 schema
     /// }
     /// # }
     /// ```
@@ -574,7 +575,8 @@ mod heap_json {
     use alloc::string::String;
 
     impl<'a> LayoutIR<'a> {
-        /// Serialize the layout IR to a JSON string (zigraph v1.2 schema).
+        /// Serialize the layout IR to a JSON string (schema v1.3 —
+        /// zigraph v1.2 plus the direction extensions).
         ///
         /// # Example
         ///

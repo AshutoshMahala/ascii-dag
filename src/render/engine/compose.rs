@@ -735,8 +735,9 @@ fn paint_edge<V: LayoutView>(
 /// horizontally, the bend scalar in `Corner`/`MultiSegment` is a
 /// COLUMN, markers point `→`/`←`, and vertical segments are the
 /// cross-axis distribution runs. Formulas mirror `paint_edge` with
-/// the axes swapped; there is no legacy to match, so the Y path's
-/// corner marker hack has no analog here.
+/// the axes swapped, including the adjacent-bend source-marker
+/// fallback (a bend one cell past the source face leaves the marker
+/// no trunk cell of its own, so it takes the corner cell).
 fn paint_edge_x<V: LayoutView>(
     view: &V,
     plan: &RenderPlan,
@@ -784,7 +785,17 @@ fn paint_edge_x<V: LayoutView>(
                     p.stroke(x, e.from_y, n, n, w, w);
                 }
             }
-            v_run_with_corners(p, bend_x, e.from_y, e.to_y, w, dir);
+            let bend_adjacent = bend_x == off(e.from_x, 1);
+            v_run_with_corners(
+                p,
+                bend_x,
+                e.from_y,
+                e.to_y,
+                w,
+                from_m && bend_adjacent,
+                rev,
+                dir,
+            );
             for x in between(bend_x, e.to_x) {
                 if to_m && x == off(e.to_x, -1) {
                     p.marker(x, e.to_y, MarkerKind::Arrow, fwd, rev);
@@ -793,8 +804,45 @@ fn paint_edge_x<V: LayoutView>(
                 }
             }
         }
-        // Never produced by layout; totality only.
-        PathRef::SideChannel { .. } => {}
+        // Not produced by the layout today, but public and
+        // round-trippable through JSON — the X mirror of the Y arm:
+        // `channel_at` is the far ROW, `span_start`/`span_end` the
+        // COLUMNS where the flow enters and leaves it.
+        PathRef::SideChannel {
+            channel_at,
+            span_start,
+            span_end,
+        } => {
+            for x in between(e.from_x, span_start) {
+                if from_m && x == off(e.from_x, 1) {
+                    p.marker(x, e.from_y, MarkerKind::Arrow, bwd, rev);
+                } else {
+                    p.stroke(x, e.from_y, n, n, w, w);
+                }
+            }
+            let source_adjacent = span_start == off(e.from_x, 1);
+            v_run_with_corners(
+                p,
+                span_start,
+                e.from_y,
+                channel_at,
+                w,
+                from_m && source_adjacent,
+                rev,
+                dir,
+            );
+            for x in between(span_start, span_end) {
+                p.stroke(x, channel_at, n, n, w, w);
+            }
+            v_run_with_corners(p, span_end, channel_at, e.to_y, w, false, rev, dir);
+            for x in between(span_end, e.to_x) {
+                if to_m && x == off(e.to_x, -1) {
+                    p.marker(x, e.to_y, MarkerKind::Arrow, fwd, rev);
+                } else {
+                    p.stroke(x, e.to_y, n, n, w, w);
+                }
+            }
+        }
         PathRef::MultiSegment {
             waypoints,
             start_offset,
@@ -838,7 +886,17 @@ fn paint_edge_x<V: LayoutView>(
                     if !first {
                         p.stroke(px, py, n, n, w, w);
                     }
-                    v_run_with_corners(p, bend_x, py, ny, w, dir);
+                    let bend_adjacent = bend_x == off(px, 1);
+                    v_run_with_corners(
+                        p,
+                        bend_x,
+                        py,
+                        ny,
+                        w,
+                        first && from_m && bend_adjacent,
+                        rev,
+                        dir,
+                    );
                     for x in between(bend_x, nx) {
                         if last && to_m && x == off(nx, -1) {
                             p.marker(x, ny, MarkerKind::Arrow, fwd, rev);
@@ -859,12 +917,15 @@ fn paint_edge_x<V: LayoutView>(
 /// [`h_run_with_corners`]. The start end's horizontal arm points back
 /// toward the source (against the flow), the far end's arm continues
 /// with the flow toward the target.
+#[allow(clippy::too_many_arguments)]
 fn v_run_with_corners(
     p: &mut EdgePainter<'_, '_, '_, '_>,
     col: usize,
     y_start: usize,
     y_end: usize,
     w: Weight,
+    marker_hack: bool,
+    dashed: bool,
     dir: isize,
 ) {
     if y_start == y_end {
@@ -879,14 +940,23 @@ fn v_run_with_corners(
     let (src_left, src_right) = if dir > 0 { (w, n) } else { (n, w) };
     let (tgt_left, tgt_right) = if dir > 0 { (n, w) } else { (w, n) };
     let (toward_end_up, toward_end_down) = if y_start < y_end { (n, w) } else { (w, n) };
-    p.stroke(
-        col,
-        y_start,
-        toward_end_up,
-        toward_end_down,
-        src_left,
-        src_right,
-    );
+    if marker_hack {
+        // The bend sits immediately past the source face, so the
+        // source-side marker has no trunk cell of its own — it takes
+        // the corner cell instead (the X mirror of the Y path's
+        // no-room-for-the-arrow rule).
+        let bwd = if dir > 0 { Dir::Left } else { Dir::Right };
+        p.marker(col, y_start, MarkerKind::Arrow, bwd, dashed);
+    } else {
+        p.stroke(
+            col,
+            y_start,
+            toward_end_up,
+            toward_end_down,
+            src_left,
+            src_right,
+        );
+    }
     p.stroke(
         col,
         y_end,

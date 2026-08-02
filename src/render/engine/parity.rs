@@ -327,6 +327,22 @@ fn plain_legend_lists_unplaced_labels() {
     ir.render_with(&RenderOptions::plain(), &mut plain)
         .expect("render");
     assert!(!plain.contains(" → "), "no legend by default:\n{plain}");
+
+    // Slices review [P1]: the no-alloc surface must agree — one
+    // assertion covering both the emission gate and the estimator.
+    use crate::render::engine::{
+        estimate_render_arena_size, estimate_render_output_size, render_to_bytes,
+    };
+    let mut arena_buf = vec![0u8; estimate_render_arena_size(&ir, &options)];
+    let arena = Arena::new(&mut arena_buf);
+    let mut bytes = vec![0u8; estimate_render_output_size(&ir, &options)];
+    let written = render_to_bytes(&ir, &options, &arena, &mut bytes)
+        .expect("plain legend fits its estimated output buffer");
+    assert_eq!(
+        core::str::from_utf8(&bytes[..written]).unwrap(),
+        out,
+        "byte surface matches the String surface with a plain legend"
+    );
 }
 
 /// The hero example against the golden snapshot (regenerated at RW8
@@ -2613,6 +2629,146 @@ mod lr_invariants {
                 .expect("csr colored");
             assert_same(&format!("{tag} (LR heap vs csr, colored)"), &heap_c, &csr_c);
         }
+    }
+
+    /// Hand-built X-flow IR: nodes on one row, an edge with the given
+    /// path, reversed as asked. Exercises the public compositor paths
+    /// the layout does not currently emit.
+    fn x_flow_ir(
+        path: crate::ir::EdgePath,
+        reversed: bool,
+        w: usize,
+        h: usize,
+        to_y: usize,
+    ) -> LayoutIR<'static> {
+        use crate::ir::{FlowAxis, LayoutEdge, LayoutIRBuilder, LayoutNode, NodeKind};
+        let mut b = LayoutIRBuilder::new();
+        b.set_dimensions(w, h);
+        for (i, (id, label, x, y)) in [(1usize, "a", 0usize, 0usize), (2, "b", 12, to_y)]
+            .into_iter()
+            .enumerate()
+        {
+            b.add_node(LayoutNode {
+                id,
+                label,
+                x,
+                y,
+                width: 3,
+                height: 1,
+                center_x: x + 1,
+                center_y: y,
+                level: i,
+                level_position: 0,
+                kind: NodeKind::Explicit,
+                has_self_loop: false,
+                self_loop_at: None,
+                edge_index: None,
+                content_tag: 0,
+            });
+        }
+        b.add_edge(LayoutEdge {
+            from_id: 1,
+            to_id: 2,
+            from_x: 2,
+            from_y: 0,
+            to_x: 12,
+            to_y,
+            path,
+            flow_axis: FlowAxis::X,
+            edge_index: 0,
+            label: None,
+            label_x: 0,
+            label_y: 0,
+            directed: true,
+            reversed,
+        });
+        b.build()
+    }
+
+    fn cell_at(out: &str, x: usize, y: usize) -> char {
+        out.lines()
+            .nth(y)
+            .and_then(|l| l.chars().nth(x))
+            .unwrap_or(' ')
+    }
+
+    /// Slices review [P1]: when the bend sits IMMEDIATELY past the
+    /// source face, the source-side marker has no trunk cell of its
+    /// own — it must take the corner cell rather than vanish. Pinned
+    /// per path variant on reversed edges (where the marker is the
+    /// arrow showing the original direction).
+    #[test]
+    fn x_adjacent_bend_keeps_the_source_marker() {
+        use crate::ir::EdgePath;
+        // Corner bending one column past the source face (x = 3).
+        let ir = x_flow_ir(EdgePath::Corner { bend_at: 3 }, true, 20, 6, 3);
+        let out = render_plain(&ir, &RenderOptions::plain());
+        assert_eq!(
+            cell_at(&out, 3, 0),
+            '⇠',
+            "reversed Corner keeps its source marker at the adjacent bend:\n{out}"
+        );
+
+        // MultiSegment with start_offset == 0 — same adjacency.
+        let ir = x_flow_ir(
+            EdgePath::MultiSegment {
+                waypoints: alloc::vec![(3, 3)],
+                start_offset: 0,
+            },
+            true,
+            20,
+            8,
+            3,
+        );
+        let out = render_plain(&ir, &RenderOptions::plain());
+        assert_eq!(
+            cell_at(&out, 3, 0),
+            '⇠',
+            "reversed MultiSegment keeps its source marker:\n{out}"
+        );
+    }
+
+    /// Slices review [P1]: `SideChannel` is public and JSON-roundtrippable,
+    /// so an X-flow one must actually paint — through the compositor AND
+    /// the plan (row spans, ink enumeration, hit-testing, banding). The
+    /// channel row sits outside the endpoint rows and the cap is 1, so
+    /// this fixture exercises all four at once.
+    #[test]
+    fn x_side_channel_paints_and_hits() {
+        use crate::render::engine::HitResult;
+        let ir = x_flow_ir(
+            crate::ir::EdgePath::SideChannel {
+                channel_at: 4,
+                span_start: 5,
+                span_end: 9,
+            },
+            false,
+            20,
+            8,
+            0,
+        );
+        let options = RenderOptions::plain();
+        let out = render_plain(&ir, &options);
+        assert!(
+            out.lines().nth(4).is_some_and(|l| l.contains('─')),
+            "the far channel row paints:\n{out}"
+        );
+        assert_eq!(
+            cell_at(&out, 11, 0),
+            '→',
+            "arrowhead into the target:\n{out}"
+        );
+        // Banding must not lose it: cap 1 forces a band per row.
+        let mut capped = options;
+        capped.band_rows_cap = 1;
+        assert_same("x side-channel banding", &out, &render_plain(&ir, &capped));
+        // And the channel ink hit-tests to its edge.
+        let plan = ir.render_plan(&options);
+        assert_eq!(
+            ir.hit_test(&plan, 7, 4),
+            HitResult::Edge(0),
+            "channel-row ink belongs to the edge:\n{out}"
+        );
     }
 
     /// P3-S3: the LR two-node-cycle presentation — the anti-parallel
