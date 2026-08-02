@@ -37,7 +37,6 @@ pub(crate) struct NodeRef<'a> {
     pub kind: NodeKind,
     pub has_self_loop: bool,
     /// Self-loop marker cell (arena sentinel normalized to `None`).
-    #[allow(dead_code)] // paint consumer lands at LR-P3 (parity contract, N1)
     pub self_loop_at: Option<(usize, usize)>,
     /// Owning edge for dummy nodes; `None` for real nodes.
     #[allow(dead_code)] // consumer lands with RW7 dummy introspection
@@ -90,8 +89,8 @@ pub(crate) struct EdgeRef<'a> {
     pub label_y: usize,
     pub directed: bool,
     pub reversed: bool,
-    /// Physical axis of the edge's trunk (temp/08 D2).
-    #[allow(dead_code)] // paint consumer lands at LR-P3 (parity contract, N1)
+    /// Physical axis of the edge's trunk (temp/08 D2) — selects the
+    /// compositor's paint path.
     pub flow_axis: crate::ir::FlowAxis,
     pub path: PathRef<'a>,
 }

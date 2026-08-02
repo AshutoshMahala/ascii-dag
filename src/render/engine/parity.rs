@@ -2406,4 +2406,48 @@ mod lr_invariants {
         );
         assert!(child.x > parent.x && child.x + child.width < parent.x + parent.width);
     }
+
+    /// P3-S1: horizontal trunks render — a chain paints `[a]` and
+    /// `[b]` on one row joined by a `─` trunk with a `→` arrowhead.
+    #[test]
+    fn lr_chain_renders_horizontal_trunk() {
+        let mut g = Graph::new();
+        g.add_node(1, "a");
+        g.add_node(2, "b");
+        g.add_edge(1, 2, None);
+        let ir = lr(&g);
+        let out = render_plain(&ir, &RenderOptions::plain());
+        let row = out
+            .lines()
+            .find(|l| l.contains("[a]"))
+            .expect("row with [a]");
+        assert!(row.contains("[b]"), "same-row target: {row:?}");
+        assert!(row.contains('─'), "trunk: {row:?}");
+        assert!(row.contains('→'), "arrowhead: {row:?}");
+        let a = row.find("[a]").unwrap();
+        let arrow = row.find('→').unwrap();
+        let b = row.find("[b]").unwrap();
+        assert!(a < arrow && arrow < b, "order: {row:?}");
+    }
+
+    /// P3-S1: corner edges bend through vertical cross runs, and the
+    /// LR self-loop marker paints at its IR cell below the node.
+    #[test]
+    fn lr_corner_and_self_loop_render() {
+        let mut g = Graph::new();
+        g.add_node(1, "root");
+        g.add_node(2, "up");
+        g.add_node(3, "down");
+        g.add_edge(1, 2, None);
+        g.add_edge(1, 3, None);
+        g.add_edge(1, 1, None);
+        let ir = lr(&g);
+        let out = render_plain(&ir, &RenderOptions::plain());
+        assert!(out.contains('→'), "arrowheads:\n{out}");
+        assert!(
+            out.contains('│') || out.contains('┐') || out.contains('└'),
+            "vertical cross runs:\n{out}"
+        );
+        assert!(out.contains('↺'), "self-loop marker:\n{out}");
+    }
 }
