@@ -149,9 +149,11 @@ pub struct LayoutNode<'a> {
     /// y)`, the legacy `↺` position. `Some` iff `has_self_loop`
     /// (`has_self_loop` is DERIVED from this field at emission, so
     /// layout-generated IRs never disagree; hand-built literals are
-    /// responsible for keeping the pair consistent). Direction flips
-    /// re-anchor the cell to the
-    /// same node-relative corner rather than point-mapping it.
+    /// responsible for keeping the pair consistent). The vertical flip
+    /// RE-ANCHORS the cell to the same node-relative corner
+    /// (point-mapping would land it on a multi-row node's far row);
+    /// the horizontal flip point-maps, which on that axis *is* the
+    /// node-relative answer.
     pub self_loop_at: Option<(usize, usize)>,
     /// For dummy nodes: the index of the edge this dummy belongs to.
     /// `None` for real (explicit/implicit) nodes. Mirrors zigraph's
@@ -373,9 +375,16 @@ impl<'a> LayoutIR<'a> {
                     span_end,
                     ..
                 } => {
-                    let (s, e) = (flip_row(*span_end), flip_row(*span_start));
-                    *span_start = s;
-                    *span_end = e;
+                    // Mirror each in place — never swap. `span_start`
+                    // is SOURCE-associated and `span_end`
+                    // TARGET-associated (the compositor paints the
+                    // source run at one and the target run from the
+                    // other); a mirror moves them, it does not trade
+                    // their roles. Unobservable in generated output —
+                    // the layout never emits `SideChannel` — but wrong
+                    // for hand-built IRs.
+                    *span_start = flip_row(*span_start);
+                    *span_end = flip_row(*span_end);
                 }
                 // Spline is never produced by the layout engine today, but
                 // the flip must be total: both backends apply the identical
@@ -389,6 +398,88 @@ impl<'a> LayoutIR<'a> {
         }
         for sg in &mut self.subgraphs {
             sg.y = h.saturating_sub(sg.y + sg.height);
+        }
+        self.y_index = OnceCell::new();
+    }
+
+    /// Horizontally mirror every coordinate in place (involutive).
+    ///
+    /// Applied once at the end of layout for `Direction::RightLeft` to
+    /// turn the left-to-right logical result into physical
+    /// coordinates — the x-axis twin of [`flip_vertical`].
+    ///
+    /// [`flip_vertical`]: Self::flip_vertical
+    pub(crate) fn flip_horizontal(&mut self) {
+        let w = self.width;
+        let flip_col = |x: usize| w.saturating_sub(1).saturating_sub(x);
+        for node in &mut self.nodes {
+            node.x = w.saturating_sub(node.x + node.width);
+            node.center_x = flip_col(node.center_x);
+            // Point-mapping the marker is exactly right here (unlike
+            // the vertical flip, which must re-anchor): the LR cell
+            // sits at the node's LEADING column, and its mirror is the
+            // flipped node's trailing column — which is the leading
+            // side again under right-to-left flow. Role rule and point
+            // mirror coincide on this axis.
+            node.self_loop_at = node.self_loop_at.map(|(mx, my)| (flip_col(mx), my));
+        }
+        for edge in &mut self.edges {
+            edge.from_x = flip_col(edge.from_x);
+            edge.to_x = flip_col(edge.to_x);
+            // A label occupies a SPAN of cells, so it mirrors as one;
+            // and only when it exists (an unlabeled edge's 0-default
+            // must not become a right-edge coordinate).
+            if let Some(text) = edge.label {
+                let span = text.chars().count() + 2;
+                edge.label_x = w.saturating_sub(edge.label_x + span);
+            }
+            // `flow_axis` is mirror-invariant (D2) and copies verbatim;
+            // `start_offset` is flow-relative, so it too is unchanged.
+            // The level-axis path scalars flip only when the level axis
+            // IS x — i.e. for horizontal trunks.
+            let x_flow = matches!(edge.flow_axis, FlowAxis::X);
+            match &mut edge.path {
+                EdgePath::Corner { bend_at } => {
+                    if x_flow {
+                        *bend_at = flip_col(*bend_at);
+                    }
+                }
+                EdgePath::SideChannel {
+                    channel_at,
+                    span_start,
+                    span_end,
+                } => {
+                    if x_flow {
+                        // Both spans are columns and each mirrors in
+                        // place. They are NOT swapped: `span_start` is
+                        // where the SOURCE enters the channel and
+                        // `span_end` where it exits toward the TARGET
+                        // — roles a mirror does not exchange. The
+                        // channel line is a row, untouched.
+                        *span_start = flip_col(*span_start);
+                        *span_end = flip_col(*span_end);
+                    } else {
+                        // Y trunks: the channel line is the column.
+                        *channel_at = flip_col(*channel_at);
+                    }
+                }
+                EdgePath::MultiSegment { waypoints, .. } => {
+                    for (wx, _) in waypoints.iter_mut() {
+                        *wx = flip_col(*wx);
+                    }
+                }
+                // Never produced by the layout, but the flip must be
+                // total: both backends transform every variant or the
+                // two IRs can drift.
+                EdgePath::Spline { cp1_x, cp2_x, .. } => {
+                    *cp1_x = flip_col(*cp1_x);
+                    *cp2_x = flip_col(*cp2_x);
+                }
+                EdgePath::Direct => {}
+            }
+        }
+        for sg in &mut self.subgraphs {
+            sg.x = w.saturating_sub(sg.x + sg.width);
         }
         self.y_index = OnceCell::new();
     }

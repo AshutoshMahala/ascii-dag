@@ -63,7 +63,9 @@ pub struct LayoutNodeArena {
     /// `has_self_loop` by [`set_self_loop`] (which derives the legacy
     /// cell, one right of the top row) — builder-produced IRs never
     /// disagree; hand-built literals own the pair's consistency.
-    /// Direction flips re-anchor it to the same node-relative corner.
+    /// The vertical flip re-anchors it to the same node-relative
+    /// corner; the horizontal flip point-maps, which on that axis is
+    /// the same answer.
     ///
     /// [`set_self_loop`]: crate::ir::arena::LayoutIRArenaBuilder::set_self_loop
     pub self_loop_at: (usize, usize),

@@ -1560,6 +1560,16 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         builder.flip_vertical();
     }
 
+    // RL is LR mirrored on x — the same contract, other axis. Gated
+    // on the PROFILE (see the heap twin): mirroring a vertical layout
+    // would change public `RightLeft` output before the atomic
+    // dispatch flip. Also pre-build, after the final set_dimensions.
+    if config.direction == crate::graph::Direction::RightLeft
+        && matches!(A::FLOW_AXIS, crate::ir::FlowAxis::X)
+    {
+        builder.flip_horizontal();
+    }
+
     let mut ir = builder.build();
     ir.set_direction(config.direction);
     Ok(ir)

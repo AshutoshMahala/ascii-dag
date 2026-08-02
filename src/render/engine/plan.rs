@@ -327,6 +327,17 @@ impl<'buf> RenderPlan<'buf> {
             let (mut x, mut y) = (e.label_x, e.label_y);
             let mut placeable = false;
             let is_x = matches!(e.flow_axis, crate::ir::FlowAxis::X);
+            // Centering a span on an anchor is ambiguous at even
+            // widths, and the naive `len / 2` is not mirror-stable: an
+            // RL layout would land one cell left of the exact mirror
+            // of its LR twin. Bias the lead by the physical flow sign
+            // so `RL span == mirror(LR span)` exactly, at every width.
+            let rightward = e.to_x >= e.from_x;
+            let lead = if rightward {
+                len / 2
+            } else {
+                len.saturating_sub(1) / 2
+            };
 
             // ── D9 host ladder ──
             // Host 1 — the edge's OWN cross (vertical) segment: the
@@ -347,7 +358,7 @@ impl<'buf> RenderPlan<'buf> {
                         if chosen.is_some() {
                             return;
                         }
-                        let cx = col.saturating_sub(len / 2);
+                        let cx = col.saturating_sub(lead);
                         if cx + len > width {
                             return;
                         }
@@ -397,8 +408,12 @@ impl<'buf> RenderPlan<'buf> {
             // empty cells over the node columns, never widens
             // anything. The legend remains the final fallback.
             if !placeable && is_x && e.from_y >= 1 {
-                let mid = (e.from_x.min(e.to_x) + e.from_x.abs_diff(e.to_x) / 2).max(len / 2);
-                let fx = mid - len / 2;
+                // The gap midpoint has the same tie at odd widths:
+                // round toward the flow so the mirror stays exact.
+                let gap = e.from_x.abs_diff(e.to_x);
+                let half = if rightward { gap / 2 } else { gap.div_ceil(2) };
+                let mid = (e.from_x.min(e.to_x) + half).max(lead);
+                let fx = mid - lead;
                 let fy = e.from_y - 1;
                 if (fx, fy) != (x, y)
                     && fx + len <= width

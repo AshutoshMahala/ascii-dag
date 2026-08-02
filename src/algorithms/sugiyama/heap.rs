@@ -1161,6 +1161,17 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         // Physical-space contract: IR coordinates match rendered cells.
         ir.flip_vertical();
     }
+    // RL is LR mirrored on x — the same contract, other axis. Gated
+    // on the PROFILE, not just the direction: while the public
+    // dispatcher still selects `Vertical` for every direction
+    // (the atomic flip lands at LR-P4-S3), a `RightLeft` request must
+    // keep its documented "recorded, laid out vertically" behavior —
+    // mirroring a vertical layout would change public output early.
+    if config.direction == crate::graph::Direction::RightLeft
+        && matches!(A::FLOW_AXIS, crate::ir::FlowAxis::X)
+    {
+        ir.flip_horizontal();
+    }
     ir
 }
 

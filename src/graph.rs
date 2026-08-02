@@ -1492,17 +1492,53 @@ mod tests {
     /// accidental early flip (slices review, P0).
     #[test]
     fn lr_direction_stays_vertical_until_the_atomic_flip() {
-        for dir in [Direction::LeftRight, Direction::RightLeft] {
+        let build = || {
             let mut g = Graph::new();
             g.add_node(1, "a");
-            g.add_node(2, "b");
-            g.add_edge(1, 2, None);
+            g.add_node(2, "bb");
+            g.add_node(3, "c");
+            g.add_edge(1, 2, Some("go"));
+            g.add_edge(1, 3, None);
+            g.add_edge(2, 2, None);
+            g
+        };
+        // Full geometry, not just ordering: `LeftRight`/`RightLeft`
+        // must be INDISTINGUISHABLE from `TopDown` until the atomic
+        // flip — an early or partial flip (a horizontal mirror applied
+        // to the still-vertical layout, say) fails here.
+        let baseline = build().compute_layout();
+        let fields = |ir: &crate::ir::LayoutIR<'_>| {
+            let nodes: Vec<_> = ir
+                .nodes()
+                .iter()
+                .map(|n| (n.id, n.x, n.y, n.width, n.height, n.self_loop_at))
+                .collect();
+            let edges: Vec<_> = ir
+                .edges()
+                .iter()
+                .map(|e| {
+                    (
+                        e.from_x,
+                        e.from_y,
+                        e.to_x,
+                        e.to_y,
+                        e.label_x,
+                        e.label_y,
+                        e.flow_axis,
+                    )
+                })
+                .collect();
+            (ir.width(), ir.height(), nodes, edges)
+        };
+        for dir in [Direction::LeftRight, Direction::RightLeft] {
+            let mut g = build();
             g.set_direction(dir);
             let ir = g.compute_layout();
-            assert_eq!(ir.edges()[0].flow_axis, crate::ir::FlowAxis::Y);
-            let a = ir.nodes().iter().find(|n| n.id == 1).unwrap();
-            let b = ir.nodes().iter().find(|n| n.id == 2).unwrap();
-            assert!(b.y >= a.y + a.height, "levels stay rows under {dir:?}");
+            assert_eq!(
+                fields(&ir),
+                fields(&baseline),
+                "{dir:?} still lays out exactly like TopDown"
+            );
         }
     }
 
