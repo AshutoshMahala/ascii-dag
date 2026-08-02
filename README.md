@@ -9,7 +9,10 @@ layout (cycle breaking, layering, crossing reduction, edge routing)
 with a terminal renderer. Zero dependencies. `no_std` ready — the
 arena pipeline runs without a heap allocator.
 
-<img src="assets/hero_colored_heap.png" alt="hero example — colored output" width="300"/>
+<img src="assets/hero_colored_heap.png" alt="hero example — heap colored output" height="700"/>
+<img src="assets/hero_arena_rl_dummy.png" alt="hero example — arena colored output with dummy enabled" height="300"/>
+<img src="assets/longan_nano.jpg" alt="longan_nano ascii output" height="300"/>
+
 
 ## Example
 

@@ -13,14 +13,25 @@ use longan_nano::{lcd, lcd_pins};
 use riscv_rt::entry;
 
 use ascii_dag::algorithms::sugiyama::config::LayoutConfig;
+use ascii_dag::graph::Direction;
 use ascii_dag::graph::arena::Arena;
 use ascii_dag::graph::csr::CsrGraphBuilder;
+use ascii_dag::render::engine::RenderOptions;
 
 /// Render a DAG on the Longan Nano's 160×80 LCD.
 ///
-/// Pure arena mode — no heap allocator.
-/// Total stack usage: ~6 KB (fits easily in 20 KB RAM).
+/// Pure arena mode — no heap allocator, every buffer on the stack.
 /// LCD: 160×80 px, FONT_4X6 → 40 chars × 13 lines.
+///
+/// Two choices matter on this display:
+///
+/// * **ASCII charset.** `FONT_4X6` has no box-drawing glyphs, so the
+///   render uses `RenderOptions::ascii()` — the same canvas decoded
+///   through the ASCII table (`+ - | >` instead of `┌ ─ │ →`).
+/// * **LeftRight direction.** 40 columns × 13 lines is a wide, short
+///   window, and a chain laid out top-down runs out of lines long
+///   before it runs out of columns. LR turns levels into columns and
+///   fits the same graph in a few rows.
 #[entry]
 fn main() -> ! {
     let dp = pac::Peripherals::take().unwrap();
@@ -60,7 +71,7 @@ fn main() -> ! {
         .build();
 
     // Title
-    Text::new("ascii-dag (no_alloc)", Point::new(2, 6), title_style)
+    Text::new("ascii-dag LR/ascii (no_alloc)", Point::new(2, 6), title_style)
         .draw(&mut lcd)
         .unwrap();
 
@@ -68,6 +79,10 @@ fn main() -> ! {
     let mut graph_buf = [0u8; 1024];
     let mut output_buf = [0u8; 2048];
     let mut temp_buf = [0u8; 2048];
+    // The render engine carves its plan + band canvas from an arena of
+    // its own, and writes text into a plain byte buffer.
+    let mut render_buf = [0u8; 4096];
+    let mut text_buf = [0u8; 2048];
 
     // ── Build graph ────────────────────────────────────────
     let mut graph_arena = Arena::new(&mut graph_buf);
@@ -86,25 +101,25 @@ fn main() -> ! {
     let graph = builder.build().unwrap();
 
     // ── Compute layout ─────────────────────────────────────
+    // Levels become columns: the chain runs across the 40-column
+    // display instead of down its 13 lines.
+    let mut config = LayoutConfig::standard();
+    config.direction = Direction::LeftRight;
+
     let mut output_arena = Arena::new(&mut output_buf);
     let layout = {
         let mut temp_arena = Arena::new(&mut temp_buf);
-        graph.compute_layout_arena(
-            &LayoutConfig::standard(),
-            &mut temp_arena,
-            &mut output_arena,
-        )
+        graph.compute_layout_arena(&config, &mut temp_arena, &mut output_arena)
     };
 
     match layout {
         Ok(ir) => {
-            // Reuse temp_buf for rendered text (temp_arena was dropped)
-            let render_buf = &mut temp_buf;
-            let mut line_chars = [' '; 80];
-            let mut scratch = [0usize; 80];
+            // ASCII charset: FONT_4X6 has no box-drawing glyphs.
+            let options = RenderOptions::ascii();
+            let render_arena = Arena::new(&mut render_buf);
 
-            if let Some(bytes) = ir.render_to_buffer(render_buf, &mut line_chars, &mut scratch) {
-                if let Ok(text) = core::str::from_utf8(&render_buf[..bytes]) {
+            if let Ok(bytes) = ir.render_to_bytes(&options, &render_arena, &mut text_buf) {
+                if let Ok(text) = core::str::from_utf8(&text_buf[..bytes]) {
                     // Draw DAG output line by line
                     // Title at y=6, leave gap, start DAG at y=14
                     let mut y = 14;

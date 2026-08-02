@@ -42,7 +42,8 @@ pub fn render_with(
     let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
     let mut csr_arena = Arena::new(&mut csr_buf);
     let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
-    let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+    // Size with the config: `include_dummy_nodes` grows the IR.
+    let size = (g.estimate_layout_arena_size_with(config) * 2).max(256 * 1024);
     let mut temp_buf = vec![0u8; size];
     let mut out_buf = vec![0u8; size];
     let mut temp_arena = Arena::new(&mut temp_buf);

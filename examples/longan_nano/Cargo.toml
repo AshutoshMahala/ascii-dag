@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Using arena-idx-u8 for minimal memory footprint on microcontroller (only 20KB RAM!)
-# No heap allocator needed — pure arena mode on the stack.
+# arena-idx-u8 keeps index storage to one byte per node — this part has
+# 32 KB of SRAM, all of it stack (riscv-rt reserves the region), and the
+# demo's arenas take about 10 KB of it. No heap allocator anywhere.
 ascii-dag = { path = "../../", default-features = false, features = ["arena-idx-u8"] }
 longan-nano = { git = "https://github.com/riscv-rust/longan-nano", features = ["lcd"] }
 riscv-rt = "0.11"
@@ -16,3 +17,12 @@ embedded-graphics = "0.7"
 [[bin]]
 name = "longan_demo"
 path = "src/main.rs"
+
+# Size-first: the GD32VF103 has 128 KB flash, and the default release
+# profile (opt-level 3, no LTO) does not fit.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
