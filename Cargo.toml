@@ -22,7 +22,13 @@ std = ["alloc"]
 alloc = []            # Use heap allocation (Vec, String, HashMap)
 warnings = ["std"]
 # Optional modules for bundle size reduction
-generic = ["alloc"]   # Enable generic cycle detection, topological sort, impact analysis, metrics
+# Generic cycle detection, topological sort, impact analysis, metrics.
+# Requires std, not just alloc: these algorithms track visited sets keyed by
+# the caller's own id type, bounded `Eq + Hash`. Without std the crate aliases
+# HashSet/HashMap to their BTree counterparts, which need `Ord` instead — a
+# bound the public signatures do not ask for. Declared as `alloc` until 0.10,
+# where it never compiled.
+generic = ["std"]
 serde = []            # Future: serialization support
 # Experimental: arena-based allocation for no_std/embedded
 arena = []            # Arena allocator mode - fast but uses more memory upfront

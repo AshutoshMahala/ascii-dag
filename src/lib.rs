@@ -20,7 +20,10 @@
 //! ## Feature Flags
 //!
 //! - `std` (default): Standard library support
-//! - `generic` (default): Generic algorithms (cycle detection, topological sort, impact analysis, metrics)
+//! - `generic` (default): Generic algorithms over your own types (cycle
+//!   detection, topological sort, impact analysis, metrics). Implies `std` —
+//!   these keep visited sets keyed by the caller's id type, bounded
+//!   `Eq + Hash`, so they need a real `HashSet`.
 //! - `alloc`: Heap-based `Graph` API without `std`
 //! - `arena` (+ `arena-idx-u8`/`u16`/`u32`): No-alloc CSR layout and
 //!   rendering on caller-provided arenas
