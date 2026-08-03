@@ -101,6 +101,58 @@ TD/BT output is byte-identical before and after — so the variation is
 scheduling and instruction-cache pressure from the larger binary, not
 extra work.
 
+## Bundle size (WASM)
+
+Measured on a minimal `cdylib` consumer that builds an *n*-node
+chain, lays it out and renders it, so the linker keeps what a real
+caller pulls in and nothing more. `n` is a runtime argument, so the
+work cannot be constant-folded away. Profile is the crate's own —
+`opt-level = "z"`, LTO, `codegen-units = 1`, `strip`,
+`panic = "abort"` — then `wasm-opt -Oz --all-features` and `gzip -9`.
+Both versions are measured with the same harness doing the same
+work through each version's API.
+
+| Configuration | 0.9.1 | 0.10 | Delta |
+| :--- | ---: | ---: | ---: |
+| `arena` (no-alloc) | 46.4 KB | **94.2 KB** | **+103%** |
+| | 20.2 KB gz | 40.6 KB gz | +101% |
+| default (`std` + `generic`) | 95.3 KB | **200.2 KB** | **+110%** |
+| | 40.0 KB gz | 80.5 KB gz | +101% |
+
+**The bundle roughly doubled.** Splitting by stage — the same
+harness with rendering removed, so the remainder is the render code
+the linker keeps:
+
+| Stage | 0.9.1 | 0.10 | Delta |
+| :--- | ---: | ---: | ---: |
+| `arena`, layout only | 40.3 KB | 60.1 KB | +49% |
+| `arena`, render on top | 6.2 KB | 34.1 KB | +451% |
+| default, layout only | 88.4 KB | 160.4 KB | +81% |
+| default, render on top | 6.9 KB | 39.8 KB | +477% |
+
+Two structural causes:
+
+**Layout roughly doubled** because all four directions share one
+pipeline parameterized by a zero-sized axis profile, and
+`compute_layout()` can reach both profiles — so the module carries
+two monomorphized copies. The same effect the native binaries show
+above, but far more visible here, where layout is most of the
+module. A cargo feature gating the `LeftRight`/`RightLeft` dispatch
+arms would make the `Horizontal` copy strippable and return most of
+this to callers who only need vertical layouts.
+
+**Render grew about six-fold** because the engine replaced a single
+scanline painter with semantic cells, two charset decode tables,
+plan construction with a spatial index, banding, color planes,
+styling, legend and hit-testing. That is the feature set rather than
+overhead — but all of it is reachable from `render_string`, so a
+caller who wants only plain monochrome output cannot currently strip
+any of it.
+
+Stage figures come from subtraction, and LTO shares code across
+stages, so read them as apportionment rather than as independent
+modules.
+
 ## Embedded: RP2040 Pico (Cortex-M0+, 125 MHz, 264 KB SRAM)
 
 `examples/rp2040_pico` runs the same chain benchmark through both
@@ -243,5 +295,6 @@ these** — the scalability rows above are the same shapes re-measured.
 - Arena mode (no-alloc): **~39 KB** (17 KB gzipped)
 - Full mode (`std` + `generic`): **~93 KB** (39 KB gzipped)
 
-The 0.10 render engine adds roughly 4–4.5% for engine users, and the
-rank directions the amount measured above.
+Re-measured at 0.9.1 with the harness described in the 0.10 section
+above, these come out at 46.4 KB and 95.3 KB (20.2 / 40.0 KB
+gzipped) — close enough to treat the figures above as sound.

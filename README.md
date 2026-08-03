@@ -26,7 +26,7 @@ and routed edges you can draw with Canvas, SVG, or your own widget.
 | For | drawing, in a terminal | graph algorithms | drawing, as an image |
 | Dependencies | none | a few | a C toolchain |
 | Layout engine | built in | none | built in, far richer |
-| WASM | ~39–93 KB | ~30 KB | 2 MB+ |
+| WASM | ~94–200 KB | ~30 KB | 2 MB+ |
 
 Reach for `petgraph` when you need shortest paths and flows, and
 Graphviz when you need publication-quality images. Reach for this when
@@ -214,7 +214,8 @@ Typical configurations: default (`ascii-dag = "0.10"`) for the heap
 API; `default-features = false, features = ["arena"]` for no-alloc
 embedded; add `arena` to defaults for the fast arena pipeline with
 the ergonomic `Graph` builder. For WASM, `arena` alone keeps the
-bundle around 39 KB.
+bundle around 94 KB (41 KB gzipped) against 200 KB for the default
+build — see [BENCHMARK.md](BENCHMARK.md) for how that is measured.
 
 <img src="assets/longan_nano.jpg" alt="a Longan Nano board showing an ASCII graph on its LCD" width="620"/>
 
