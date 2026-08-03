@@ -131,6 +131,42 @@ at Chain 250. The M0+ simply has not reached the crossing point by
 100 nodes. End to end at Chain 100 the heap path is a wash
 (38.0 → 38.2 ms) and the arena path is 10% slower.
 
+## Embedded: ESP32-S3 (Xtensa LX7, 240 MHz, 512 KB SRAM)
+
+`examples/esp32s3` runs six shapes through the heap pipeline
+(`alloc` + `embedded-alloc`, 128 KB heap; no arena mode on this
+board). "Render" is a single `Graph::render()` call, so it covers the
+cycle check, layout and paint together — the same call the 0.9.x rows
+below measured. RAM is live heap after the call, not peak.
+
+| Graph | Nodes | Edges | Build | Render | RAM |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| **Diamond** | 4 | 4 | 0.55 ms | 5.58 ms | 1.5 KB |
+| **Build Pipeline** | 10 | 12 | 0.68 ms | 10.53 ms | 3.5 KB |
+| **Fan-Out/Fan-In** | 12 | 16 | 0.86 ms | 9.90 ms | 4.7 KB |
+| **Binary Tree** | 31 | 30 | 1.29 ms | 18.20 ms | 11.6 KB |
+| **Deep Chain** † | 50 | 49 | 2.19 ms | 3.41 ms | 19.8 KB |
+| **Diamond Lattice** | 64 | 112 | 2.89 ms | 52.42 ms | 26.2 KB |
+
+† `Graph::render()` takes a simple-chain shortcut: a single-component
+graph whose nodes each have at most one parent and one child renders
+as inline `[A] → [B]` text without entering the layout pipeline. This
+row measures a different code path from the other five, and is not
+comparable to the RP2040 chain figures above.
+
+Against the 0.9.x rows below: RAM is essentially unchanged (0–3%
+lower), and render on the five pipeline shapes is **16–57% slower**.
+The chain row, on the shortcut path, is unchanged at +7%. The only
+shape large enough to say much is Diamond Lattice, whose +16% is the
+mildest of the five; the four small shapes cluster at +37% to +57%
+without ordering cleanly by size, which is what six differently
+shaped graphs at one sample each should be expected to look like.
+Direction-consistent with the RP2040 fixed-cost signature on an
+unrelated architecture, but nothing here is big enough to reach the
+crossover. Build is flat to modestly slower, but the 0.9.x figures
+were recorded to 0.1 ms, so the sub-millisecond rows cannot support
+a precise delta. Single run, not min-of-N.
+
 ## Embedded: Longan Nano (GD32VF103, RISC-V, 128 KB flash / 32 KB RAM)
 
 `examples/longan_nano` renders to the board's 160×80 LCD in

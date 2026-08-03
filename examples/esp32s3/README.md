@@ -93,7 +93,7 @@ Output:   ~200 bytes
 
 ## Memory Usage
 
-- **Heap**: 32 KB allocated
+- **Heap**: 128 KB allocated
 - **Small DAGs**: ~1-2 KB
 - **Large DAGs (31 nodes)**: ~4-6 KB
 - **ESP32-S3**: 512 KB SRAM total (plenty of headroom!)
