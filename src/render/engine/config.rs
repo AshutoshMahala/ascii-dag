@@ -20,6 +20,26 @@ use crate::render::colors::Palette;
 pub const DEFAULT_BAND_ROWS: usize = 64;
 
 /// Render configuration for the unified engine.
+///
+/// Start from a preset and adjust — every field is public.
+///
+/// ```
+/// use ascii_dag::{Charset, Graph, RenderOptions};
+///
+/// let g = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
+/// let ir = g.compute_layout();
+///
+/// let mut options = RenderOptions::plain();
+/// options.charset = Charset::Ascii;   // no box-drawing glyphs
+/// options.legend = true;              // list labels that did not fit
+/// options.band_rows_cap = 16;         // cap canvas memory
+///
+/// let text = ir.render_string(&options);
+/// assert!(text.contains("[A]"));
+/// ```
+///
+/// Presets: [`plain`](Self::plain), [`colored`](Self::colored),
+/// [`ascii`](Self::ascii), [`ascii_colored`](Self::ascii_colored).
 #[derive(Clone, Copy)]
 pub struct RenderOptions {
     /// Color output mode. `None` allocates no color planes at all.

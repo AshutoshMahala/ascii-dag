@@ -6,7 +6,7 @@
 //! algorithm-specific fields are scoped inside [`AlgorithmConfig`]
 //! variants.
 //!
-//! [`SugiyamaConfig`] is the legacy alloc-dependent type, deprecated
+//! `SugiyamaConfig` (feature `alloc`) is the legacy type, deprecated
 //! in favour of `LayoutConfig`.
 //!
 //! # Examples

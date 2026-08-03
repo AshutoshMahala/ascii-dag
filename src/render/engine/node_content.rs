@@ -94,6 +94,35 @@ impl NodeKindTag {
 ///
 /// A minimal impl (just `label()`) is a *blank* node — pass `&str` or
 /// [`SimpleNode`] instead when you want the classic `[label]` look.
+///
+/// ```
+/// use ascii_dag::{BoxedNode, CustomNode, Graph, RenderOptions};
+/// use ascii_dag::render::engine::{NodePaintCtx, NodeRegion};
+///
+/// // A painter is a plain `fn`: one template, many nodes.
+/// fn card(region: &mut NodeRegion<'_, '_>, ctx: NodePaintCtx<'_>) {
+///     region.write_str(0, 0, ctx.label);
+///     for (i, line) in ctx.payload.lines().enumerate() {
+///         region.write_str(0, 1 + i, line);
+///     }
+/// }
+///
+/// let mut g = Graph::new();
+/// g.add_node(1, "Client");                       // [Client]
+/// g.add_node(2, BoxedNode("Database"));          // boxed label
+/// g.add_node(3, CustomNode {                     // your painter + its data
+///     label: "Server",
+///     width: 14,
+///     height: 3,
+///     painter: Some(card),
+///     payload: "cpu: 4\nram: 16G",
+/// });
+/// g.add_edge(1, 3, None);
+/// g.add_edge(3, 2, None);
+///
+/// let text = g.compute_layout().render_string(&RenderOptions::plain());
+/// assert!(text.contains("cpu: 4"));
+/// ```
 pub trait NodeContent<'a> {
     /// The node's label text.
     fn label(&self) -> &'a str;

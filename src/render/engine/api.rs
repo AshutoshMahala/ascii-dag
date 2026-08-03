@@ -81,7 +81,7 @@ macro_rules! render_surface {
                 RenderPlan::build(self, options)
             }
 
-            /// Arena-backed [`Self::render_plan`] for no-alloc callers;
+            /// Arena-backed `render_plan` for no-alloc callers;
             /// exhaustion reports `E.Render.Plan.026`.
             pub fn render_plan_in<'buf>(
                 &self,

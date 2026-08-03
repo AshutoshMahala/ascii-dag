@@ -9,10 +9,28 @@ layout (cycle breaking, layering, crossing reduction, edge routing)
 with a terminal renderer. Zero dependencies. `no_std` ready — the
 arena pipeline runs without a heap allocator.
 
-<img src="assets/hero_colored_heap.png" alt="hero example — heap colored output" height="700"/>
-<img src="assets/hero_arena_rl_dummy.png" alt="hero example — arena colored output with dummy enabled" height="300"/>
-<img src="assets/longan_nano.jpg" alt="longan_nano ascii output" height="300"/>
+<img src="assets/hero_colored_heap.png" alt="the hero example rendered with colors and a legend" height="620"/>
 
+It is for showing a graph *where the user already is*: a build tool
+explaining why a task ran, a package manager drawing a dependency
+diamond, a CI log annotating a failed pipeline, an embedded console
+with a 160×80 display and no framebuffer. Anywhere a picture would
+help but opening one is not an option.
+
+Because the layout is separable from the painting, it also works as a
+plain layout engine — `compute_layout()` hands back positioned nodes
+and routed edges you can draw with Canvas, SVG, or your own widget.
+
+| | ascii-dag | petgraph | Graphviz |
+|---|---|---|---|
+| For | drawing, in a terminal | graph algorithms | drawing, as an image |
+| Dependencies | none | a few | a C toolchain |
+| Layout engine | built in | none | built in, far richer |
+| WASM | ~39–93 KB | ~30 KB | 2 MB+ |
+
+Reach for `petgraph` when you need shortest paths and flows, and
+Graphviz when you need publication-quality images. Reach for this when
+the output has to be text.
 
 ## Example
 
@@ -95,6 +113,33 @@ g.put_nodes(&[a, b]).inside(sg)?;      // handles or raw ids
 g.put_subgraphs(&[inner]).inside(sg)?; // nesting (cycle-checked)
 ```
 
+### Cycles
+
+A cycle does not break rendering — the offending edges are reversed
+internally and drawn dashed, so you still get a picture. To check
+first:
+
+```rust
+if g.has_cycle() { /* Graph::render prints a cycle banner instead */ }
+```
+
+Cycle detection also works over **your own types**, with no `Graph`
+involved — handy for validating a config or build plan before
+anything is laid out:
+
+```rust
+use ascii_dag::algorithms::cycles::generic::detect_cycle_fn;
+
+let cycle = detect_cycle_fn(&["app", "lib", "core"], |id| match *id {
+    "app" => vec!["lib"], "lib" => vec!["core"], "core" => vec!["app"], _ => vec![],
+});
+assert!(cycle.is_some());
+```
+
+`has_cycle_fn` is the boolean form; `topological_sort_fn` (at
+`algorithms::generic`) returns an order or the cycle that prevents one.
+Both modules need the `generic` feature, on by default.
+
 ### Render settings (`RenderOptions`)
 
 | Field | Values | Default |
@@ -124,7 +169,9 @@ config.include_dummy_nodes = true;       // emit routing waypoints into the IR
 ```
 
 All four directions lay out natively. `TB`/`BT` stack levels as rows;
-`LR`/`RL` make them columns, which suits wide, shallow graphs:
+`LR`/`RL` make them columns, which suits graphs with **many levels** —
+a long pipeline is tall and scrolls in `TB`, but spends the terminal's
+width in `LR`:
 
 ```text
 TB (default)          LR
@@ -137,6 +184,11 @@ TB (default)          LR
    ↓    ↓
 [Store] [Index]
 ```
+
+<img src="assets/hero_arena_rl_dummy.png" alt="the hero example in RightLeft with routing waypoints marked" width="620"/>
+
+*The hero example under `--rl --dummy --color`: levels run right to
+left and `◍` marks each routing waypoint.*
 
 `BT` and `RL` are exact mirrors of `TB` and `LR`. The spacing settings
 follow the direction — `node_spacing` separates nodes within a level,
@@ -161,7 +213,15 @@ reference: [docs.rs/ascii-dag](https://docs.rs/ascii-dag).
 Typical configurations: default (`ascii-dag = "0.10"`) for the heap
 API; `default-features = false, features = ["arena"]` for no-alloc
 embedded; add `arena` to defaults for the fast arena pipeline with
-the ergonomic `Graph` builder.
+the ergonomic `Graph` builder. For WASM, `arena` alone keeps the
+bundle around 39 KB.
+
+<img src="assets/longan_nano.jpg" alt="a Longan Nano board showing an ASCII graph on its LCD" width="620"/>
+
+*The arena pipeline on a Longan Nano (RISC-V, 32 KB RAM, no
+allocator): `LeftRight` and the ASCII charset, because the LCD font
+has no box-drawing glyphs. Firmware is 92 KB; the graph costs ~10 KB
+of stack. See `examples/longan_nano`.*
 
 ## Errors and warnings
 
@@ -188,9 +248,11 @@ with stderr closed):
 
 ## Documentation
 
+- [docs/layout.md](docs/layout.md) — directions, clusters, spacing, crossing reduction, reading the IR
+- [docs/rendering.md](docs/rendering.md) — options, styling, streaming, no-alloc output, hit-testing
 - [docs/nodes.md](docs/nodes.md) — nodes as objects: painters, payloads, blank nodes
 - [docs/migrate-from-0.9.md](docs/migrate-from-0.9.md) — upgrading to 0.10
-- [examples/README.md](examples/README.md) — 16 runnable examples; each renders via `--csr` too
+- [examples/README.md](examples/README.md) — 19 runnable examples; the rendering ones take `--csr` to show the arena pipeline
 - [BENCHMARK.md](BENCHMARK.md) — measured performance, desktop and embedded
 - [ARCHITECTURE.md](ARCHITECTURE.md) — how the pipeline works
 
@@ -198,8 +260,9 @@ with stderr closed):
 
 Text-grid output: edges route orthogonally (no diagonals), wide
 Unicode in labels counts as one cell per `char`, and layouts optimize
-for readability rather than minimal area. For heavy graph *algorithms*
-use `petgraph`; for image-quality output use Graphviz.
+for readability rather than minimal area. Very dense graphs (hundreds
+of edges crossing one level) reach a point where any text grid stops
+being readable — that is a property of the medium, not the layout.
 
 ## License
 
@@ -210,9 +273,30 @@ Licensed under either of:
 
 at your option.
 
+## Versioning and releases
+
+While the crate is pre-1.0, each **minor** version is a compatibility
+line: `0.10 → 0.11` may break, `0.10.0 → 0.10.3` will not.
+
+Each minor line lives on its own long-running branch — `release/v0.10`,
+`release/v0.11` — and patch releases are tagged on it. There is no
+branch per patch: `0.10.1`, `0.10.2` and so on are tags along
+`release/v0.10`, which is what makes it possible to ship a fix for
+0.10 after `main` has moved on to 0.11.
+
+Pin to a line and you get its fixes without surprises:
+
+```toml
+ascii-dag = "0.10"     # 0.10.x, including later patch fixes
+```
+
 ## Contribution
 
 Contributions welcome! This project aims to stay small and focused.
+
+Fixes land on `main` first, then get backported to the release
+branches that need them — that way a bug fixed in a patch cannot
+reappear in the next minor.
 
 ---
 

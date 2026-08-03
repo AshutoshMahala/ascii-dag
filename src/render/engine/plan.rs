@@ -75,6 +75,28 @@ pub(crate) struct PlanElement {
 }
 
 /// Result of a hit-test query.
+///
+/// ```
+/// use ascii_dag::{Graph, RenderOptions};
+/// use ascii_dag::render::engine::HitResult;
+///
+/// let g = Graph::from_edges(&[(1, "Alpha"), (2, "Beta")], &[(1, 2)]);
+/// let ir = g.compute_layout();
+/// let options = RenderOptions::plain();
+/// let plan = ir.render_plan(&options);
+///
+/// // Find where "Alpha" was painted, then ask what is there.
+/// let text = ir.render_string(&options);
+/// let (row, col) = text
+///     .lines()
+///     .enumerate()
+///     .find_map(|(r, l)| l.find("Alpha").map(|c| (r, c)))
+///     .unwrap();
+/// assert_eq!(ir.hit_test(&plan, col, row), HitResult::Node(1));
+///
+/// // Off the canvas is `None`, never a panic.
+/// assert_eq!(ir.hit_test(&plan, 9999, 9999), HitResult::None);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HitResult {
@@ -142,6 +164,18 @@ impl LabelPlan {
 /// the render entry points build their own plan internally. Queries
 /// must be paired with the same layout the plan was built from —
 /// out-of-canvas queries return `HitResult::None`.
+///
+/// ```
+/// use ascii_dag::{Graph, RenderOptions};
+///
+/// let g = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
+/// let ir = g.compute_layout();
+/// let plan = ir.render_plan(&RenderOptions::plain());
+///
+/// // Size a viewport without painting anything.
+/// assert!(plan.width() > 0 && plan.height() > 0);
+/// assert!(plan.band_count() >= 1);
+/// ```
 pub struct RenderPlan<'buf> {
     width: usize,
     height: usize,

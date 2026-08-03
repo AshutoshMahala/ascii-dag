@@ -3,7 +3,7 @@
 //! ## Submodules
 //!
 //! - [`cycles`] - Cycle detection for DAGs and generic graphs
-//! - [`generic`] - Generic graph algorithms (topological sort, impact analysis, metrics, traversal)
+//! - `generic` (feature `generic`) - Generic graph algorithms (topological sort, impact analysis, metrics, traversal)
 //! - [`sugiyama`] - Sugiyama hierarchical layout algorithm (heap and arena variants)
 
 pub mod cycles;

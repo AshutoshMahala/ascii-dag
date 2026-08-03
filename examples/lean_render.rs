@@ -8,7 +8,11 @@
 //! 2. Buffer B -> Output Storage (Layout Result, semi-permanent)
 //! 3. Buffer C -> Temp Storage (Layout Calculations, transient)
 //! 4. ... Layout finishes ...
-//! 5. Buffer C -> Render Storage (Text output, reuses Temp memory)
+//! 5. Buffer C -> Render Storage (engine scratch + text output, both
+//!    carved from the reused Temp memory)
+//!
+//! Nothing here allocates: one fixed 16 KB block backs the graph, the
+//! layout, and the render.
 
 use ascii_dag::algorithms::sugiyama::config::LayoutConfig;
 use ascii_dag::graph::arena::Arena;
@@ -74,15 +78,16 @@ fn main() {
         // 'temp_arena' is now dropped.
         // We reuse 'temp_mem' for the render buffer.
 
-        let render_buffer = temp_mem;
-        // We also need a small line buffer for the renderer logic
-
         println!("> Reusing Temp Buffer for Rendering...");
 
         let options = ascii_dag::render::engine::RenderOptions::plain();
         {
-            let mut scratch_buffer = vec![0u8; layout.estimate_render_arena_size(&options)];
-            let render_arena = ascii_dag::graph::arena::Arena::new(&mut scratch_buffer);
+            // The engine needs working memory (plan + band canvas) AND
+            // somewhere to put the text. Both come out of the reused
+            // temp block — nothing is allocated here either.
+            let need = layout.estimate_render_arena_size(&options);
+            let (scratch_buffer, render_buffer) = temp_mem.split_at_mut(need);
+            let render_arena = ascii_dag::graph::arena::Arena::new(scratch_buffer);
             if let Ok(bytes) = layout.render_to_bytes(&options, &render_arena, render_buffer) {
                 if let Ok(s) = core::str::from_utf8(&render_buffer[..bytes]) {
                     println!("\n{}", s);

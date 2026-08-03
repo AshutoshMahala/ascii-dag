@@ -1,7 +1,7 @@
 //! Core graph data structure.
 //!
 //! This module provides the fundamental graph structure with nodes and edges.
-//! The primary type is [`Graph`].
+//! The primary type is `Graph` (feature `alloc`).
 //!
 //! ## Performance Characteristics
 //!
@@ -156,7 +156,7 @@ use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
 
 // ── Node handles & the AUTO sentinel ─────────────────────────────────────
 
-/// A typed handle to a node, returned by [`Graph::add_node`].
+/// A typed handle to a node, returned by `Graph::add_node`.
 ///
 /// Handles flow back into the edge and subgraph APIs (which accept
 /// `impl Into<NodeId>`), so graphs can be built end-to-end without
@@ -182,7 +182,7 @@ use alloc::collections::{BTreeMap as HashMap, BTreeSet as HashSet};
 /// is allocation-free and available in every build, `no_std`
 /// included — a no-alloc component can produce and pass handles
 /// (e.g. `(NodeId, NodeId)` edge pairs) for an alloc-enabled host to
-/// assemble into a [`Graph`].
+/// assemble into a `Graph`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(usize);
 
@@ -208,11 +208,11 @@ impl From<NodeId> for usize {
     }
 }
 
-/// The type of the [`AUTO`] sentinel — see [`Graph::add_node`].
+/// The type of the [`AUTO`] sentinel — see `Graph::add_node`.
 #[derive(Debug, Clone, Copy)]
 pub struct Auto;
 
-/// Auto-numbering sentinel for [`Graph::add_node`]'s id slot:
+/// Auto-numbering sentinel for `Graph::add_node`'s id slot:
 /// `g.add_node(AUTO, "label")` lets the graph pick the next id above
 /// every id it has seen. `Auto` does not convert to [`NodeId`], so the
 /// sentinel cannot appear where an *existing* node is referenced
@@ -220,7 +220,7 @@ pub struct Auto;
 pub const AUTO: Auto = Auto;
 
 /// An explicit node id or the [`AUTO`] sentinel, for
-/// [`Graph::add_node`]'s id slot.
+/// `Graph::add_node`'s id slot.
 ///
 /// `From<usize>` keeps every existing call site compiling — including
 /// bare integer literals. STANDING GUARD (compile-pinned by test):

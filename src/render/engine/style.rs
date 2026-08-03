@@ -52,6 +52,32 @@ pub enum MarkerShape {
 pub type NodePaintFn = fn(&mut NodeRegion<'_, '_>, NodePaintCtx<'_>);
 
 /// Subgraph (cluster) box border style.
+///
+/// `None` is not "invisible cluster" — the box still groups its nodes
+/// for layout and its label still paints; only the border ink is
+/// suppressed.
+///
+/// ```
+/// use ascii_dag::{Graph, RenderOptions};
+/// use ascii_dag::render::engine::{SubgraphBorder, SubgraphStyle, SubgraphStyleCtx};
+///
+/// fn borderless(_ctx: SubgraphStyleCtx<'_>) -> SubgraphStyle {
+///     SubgraphStyle { border: SubgraphBorder::None, ..SubgraphStyle::default() }
+/// }
+///
+/// let mut g = Graph::new();
+/// g.add_node(1, "A");
+/// g.add_node(2, "B");
+/// g.add_edge(1, 2, None);
+/// let sg = g.add_subgraph("Group");
+/// g.put_nodes(&[1]).inside(sg).unwrap();
+///
+/// let mut options = RenderOptions::plain();
+/// options.subgraph_style_fn = borderless;
+/// let text = g.compute_layout().render_string(&options);
+/// assert!(!text.contains('╔'));      // no border ink
+/// assert!(text.contains("Group"));   // label still there
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum SubgraphBorder {
@@ -185,6 +211,31 @@ pub struct SubgraphStyleCtx<'a> {
 }
 
 /// Per-element style callbacks — plain fn pointers (`no_std`-safe).
+///
+/// Resolved once per element at plan time, never per cell. A plain
+/// `fn` rather than a closure keeps them `Copy` and usable without an
+/// allocator.
+///
+/// ```
+/// use ascii_dag::{Graph, RenderOptions};
+/// use ascii_dag::render::engine::{EdgeStyle, EdgeStyleCtx, LineWeight, MarkerShape};
+///
+/// // Dash the edges that cycle-breaking reversed; suppress tail arrows.
+/// fn style(ctx: EdgeStyleCtx<'_>) -> EdgeStyle {
+///     EdgeStyle {
+///         weight: Some(if ctx.reversed { LineWeight::Dashed } else { LineWeight::Light }),
+///         marker_end: MarkerShape::Arrow,
+///         marker_start: MarkerShape::None,
+///         ..EdgeStyle::default()
+///     }
+/// }
+///
+/// let g = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
+/// let mut options = RenderOptions::plain();
+/// options.edge_style_fn = style;
+/// let text = g.compute_layout().render_string(&options);
+/// assert!(text.contains('↓'));
+/// ```
 pub type EdgeStyleFn = fn(EdgeStyleCtx<'_>) -> EdgeStyle;
 /// See [`EdgeStyleFn`].
 pub type SubgraphStyleFn = fn(SubgraphStyleCtx<'_>) -> SubgraphStyle;

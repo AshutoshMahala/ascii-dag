@@ -420,6 +420,36 @@ impl<'a> CsrGraph<'a> {
     /// This is the entry point for the no-alloc layout algorithm.
     /// It consumes memory from `temp_arena` for calculation scratch space
     /// and populates `output_arena` with the final `LayoutIRArena`.
+    ///
+    /// When the CSR came from a `Graph`, size both arenas with
+    /// `Graph::estimate_layout_arena_size_with(&config)` (or the
+    /// no-argument form for the standard config) — the estimate is an
+    /// upper bound, so an exactly-sized buffer always suffices.
+    ///
+    /// Those estimators live on `Graph` and therefore need the `alloc`
+    /// feature. Building directly on `CsrGraphBuilder` in a pure
+    /// no-alloc build, there is no equivalent estimator yet: provision
+    /// generously and treat `ArenaOom` as the signal to grow, the way
+    /// `examples/lean_render.rs` and `examples/longan_nano` do.
+    ///
+    /// ```
+    /// use ascii_dag::{Graph, LayoutConfig, RenderOptions};
+    /// use ascii_dag::graph::arena::Arena;
+    ///
+    /// let g = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
+    /// let config = LayoutConfig::standard();
+    ///
+    /// let mut csr_buf = vec![0u8; g.estimate_csr_arena_size()];
+    /// let mut csr_arena = Arena::new(&mut csr_buf);
+    /// let csr = g.to_csr(&mut csr_arena).unwrap();
+    ///
+    /// let size = g.estimate_layout_arena_size_with(&config);
+    /// let (mut t, mut o) = (vec![0u8; size], vec![0u8; size]);
+    /// let (mut ta, mut oa) = (Arena::new(&mut t), Arena::new(&mut o));
+    ///
+    /// let ir = csr.compute_layout_arena(&config, &mut ta, &mut oa).unwrap();
+    /// assert!(ir.render_string(&RenderOptions::plain()).contains("[A]"));
+    /// ```
     pub fn compute_layout_arena<'b>(
         &self,
         config: &crate::algorithms::sugiyama::config::LayoutConfig<'_>,

@@ -184,7 +184,7 @@ pub struct LayoutEdgeArena {
 
 /// Subgraph bounding box for arena-backed layout.
 ///
-/// Equivalent to [`SubgraphInfo`](crate::ir::SubgraphInfo) but avoids
+/// Equivalent to `SubgraphInfo` (feature `alloc`) but avoids
 /// `&str` lifetime by storing label offset/length into shared label storage.
 #[derive(Debug, Clone, Copy)]
 pub struct SubgraphInfoArena {

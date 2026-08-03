@@ -102,7 +102,7 @@ pub enum NodeKind {
 /// horizontal trunks (LeftRight/RightLeft). Mirror-invariant: both
 /// the BottomUp y-flip and the RightLeft x-flip leave the trunk axis
 /// unchanged, so flips copy it verbatim. Level-axis scalars inside
-/// [`EdgePath`] (`bend_at`, `channel_at`, …) live on the axis
+/// `EdgePath` (`bend_at`, `channel_at`, …) live on the axis
 /// this field names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowAxis {

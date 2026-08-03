@@ -5,7 +5,8 @@
 //!
 //! ## Generic Cycle Detection
 //!
-//! For more flexibility, see the [`generic`] submodule which provides
+//! For more flexibility, see the `generic` submodule (feature
+//! `generic`) which provides
 //! cycle detection that works with any data structure through higher-order
 //! functions or traits.
 //!
