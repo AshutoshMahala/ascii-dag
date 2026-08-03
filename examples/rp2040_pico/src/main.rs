@@ -135,8 +135,10 @@ fn main() -> ! {
         }
     }
 
-    // Small delay for terminal to connect
-    cortex_m::asm::delay(125_000_000); // ~1 second at 125MHz
+    // Give yourself time to attach a serial terminal before the
+    // benchmark runs. USB is polled throughout — a plain blocking
+    // delay would stop servicing the bus and can drop the connection.
+    wait_for_terminal(&mut serial, &mut usb_dev, 10);
 
     // === ASCII-DAG BENCHMARK ===
     
@@ -231,6 +233,40 @@ fn main() -> ! {
         
         cortex_m::asm::wfi(); // Wait for interrupt (low power)
     }
+}
+
+/// Count down `seconds` before starting, so a terminal attached after
+/// the board enumerates still catches the whole run.
+///
+/// USB is polled in ~10 ms slices for the whole wait: the host drops a
+/// CDC device that stops answering, so a single long `asm::delay`
+/// would trade the terminal for the pause.
+fn wait_for_terminal(
+    serial: &mut SerialPort<UsbBus>,
+    usb_dev: &mut UsbDevice<UsbBus>,
+    seconds: u32,
+) {
+    let mut buf = String::new();
+    write!(
+        buf,
+        "\r\nConnect your terminal now — benchmark starts in {} seconds.\r\n",
+        seconds
+    )
+    .ok();
+    write_serial(serial, usb_dev, &buf);
+
+    for remaining in (1..=seconds).rev() {
+        buf.clear();
+        write!(buf, "{} ", remaining).ok();
+        write_serial(serial, usb_dev, &buf);
+
+        // ~1 second in 10 ms slices, servicing USB between each.
+        for _ in 0..100 {
+            usb_dev.poll(&mut [serial]);
+            cortex_m::asm::delay(1_250_000); // ~10 ms at 125 MHz
+        }
+    }
+    write_serial(serial, usb_dev, "\r\nGO\r\n");
 }
 
 /// Write a string to USB serial, handling USB polling
@@ -340,9 +376,9 @@ fn run_heap_benchmark(nodes: &[(usize, &str)], edges: &[(usize, usize)], timer: 
     let ir = dag.compute_layout();
     let compute_time = timer.get_counter() - compute_start;
     
-    // Phase 3: Render
+    // Phase 3: Render (0.10 engine surface)
     let render_start = timer.get_counter();
-    let output = ir.render_scanline();
+    let output = ir.render_string(&ascii_dag::RenderOptions::plain());
     let render_time = timer.get_counter() - render_start;
     
     let heap_after = HEAP.used();
@@ -439,13 +475,26 @@ fn run_arena_benchmark(
         // Measure arena usage
         let temp_used = layout_temp_arena.used();
         
-        // Phase 3: Render
+        // Phase 3: Render (0.10 no-alloc surface). The engine carves
+        // its plan and band canvas from an arena of its own; both
+        // buffers are fixed arrays, so nothing allocates.
         let render_start = timer.get_counter();
-        let mut render_buf = [0u8; 8192]; // Larger buffer for 100 nodes
-        let mut line_buf = [' '; 512];
-        let mut scratch = [0usize; 512];
-        let _rendered_len = layout.render_to_buffer(&mut render_buf, &mut line_buf, &mut scratch).unwrap_or(0);
+        let options = ascii_dag::RenderOptions::plain();
+        let mut render_scratch = [0u8; 16384];
+        let mut render_buf = [0u8; 8192];
+        let render_arena = Arena::new(&mut render_scratch);
+        let rendered = layout.render_to_bytes(&options, &render_arena, &mut render_buf);
         let render_time = timer.get_counter() - render_start;
+        // A too-small buffer would otherwise report a *fast* render.
+        // Say so instead of quietly timing a failure.
+        if rendered.is_err() {
+            write_serial(
+                serial,
+                usb_dev,
+                "  [Arena FAIL: render buffers too small — grow render_scratch/render_buf]\r\n",
+            );
+            return None;
+        }
         
         Some(BenchResult {
             build_us: build_time.ticks(),

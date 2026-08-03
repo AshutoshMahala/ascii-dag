@@ -101,6 +101,36 @@ TD/BT output is byte-identical before and after — so the variation is
 scheduling and instruction-cache pressure from the larger binary, not
 extra work.
 
+## Embedded: RP2040 Pico (Cortex-M0+, 125 MHz, 264 KB SRAM)
+
+`examples/rp2040_pico` runs the same chain benchmark through both
+pipelines and reports over USB serial. RAM is peak heap for the heap
+mode, arena bytes for the arena mode.
+
+| Graph | Nodes | Mode | Build | Compute | Render | **Total** | RAM | Speedup |
+| :--- | ---: | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **Chain 10** | 10 | Heap | 0.45 ms | 3.46 ms | 1.28 ms | **5.18 ms** | 3.9 KB | |
+| | | Arena | 0.32 ms | 1.67 ms | 1.52 ms | **3.50 ms** | **1.8 KB** | **1.5x** |
+| **Chain 50** | 50 | Heap | 1.60 ms | 13.71 ms | 3.95 ms | **19.26 ms** | 18.1 KB | |
+| | | Arena | 0.70 ms | 3.28 ms | 5.24 ms | **9.22 ms** | **8.7 KB** | **2.1x** |
+| **Chain 100** | 100 | Heap | 3.13 ms | 28.04 ms | 7.06 ms | **38.23 ms** | 36.2 KB | |
+| | | Arena | 1.49 ms | 5.34 ms | 9.71 ms | **16.54 ms** | **17.3 KB** | **2.3x** |
+
+Against the 0.9.x rows below, measured on the same board: **build is
+25–39% faster** on the heap path, and **peak heap RAM is down 22–23%**
+(47.1 → 36.2 KB at Chain 100). **Render is slower**, by a margin that
+shrinks as the graph grows — arena render is 3.0× the 0.9.x time at
+Chain 10, 1.9× at Chain 50, 1.3× at Chain 100.
+
+That shape is the 0.10 engine's tradeoff, not an embedded-specific
+regression: `RenderPlan` construction is a larger fixed cost, and
+painting from a plan has a flatter per-node slope, so the two curves
+converge and then cross. The desktop table above shows the same
+crossover — arena render is +44% against 0.9.x at Chain 100 and −40%
+at Chain 250. The M0+ simply has not reached the crossing point by
+100 nodes. End to end at Chain 100 the heap path is a wash
+(38.0 → 38.2 ms) and the arena path is 10% slower.
+
 ## Embedded: Longan Nano (GD32VF103, RISC-V, 128 KB flash / 32 KB RAM)
 
 `examples/longan_nano` renders to the board's 160×80 LCD in
