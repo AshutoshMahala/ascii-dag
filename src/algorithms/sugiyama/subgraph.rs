@@ -134,18 +134,29 @@ pub(crate) fn block_partition_level(dag: &Graph<'_>, level: &[VNode]) -> Vec<VNo
         return Vec::new();
     }
 
-    // Assign each vnode to a block key: root ancestor subgraph ID, or None (unaffiliated)
+    // Assign each vnode to a block key: root ancestor subgraph ID, or None
+    // (unaffiliated). `order` records first appearance so the block list can
+    // be built in level order rather than from map iteration — under `std`
+    // these are `HashMap`/`HashSet`, whose iteration order is seeded per
+    // process, and the stable sort below would then resolve equal averages
+    // differently from one run to the next.
+    let mut order: Vec<Option<usize>> = Vec::new();
     let mut blocks: HashMap<Option<usize>, Vec<(usize, VNode)>> = HashMap::new();
     for (pos, vnode) in level.iter().enumerate() {
         let sg = vnode_subgraph(dag, vnode);
         let root_sg = root_subgraph(dag, sg);
-        blocks.entry(root_sg).or_default().push((pos, *vnode));
+        let members = blocks.entry(root_sg).or_insert_with(|| {
+            order.push(root_sg);
+            Vec::new()
+        });
+        members.push((pos, *vnode));
     }
 
     // Compute average original position per block for ordering
-    let mut block_list: Vec<(Option<usize>, f64, Vec<VNode>)> = blocks
+    let mut block_list: Vec<(Option<usize>, f64, Vec<VNode>)> = order
         .into_iter()
-        .map(|(key, members)| {
+        .map(|key| {
+            let members = blocks.remove(&key).unwrap_or_default();
             let avg = members.iter().map(|(pos, _)| *pos as f64).sum::<f64>()
                 / members.len().max(1) as f64;
             let vnodes: Vec<VNode> = members.into_iter().map(|(_, v)| v).collect();
@@ -153,7 +164,8 @@ pub(crate) fn block_partition_level(dag: &Graph<'_>, level: &[VNode]) -> Vec<VNo
         })
         .collect();
 
-    // Sort blocks by average position (stable: unaffiliated nodes stay in place)
+    // Sort blocks by average position. The sort is stable and the list is now
+    // in level order, so blocks with equal averages genuinely stay in place.
     block_list.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(core::cmp::Ordering::Equal));
 
     // Flatten back into a single level
