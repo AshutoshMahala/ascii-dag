@@ -395,6 +395,8 @@ fn hero_matches_golden() {
 // The shared hero fixture refers to the crate by its external name.
 use crate as ascii_dag;
 include!("../../../examples/shared/hero_graph.rs");
+// Clustered stress tiers — the corpus's deep-nesting cases (quality scorer).
+include!("../../../examples/shared/stress_graphs.rs");
 
 // ── BottomUp rendering (RW5) ─────────────────────────────────────────────
 //
@@ -2306,7 +2308,7 @@ mod lr_invariants {
         g
     }
 
-    fn corpus() -> [(&'static str, Graph<'static>); 10] {
+    pub(super) fn corpus() -> [(&'static str, Graph<'static>); 10] {
         [
             ("fan", fan()),
             ("stage", stage()),
@@ -3312,5 +3314,166 @@ mod lr_invariants {
         let back = row.find(['⇠', '←']).unwrap();
         let fwd = row.find(['→', '⇢']).unwrap();
         assert!(back < fwd, "back arrow at the source face: {row:?}");
+    }
+}
+
+/// Layout-quality scoring.
+///
+/// Not an invariant suite — a measuring tape. Routing changes are easy
+/// to judge by eye on one graph in one direction and easy to get wrong
+/// everywhere else, so this prints one table over the whole corpus in
+/// all four directions. A theory is accepted or rejected on the table,
+/// not on how the hero example looks.
+///
+/// ```text
+/// cargo test --lib --all-features quality_table -- --ignored --nocapture
+/// ```
+mod quality {
+    use super::lr_invariants::corpus;
+    use super::*;
+    use crate::graph::Direction;
+    use crate::ir::{EdgePath, FlowAxis, LayoutEdge, LayoutIR};
+
+    /// Cross-axis coordinate of a physical point, for this edge's trunk.
+    fn cross(e: &LayoutEdge<'_>, x: usize, y: usize) -> usize {
+        match e.flow_axis {
+            FlowAxis::X => y,
+            FlowAxis::Y => x,
+        }
+    }
+
+    /// How many times the edge changes lane on the cross axis.
+    ///
+    /// This is the number a reader perceives as "kinks". A straight
+    /// edge scores 0 however long it is; the staircase that motivated
+    /// this work scores 5.
+    fn lane_changes(e: &LayoutEdge<'_>) -> usize {
+        match &e.path {
+            EdgePath::Direct => 0,
+            EdgePath::Corner { .. } => 1,
+            EdgePath::SideChannel { .. } => 2,
+            EdgePath::Spline { .. } => 1,
+            EdgePath::MultiSegment { waypoints, .. } => {
+                let mut seq = Vec::with_capacity(waypoints.len() + 2);
+                seq.push(cross(e, e.from_x, e.from_y));
+                for &(wx, wy) in waypoints.iter() {
+                    seq.push(cross(e, wx, wy));
+                }
+                seq.push(cross(e, e.to_x, e.to_y));
+                seq.windows(2).filter(|w| w[0] != w[1]).count()
+            }
+        }
+    }
+
+    /// Cross-axis **overshoot**: how far the edge wanders outside the band
+    /// spanned by its own endpoints.
+    ///
+    /// Defined as overshoot rather than total cross span, because the span
+    /// between two endpoints is unavoidable geometry — an edge joining row 0
+    /// to row 20 is not badly routed for covering 20 rows. What this work
+    /// cares about is an edge leaving the band it needs at all: hero's
+    /// `trace` joins two nodes on row 0 and reaches row 20, which is pure
+    /// excursion.
+    ///
+    /// Every path variant is measured. `Direct` and `Corner` are 0 by
+    /// construction: `bend_at` is a LEVEL-axis line, so a corner's cross
+    /// segment runs between the two endpoints and cannot leave the band.
+    /// `channel_at` by contrast IS a cross-axis line, so `SideChannel` can.
+    fn spread(e: &LayoutEdge<'_>) -> usize {
+        let a = cross(e, e.from_x, e.from_y);
+        let b = cross(e, e.to_x, e.to_y);
+        let (lo, hi) = (a.min(b), a.max(b));
+        let over = |c: usize| {
+            if c < lo {
+                lo - c
+            } else if c > hi {
+                c - hi
+            } else {
+                0
+            }
+        };
+        match &e.path {
+            EdgePath::Direct | EdgePath::Corner { .. } => 0,
+            EdgePath::SideChannel { channel_at, .. } => over(*channel_at),
+            EdgePath::MultiSegment { waypoints, .. } => waypoints
+                .iter()
+                .map(|&(wx, wy)| over(cross(e, wx, wy)))
+                .max()
+                .unwrap_or(0),
+            EdgePath::Spline {
+                cp1_x,
+                cp1_y,
+                cp2_x,
+                cp2_y,
+            } => over(cross(e, *cp1_x, *cp1_y)).max(over(cross(e, *cp2_x, *cp2_y))),
+        }
+    }
+
+    /// Stroke-crosses-stroke cells in the painted output.
+    ///
+    /// A proxy, deliberately: it counts what the reader sees as a
+    /// crossing. Border junctions (`╪ ╫ ╬`) are excluded — an edge
+    /// crossing a cluster wall is expected and not a routing fault.
+    fn crossings(text: &str) -> usize {
+        text.chars()
+            .filter(|c| matches!(c, '┼' | '┿' | '╂' | '+'))
+            .count()
+    }
+
+    fn score(ir: &LayoutIR<'_>) -> (usize, usize, usize, usize) {
+        let text = ir.render_string(&RenderOptions::plain());
+        let kinks: usize = ir.edges().iter().map(lane_changes).sum();
+        let worst = ir.edges().iter().map(spread).max().unwrap_or(0);
+        (crossings(&text), kinks, worst, ir.width() * ir.height())
+    }
+
+    #[test]
+    #[ignore = "reporting tool, not an assertion — run with --ignored --nocapture"]
+    fn quality_table() {
+        const DIRS: [(&str, Direction); 4] = [
+            ("TD", Direction::TopDown),
+            ("BT", Direction::BottomUp),
+            ("LR", Direction::LeftRight),
+            ("RL", Direction::RightLeft),
+        ];
+
+        println!("\nfixture      dir   cross  kinks  spread     area  canvas");
+        println!("-----------  ---  ------  -----  ------  -------  ------");
+        let mut totals = [0usize; 4];
+        let stress: [(&str, Graph<'static>); 5] = [
+            ("tier1_micro", tier1_microservices()),
+            ("tier2_plat", tier2_platform()),
+            ("tier3_cloud", tier3_cloud()),
+            ("tier4_ent", tier4_enterprise()),
+            ("tier5_mega", tier5_megacorp()),
+        ];
+        for (name, g) in corpus().into_iter().chain(stress) {
+            for (tag, dir) in DIRS {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                let (c, k, s, a) = score(&ir);
+                totals[0] += c;
+                totals[1] += k;
+                totals[2] += s;
+                totals[3] += a;
+                println!(
+                    "{name:<11}  {tag:<3}  {c:>6}  {k:>5}  {s:>6}  {a:>7}  {}x{}",
+                    ir.width(),
+                    ir.height()
+                );
+            }
+        }
+        println!("-----------  ---  ------  -----  ------  -------  ------");
+        println!(
+            "{:<11}  {:<3}  {:>6}  {:>5}  {:>6}  {:>7}",
+            "TOTAL", "", totals[0], totals[1], totals[2], totals[3]
+        );
+        println!(
+            "\ncross = stroke-crosses-stroke cells (border junctions excluded)\n\
+             kinks = cross-axis lane changes summed over edges\n\
+             spread = worst single edge's cross-axis excursion\n\
+             area  = canvas w*h (guards against trading crossings for size)\n"
+        );
     }
 }
