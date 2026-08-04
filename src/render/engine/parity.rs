@@ -3383,15 +3383,8 @@ mod quality {
         let a = cross(e, e.from_x, e.from_y);
         let b = cross(e, e.to_x, e.to_y);
         let (lo, hi) = (a.min(b), a.max(b));
-        let over = |c: usize| {
-            if c < lo {
-                lo - c
-            } else if c > hi {
-                c - hi
-            } else {
-                0
-            }
-        };
+        // Distance outside [lo, hi]; 0 when inside, both branches saturating.
+        let over = |c: usize| lo.saturating_sub(c).max(c.saturating_sub(hi));
         match &e.path {
             EdgePath::Direct | EdgePath::Corner { .. } => 0,
             EdgePath::SideChannel { channel_at, .. } => over(*channel_at),

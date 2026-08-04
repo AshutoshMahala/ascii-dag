@@ -389,6 +389,209 @@ pub(crate) fn passthrough_extent(jogging_waypoints: usize) -> usize {
     jogging_waypoints + usize::from(jogging_waypoints > 0)
 }
 
+// ── Routing fans (temp/09 P2) ────────────────────────────────────────────
+//
+// A skip-level edge crossing the gap between two levels has to pass the
+// cross-axis territory that the *shorter* edges in that gap already claim.
+// Today its cross coordinate is derived from the level's NODES and knows
+// nothing about that territory, so the longest edge in a graph can be
+// handed a lane between two short ones and forced to cut across them.
+//
+// These are the primitives for reasoning about that territory. They are
+// deliberately plain interval arithmetic rather than being generic over
+// [`Axis`]: everything here is already in cross-axis space, so an axis
+// parameter would only be decoration. What matters for backend parity is
+// that the rule lives in exactly one place — this file — with both
+// backends supplying their own coordinate storage. The clearance is a
+// parameter for the same reason: callers pass `A::SG_GAP_CROSS` (or
+// whatever the situation demands) rather than the rule guessing.
+
+/// An inclusive cross-axis interval, `lo ..= hi`.
+// Staged ahead of use: P3 wires these into dummy placement in both
+// backends. Landing the geometry first keeps that change reviewable.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CrossSpan {
+    /// Lower cross-axis bound, inclusive.
+    pub(crate) lo: usize,
+    /// Upper cross-axis bound, inclusive.
+    pub(crate) hi: usize,
+}
+
+#[allow(dead_code)]
+impl CrossSpan {
+    /// The span covered by an edge running between two cross positions,
+    /// whichever order they arrive in.
+    pub(crate) fn between(a: usize, b: usize) -> Self {
+        CrossSpan {
+            lo: a.min(b),
+            hi: a.max(b),
+        }
+    }
+
+    /// Does this span contain `c`?
+    pub(crate) fn contains(&self, c: usize) -> bool {
+        self.lo <= c && c <= self.hi
+    }
+}
+
+/// Normalize the spans claimed in one inter-level gap into the gap's *fan*:
+/// widened by `clearance`, sorted, and merged into disjoint runs. Returns
+/// how many entries of `spans` the fan occupies; the rest is scratch.
+///
+/// The fan is an interval **union**, not the convex envelope of its inputs.
+/// That distinction matters: with two clusters far apart on the cross axis,
+/// the envelope would swallow the free lane between them and push a passing
+/// edge beyond both — paying canvas for space that was never occupied. The
+/// union keeps that lane usable.
+///
+/// Works in place on a caller-owned slice so the arena backend can supply
+/// scratch without allocating.
+#[allow(dead_code)]
+pub(crate) fn merge_fan(spans: &mut [CrossSpan], clearance: usize) -> usize {
+    if spans.is_empty() {
+        return 0;
+    }
+    for s in spans.iter_mut() {
+        s.lo = s.lo.saturating_sub(clearance);
+        s.hi = s.hi.saturating_add(clearance);
+    }
+    spans.sort_unstable_by_key(|s| (s.lo, s.hi));
+
+    let mut write = 0;
+    for read in 1..spans.len() {
+        // Merge when they overlap OR merely touch: `hi + 1 == lo` leaves no
+        // usable cell between them, so treating them as one run keeps
+        // `nearest_outside` from ever proposing a position that does not
+        // exist.
+        if spans[read].lo <= spans[write].hi.saturating_add(1) {
+            spans[write].hi = spans[write].hi.max(spans[read].hi);
+        } else {
+            write += 1;
+            spans[write] = spans[read];
+        }
+    }
+    write + 1
+}
+
+/// The free interval of the cross axis containing `p`, as `(lo, hi)` with
+/// `hi == None` meaning unbounded above. `None` when `p` is itself inside
+/// the fan.
+///
+/// `fan` must already be merged by [`merge_fan`].
+#[allow(dead_code)]
+fn free_gap_containing(fan: &[CrossSpan], p: usize) -> Option<(usize, Option<usize>)> {
+    if fan.iter().any(|s| s.contains(p)) {
+        return None;
+    }
+    let lo = fan
+        .iter()
+        .filter(|s| s.hi < p)
+        .map(|s| s.hi + 1)
+        .max()
+        .unwrap_or(0);
+    let hi = fan.iter().filter(|s| s.lo > p).map(|s| s.lo - 1).min();
+    Some((lo, hi))
+}
+
+/// The cross position closest to `ideal` that lies outside every span of
+/// `fan`, which must already be merged by [`merge_fan`].
+///
+/// `from` is the chain's previous cross coordinate, when it has one. It is
+/// not a hint — it is a constraint. A dummy chain that has already committed
+/// to one side of a fan must stay there: without `from`, asking for the
+/// position merely *nearest* to `ideal` will happily answer with a cell on
+/// the far side, and the resulting segment then runs straight through the
+/// fan the placement existed to avoid. Given `from`, the result is confined
+/// to the free interval `from` already occupies, so the whole segment
+/// `from ..= result` is guaranteed clear.
+///
+/// Pass `None` for the first dummy in a chain, which has no established
+/// side; then the rule is nearest to `ideal`, ties resolving **upward**.
+/// The low end of the cross axis carries cluster leading pads and level
+/// margins, so it is the more contended direction — and a fixed rule is
+/// what keeps the two backends byte-identical, which "either is fine"
+/// would not.
+///
+/// Returns `None` only when no position outside the fan is representable —
+/// a fan reaching `usize::MAX` with nothing below it. Callers get an
+/// explicit failure rather than a coordinate that is silently still inside.
+#[allow(dead_code)]
+pub(crate) fn nearest_outside(
+    fan: &[CrossSpan],
+    ideal: usize,
+    from: Option<usize>,
+) -> Option<usize> {
+    // Anchored: clamp into the free interval the chain already sits in.
+    if let Some(f) = from {
+        if let Some((glo, ghi)) = free_gap_containing(fan, f) {
+            let mut p = ideal.max(glo);
+            if let Some(h) = ghi {
+                p = p.min(h);
+            }
+            return Some(p);
+        }
+        // `from` is itself inside the fan — nothing to preserve; fall through.
+    }
+
+    let Some(idx) = fan.iter().position(|s| s.contains(ideal)) else {
+        return Some(ideal);
+    };
+
+    // Upward: leave this run, then any run that abuts it.
+    let mut up = fan[idx].hi.checked_add(1);
+    for s in &fan[idx + 1..] {
+        match up {
+            Some(u) if s.contains(u) => up = s.hi.checked_add(1),
+            _ => break,
+        }
+    }
+
+    // Downward: same walk, but the axis bottoms out at 0.
+    let mut down = fan[idx].lo.checked_sub(1);
+    for s in fan[..idx].iter().rev() {
+        match down {
+            Some(d) if s.contains(d) => down = s.lo.checked_sub(1),
+            _ => break,
+        }
+    }
+
+    match (down, up) {
+        (Some(d), Some(u)) => Some(if ideal - d < u - ideal { d } else { u }),
+        (Some(d), None) => Some(d),
+        (None, Some(u)) => Some(u),
+        (None, None) => None,
+    }
+}
+
+/// Placement order for the dummy chains crossing one gap.
+///
+/// Ash's rule: the edge travelling farthest diverges first and takes the
+/// outer track. Since a placed chain becomes part of the fan that later
+/// chains must clear, "who is placed first" is part of the fan's
+/// definition, not a detail — so the comparator lives here, shared, rather
+/// than being written twice and drifting.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChainKey {
+    /// Levels this edge still has to travel from the gap being placed.
+    pub(crate) remaining: usize,
+    /// Total levels the edge spans end to end.
+    pub(crate) total: usize,
+    /// Edge index — the final tie-break, so the order is total.
+    pub(crate) edge: usize,
+}
+
+/// Order two chains for placement: longest remaining span first, then
+/// longest total span, then lowest edge index.
+#[allow(dead_code)]
+pub(crate) fn chain_cmp(a: &ChainKey, b: &ChainKey) -> core::cmp::Ordering {
+    b.remaining
+        .cmp(&a.remaining)
+        .then_with(|| b.total.cmp(&a.total))
+        .then_with(|| a.edge.cmp(&b.edge))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,5 +615,243 @@ mod tests {
         // Horizontal: trailing (bottom) pad 2 + sibling 1 + leading
         // (top: border + label + blank) pad 3.
         assert_eq!(Horizontal::SG_GAP_CROSS, 6);
+    }
+
+    // ── Routing fans (temp/09 P2) ────────────────────────────────────────
+
+    fn fan(pairs: &[(usize, usize)], clearance: usize) -> Vec<CrossSpan> {
+        let mut v: Vec<CrossSpan> = pairs
+            .iter()
+            .map(|&(a, b)| CrossSpan::between(a, b))
+            .collect();
+        let n = merge_fan(&mut v, clearance);
+        v.truncate(n);
+        v
+    }
+
+    #[test]
+    fn between_normalizes_either_order() {
+        assert_eq!(CrossSpan::between(7, 3), CrossSpan { lo: 3, hi: 7 });
+        assert_eq!(CrossSpan::between(3, 7), CrossSpan { lo: 3, hi: 7 });
+    }
+
+    #[test]
+    fn merge_fan_sorts_and_unions_overlaps() {
+        assert_eq!(
+            fan(&[(10, 14), (0, 5), (3, 8)], 0),
+            vec![CrossSpan { lo: 0, hi: 8 }, CrossSpan { lo: 10, hi: 14 }]
+        );
+    }
+
+    #[test]
+    fn merge_fan_joins_touching_runs() {
+        // 0..=4 and 5..=9 leave no usable cell between them.
+        assert_eq!(fan(&[(0, 4), (5, 9)], 0), vec![CrossSpan { lo: 0, hi: 9 }]);
+    }
+
+    #[test]
+    fn merge_fan_applies_clearance_and_clamps_at_zero() {
+        // 3..=5 widened by 4 would reach -1; the axis bottoms out at 0.
+        assert_eq!(fan(&[(3, 5)], 4), vec![CrossSpan { lo: 0, hi: 9 }]);
+    }
+
+    #[test]
+    fn merge_fan_clearance_can_close_a_gap() {
+        // 0..=2 and 6..=8 are disjoint bare, but clearance 2 merges them.
+        assert_eq!(fan(&[(0, 2), (6, 8)], 0).len(), 2);
+        assert_eq!(fan(&[(0, 2), (6, 8)], 2), vec![CrossSpan { lo: 0, hi: 10 }]);
+    }
+
+    /// The whole segment between two cross positions must miss the fan —
+    /// not merely the endpoint. This is the property the `from` argument
+    /// exists to guarantee.
+    fn segment_clear(fan: &[CrossSpan], a: usize, b: usize) -> bool {
+        let (lo, hi) = (a.min(b), a.max(b));
+        !fan.iter().any(|s| s.lo <= hi && lo <= s.hi)
+    }
+
+    #[test]
+    fn nearest_outside_is_identity_when_already_clear() {
+        let f = fan(&[(2, 5)], 0);
+        assert_eq!(nearest_outside(&f, 0, None), Some(0));
+        assert_eq!(nearest_outside(&f, 9, None), Some(9));
+        assert_eq!(nearest_outside(&[], 4, None), Some(4));
+    }
+
+    #[test]
+    fn nearest_outside_leaves_the_containing_run() {
+        let f = fan(&[(2, 8)], 0);
+        assert_eq!(
+            nearest_outside(&f, 3, None),
+            Some(1),
+            "closer to the low edge"
+        );
+        assert_eq!(
+            nearest_outside(&f, 7, None),
+            Some(9),
+            "closer to the high edge"
+        );
+    }
+
+    #[test]
+    fn nearest_outside_breaks_ties_upward() {
+        // 2..=6, ideal 4: down=1 (distance 3), up=7 (distance 3).
+        let f = fan(&[(2, 6)], 0);
+        assert_eq!(nearest_outside(&f, 4, None), Some(7));
+    }
+
+    #[test]
+    fn nearest_outside_skips_abutting_runs() {
+        let f = fan(&[(0, 5), (7, 12)], 0);
+        assert_eq!(f.len(), 2, "one free cell keeps them apart");
+        assert_eq!(
+            nearest_outside(&f, 3, None),
+            Some(6),
+            "the single free cell"
+        );
+        let g = fan(&[(0, 5), (6, 12)], 0);
+        assert_eq!(g.len(), 1);
+        assert_eq!(nearest_outside(&g, 3, None), Some(13));
+    }
+
+    #[test]
+    fn nearest_outside_goes_up_when_zero_blocks_the_way_down() {
+        let f = fan(&[(0, 6)], 0);
+        assert_eq!(nearest_outside(&f, 1, None), Some(7));
+    }
+
+    #[test]
+    fn nearest_outside_never_lands_inside_the_fan() {
+        let f = fan(&[(0, 3), (5, 5), (9, 20)], 1);
+        for ideal in 0..30 {
+            let got = nearest_outside(&f, ideal, None).expect("finite fan");
+            assert!(
+                !f.iter().any(|s| s.contains(got)),
+                "ideal {ideal} -> {got} landed inside {f:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn anchored_placement_never_crosses_the_fan() {
+        // The reported case: a chain already at 11 asked to aim at 6.
+        // Unanchored the answer is 4 — nearer, but the segment 11->4 runs
+        // through the whole fan.
+        let f = fan(&[(5, 10)], 0);
+        assert_eq!(
+            nearest_outside(&f, 6, None),
+            Some(4),
+            "nearest, ignoring heading"
+        );
+        assert!(!segment_clear(&f, 11, 4), "which crosses the fan");
+
+        let anchored = nearest_outside(&f, 6, Some(11)).expect("finite fan");
+        assert_eq!(
+            anchored, 11,
+            "clamped into the gap the chain already occupies"
+        );
+        assert!(segment_clear(&f, 11, anchored), "segment stays clear");
+    }
+
+    #[test]
+    fn anchored_placement_holds_the_low_side_too() {
+        let f = fan(&[(5, 10)], 0);
+        let p = nearest_outside(&f, 9, Some(2)).expect("finite fan");
+        assert_eq!(p, 4, "clamped to the top of the low gap");
+        assert!(segment_clear(&f, 2, p));
+    }
+
+    #[test]
+    fn anchored_placement_tracks_the_ideal_within_its_gap() {
+        // Free gap 6..=8 between two runs; the chain sits at 7.
+        let f = fan(&[(0, 5), (9, 20)], 0);
+        assert_eq!(
+            nearest_outside(&f, 0, Some(7)),
+            Some(6),
+            "clamped to gap floor"
+        );
+        assert_eq!(
+            nearest_outside(&f, 8, Some(7)),
+            Some(8),
+            "ideal is reachable"
+        );
+        assert_eq!(
+            nearest_outside(&f, 30, Some(7)),
+            Some(8),
+            "clamped to gap ceiling"
+        );
+        for ideal in 0..30 {
+            let p = nearest_outside(&f, ideal, Some(7)).expect("finite fan");
+            assert!(
+                segment_clear(&f, 7, p),
+                "ideal {ideal} -> {p} crossed the fan"
+            );
+        }
+    }
+
+    #[test]
+    fn anchored_falls_back_when_the_anchor_is_itself_inside() {
+        // Shouldn't happen if prior placement was correct, but must not panic.
+        let f = fan(&[(5, 10)], 0);
+        assert_eq!(
+            nearest_outside(&f, 6, Some(7)),
+            nearest_outside(&f, 6, None)
+        );
+    }
+
+    #[test]
+    fn nearest_outside_reports_failure_at_the_representable_edge() {
+        // A fan reaching usize::MAX with nothing below has no outside cell.
+        let f = [CrossSpan {
+            lo: 0,
+            hi: usize::MAX,
+        }];
+        assert_eq!(nearest_outside(&f, usize::MAX, None), None);
+        // Room below is still found rather than overflowing upward.
+        let g = [CrossSpan {
+            lo: 4,
+            hi: usize::MAX,
+        }];
+        assert_eq!(nearest_outside(&g, usize::MAX, None), Some(3));
+    }
+
+    #[test]
+    fn hero_case_clears_the_gateway_fan() {
+        // hero LR, Gateway's gap: its edges reach rows 3 and 7 from row 0,
+        // so the fan is 0..=7. The trace dummy's ideal is row 0 (both its
+        // endpoints sit there) and it currently lands at row 4, inside.
+        let f = fan(&[(0, 3), (0, 7)], 0);
+        assert_eq!(f, vec![CrossSpan { lo: 0, hi: 7 }]);
+        assert_eq!(
+            nearest_outside(&f, 4, None),
+            Some(8),
+            "clears Orders at row 7"
+        );
+        assert_eq!(nearest_outside(&f, 0, None), Some(8), "no room below row 0");
+    }
+
+    #[test]
+    fn chain_order_is_longest_first_then_total_then_index() {
+        use core::cmp::Ordering;
+        let k = |remaining, total, edge| ChainKey {
+            remaining,
+            total,
+            edge,
+        };
+        // More remaining travel wins outright.
+        assert_eq!(chain_cmp(&k(5, 5, 9), &k(4, 9, 0)), Ordering::Less);
+        // Equal remaining: longer total span wins.
+        assert_eq!(chain_cmp(&k(3, 8, 9), &k(3, 4, 0)), Ordering::Less);
+        // Equal on both: lowest edge index wins, so the order is total.
+        assert_eq!(chain_cmp(&k(3, 8, 2), &k(3, 8, 7)), Ordering::Less);
+        assert_eq!(chain_cmp(&k(3, 8, 7), &k(3, 8, 7)), Ordering::Equal);
+
+        let mut v = [k(1, 1, 3), k(4, 4, 2), k(4, 9, 5), k(4, 9, 1)];
+        v.sort_by(chain_cmp);
+        assert_eq!(
+            v.iter().map(|c| c.edge).collect::<Vec<_>>(),
+            vec![1, 5, 2, 3],
+            "remaining desc, total desc, edge asc"
+        );
     }
 }
