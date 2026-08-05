@@ -1367,6 +1367,10 @@ fn allocate_chain_lanes<A: Axis>(
     let mut committed: Vec<Vec<GapClaim>> = vec![Vec::new(); n_gaps];
     let mut reach = 0usize;
     let mut scratch: Vec<CrossSpan> = Vec::new();
+    // Global work purse (§4.7, claim-comparison units): both backends
+    // charge the same amounts at the same points in the same chain
+    // order, so they exhaust identically.
+    let mut dp_budget = crate::algorithms::sugiyama::geometry::LANE_WORK_BUDGET;
 
     for ch in &chains {
         let span_levels = ch.t_level - ch.s_level;
@@ -1427,7 +1431,11 @@ fn allocate_chain_lanes<A: Axis>(
             span_need += level_obstacles[lvl].len();
         }
 
-        if contiguous && wp_count > 0 && span_need <= LANE_SPAN_CAP {
+        if contiguous && wp_count > 0 && span_need <= LANE_SPAN_CAP && dp_budget >= span_need {
+            // Charge the union/candidate stream work up front; an
+            // exhausted purse skips the whole attempt (packed), so later
+            // chains never repeat candidate construction for nothing.
+            dp_budget -= span_need;
             // ── §4.3: one lane for the whole chain ──
             // Union every constraint: all traversed gaps' filtered claims
             // plus all interior levels' obstacles, merged together. A
@@ -1454,7 +1462,12 @@ fn allocate_chain_lanes<A: Axis>(
             let tn = merge_fan(&mut tmp, clearance);
             let t_comp = free_gap_containing(&tmp[..tn], ch.t_cross);
 
-            if let (Some((slo, shi)), Some((tlo, thi))) = (s_comp, t_comp) {
+            let walk_cost = crate::algorithms::sugiyama::geometry::lane_scan_work(0, n, wp_count);
+            let can_walk = dp_budget >= walk_cost;
+            if can_walk {
+                dp_budget -= walk_cost;
+            }
+            if let (true, Some((slo, shi)), Some((tlo, thi))) = (can_walk, s_comp, t_comp) {
                 let lo_bound = slo.max(tlo);
                 let hi_bound = match (shi, thi) {
                     (Some(a), Some(b)) => Some(a.min(b)),
@@ -1473,6 +1486,11 @@ fn allocate_chain_lanes<A: Axis>(
 
                 let mut best: Option<(usize, usize)> = None; // (dist, coord)
                 let mut consider = |p: usize| {
+                    // §4.6/review: a lane the CSR backend cannot
+                    // represent does not exist for either backend.
+                    if !crate::algorithms::sugiyama::geometry::lane_admissible(p) {
+                        return;
+                    }
                     let d = total_dist(p);
                     if best.is_none_or(|(bd, bp)| d < bd || (d == bd && p < bp)) {
                         best = Some((d, p));
@@ -1521,6 +1539,8 @@ fn allocate_chain_lanes<A: Axis>(
                     clearance,
                     &exempt,
                     &ideal_at,
+                    span_need,
+                    &mut dp_budget,
                 );
             }
         }
@@ -1584,6 +1604,8 @@ fn chain_lane_dp<A: Axis>(
     clearance: usize,
     exempt: &dyn Fn(&crate::algorithms::sugiyama::geometry::GapClaim, usize) -> bool,
     ideal_at: &dyn Fn(usize) -> usize,
+    span_need: usize,
+    dp_budget: &mut usize,
 ) -> Option<Vec<usize>> {
     use crate::algorithms::sugiyama::geometry::{
         CrossSpan, LANE_CAND_CAP, merge_fan, nearest_outside,
@@ -1592,6 +1614,12 @@ fn chain_lane_dp<A: Axis>(
     let span_levels = ch.t_level - ch.s_level;
     let wp_count = span_levels - 1;
     let body = A::DUMMY_CROSS.saturating_sub(1);
+    // Candidate generation streams the same claims the union did —
+    // charge it before doing it.
+    if *dp_budget < span_need {
+        return None;
+    }
+    *dp_budget -= span_need;
     let mut total_cands = 0usize;
 
     // Raw filtered claims per traversed gap (for crossing counts) and the
@@ -1662,19 +1690,42 @@ fn chain_lane_dp<A: Axis>(
                 c.push(p);
             }
         }
-        // Filter by the level's own obstacles.
-        c.retain(|&p| !obs[..on].iter().any(|s| s.contains(p)));
+        // The candidate budget counts RAW pushes — before filtering and
+        // deduplication — because that is the quantity the CSR backend
+        // can meter without buffering past its arena slice. Counting
+        // post-dedup here while CSR counts raw would let a candidate-
+        // heavy chain run the DP on one backend and keep packed routing
+        // on the other.
+        total_cands += c.len();
+        if total_cands > LANE_CAND_CAP {
+            return None; // shared budget exhausted — keep packed
+        }
+        // Filter by the level's own obstacles, and by representability
+        // (`LANE_MAX_CROSS`): CSR stores coordinates as u16, and a
+        // coordinate only one backend can hold must not exist in either.
+        c.retain(|&p| {
+            crate::algorithms::sugiyama::geometry::lane_admissible(p)
+                && !obs[..on].iter().any(|s| s.contains(p))
+        });
         c.sort_unstable();
         c.dedup();
         if c.is_empty() {
             return None; // no representable candidate — keep packed (§4.6)
         }
-        total_cands += c.len();
-        if total_cands > LANE_CAND_CAP {
-            // Shared per-chain DP budget: over it, keep packed (both backends).
-            return None;
-        }
         cands.push(c);
+    }
+
+    // §4.7 work budget: transitions ARE claim scans — a transition over
+    // a thousand-claim gap costs a thousand comparisons, so the meter
+    // weighs each row product by its gap's claim count.
+    {
+        let rows: Vec<usize> = cands.iter().map(|c| c.len()).collect();
+        let claims: Vec<usize> = raw.iter().map(|r| r.len()).collect();
+        let work = crate::algorithms::sugiyama::geometry::lane_dp_work(&rows, &claims);
+        if work > *dp_budget {
+            return None; // purse exhausted — keep packed (both backends)
+        }
+        *dp_budget -= work;
     }
 
     let crossings = |gap_li: usize, a: usize, b: usize| -> usize {

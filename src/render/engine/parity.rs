@@ -3602,6 +3602,158 @@ mod quality {
         );
     }
 
+    /// Review #2: an EXACTLY estimate-sized arena must survive a cyclic
+    /// graph — the estimator's original unflipped relaxation counted zero
+    /// dummies for an ordered cycle, while cycle breaking turns the
+    /// closing edge into a span-(N-1) chain. The estimator now mirrors
+    /// cycle breaking, so EVERY dummy-derived manifest term is exact.
+    ///
+    /// Cases: small cycle (lane pass enabled), and a cycle past the lane
+    /// work cap (`E > LANE_PASS_MAX_WORK` — lane pass DISABLED, so the
+    /// estimate must be right for the base manifest alone), both with
+    /// `include_dummy_nodes` so the emitted-dummy IR terms are exercised.
+    fn cycle_fits_exact_arena(n: usize) {
+        let mut g = Graph::new();
+        for i in 0..n {
+            g.add_node(i, "n");
+        }
+        for i in 0..n - 1 {
+            g.add_edge(i, i + 1, None);
+        }
+        g.add_edge(n - 1, 0usize, None); // ordered cycle
+
+        let mut cfg = LayoutConfig::standard();
+        cfg.include_dummy_nodes = true;
+        // Conversion arena gets headroom like the rest of the suite
+        // (`csr_engine` doubles it too) — the exact-size contract under
+        // test here is the LAYOUT estimator, not the conversion one.
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let est = g.estimate_layout_arena_size_with(&cfg);
+        let mut temp_buf = vec![0u8; est];
+        let mut out_buf = vec![0u8; est];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&cfg, &mut temp_arena, &mut out_arena)
+            .expect("exactly estimate-sized arena must suffice, cycle included");
+        assert!(ir.width() > 0 && ir.height() > 0);
+        // The broken cycle's chain has N-2 waypoints; with
+        // include_dummy_nodes they must ALL be present in the IR — the
+        // old undercount silently dropped overflowing waypoints instead.
+        let dummies = ir
+            .nodes()
+            .iter()
+            .filter(|nd| nd.kind == crate::ir::NodeKind::Dummy)
+            .count();
+        assert_eq!(dummies, n - 2, "every broken-cycle waypoint emitted");
+    }
+
+    #[test]
+    fn cyclic_graph_layout_fits_exactly_estimated_arena() {
+        cycle_fits_exact_arena(8);
+        cycle_fits_exact_arena(60);
+    }
+
+    /// Review #3 (representability boundary): a chain whose every
+    /// admissible lane is blocked by a giant level obstacle must keep its
+    /// packed routing — never a lane clamped into occupied space, and
+    /// never a waypoint moved INTO the obstacle.
+    #[test]
+    fn oversized_obstacle_refuses_lane_instead_of_clamping() {
+        use crate::algorithms::sugiyama::geometry::LANE_MAX_CROSS;
+        let mut g = Graph::new();
+        g.add_node(0usize, "src");
+        // A node wider than the representable cross axis: every lane at
+        // its level is either inside its body or beyond LANE_MAX_CROSS.
+        g.add_node(
+            1usize,
+            crate::render::engine::CustomNode {
+                label: "wall",
+                width: LANE_MAX_CROSS + 8,
+                height: 1,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_node(2usize, "dst");
+        g.add_edge(0usize, 1usize, None);
+        g.add_edge(1usize, 2usize, None);
+        g.add_edge(0usize, 2usize, None); // skip chain past the wall
+
+        let mut cfg = LayoutConfig::standard();
+        cfg.include_dummy_nodes = true;
+        let ir = g.compute_layout_with_config(&cfg);
+        for nd in ir
+            .nodes()
+            .iter()
+            .filter(|nd| nd.kind == crate::ir::NodeKind::Dummy)
+        {
+            let (wall_x, wall_w) = ir
+                .nodes()
+                .iter()
+                .find(|w| w.id == 1)
+                .map(|w| (w.x, w.width))
+                .expect("wall present");
+            let inside_wall = nd.x >= wall_x && nd.x < wall_x + wall_w;
+            assert!(
+                !inside_wall,
+                "waypoint at x={} moved inside the wall [{}, {})",
+                nd.x,
+                wall_x,
+                wall_x + wall_w
+            );
+        }
+    }
+
+    /// Review #4: the design requires NO crossing regression in any
+    /// fixture/direction — an aggregate floor lets one cell regress while
+    /// another improves. Every corpus cell is pinned at its landed value
+    /// (TD pin covers BT, LR covers RL: exact mirrors, gated above).
+    #[test]
+    fn per_fixture_crossings_never_regress() {
+        let pins: &[(&str, usize, usize)] = &[
+            // (fixture, TD/BT ceiling, LR/RL ceiling)
+            ("fan", 2, 2),
+            ("stage", 0, 0),
+            ("skip", 0, 0),
+            ("back", 0, 0),
+            ("two_cycle", 0, 0),
+            ("self_loop", 0, 0),
+            ("labels", 0, 0),
+            ("nested", 0, 0),
+            ("hero", 2, 1),
+            ("wide_node", 0, 0),
+            ("tier1_micro", 0, 0),
+            ("tier2_plat", 1, 3),
+            ("tier3_cloud", 7, 9),
+            ("tier4_ent", 4, 8),
+            ("tier5_mega", 14, 12),
+        ];
+        for (name, g) in mirror_corpus() {
+            let &(_, td_pin, lr_pin) = pins
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .unwrap_or_else(|| panic!("fixture {name} has no crossing pin — add one"));
+            for (dir, pin) in [
+                (Direction::TopDown, td_pin),
+                (Direction::BottomUp, td_pin),
+                (Direction::LeftRight, lr_pin),
+                (Direction::RightLeft, lr_pin),
+            ] {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                let (c, _, _, _) = score(&ir);
+                assert!(
+                    c <= pin,
+                    "{name} {dir:?}: crossings regressed to {c} (pin {pin})"
+                );
+            }
+        }
+    }
+
     #[test]
     #[ignore = "reporting tool, not an assertion — run with --ignored --nocapture"]
     fn quality_table() {

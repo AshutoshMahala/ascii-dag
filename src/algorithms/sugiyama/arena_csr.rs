@@ -4758,6 +4758,10 @@ fn allocate_chain_lanes_csr<A: Axis>(
     lane_cursors[..n_gaps].copy_from_slice(&lane_committed_offsets[..n_gaps]);
 
     let mut reach = 0usize;
+    // Global work purse (§4.7, claim-comparison units): both backends
+    // charge the same amounts at the same points in the same chain
+    // order, so they exhaust identically.
+    let mut dp_budget = crate::algorithms::sugiyama::geometry::LANE_WORK_BUDGET;
 
     for ci in 0..chain_count {
         let (t_level, span_levels, ei) = lane_chains[ci];
@@ -4815,7 +4819,10 @@ fn allocate_chain_lanes_csr<A: Axis>(
 
         let mut have_placed = false;
 
-        if contiguous && wp_count > 0 && span_need <= LANE_SPAN_CAP {
+        if contiguous && wp_count > 0 && span_need <= LANE_SPAN_CAP && dp_budget >= span_need {
+            // Charge the union/candidate stream work up front (mirrors
+            // the heap); an exhausted purse skips the whole attempt.
+            dp_budget -= span_need;
             // ── §4.3: one lane for the whole chain ──
             let mut n_union = 0usize;
             for gap in s_level..t_level {
@@ -4876,7 +4883,12 @@ fn allocate_chain_lanes_csr<A: Axis>(
             let s_comp = comp_of(lane_spans, ch.s_level, ch.s_cross);
             let t_comp = comp_of(lane_spans, ch.t_level - 1, ch.t_cross);
 
-            if let (Some((slo, shi)), Some((tlo, thi))) = (s_comp, t_comp) {
+            let walk_cost = crate::algorithms::sugiyama::geometry::lane_scan_work(0, un, wp_count);
+            let can_walk = dp_budget >= walk_cost;
+            if can_walk {
+                dp_budget -= walk_cost;
+            }
+            if let (true, Some((slo, shi)), Some((tlo, thi))) = (can_walk, s_comp, t_comp) {
                 let lo_bound = slo.max(tlo);
                 let hi_bound = match (shi, thi) {
                     (Some(a), Some(b)) => Some(a.min(b)),
@@ -4897,6 +4909,11 @@ fn allocate_chain_lanes_csr<A: Axis>(
                     let ideals = &lane_cands[..wp_count];
                     let union_fan = &lane_spans[..un];
                     let mut consider = |p: usize| {
+                        // A lane beyond Coord range does not exist —
+                        // for either backend (heap mirrors this).
+                        if !crate::algorithms::sugiyama::geometry::lane_admissible(p) {
+                            return;
+                        }
                         let dd: usize = ideals.iter().map(|&i| i.abs_diff(p)).sum();
                         if best.is_none_or(|(bd, bp)| dd < bd || (dd == bd && p < bp)) {
                             best = Some((dd, p));
@@ -4925,8 +4942,10 @@ fn allocate_chain_lanes_csr<A: Axis>(
                 }
 
                 if let Some((_, lane)) = best {
+                    // `consider` refused anything past LANE_MAX_CROSS,
+                    // so the cast is exact — no clamp into occupied space.
                     for slot in dummy_data[ds..de].iter_mut() {
-                        slot.1 = lane.min(Coord::MAX as usize) as Coord;
+                        slot.1 = lane as Coord;
                     }
                     have_placed = true;
                 }
@@ -4952,6 +4971,8 @@ fn allocate_chain_lanes_csr<A: Axis>(
                     lane_dp,
                     dummy_data,
                     ds,
+                    span_need,
+                    &mut dp_budget,
                 );
             }
         }
@@ -5009,6 +5030,8 @@ fn chain_lane_dp_csr<A: Axis>(
     lane_dp: &mut [LaneDpEntry],
     dummy_data: &mut [(Idx, Coord)],
     ds: usize,
+    span_need: usize,
+    dp_budget: &mut usize,
 ) -> bool {
     use crate::algorithms::sugiyama::geometry::{merge_fan, nearest_outside};
 
@@ -5017,6 +5040,12 @@ fn chain_lane_dp_csr<A: Axis>(
     let body = A::DUMMY_CROSS.saturating_sub(1);
     let clearance = A::SIBLING_GAP_CROSS;
     let cand_cap = lane_cands.len();
+    // Candidate generation streams the same claims the union did —
+    // charge it before doing it (mirrors the heap).
+    if *dp_budget < span_need {
+        return false;
+    }
+    *dp_budget -= span_need;
 
     let crossings = |gap: usize, a: usize, b: usize| -> usize {
         let (lo, hi) = (a.min(b), a.max(b));
@@ -5140,13 +5169,18 @@ fn chain_lane_dp_csr<A: Axis>(
         if overflow {
             return false; // shared per-chain DP budget: keep packed
         }
-        // Filter by the level's own obstacles, then sort + dedup.
+        // Filter by the level's own obstacles AND representability
+        // (`LANE_MAX_CROSS`), then sort + dedup. The budget above was
+        // charged on RAW pushes — the heap backend meters the same
+        // quantity, so the two exhaust identically.
         {
             let obs = &lane_spans[obs_base..obs_base + on];
             let mut w = cstart;
             for r in cstart..total {
                 let p = lane_cands[r];
-                if !obs.iter().any(|s| s.contains(p)) {
+                if crate::algorithms::sugiyama::geometry::lane_admissible(p)
+                    && !obs.iter().any(|s| s.contains(p))
+                {
                     lane_cands[w] = p;
                     w += 1;
                 }
@@ -5167,6 +5201,40 @@ fn chain_lane_dp_csr<A: Axis>(
             return false; // no representable candidate — keep packed (§4.6)
         }
         lane_cand_offsets[li + 1] = total;
+    }
+
+    // §4.7 work budget: transitions ARE claim scans, so each row
+    // product is weighted by its gap's filtered-claim count (mirrors
+    // the heap's `lane_dp_work` inputs exactly).
+    {
+        let claims_in = |gap: usize| -> usize {
+            let mut n = 0usize;
+            for c in lane_fixed[lane_fixed_offsets[gap]..lane_fixed_offsets[gap + 1]].iter() {
+                if !lane_exempt(graph, back_edges, ch, c.edge_idx, gap) {
+                    n += 1;
+                }
+            }
+            for c in lane_committed[lane_committed_offsets[gap]..lane_cursors[gap]].iter() {
+                if !lane_exempt(graph, back_edges, ch, c.edge_idx, gap) {
+                    n += 1;
+                }
+            }
+            n
+        };
+        let row = |li: usize| lane_cand_offsets[li + 1] - lane_cand_offsets[li];
+        let mut work = row(0).saturating_mul(claims_in(ch.s_level) + 1);
+        for li in 1..wp_count {
+            work = work.saturating_add(
+                row(li - 1)
+                    .saturating_mul(row(li))
+                    .saturating_mul(claims_in(ch.s_level + li) + 1),
+            );
+        }
+        work = work.saturating_add(row(wp_count - 1).saturating_mul(claims_in(ch.t_level - 1) + 1));
+        if work > *dp_budget {
+            return false; // purse exhausted — keep packed (both backends)
+        }
+        *dp_budget -= work;
     }
 
     // ── DP fill: per candidate, best predecessor (ascending scan with
@@ -5226,7 +5294,8 @@ fn chain_lane_dp_csr<A: Axis>(
         return false;
     };
     for li in (0..wp_count).rev() {
-        dummy_data[ds + li].1 = lane_cands[idx].min(Coord::MAX as usize) as Coord;
+        // Candidates were filtered to LANE_MAX_CROSS — the cast is exact.
+        dummy_data[ds + li].1 = lane_cands[idx] as Coord;
         idx = lane_dp[idx].1;
     }
     true
@@ -5835,56 +5904,100 @@ impl<'a> Graph<'a> {
             .len()
             .saturating_mul(core::mem::size_of::<crate::ir::arena::CustomNodeArena>())
             .saturating_add(if self.node_custom.is_empty() { 0 } else { 16 });
-        // ── Cheap level relaxation: exact dummy count AND exact depth ──
-        // If this (unflipped) relaxation converges, the graph has no
-        // directed cycle, so cycle breaking is a no-op and the depth
-        // below equals the layout's exactly. If it does not converge,
-        // bound by node_count — a DAG's depth can never exceed its node
-        // count, which is precisely what the layout enforces.
+        // ── Level assignment for sizing: mirror the layout's own ──
+        // Under `CycleBreaking::DepthFirst` (the default), run the SAME
+        // back-edge detection and back-flipped relaxation the layout
+        // runs, so depth and dummy count are EXACT for every graph —
+        // cyclic included. The previous unflipped relaxation undercounted
+        // cyclic graphs: an ordered cycle 0→1→…→N-1→0 relaxes to zero
+        // dummies, but breaking reverses the closing edge into a
+        // span-(N-1) chain with N-2 waypoints, and every dummy-derived
+        // manifest term (vnodes, level widths, waypoints, lane scratch,
+        // emitted dummy IR) was sized from the undercount.
+        //
+        // Under `CycleBreaking::None` the unflipped relaxation stays: if
+        // it converges the graph is acyclic and it equals the layout's;
+        // if not, the layout itself fails with `ExceedsMaxLevels`, and
+        // node-count bounds keep the estimate a ceiling on the way there.
         let actual_dummies: usize;
         let max_levels: usize;
+        let lane_dummy_bound: usize;
         {
-            let mut levels = vec![0u32; node_count];
-            let edge_idx: alloc::vec::Vec<(usize, usize)> = self
-                .edges
-                .iter()
-                .map(|&(from_id, to_id, _)| {
-                    let fi = self.node_index(from_id).unwrap_or(usize::MAX);
-                    let ti = self.node_index(to_id).unwrap_or(usize::MAX);
-                    (fi, ti)
-                })
-                .collect();
-            let mut changed = true;
-            let mut passes = 0;
-            while changed && passes < node_count {
-                changed = false;
-                passes += 1;
-                for &(fi, ti) in &edge_idx {
-                    if fi != usize::MAX && ti != usize::MAX && fi != ti {
-                        let nl = levels[fi].saturating_add(1);
-                        if nl > levels[ti] {
-                            levels[ti] = nl;
-                            changed = true;
+            use crate::algorithms::sugiyama::config::CycleBreaking;
+            let count_from = |lvl: &[usize], back: &[bool]| -> usize {
+                let mut dummies = 0usize;
+                for (ei, &(from_id, to_id, _)) in self.edges.iter().enumerate() {
+                    if from_id == to_id {
+                        continue;
+                    }
+                    let (Some(fi), Some(ti)) = (self.node_index(from_id), self.node_index(to_id))
+                    else {
+                        continue;
+                    };
+                    let is_back = back.get(ei).copied().unwrap_or(false);
+                    let (s, d) = if is_back { (ti, fi) } else { (fi, ti) };
+                    let span = lvl[d].abs_diff(lvl[s]);
+                    if span > 1 {
+                        dummies += span - 1;
+                    }
+                }
+                dummies
+            };
+            match config.cycle_breaking() {
+                CycleBreaking::DepthFirst => {
+                    let back = self.detect_back_edges();
+                    let mut lvl = vec![0usize; node_count];
+                    for (idx, l) in self.calculate_levels_with_back_edges(&back) {
+                        if idx < node_count {
+                            lvl[idx] = l;
                         }
                     }
+                    max_levels = lvl.iter().copied().max().unwrap_or(0) + 1;
+                    actual_dummies = count_from(&lvl, &back);
+                    lane_dummy_bound = actual_dummies; // exact
                 }
-            }
-            max_levels = if changed {
-                node_count.max(1)
-            } else {
-                levels.iter().copied().max().unwrap_or(0) as usize + 1
-            };
-            let mut dummies = 0usize;
-            for &(fi, ti) in &edge_idx {
-                if fi != usize::MAX && ti != usize::MAX {
-                    let fl = levels[fi] as usize;
-                    let tl = levels[ti] as usize;
-                    if tl > fl + 1 {
-                        dummies += tl - fl - 1;
+                _ => {
+                    let mut levels = vec![0u32; node_count];
+                    let edge_idx: alloc::vec::Vec<(usize, usize)> = self
+                        .edges
+                        .iter()
+                        .map(|&(from_id, to_id, _)| {
+                            let fi = self.node_index(from_id).unwrap_or(usize::MAX);
+                            let ti = self.node_index(to_id).unwrap_or(usize::MAX);
+                            (fi, ti)
+                        })
+                        .collect();
+                    let mut changed = true;
+                    let mut passes = 0;
+                    while changed && passes < node_count {
+                        changed = false;
+                        passes += 1;
+                        for &(fi, ti) in &edge_idx {
+                            if fi != usize::MAX && ti != usize::MAX && fi != ti {
+                                let nl = levels[fi].saturating_add(1);
+                                if nl > levels[ti] {
+                                    levels[ti] = nl;
+                                    changed = true;
+                                }
+                            }
+                        }
                     }
+                    max_levels = if changed {
+                        node_count.max(1)
+                    } else {
+                        levels.iter().copied().max().unwrap_or(0) as usize + 1
+                    };
+                    let lvl: alloc::vec::Vec<usize> = levels.iter().map(|&l| l as usize).collect();
+                    actual_dummies = count_from(&lvl, &[]);
+                    lane_dummy_bound = if changed {
+                        // Did not converge: the layout will fail, but keep
+                        // the estimate a ceiling on the way there.
+                        actual_dummies.max(edge_count.saturating_mul(node_count.saturating_sub(1)))
+                    } else {
+                        actual_dummies
+                    };
                 }
             }
-            actual_dummies = dummies;
         }
 
         let max_vnodes = (node_count + actual_dummies).min(MAX_NODES);
@@ -5901,13 +6014,13 @@ impl<'a> Graph<'a> {
         // upper bound even when this cheap relaxation and the real layout
         // disagree about depth or dummy count (cyclic graphs): the builder
         // sizes from exact values which the shared caps bound identically.
-        let lane_bytes: usize = if actual_dummies > 0
+        let lane_bytes: usize = if lane_dummy_bound > 0
             && edge_count <= crate::algorithms::sugiyama::geometry::LANE_PASS_MAX_WORK
         {
             use crate::algorithms::sugiyama::geometry::{
                 CrossSpan, GapClaim, LANE_CAND_CAP, LANE_PASS_MAX_WORK, LANE_SPAN_CAP,
             };
-            let d = actual_dummies.min(LANE_PASS_MAX_WORK);
+            let d = lane_dummy_bound.min(LANE_PASS_MAX_WORK);
             let c = edge_count.min(d);
             let comm = d + c;
             let gaps = max_levels.saturating_sub(1);

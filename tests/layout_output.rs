@@ -1016,3 +1016,50 @@ mod deep_chain {
         assert!(matches!(err, GraphError::ExceedsMaxNodes { .. }));
     }
 }
+
+/// Review #2 follow-up (temp/09): a cyclic graph PAST the lane-pass
+/// work cap must still fit an exactly estimate-sized layout arena.
+/// With `E > LANE_PASS_MAX_WORK` (16,384) the lane pass is disabled and
+/// contributes no bytes, so the base manifest must stand on its own
+/// exact dummy count — the pre-fix estimator's unflipped relaxation
+/// counted ZERO dummies for an ordered cycle, while cycle breaking
+/// actually creates a span-(N-1) chain with N-2 waypoints.
+///
+/// Lives here rather than the lib parity suite because `--all-features`
+/// unions in `arena-idx-u8` (255-node cap); this file runs on default
+/// features like the other deep-graph pins.
+#[test]
+#[cfg(feature = "arena")]
+fn big_cycle_past_lane_cap_fits_exactly_estimated_arena() {
+    use ascii_dag::graph::arena::Arena;
+
+    const N: usize = 16_386; // E = N + 1 > LANE_PASS_MAX_WORK
+    let mut g = Graph::new();
+    for i in 0..N {
+        g.add_node(i, "n");
+    }
+    for i in 0..N - 1 {
+        g.add_edge(i, i + 1, None);
+    }
+    g.add_edge(N - 1, 0usize, None); // ordered cycle
+
+    let mut cfg = LayoutConfig::standard();
+    cfg.include_dummy_nodes = true;
+    let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+    let mut csr_arena = Arena::new(&mut csr_buf);
+    let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+    let est = g.estimate_layout_arena_size_with(&cfg);
+    let mut temp_buf = vec![0u8; est];
+    let mut out_buf = vec![0u8; est];
+    let mut temp_arena = Arena::new(&mut temp_buf);
+    let mut out_arena = Arena::new(&mut out_buf);
+    let ir = csr
+        .compute_layout_arena(&cfg, &mut temp_arena, &mut out_arena)
+        .expect("exactly estimate-sized arena must suffice past the lane cap");
+    let dummies = ir
+        .nodes()
+        .iter()
+        .filter(|nd| nd.kind == ascii_dag::NodeKind::Dummy)
+        .count();
+    assert_eq!(dummies, N - 2, "every broken-cycle waypoint emitted");
+}

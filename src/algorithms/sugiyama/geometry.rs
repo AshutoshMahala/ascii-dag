@@ -450,6 +450,58 @@ pub(crate) const LANE_PASS_MAX_LEVELS: usize = 4_096;
 pub(crate) const LANE_CAND_CAP: usize = 4_096;
 /// Per-chain span-scratch budget for fan unions; over budget → packed.
 pub(crate) const LANE_SPAN_CAP: usize = 8_192;
+/// Global work purse for one whole lane pass, in claim-comparison
+/// units. Memory caps alone bound neither transitions nor the claim
+/// scans each transition performs — two 2,048-candidate rows are ~4M
+/// transitions, each scanning that gap's claims. Every costed phase
+/// (span counting, lane consider-scans, candidate generation, weighted
+/// DP) charges this purse; a chain the remainder cannot cover keeps its
+/// packed routing. Both backends charge the same amounts at the same
+/// points in the same chain order, so they exhaust identically.
+pub(crate) const LANE_WORK_BUDGET: usize = 1 << 20;
+
+/// Weighted §4.7 DP cost: transitions × the claim scans each performs.
+/// `rows` are candidate counts per interior level; `claims_per_gap` are
+/// the chain's filtered claim counts, one per traversed gap
+/// (`rows.len() + 1` entries — source-side gap first, target-side last).
+// Called by the heap backend; the CSR backend mirrors this arithmetic
+// inline (it cannot build the input slices without alloc). The unit
+// tests below pin the shared formula both implementations must match.
+#[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+pub(crate) fn lane_dp_work(rows: &[usize], claims_per_gap: &[usize]) -> usize {
+    if rows.is_empty() {
+        return 0;
+    }
+    let mut w = rows[0].saturating_mul(claims_per_gap[0] + 1);
+    for i in 1..rows.len() {
+        w = w.saturating_add(
+            rows[i - 1]
+                .saturating_mul(rows[i])
+                .saturating_mul(claims_per_gap[i] + 1),
+        );
+    }
+    w.saturating_add(rows[rows.len() - 1].saturating_mul(claims_per_gap[rows.len()] + 1))
+}
+
+/// Fast-path (§4.3) cost: the union build/merge plus the per-component
+/// `total_dist` scans of the consider walk.
+pub(crate) fn lane_scan_work(span_need: usize, components: usize, waypoints: usize) -> usize {
+    span_need.saturating_add((components + 1).saturating_mul(waypoints))
+}
+
+/// Whether a cross coordinate is placeable at all (`LANE_MAX_CROSS`).
+/// One shared predicate so the two backends cannot disagree at the
+/// representability boundary.
+pub(crate) fn lane_admissible(p: usize) -> bool {
+    p <= LANE_MAX_CROSS
+}
+/// Largest representable cross coordinate: the CSR backend stores
+/// coordinates as `u16`, so a lane beyond this cannot exist there.
+/// BOTH backends refuse such lanes (heap included, though `usize` could
+/// hold them) — clamping instead would write a coordinate the fan
+/// arithmetic never cleared, and letting only one backend refuse would
+/// fork the outputs.
+pub(crate) const LANE_MAX_CROSS: usize = u16::MAX as usize;
 
 /// Whether the chain-lane pass runs at all. Evaluated identically by the
 /// heap backend, the CSR backend, and the arena estimator — the three
@@ -891,5 +943,32 @@ mod tests {
             vec![1, 5, 2, 3],
             "remaining desc, total desc, edge asc"
         );
+    }
+
+    #[test]
+    fn dp_work_weights_transitions_by_claim_scans() {
+        // Single interior row: source edge + tail only.
+        assert_eq!(lane_dp_work(&[4], &[2, 5]), 4 * 3 + 4 * 6);
+        // Two rows: source + cross product + tail, each × (claims+1).
+        assert_eq!(lane_dp_work(&[3, 2], &[1, 4, 0]), 3 * 2 + 3 * 2 * 5 + 2);
+        assert_eq!(lane_dp_work(&[], &[7]), 0);
+        // The review case: two 2,048 rows over 1,000-claim gaps is far
+        // beyond the purse — the weighted meter must say so.
+        assert!(lane_dp_work(&[2048, 2048], &[1000, 1000, 1000]) > LANE_WORK_BUDGET);
+        // ...while the same rows over claim-free gaps are within it.
+        assert!(lane_dp_work(&[64, 64], &[3, 3, 3]) < LANE_WORK_BUDGET);
+    }
+
+    #[test]
+    fn scan_work_counts_union_and_consider_walk() {
+        assert_eq!(lane_scan_work(100, 4, 6), 100 + 5 * 6);
+        assert_eq!(lane_scan_work(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn admissibility_is_the_u16_boundary() {
+        assert!(lane_admissible(0));
+        assert!(lane_admissible(LANE_MAX_CROSS));
+        assert!(!lane_admissible(LANE_MAX_CROSS + 1));
     }
 }
