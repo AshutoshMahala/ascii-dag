@@ -407,9 +407,6 @@ pub(crate) fn passthrough_extent(jogging_waypoints: usize) -> usize {
 // whatever the situation demands) rather than the rule guessing.
 
 /// An inclusive cross-axis interval, `lo ..= hi`.
-// Staged ahead of use: P3 wires these into dummy placement in both
-// backends. Landing the geometry first keeps that change reviewable.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CrossSpan {
     /// Lower cross-axis bound, inclusive.
@@ -418,7 +415,6 @@ pub(crate) struct CrossSpan {
     pub(crate) hi: usize,
 }
 
-#[allow(dead_code)]
 impl CrossSpan {
     /// The span covered by an edge running between two cross positions,
     /// whichever order they arrive in.
@@ -435,6 +431,21 @@ impl CrossSpan {
     }
 }
 
+/// A raw cross-axis claim in one inter-level gap, keeping *whose* it is.
+///
+/// Provenance is what makes §4.5's endpoint exemptions decidable: a merged
+/// span has forgotten which edge swept it, so exemption filtering must
+/// happen on raw claims, before any [`merge_fan`]. Crossing counts also
+/// run against raw claims — merging would collapse two distinct crossed
+/// edges into one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GapClaim {
+    /// Cross-axis span the edge segment sweeps (body-widened for dummies).
+    pub(crate) span: CrossSpan,
+    /// The claiming edge's index in `Graph::edges`.
+    pub(crate) edge_idx: usize,
+}
+
 /// Normalize the spans claimed in one inter-level gap into the gap's *fan*:
 /// widened by `clearance`, sorted, and merged into disjoint runs. Returns
 /// how many entries of `spans` the fan occupies; the rest is scratch.
@@ -447,7 +458,6 @@ impl CrossSpan {
 ///
 /// Works in place on a caller-owned slice so the arena backend can supply
 /// scratch without allocating.
-#[allow(dead_code)]
 pub(crate) fn merge_fan(spans: &mut [CrossSpan], clearance: usize) -> usize {
     if spans.is_empty() {
         return 0;
@@ -479,8 +489,7 @@ pub(crate) fn merge_fan(spans: &mut [CrossSpan], clearance: usize) -> usize {
 /// the fan.
 ///
 /// `fan` must already be merged by [`merge_fan`].
-#[allow(dead_code)]
-fn free_gap_containing(fan: &[CrossSpan], p: usize) -> Option<(usize, Option<usize>)> {
+pub(crate) fn free_gap_containing(fan: &[CrossSpan], p: usize) -> Option<(usize, Option<usize>)> {
     if fan.iter().any(|s| s.contains(p)) {
         return None;
     }
@@ -516,7 +525,6 @@ fn free_gap_containing(fan: &[CrossSpan], p: usize) -> Option<(usize, Option<usi
 /// Returns `None` only when no position outside the fan is representable —
 /// a fan reaching `usize::MAX` with nothing below it. Callers get an
 /// explicit failure rather than a coordinate that is silently still inside.
-#[allow(dead_code)]
 pub(crate) fn nearest_outside(
     fan: &[CrossSpan],
     ideal: usize,

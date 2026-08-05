@@ -560,6 +560,19 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         positions.sort_by_key(|(level, _)| *level);
     }
 
+    // temp/09 P3: allocate each skip-edge chain a lane clear of the fans
+    // its gaps sweep. The canvas must cover any lane past the packed
+    // extent — the flip reflects around the canvas width, so an extent it
+    // cannot see would skew RightLeft instead of mirroring it (§4.8).
+    let lane_reach = allocate_chain_lanes::<A>(
+        dag,
+        &virtual_levels,
+        &real_node_coords,
+        &back_edges,
+        &mut dummy_positions,
+    );
+    let max_width = max_width.max(lane_reach);
+
     // Jog-aware dummy rows: a waypoint claims a routing row only where the
     // edge actually changes column — its x differs from the NEXT chain x
     // (next waypoint, or the layout-target center), because the bend to a
@@ -781,8 +794,18 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             };
             for (pos, vnode) in level_vnodes.iter().enumerate() {
                 if let VNode::Dummy { edge_idx } = vnode {
-                    let cross =
-                        x_coords[level_idx][pos] + level_offset + A::dummy_draw_offset(*edge_idx);
+                    // §4.8: the allocated waypoint coordinate is canonical —
+                    // the routing chain and the emitted dummy marker must
+                    // agree, so this is a lookup, never a recomputation.
+                    let cross = dummy_positions[*edge_idx]
+                        .iter()
+                        .find(|&&(l, _)| l == level_idx)
+                        .map(|&(_, x)| x)
+                        .unwrap_or_else(|| {
+                            x_coords[level_idx][pos]
+                                + level_offset
+                                + A::dummy_draw_offset(*edge_idx)
+                        });
                     let (x, y) = A::materialize(level_offsets[level_idx], cross);
                     // Synthetic id, excluded from id_to_index by the builder.
                     let id = usize::MAX - synthetic;
@@ -1192,6 +1215,505 @@ fn build_node_edge_indices(dag: &Graph<'_>) -> Vec<Vec<usize>> {
 }
 
 // ── X-coordinate refinement (median placement) ─────────────────────────
+
+// ── Fan-aware chain-lane allocation (temp/09 P3) ─────────────────────────
+
+/// One skip-level edge's routing chain, in layout orientation.
+struct ChainPlan {
+    edge_idx: usize,
+    /// Layout source / target node indices (back edges already flipped).
+    src_idx: usize,
+    dst_idx: usize,
+    s_level: usize,
+    t_level: usize,
+    s_cross: usize,
+    t_cross: usize,
+}
+
+/// Lexicographic transition cost for the §4.7 fallback:
+/// `(crossings, lane changes, displacement, extent)`. The first three
+/// accumulate by addition along a path, `extent` by max — a lane used
+/// across five gaps widens the canvas once, not five times.
+type LaneCost = (usize, usize, usize, usize);
+
+fn cost_add(a: LaneCost, b: LaneCost) -> LaneCost {
+    (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3.max(b.3))
+}
+
+/// Allocate every skip-edge chain a cross-axis lane clear of the fans its
+/// gaps sweep (temp/09 §4). Chains are allocated shortest-first so each
+/// longer chain is pushed outside the ones already placed and the
+/// farthest-travelling edge ends outermost — Ash's rule: the farther edge
+/// diverges first and takes the outer track.
+///
+/// Rewrites `dummy_positions` in place. Returns the greatest cross
+/// coordinate reached plus the waypoint body, so the caller can widen the
+/// canvas — the flip must see the same width (§4.8), or `RightLeft` comes
+/// out skewed instead of mirrored.
+fn allocate_chain_lanes<A: Axis>(
+    dag: &Graph<'_>,
+    virtual_levels: &[Vec<VNode>],
+    real_node_coords: &[(usize, usize, usize, usize)],
+    back_edges: &[bool],
+    dummy_positions: &mut [Vec<(usize, usize)>],
+) -> usize {
+    use crate::algorithms::sugiyama::geometry::{
+        CrossSpan, GapClaim, free_gap_containing, merge_fan,
+    };
+
+    let n_levels = virtual_levels.len();
+    if n_levels < 2 {
+        return 0;
+    }
+    let n_gaps = n_levels - 1;
+    let clearance = A::SIBLING_GAP_CROSS;
+    let body = A::DUMMY_CROSS.saturating_sub(1);
+
+    // Layout-oriented endpoints of an edge: back edges run target→source.
+    let layout_ends = |ei: usize| -> Option<(usize, usize)> {
+        let (from_id, to_id, _) = dag.edges[ei];
+        if from_id == to_id {
+            return None;
+        }
+        let (fi, ti) = (dag.node_index(from_id)?, dag.node_index(to_id)?);
+        Some(if back_edges.get(ei).copied().unwrap_or(false) {
+            (ti, fi)
+        } else {
+            (fi, ti)
+        })
+    };
+
+    // ── Fixed claims (§4.1): adjacent-level real-to-real edge sweeps ──
+    let mut fixed: Vec<Vec<GapClaim>> = vec![Vec::new(); n_gaps];
+    for ei in 0..dag.edges.len() {
+        let Some((s, d)) = layout_ends(ei) else {
+            continue;
+        };
+        let (sl, _, sc, sw) = real_node_coords[s];
+        let (dl, _, dc, dw) = real_node_coords[d];
+        if sl.abs_diff(dl) != 1 {
+            continue; // skip-level edges are chains, not fixed claims
+        }
+        fixed[sl.min(dl)].push(GapClaim {
+            span: CrossSpan::between(sc + sw / 2, dc + dw / 2),
+            edge_idx: ei,
+        });
+    }
+
+    // ── Level obstacles (§4.3.1): node bodies + cluster envelopes ──
+    let mut level_obstacles: Vec<Vec<CrossSpan>> = vec![Vec::new(); n_levels];
+    for &(lvl, _, x, w) in real_node_coords.iter() {
+        level_obstacles[lvl].push(CrossSpan {
+            lo: x,
+            hi: x + w.saturating_sub(1),
+        });
+    }
+    if dag.has_subgraphs() {
+        let (env, ranges) = crate::algorithms::sugiyama::subgraph::cluster_cross_envelopes::<A>(
+            dag,
+            real_node_coords,
+        );
+        for (si, e) in env.iter().enumerate() {
+            if let Some((lo, hi)) = *e {
+                let (first, last) = ranges[si];
+                if first > last {
+                    continue; // empty cluster
+                }
+                for lvl in first..=last.min(n_levels - 1) {
+                    level_obstacles[lvl].push(CrossSpan { lo, hi });
+                }
+            }
+        }
+    }
+
+    // ── Chains, in allocation order (§4.4) ──
+    // Spatial rank (longest outermost) is `chain_cmp`; the allocation
+    // order that PRODUCES it is the reverse on the span components —
+    // ascending `(target_level, total_span, edge_index)` — because each
+    // placed chain becomes an obstacle that pushes later (longer) chains
+    // further out. The index tie stays ascending in both readings.
+    let mut chains: Vec<ChainPlan> = Vec::new();
+    for ei in 0..dag.edges.len() {
+        if dummy_positions[ei].is_empty() {
+            continue;
+        }
+        let Some((s, d)) = layout_ends(ei) else {
+            continue;
+        };
+        let (sl, _, sc, sw) = real_node_coords[s];
+        let (dl, _, dc, dw) = real_node_coords[d];
+        if dl <= sl {
+            continue; // defensive: layout levels must increase
+        }
+        chains.push(ChainPlan {
+            edge_idx: ei,
+            src_idx: s,
+            dst_idx: d,
+            s_level: sl,
+            t_level: dl,
+            s_cross: sc + sw / 2,
+            t_cross: dc + dw / 2,
+        });
+    }
+    chains.sort_unstable_by_key(|c| (c.t_level, c.t_level - c.s_level, c.edge_idx));
+
+    let mut committed: Vec<Vec<GapClaim>> = vec![Vec::new(); n_gaps];
+    let mut reach = 0usize;
+    let mut scratch: Vec<CrossSpan> = Vec::new();
+
+    for ch in &chains {
+        let span_levels = ch.t_level - ch.s_level;
+        let wp_count = dummy_positions[ch.edge_idx].len();
+
+        // §4.5: a claim is exempt for THIS chain only in its endpoint
+        // gaps — shared source trunk in gap(S, S+1), shared target merge
+        // in gap(T-1, T). A same-source chain's distant lane is not a
+        // trunk and stays an obstacle.
+        let exempt = |claim: &GapClaim, gap: usize| -> bool {
+            let Some((cs, cd)) = layout_ends(claim.edge_idx) else {
+                return false;
+            };
+            (gap == ch.s_level && cs == ch.src_idx) || (gap + 1 == ch.t_level && cd == ch.dst_idx)
+        };
+        let filtered_spans = |gap: usize, out: &mut Vec<CrossSpan>| {
+            out.clear();
+            for c in fixed[gap].iter().chain(committed[gap].iter()) {
+                if !exempt(c, gap) {
+                    out.push(c.span);
+                }
+            }
+        };
+
+        // The chain's ideal line: interpolation between endpoint centers.
+        let ideal_at = |l: usize| -> usize {
+            let step = l - ch.s_level;
+            if ch.t_cross >= ch.s_cross {
+                ch.s_cross + (ch.t_cross - ch.s_cross) * step / span_levels
+            } else {
+                ch.s_cross - (ch.s_cross - ch.t_cross) * step / span_levels
+            }
+        };
+
+        // Waypoint levels must be exactly S+1 ..= T-1, in order. Anything
+        // else (defensive; not produced by virtual-level insertion) keeps
+        // its packed coordinates — but still commits them, so later
+        // chains route around it.
+        let contiguous = wp_count == span_levels.saturating_sub(1)
+            && dummy_positions[ch.edge_idx]
+                .iter()
+                .enumerate()
+                .all(|(i, &(l, _))| l == ch.s_level + 1 + i);
+
+        let mut placed: Option<Vec<usize>> = None;
+
+        if contiguous && wp_count > 0 {
+            // ── §4.3: one lane for the whole chain ──
+            // Union every constraint: all traversed gaps' filtered claims
+            // plus all interior levels' obstacles, merged together. A
+            // coordinate free in the union is free in each individually.
+            scratch.clear();
+            let mut tmp: Vec<CrossSpan> = Vec::new();
+            for gap in ch.s_level..ch.t_level {
+                filtered_spans(gap, &mut tmp);
+                scratch.extend_from_slice(&tmp);
+            }
+            for lvl in (ch.s_level + 1)..ch.t_level {
+                scratch.extend_from_slice(&level_obstacles[lvl]);
+            }
+            let n = merge_fan(&mut scratch, clearance);
+            let union_fan = &scratch[..n];
+
+            // §4.3.2: the lane must live in the free component reachable
+            // from the source in the source-side gap and from the target
+            // in the target-side gap.
+            filtered_spans(ch.s_level, &mut tmp);
+            let sn = merge_fan(&mut tmp, clearance);
+            let s_comp = free_gap_containing(&tmp[..sn], ch.s_cross);
+            filtered_spans(ch.t_level - 1, &mut tmp);
+            let tn = merge_fan(&mut tmp, clearance);
+            let t_comp = free_gap_containing(&tmp[..tn], ch.t_cross);
+
+            if let (Some((slo, shi)), Some((tlo, thi))) = (s_comp, t_comp) {
+                let lo_bound = slo.max(tlo);
+                let hi_bound = match (shi, thi) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                    (None, None) => None,
+                };
+                // Free components of the union, clipped to the bounds;
+                // the winner minimises total distance to the ideal line,
+                // ties toward the smaller coordinate (§4.3.3 — NOT
+                // `nearest_outside`'s upward rule; different operation).
+                let mut ideals: Vec<usize> = ((ch.s_level + 1)..ch.t_level).map(ideal_at).collect();
+                ideals.sort_unstable();
+                let median = ideals[(ideals.len() - 1) / 2];
+                let total_dist =
+                    |p: usize| -> usize { ideals.iter().map(|&i| i.abs_diff(p)).sum() };
+
+                let mut best: Option<(usize, usize)> = None; // (dist, coord)
+                let mut consider = |p: usize| {
+                    let d = total_dist(p);
+                    if best.is_none_or(|(bd, bp)| d < bd || (d == bd && p < bp)) {
+                        best = Some((d, p));
+                    }
+                };
+                // Walk the union's free components: before, between, after.
+                let mut cursor = 0usize;
+                for (i, s) in union_fan.iter().enumerate() {
+                    if s.lo > cursor {
+                        // free [cursor, s.lo-1]
+                        let (flo, fhi) = (cursor, s.lo - 1);
+                        let lo = flo.max(lo_bound);
+                        let hi = hi_bound.map_or(fhi, |h| fhi.min(h));
+                        if lo <= hi {
+                            consider(median.clamp(lo, hi));
+                        }
+                    }
+                    cursor = s.hi.saturating_add(1);
+                    if i == union_fan.len() - 1 || s.hi == usize::MAX {
+                        // handled after loop / saturated
+                    }
+                }
+                if cursor != usize::MAX || union_fan.is_empty() {
+                    // trailing unbounded free interval [cursor, ..)
+                    let lo = cursor.max(lo_bound);
+                    let hi = hi_bound;
+                    match hi {
+                        Some(h) if lo <= h => consider(median.clamp(lo, h)),
+                        None => consider(median.max(lo)),
+                        _ => {}
+                    }
+                }
+
+                if let Some((_, lane)) = best {
+                    placed = Some(vec![lane; wp_count]);
+                }
+            }
+
+            // ── §4.7: no single lane — lexicographic DP over levels ──
+            if placed.is_none() {
+                placed = chain_lane_dp::<A>(
+                    ch,
+                    &fixed,
+                    &committed,
+                    &level_obstacles,
+                    clearance,
+                    &exempt,
+                    &ideal_at,
+                );
+            }
+        }
+
+        // Write the allocation (or keep packed coordinates on failure),
+        // then commit the complete segment spans so later chains see the
+        // real geometry (§4.1) — including the source and target
+        // connector segments.
+        let coords: Vec<usize> = match &placed {
+            Some(v) => v.clone(),
+            None => dummy_positions[ch.edge_idx]
+                .iter()
+                .map(|&(_, x)| x)
+                .collect(),
+        };
+        if let Some(v) = &placed {
+            for (slot, &c) in dummy_positions[ch.edge_idx].iter_mut().zip(v.iter()) {
+                slot.1 = c;
+            }
+        }
+        let mut prev = ch.s_cross;
+        for (i, &c) in coords.iter().enumerate() {
+            let gap = ch.s_level + i;
+            committed[gap].push(GapClaim {
+                span: CrossSpan {
+                    lo: prev.min(c),
+                    hi: prev.max(c) + body,
+                },
+                edge_idx: ch.edge_idx,
+            });
+            reach = reach.max(c + A::DUMMY_CROSS);
+            prev = c;
+        }
+        committed[ch.t_level - 1].push(GapClaim {
+            span: CrossSpan {
+                lo: prev.min(ch.t_cross),
+                hi: prev.max(ch.t_cross) + body,
+            },
+            edge_idx: ch.edge_idx,
+        });
+    }
+
+    reach
+}
+
+/// §4.7 fallback: lexicographic DP over the chain's levels.
+///
+/// States are level coordinates — `C[S]` and `C[T]` are singletons holding
+/// the endpoint centers, so the source connector and target merge are
+/// costed like any other segment. Candidates per interior level are the
+/// finite free-interval boundaries of its two adjacent gaps plus the
+/// source, target and ideal probes clamped into free space, filtered by
+/// the level's own obstacles. Ties break toward the smaller coordinate,
+/// then the earlier candidate — a total order both backends must share.
+#[allow(clippy::too_many_arguments)]
+fn chain_lane_dp<A: Axis>(
+    ch: &ChainPlan,
+    fixed: &[Vec<crate::algorithms::sugiyama::geometry::GapClaim>],
+    committed: &[Vec<crate::algorithms::sugiyama::geometry::GapClaim>],
+    level_obstacles: &[Vec<crate::algorithms::sugiyama::geometry::CrossSpan>],
+    clearance: usize,
+    exempt: &dyn Fn(&crate::algorithms::sugiyama::geometry::GapClaim, usize) -> bool,
+    ideal_at: &dyn Fn(usize) -> usize,
+) -> Option<Vec<usize>> {
+    use crate::algorithms::sugiyama::geometry::{CrossSpan, merge_fan, nearest_outside};
+
+    let span_levels = ch.t_level - ch.s_level;
+    let wp_count = span_levels - 1;
+    let body = A::DUMMY_CROSS.saturating_sub(1);
+
+    // Raw filtered claims per traversed gap (for crossing counts) and the
+    // merged form (for free intervals / candidate generation).
+    let mut raw: Vec<Vec<CrossSpan>> = Vec::with_capacity(span_levels);
+    let mut merged: Vec<Vec<CrossSpan>> = Vec::with_capacity(span_levels);
+    for gap in ch.s_level..ch.t_level {
+        let mut spans: Vec<CrossSpan> = fixed[gap]
+            .iter()
+            .chain(committed[gap].iter())
+            .filter(|c| !exempt(c, gap))
+            .map(|c| c.span)
+            .collect();
+        raw.push(spans.clone());
+        let n = merge_fan(&mut spans, clearance);
+        spans.truncate(n);
+        merged.push(spans);
+    }
+
+    // Candidate coordinates per interior level.
+    let mut cands: Vec<Vec<usize>> = Vec::with_capacity(wp_count);
+    for (li, lvl) in ((ch.s_level + 1)..ch.t_level).enumerate() {
+        let mut c: Vec<usize> = Vec::new();
+        for m in [&merged[li], &merged[li + 1]] {
+            let mut cursor = 0usize;
+            for s in m.iter() {
+                if s.lo > cursor {
+                    c.push(cursor);
+                    c.push(s.lo - 1);
+                }
+                cursor = s.hi.saturating_add(1);
+            }
+            if cursor != usize::MAX {
+                c.push(cursor); // floor of the unbounded top interval
+            }
+        }
+        // The level's own obstacles also CONTRIBUTE candidates: a cluster
+        // envelope can swallow every gap-derived boundary at its levels,
+        // and without the coordinates just past the envelope the DP would
+        // starve and give the chain up (observed: tier3/tier5 chains all
+        // kept packed). Merged here once, reused for probe clamping and
+        // the final filter.
+        let mut obs: Vec<CrossSpan> = level_obstacles[lvl].clone();
+        let on = merge_fan(&mut obs, clearance);
+        {
+            let mut cursor = 0usize;
+            for sp in obs[..on].iter() {
+                if sp.lo > cursor {
+                    c.push(cursor);
+                    c.push(sp.lo - 1);
+                }
+                cursor = sp.hi.saturating_add(1);
+            }
+            if cursor != usize::MAX {
+                c.push(cursor);
+            }
+        }
+        // Probes, clamped clear of both adjacent gaps AND this level.
+        let mut both: Vec<CrossSpan> = merged[li]
+            .iter()
+            .chain(merged[li + 1].iter())
+            .chain(obs[..on].iter())
+            .copied()
+            .collect();
+        let bn = merge_fan(&mut both, 0);
+        for probe in [ch.s_cross, ch.t_cross, ideal_at(lvl)] {
+            if let Some(p) = nearest_outside(&both[..bn], probe, None) {
+                c.push(p);
+            }
+        }
+        // Filter by the level's own obstacles.
+        c.retain(|&p| !obs[..on].iter().any(|s| s.contains(p)));
+        c.sort_unstable();
+        c.dedup();
+        if c.is_empty() {
+            return None; // no representable candidate — keep packed (§4.6)
+        }
+        cands.push(c);
+    }
+
+    let crossings = |gap_li: usize, a: usize, b: usize| -> usize {
+        let (lo, hi) = (a.min(b), a.max(b));
+        raw[gap_li]
+            .iter()
+            .filter(|s| s.lo <= hi + body && lo <= s.hi.saturating_add(body))
+            .count()
+    };
+
+    // dp[li][ci] = (cost, predecessor candidate index)
+    let mut dp: Vec<Vec<(LaneCost, usize)>> = Vec::with_capacity(wp_count);
+    for (li, level_cands) in cands.iter().enumerate() {
+        let lvl = ch.s_level + 1 + li;
+        let ideal = ideal_at(lvl);
+        let mut row: Vec<(LaneCost, usize)> = Vec::with_capacity(level_cands.len());
+        for &c in level_cands.iter() {
+            let step_cost = |from: usize, gap_li: usize| -> LaneCost {
+                (
+                    crossings(gap_li, from, c),
+                    usize::from(from != c),
+                    ideal.abs_diff(c),
+                    c + A::DUMMY_CROSS,
+                )
+            };
+            let best = if li == 0 {
+                (step_cost(ch.s_cross, 0), usize::MAX)
+            } else {
+                let mut b: Option<(LaneCost, usize)> = None;
+                for (pi, &(pcost, _)) in dp[li - 1].iter().enumerate() {
+                    let pc = cands[li - 1][pi];
+                    let total = cost_add(pcost, step_cost(pc, li));
+                    if b.is_none_or(|(bc, _)| total < bc) {
+                        b = Some((total, pi));
+                    }
+                }
+                b?
+            };
+            row.push(best);
+        }
+        dp.push(row);
+    }
+
+    // Close with the final segment into the target.
+    let last = wp_count - 1;
+    let mut best_end: Option<(LaneCost, usize)> = None;
+    for (ci, &(cost, _)) in dp[last].iter().enumerate() {
+        let c = cands[last][ci];
+        let tail = (
+            crossings(span_levels - 1, c, ch.t_cross),
+            usize::from(c != ch.t_cross),
+            0,
+            0,
+        );
+        let total = cost_add(cost, tail);
+        if best_end.is_none_or(|(bc, _)| total < bc) {
+            best_end = Some((total, ci));
+        }
+    }
+    let (_, mut ci) = best_end?;
+
+    let mut out = vec![0usize; wp_count];
+    for li in (0..wp_count).rev() {
+        out[li] = cands[li][ci];
+        ci = dp[li][ci].1;
+    }
+    Some(out)
+}
 
 /// Refine x-coordinates by shifting nodes toward the median x of their
 /// connected neighbors on adjacent levels. This is the "coordinate

@@ -2910,10 +2910,27 @@ mod lr_invariants {
     /// flip, or a wiring gap all fail.
     #[test]
     fn rl_is_the_exact_x_mirror_of_lr() {
-        use crate::ir::EdgePath;
         for (tag, g) in corpus() {
             let a = lr_rl(&g, Direction::LeftRight);
             let b = lr_rl(&g, Direction::RightLeft);
+            assert_exact_x_mirror(tag, &a, &b);
+        }
+    }
+
+    /// Field-by-field x-mirror assertion between an LR and an RL layout
+    /// of the same graph: canvas, node rects and centers, self-loop
+    /// markers, edge endpoints and labels, every path variant including
+    /// `MultiSegment` waypoints, and subgraph boxes. Shared with the
+    /// routing-quality gate, which runs it over the stress tiers as well
+    /// — a skewed waypoint must fail the mirror check, not just move a
+    /// metric.
+    pub(super) fn assert_exact_x_mirror(
+        tag: &str,
+        a: &crate::ir::LayoutIR<'_>,
+        b: &crate::ir::LayoutIR<'_>,
+    ) {
+        use crate::ir::EdgePath;
+        {
             let w = a.width();
             assert_eq!(
                 (a.width(), a.height()),
@@ -3418,6 +3435,129 @@ mod quality {
         let kinks: usize = ir.edges().iter().map(lane_changes).sum();
         let worst = ir.edges().iter().map(spread).max().unwrap_or(0);
         (crossings(&text), kinks, worst, ir.width() * ir.height())
+    }
+
+    /// Mirror-invariant metric parity: `RightLeft` and `LeftRight` must
+    /// agree on every quantity the acceptance gate reads.
+    ///
+    /// This is a *necessary* condition, not a sufficient one — two
+    /// different layouts can share all six numbers. `rl_is_an_exact_
+    /// reflection_of_lr` below checks the real invariant. Both exist
+    /// because the first P3 prototype produced tier4 LR 20 vs RL 19 at
+    /// identical dimensions, and nothing then present caught it.
+    #[test]
+    fn lr_and_rl_agree_on_every_scored_metric() {
+        for (name, g) in mirror_corpus() {
+            let scored = |dir| {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                (score(&ir), ir.width(), ir.height())
+            };
+            assert_eq!(
+                scored(Direction::LeftRight),
+                scored(Direction::RightLeft),
+                "{name}: RL must match LR on cross, kinks, spread, area, w, h"
+            );
+        }
+    }
+
+    /// The actual invariant: `RightLeft` is `LeftRight` reflected on x —
+    /// checked field by field via `lr_invariants::assert_exact_x_mirror`
+    /// (canvas, node rects, self-loop markers, edge endpoints, labels,
+    /// every path variant *including `MultiSegment` waypoints*, subgraph
+    /// boxes) over the corpus AND the stress tiers.
+    ///
+    /// The metric gate above is necessary but not sufficient — two
+    /// different layouts can share all six numbers, and a placement pass
+    /// that skews waypoints moves no metric this fixture set happens to
+    /// pin. This one fails on the first skewed coordinate.
+    ///
+    /// Canvas extent is the subtle part: `flip_horizontal` reflects
+    /// around the canvas width, so any placement that widens the canvas
+    /// without the flip seeing it yields a *skewed* RL rather than a
+    /// mirrored one. That is the leading explanation for the first P3
+    /// prototype's tier4 LR 20 / RL 19 asymmetry.
+    #[test]
+    fn rl_is_an_exact_reflection_of_lr() {
+        for (name, g) in mirror_corpus() {
+            let build = |dir| {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                g.compute_layout_with_config(&cfg)
+            };
+            let lr = build(Direction::LeftRight);
+            let rl = build(Direction::RightLeft);
+            super::lr_invariants::assert_exact_x_mirror(name, &lr, &rl);
+        }
+    }
+
+    /// Corpus fixtures plus the clustered stress tiers.
+    fn mirror_corpus() -> Vec<(&'static str, Graph<'static>)> {
+        let mut v: Vec<(&'static str, Graph<'static>)> = corpus().into_iter().collect();
+        v.push(("tier1_micro", tier1_microservices()));
+        v.push(("tier2_plat", tier2_platform()));
+        v.push(("tier3_cloud", tier3_cloud()));
+        v.push(("tier4_ent", tier4_enterprise()));
+        v.push(("tier5_mega", tier5_megacorp()));
+        v
+    }
+
+    /// §4.4 pin: the farthest-travelling chain takes the outer track.
+    ///
+    /// Allocation order and spatial order are opposite — chains are
+    /// allocated shortest-first precisely so each longer chain is pushed
+    /// outside the ones already placed. This relationship was silently
+    /// inverted once (the first P3 prototype placed longest-first and got
+    /// `fan → longest → shortest`), so it is pinned on real layout output:
+    /// two skip chains from one source, the longer must end outermost at
+    /// every shared level, in both an axis-vertical and an axis-horizontal
+    /// direction.
+    #[test]
+    fn longer_chain_takes_the_outer_track() {
+        let mut g = Graph::new();
+        for id in 1..=5 {
+            g.add_node(id, "n");
+        }
+        for (a, b) in [(1usize, 2usize), (2, 3), (3, 4), (4, 5)] {
+            g.add_edge(a, b, None);
+        }
+        g.add_edge(1, 4, None); // span 3 — allocated first
+        g.add_edge(1, 5, None); // span 4 — allocated last, ends outermost
+
+        for dir in [Direction::TopDown, Direction::LeftRight] {
+            let mut cfg = LayoutConfig::standard();
+            cfg.direction = dir;
+            cfg.include_dummy_nodes = true;
+            let ir = g.compute_layout_with_config(&cfg);
+
+            let chain = |edge: usize| -> Vec<(usize, usize)> {
+                let mut v: Vec<(usize, usize)> = ir
+                    .nodes()
+                    .iter()
+                    .filter(|n| n.kind == crate::ir::NodeKind::Dummy)
+                    .filter(|n| n.edge_index == Some(edge))
+                    .map(|n| match dir {
+                        Direction::LeftRight => (n.x, n.y),
+                        _ => (n.y, n.x),
+                    })
+                    .collect();
+                v.sort_unstable();
+                v
+            };
+            let short = chain(4);
+            let long = chain(5);
+            assert_eq!(short.len(), 2, "{dir:?}: span-3 chain has 2 waypoints");
+            assert_eq!(long.len(), 3, "{dir:?}: span-4 chain has 3 waypoints");
+            for &(lvl, sc) in &short {
+                let &(_, lc) = long.iter().find(|&&(l, _)| l == lvl).expect("shared level");
+                assert!(
+                    lc > sc,
+                    "{dir:?}: at level-coord {lvl} the longer chain must be \
+                     outermost (long {lc} vs short {sc})"
+                );
+            }
+        }
     }
 
     #[test]

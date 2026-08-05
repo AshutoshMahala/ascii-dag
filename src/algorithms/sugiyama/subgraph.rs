@@ -580,6 +580,67 @@ type LevelRanges = Vec<(usize, usize)>;
 /// coordinates, mirroring [`compute_bounding_boxes`] x-math: member
 /// extent, `A::SG_PAD_CROSS`, label minimum width, child → parent
 /// expansion, label recheck. `order` must be deepest-first.
+/// Cluster cross-extents per level, projected from current node
+/// coordinates — the same math the compaction passes use
+/// ([`project_envelopes`]: member extent, `SG_PAD_CROSS`, label minimum,
+/// child→parent expansion), so a waypoint kept clear of these is clear of
+/// the boxes the renderer will actually draw.
+///
+/// Returns, per cluster, `Some((lo, hi))` inclusive cross bounds and the
+/// `(first_level, last_level)` range it covers. Used by fan-aware chain
+/// allocation (temp/09 P3) to keep lanes out of cluster interiors.
+pub(crate) fn cluster_cross_envelopes<A: Axis>(
+    dag: &Graph<'_>,
+    real_node_coords: &[(usize, usize, usize, usize)],
+) -> (Envelopes, LevelRanges) {
+    let sg_count = dag.subgraphs.len();
+    if sg_count == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let sg_id_to_idx: HashMap<usize, usize> = dag
+        .subgraphs
+        .iter()
+        .enumerate()
+        .map(|(i, sg)| (sg.id, i))
+        .collect();
+    let parent_idx: Vec<Option<usize>> = dag
+        .subgraphs
+        .iter()
+        .map(|sg| sg.parent_id.and_then(|pid| sg_id_to_idx.get(&pid).copied()))
+        .collect();
+    let mut depths = vec![0usize; sg_count];
+    for i in 0..sg_count {
+        let mut d = 0;
+        let mut cur = parent_idx[i];
+        while let Some(p) = cur {
+            d += 1;
+            cur = parent_idx[p];
+        }
+        depths[i] = d;
+    }
+    let mut order: Vec<usize> = (0..sg_count).collect();
+    order.sort_by(|a, b| depths[*b].cmp(&depths[*a]));
+    let node_sg: Vec<Option<usize>> = dag
+        .nodes
+        .iter()
+        .map(|&(nid, _)| {
+            dag.node_subgraph
+                .get(&nid)
+                .and_then(|sid| sg_id_to_idx.get(sid).copied())
+        })
+        .collect();
+
+    let (bbox, range) =
+        project_envelopes::<A>(dag, real_node_coords, &node_sg, &parent_idx, &order);
+    // `project_envelopes` returns exclusive right edges; obstacles are
+    // inclusive spans.
+    let bbox = bbox
+        .into_iter()
+        .map(|b| b.map(|(l, r)| (l, r.saturating_sub(1).max(l))))
+        .collect();
+    (bbox, range)
+}
+
 fn project_envelopes<A: Axis>(
     dag: &Graph<'_>,
     real_node_coords: &[(usize, usize, usize, usize)],
