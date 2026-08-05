@@ -369,9 +369,11 @@ fn hero_horizontal_matches_goldens() {
         // horizontal canvas tight, and a regression that puts the
         // blank rows back would otherwise slip through a trimmed
         // golden (P5 review).
+        // 81×24 before the chain-lane pass; 77×24 after it (temp/09 P3
+        // removed trace's detour, which was what held the extra columns).
         assert_eq!(
             (ir.width(), ir.height()),
-            (81, 24),
+            (77, 24),
             "hero {dir:?} canvas stays tight"
         );
         let engine = render_plain(&ir, &RenderOptions::plain());
@@ -3558,6 +3560,46 @@ mod quality {
                 );
             }
         }
+    }
+
+    /// P6: the quality totals are a floor, not a report.
+    ///
+    /// `quality_table` (below, `#[ignore]`d) prints the full per-fixture
+    /// breakdown; this asserts the corpus totals never regress past the
+    /// values the chain-lane pass (temp/09 P3/P4) landed at. Improvements
+    /// lower them — update the pins when they do. This is what stops the
+    /// staircase routing being quietly re-introduced by a change nobody
+    /// connects to routing: the determinism bug of `40df9a2` and the
+    /// first P3 prototype's regressions would both have tripped it.
+    #[test]
+    fn quality_totals_never_regress() {
+        const DIRS: [Direction; 4] = [
+            Direction::TopDown,
+            Direction::BottomUp,
+            Direction::LeftRight,
+            Direction::RightLeft,
+        ];
+        let (mut cross, mut kinks, mut spread, mut area) = (0usize, 0usize, 0usize, 0usize);
+        for (_, g) in mirror_corpus() {
+            for dir in DIRS {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                let (c, k, s, a) = score(&ir);
+                cross += c;
+                kinks += k;
+                spread += s;
+                area += a;
+            }
+        }
+        assert!(cross <= 130, "corpus crossings regressed: {cross} > 130");
+        assert!(kinks <= 646, "corpus kinks regressed: {kinks} > 646");
+        assert!(spread <= 520, "corpus overshoot regressed: {spread} > 520");
+        // 5% over the pre-lane baseline area of 1,429,604 (temp/09 §1).
+        assert!(
+            area <= 1_501_084,
+            "corpus canvas area over the 5% budget: {area} > 1,501,084"
+        );
     }
 
     #[test]

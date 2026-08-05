@@ -1258,11 +1258,18 @@ fn allocate_chain_lanes<A: Axis>(
     dummy_positions: &mut [Vec<(usize, usize)>],
 ) -> usize {
     use crate::algorithms::sugiyama::geometry::{
-        CrossSpan, GapClaim, free_gap_containing, merge_fan,
+        CrossSpan, GapClaim, LANE_SPAN_CAP, free_gap_containing, lane_pass_enabled, merge_fan,
     };
 
     let n_levels = virtual_levels.len();
     if n_levels < 2 {
+        return 0;
+    }
+    // Shared budget (geometry.rs): outside it, the graph keeps its packed
+    // routing — evaluated identically by the CSR backend and the arena
+    // estimator, so backends cannot diverge and arenas cannot under-provision.
+    let total_dummies: usize = dummy_positions.iter().map(|v| v.len()).sum();
+    if !lane_pass_enabled(n_levels, dag.edges.len(), total_dummies) {
         return 0;
     }
     let n_gaps = n_levels - 1;
@@ -1406,7 +1413,21 @@ fn allocate_chain_lanes<A: Axis>(
 
         let mut placed: Option<Vec<usize>> = None;
 
-        if contiguous && wp_count > 0 {
+        // Per-chain span budget (LANE_SPAN_CAP), shared with CSR: the
+        // union scratch this chain needs, counted before building it.
+        let mut span_need = 0usize;
+        for gap in ch.s_level..ch.t_level {
+            span_need += fixed[gap]
+                .iter()
+                .chain(committed[gap].iter())
+                .filter(|c| !exempt(c, gap))
+                .count();
+        }
+        for lvl in (ch.s_level + 1)..ch.t_level {
+            span_need += level_obstacles[lvl].len();
+        }
+
+        if contiguous && wp_count > 0 && span_need <= LANE_SPAN_CAP {
             // ── §4.3: one lane for the whole chain ──
             // Union every constraint: all traversed gaps' filtered claims
             // plus all interior levels' obstacles, merged together. A
@@ -1564,11 +1585,14 @@ fn chain_lane_dp<A: Axis>(
     exempt: &dyn Fn(&crate::algorithms::sugiyama::geometry::GapClaim, usize) -> bool,
     ideal_at: &dyn Fn(usize) -> usize,
 ) -> Option<Vec<usize>> {
-    use crate::algorithms::sugiyama::geometry::{CrossSpan, merge_fan, nearest_outside};
+    use crate::algorithms::sugiyama::geometry::{
+        CrossSpan, LANE_CAND_CAP, merge_fan, nearest_outside,
+    };
 
     let span_levels = ch.t_level - ch.s_level;
     let wp_count = span_levels - 1;
     let body = A::DUMMY_CROSS.saturating_sub(1);
+    let mut total_cands = 0usize;
 
     // Raw filtered claims per traversed gap (for crossing counts) and the
     // merged form (for free intervals / candidate generation).
@@ -1644,6 +1668,11 @@ fn chain_lane_dp<A: Axis>(
         c.dedup();
         if c.is_empty() {
             return None; // no representable candidate — keep packed (§4.6)
+        }
+        total_cands += c.len();
+        if total_cands > LANE_CAND_CAP {
+            // Shared per-chain DP budget: over it, keep packed (both backends).
+            return None;
         }
         cands.push(c);
     }

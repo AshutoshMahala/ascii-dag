@@ -58,6 +58,8 @@ use super::idx::{Coord, Idx, MAX_NODES};
 type Idx = u32;
 #[cfg(not(feature = "arena"))]
 type Coord = u16;
+/// One §4.7 DP cell: lexicographic cost + predecessor candidate index.
+type LaneDpEntry = ((usize, usize, usize, usize), usize);
 #[cfg(not(feature = "arena"))]
 const MAX_NODES: usize = u32::MAX as usize;
 
@@ -107,6 +109,30 @@ pub(crate) struct LayoutTemps<'a> {
     /// opposite back flag (a 2-node cycle).
     pub(crate) edge_in_two_cycle: &'a mut [bool],
     pub(crate) waypoint_scratch: &'a mut [(usize, usize)],
+    // ── Lane pass (temp/09 P4). All empty when the shared budget
+    //    (`geometry::lane_pass_enabled`) disables the pass — the heap
+    //    backend evaluates the same predicate, so the two cannot
+    //    disagree about whether lanes run. ──
+    /// Fixed-claim CSR offsets per gap (`n_gaps + 1`).
+    pub(crate) lane_fixed_offsets: &'a mut [usize],
+    /// Fixed claims: adjacent-level real-to-real edge sweeps, by gap.
+    pub(crate) lane_fixed: &'a mut [crate::algorithms::sugiyama::geometry::GapClaim],
+    /// Committed-claim CSR offsets per gap (`n_gaps + 1`).
+    pub(crate) lane_committed_offsets: &'a mut [usize],
+    /// Per-gap write cursors for committed claims (`n_gaps`).
+    pub(crate) lane_cursors: &'a mut [usize],
+    /// Committed chain-segment claims, grouped by gap (`D + C` total).
+    pub(crate) lane_committed: &'a mut [crate::algorithms::sugiyama::geometry::GapClaim],
+    /// Chain sort keys `(t_level, span, edge)`.
+    pub(crate) lane_chains: &'a mut [(usize, usize, usize)],
+    /// Span scratch: union region + per-gap region (2 × span budget).
+    pub(crate) lane_spans: &'a mut [crate::algorithms::sugiyama::geometry::CrossSpan],
+    /// DP candidate coordinates, all interior levels of one chain.
+    pub(crate) lane_cands: &'a mut [usize],
+    /// Candidate CSR offsets per interior level (`max_levels + 1`).
+    pub(crate) lane_cand_offsets: &'a mut [usize],
+    /// DP rows parallel to `lane_cands`: (cost, predecessor index).
+    pub(crate) lane_dp: &'a mut [LaneDpEntry],
     pub(crate) level_vdummy_counts: &'a mut [Idx],
 
     // ── Edge routing Y tracking ──────────────────────────────────────
@@ -643,6 +669,33 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         max_width,
         !graph.has_subgraphs(), // skip centering for subgraph layouts (match build_real_coords)
     );
+
+    // temp/09 P4: chain-lane allocation, mirror of the heap pass (§4).
+    // Envelopes are re-projected first so obstacles reflect the final
+    // coordinates; the canvas is widened by the reach so the flip sees
+    // the same width (§4.8).
+    {
+        let sg_count = graph.subgraph_count();
+        if sg_count > 0 {
+            let max_depth = temps.sg_depths[..sg_count]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+            project_sg_envelopes_csr::<A>(
+                graph,
+                temps.real_coords,
+                graph.node_count(),
+                sg_count,
+                max_depth,
+                temps.sg_envelopes,
+                temps.sg_depths,
+            );
+        }
+        let lane_reach =
+            allocate_chain_lanes_csr::<A>(graph, back_edges, max_level as usize + 1, &mut temps);
+        max_width = max_width.max(lane_reach.min(Coord::MAX as usize) as Coord);
+    }
 
     // Step 8: Geometry-aware horizontal slot allocation for edge separation
     // Assigns horizontal routing slots to non-vertical source nodes so that
@@ -1608,6 +1661,77 @@ fn alloc_layout_temps_csr<'b>(
     let max_positions_size = node_count.max(1);
     let max_dummy_waypoints = total_dummies.max(1);
 
+    // Lane-pass buffers (temp/09 P4), sized from the same exact counts
+    // the pass will see at runtime; the shared budget bounds them, and a
+    // disabled pass allocates nothing.
+    let lane_on = crate::algorithms::sugiyama::geometry::lane_pass_enabled(
+        max_levels,
+        edge_count,
+        total_dummies,
+    );
+    let lane_gaps = max_levels.saturating_sub(1);
+    let lane_chain_n = edge_count.min(total_dummies);
+    let lane_comm_n = total_dummies + lane_chain_n;
+    let lane_span_n = crate::algorithms::sugiyama::geometry::LANE_SPAN_CAP
+        .min(edge_count + lane_comm_n + node_count + sg_count * max_levels + 16)
+        * 2;
+    let lane_cand_n = crate::algorithms::sugiyama::geometry::LANE_CAND_CAP.min(
+        4 * (edge_count + lane_comm_n)
+            + 2 * (node_count + sg_count * max_levels)
+            + 8 * max_levels
+            + 16,
+    );
+    let (lane_fixed_offsets_ptr, _) = if lane_on {
+        arena.alloc_raw_uninit::<usize>(lane_gaps + 1)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (lane_fixed_ptr, _) = if lane_on {
+        arena.alloc_raw_uninit::<crate::algorithms::sugiyama::geometry::GapClaim>(edge_count)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (lane_committed_offsets_ptr, _) = if lane_on {
+        arena.alloc_raw_uninit::<usize>(lane_gaps + 1)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (lane_cursors_ptr, _) = if lane_on {
+        arena.alloc_raw_uninit::<usize>(lane_gaps.max(1))?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (lane_committed_ptr, _) = if lane_on {
+        arena.alloc_raw_uninit::<crate::algorithms::sugiyama::geometry::GapClaim>(lane_comm_n)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (lane_chains_ptr, _) = if lane_on {
+        arena.alloc_raw_uninit::<(usize, usize, usize)>(lane_chain_n.max(1))?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (lane_spans_ptr, _) = if lane_on {
+        arena.alloc_raw_uninit::<crate::algorithms::sugiyama::geometry::CrossSpan>(lane_span_n)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (lane_cands_ptr, _) = if lane_on {
+        arena.alloc_raw_uninit::<usize>(lane_cand_n)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (lane_cand_offsets_ptr, _) = if lane_on {
+        arena.alloc_raw_uninit::<usize>(max_levels + 1)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (lane_dp_ptr, _) = if lane_on {
+        arena.alloc_raw_uninit::<LaneDpEntry>(lane_cand_n)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+
     let (edge_indices_ptr, _) = arena.alloc_raw_uninit::<(Idx, Idx)>(edge_count)?;
     let (vlevel_offsets_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (level_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels)?;
@@ -1732,6 +1856,56 @@ fn alloc_layout_temps_csr<'b>(
             },
             sg_depths: if sg_count > 0 {
                 core::slice::from_raw_parts_mut(sg_depths_ptr, sg_count)
+            } else {
+                &mut []
+            },
+            lane_fixed_offsets: if lane_on {
+                core::slice::from_raw_parts_mut(lane_fixed_offsets_ptr, lane_gaps + 1)
+            } else {
+                &mut []
+            },
+            lane_fixed: if lane_on {
+                core::slice::from_raw_parts_mut(lane_fixed_ptr, edge_count)
+            } else {
+                &mut []
+            },
+            lane_committed_offsets: if lane_on {
+                core::slice::from_raw_parts_mut(lane_committed_offsets_ptr, lane_gaps + 1)
+            } else {
+                &mut []
+            },
+            lane_cursors: if lane_on {
+                core::slice::from_raw_parts_mut(lane_cursors_ptr, lane_gaps.max(1))
+            } else {
+                &mut []
+            },
+            lane_committed: if lane_on {
+                core::slice::from_raw_parts_mut(lane_committed_ptr, lane_comm_n)
+            } else {
+                &mut []
+            },
+            lane_chains: if lane_on {
+                core::slice::from_raw_parts_mut(lane_chains_ptr, lane_chain_n.max(1))
+            } else {
+                &mut []
+            },
+            lane_spans: if lane_on {
+                core::slice::from_raw_parts_mut(lane_spans_ptr, lane_span_n)
+            } else {
+                &mut []
+            },
+            lane_cands: if lane_on {
+                core::slice::from_raw_parts_mut(lane_cands_ptr, lane_cand_n)
+            } else {
+                &mut []
+            },
+            lane_cand_offsets: if lane_on {
+                core::slice::from_raw_parts_mut(lane_cand_offsets_ptr, max_levels + 1)
+            } else {
+                &mut []
+            },
+            lane_dp: if lane_on {
+                core::slice::from_raw_parts_mut(lane_dp_ptr, lane_cand_n)
             } else {
                 &mut []
             },
@@ -4330,6 +4504,734 @@ fn build_real_coords_csr(
     }
 }
 
+// ── Fan-aware chain-lane allocation, CSR mirror (temp/09 P4) ─────────────
+//
+// Branch-for-branch port of `heap::allocate_chain_lanes` +
+// `heap::chain_lane_dp` onto caller-arena buffers. Every decision rule —
+// budget, ordering, exemptions, candidate generation, tie-breaks — is
+// either shared code in `geometry.rs` or a literal mirror; byte parity
+// with the heap backend is the contract, pinned by the parity suite.
+
+/// One chain, in layout orientation (back edges already flipped).
+#[derive(Clone, Copy)]
+struct LaneChain {
+    #[allow(dead_code)] // parity of shape with the heap ChainPlan
+    ei: usize,
+    s_idx: usize,
+    d_idx: usize,
+    s_level: usize,
+    t_level: usize,
+    s_cross: usize,
+    t_cross: usize,
+}
+
+/// Transition cost for the §4.7 DP: `(crossings, lane changes,
+/// displacement, extent)`; the first three add along a path, extent maxes.
+type LaneCostCsr = (usize, usize, usize, usize);
+
+fn lane_cost_add(a: LaneCostCsr, b: LaneCostCsr) -> LaneCostCsr {
+    (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3.max(b.3))
+}
+
+/// Chain endpoints in layout orientation.
+fn lane_layout_ends(
+    graph: &CsrGraph<'_>,
+    back_edges: &[bool],
+    ei: usize,
+) -> Option<(usize, usize)> {
+    let (from_idx, to_idx) = graph.edge(ei);
+    if from_idx == to_idx {
+        return None;
+    }
+    Some(if back_edges.get(ei).copied().unwrap_or(false) {
+        (to_idx, from_idx)
+    } else {
+        (from_idx, to_idx)
+    })
+}
+
+/// §4.5: a claim is exempt for a chain only in its endpoint gaps —
+/// shared source trunk in gap(S, S+1), shared target merge in gap(T-1, T).
+fn lane_exempt(
+    graph: &CsrGraph<'_>,
+    back_edges: &[bool],
+    ch: &LaneChain,
+    claim_edge: usize,
+    gap: usize,
+) -> bool {
+    let Some((cs, cd)) = lane_layout_ends(graph, back_edges, claim_edge) else {
+        return false;
+    };
+    (gap == ch.s_level && cs == ch.s_idx) || (gap + 1 == ch.t_level && cd == ch.d_idx)
+}
+
+/// The chain's ideal line: interpolation between its endpoint centers.
+fn lane_ideal_at(ch: &LaneChain, l: usize) -> usize {
+    let span = ch.t_level - ch.s_level;
+    let step = l - ch.s_level;
+    if ch.t_cross >= ch.s_cross {
+        ch.s_cross + (ch.t_cross - ch.s_cross) * step / span
+    } else {
+        ch.s_cross - (ch.s_cross - ch.t_cross) * step / span
+    }
+}
+
+/// Stream one gap's filtered claims (fixed, then committed-so-far)
+/// through `f` — the same multiset the heap backend builds.
+#[allow(clippy::too_many_arguments)]
+fn lane_for_filtered(
+    graph: &CsrGraph<'_>,
+    back_edges: &[bool],
+    ch: &LaneChain,
+    fixed_offsets: &[usize],
+    fixed: &[crate::algorithms::sugiyama::geometry::GapClaim],
+    committed_offsets: &[usize],
+    cursors: &[usize],
+    committed: &[crate::algorithms::sugiyama::geometry::GapClaim],
+    gap: usize,
+    f: &mut dyn FnMut(crate::algorithms::sugiyama::geometry::CrossSpan),
+) {
+    for c in fixed[fixed_offsets[gap]..fixed_offsets[gap + 1]].iter() {
+        if !lane_exempt(graph, back_edges, ch, c.edge_idx, gap) {
+            f(c.span);
+        }
+    }
+    for c in committed[committed_offsets[gap]..cursors[gap]].iter() {
+        if !lane_exempt(graph, back_edges, ch, c.edge_idx, gap) {
+            f(c.span);
+        }
+    }
+}
+
+/// Stream one level's obstacle spans (node bodies, then cluster
+/// envelopes) through `f` — the heap backend's `level_obstacles[lvl]`.
+fn lane_for_level_obstacles(
+    has_subgraphs: bool,
+    real_coords: &[(usize, usize, usize, usize)],
+    sg_envelopes: &[(usize, usize, usize, usize)],
+    n_levels: usize,
+    lvl: usize,
+    f: &mut dyn FnMut(crate::algorithms::sugiyama::geometry::CrossSpan),
+) {
+    use crate::algorithms::sugiyama::geometry::CrossSpan;
+    for &(l, _, x, w) in real_coords.iter() {
+        if l == lvl {
+            f(CrossSpan {
+                lo: x,
+                hi: x + w.saturating_sub(1),
+            });
+        }
+    }
+    if has_subgraphs {
+        for &(l, r, first, last) in sg_envelopes.iter() {
+            if l == usize::MAX || first > last {
+                continue; // empty cluster (sentinel)
+            }
+            // Exclusive right → inclusive, mirroring the heap wrapper.
+            let hi = r.saturating_sub(1).max(l);
+            if first <= lvl && lvl <= last.min(n_levels - 1) {
+                f(CrossSpan { lo: l, hi });
+            }
+        }
+    }
+}
+
+/// CSR mirror of `allocate_chain_lanes` (temp/09 §4). Rewrites
+/// `dummy_data` cross coordinates in place; returns the reach (greatest
+/// coordinate plus waypoint body) so the caller can widen the canvas —
+/// the flip must see the same width (§4.8).
+fn allocate_chain_lanes_csr<A: Axis>(
+    graph: &CsrGraph<'_>,
+    back_edges: &[bool],
+    n_levels: usize,
+    temps: &mut LayoutTemps<'_>,
+) -> usize {
+    use crate::algorithms::sugiyama::geometry::{
+        CrossSpan, GapClaim, LANE_SPAN_CAP, free_gap_containing, lane_pass_enabled, merge_fan,
+    };
+
+    if n_levels < 2 {
+        return 0;
+    }
+    let edge_count = graph.edge_count();
+    let total_dummies = temps.dummy_offsets[edge_count.min(temps.dummy_offsets.len() - 1)] as usize;
+    // Shared budget — identical to the heap backend's gate and to the
+    // predicate the temps builder sized these buffers under.
+    if !lane_pass_enabled(n_levels, edge_count, total_dummies) || temps.lane_spans.is_empty() {
+        return 0;
+    }
+    let n_gaps = n_levels - 1;
+    let clearance = A::SIBLING_GAP_CROSS;
+    let body = A::DUMMY_CROSS.saturating_sub(1);
+    let has_sg = graph.has_subgraphs();
+
+    let LayoutTemps {
+        real_coords,
+        dummy_offsets,
+        dummy_data,
+        sg_envelopes,
+        lane_fixed_offsets,
+        lane_fixed,
+        lane_committed_offsets,
+        lane_cursors,
+        lane_committed,
+        lane_chains,
+        lane_spans,
+        lane_cands,
+        lane_cand_offsets,
+        lane_dp,
+        ..
+    } = temps;
+    let real_coords: &[(usize, usize, usize, usize)] = real_coords;
+    let sg_envelopes: &[(usize, usize, usize, usize)] = sg_envelopes;
+
+    // ── Fixed claims (§4.1): adjacent-level real-to-real sweeps,
+    //    two-pass CSR fill grouped by gap. ──
+    for o in lane_fixed_offsets[..=n_gaps].iter_mut() {
+        *o = 0;
+    }
+    for ei in 0..edge_count {
+        let Some((s, d)) = lane_layout_ends(graph, back_edges, ei) else {
+            continue;
+        };
+        let (sl, dl) = (real_coords[s].0, real_coords[d].0);
+        if sl.abs_diff(dl) == 1 {
+            lane_fixed_offsets[sl.min(dl) + 1] += 1;
+        }
+    }
+    for g in 0..n_gaps {
+        lane_fixed_offsets[g + 1] += lane_fixed_offsets[g];
+    }
+    lane_cursors[..n_gaps].copy_from_slice(&lane_fixed_offsets[..n_gaps]);
+    for ei in 0..edge_count {
+        let Some((s, d)) = lane_layout_ends(graph, back_edges, ei) else {
+            continue;
+        };
+        let (sl, _, sc, sw) = real_coords[s];
+        let (dl, _, dc, dw) = real_coords[d];
+        if sl.abs_diff(dl) != 1 {
+            continue;
+        }
+        let g = sl.min(dl);
+        lane_fixed[lane_cursors[g]] = GapClaim {
+            span: CrossSpan::between(sc + sw / 2, dc + dw / 2),
+            edge_idx: ei,
+        };
+        lane_cursors[g] += 1;
+    }
+
+    // ── Chains in allocation order (§4.4): ascending
+    //    (target_level, span, edge) — shortest first, so the
+    //    farthest-travelling chain is pushed outermost. ──
+    let mut chain_count = 0usize;
+    for ei in 0..edge_count {
+        let ds = dummy_offsets[ei] as usize;
+        let de = dummy_offsets[ei + 1] as usize;
+        if de <= ds {
+            continue;
+        }
+        let Some((s, d)) = lane_layout_ends(graph, back_edges, ei) else {
+            continue;
+        };
+        let (sl, dl) = (real_coords[s].0, real_coords[d].0);
+        if dl <= sl {
+            continue;
+        }
+        lane_chains[chain_count] = (dl, dl - sl, ei);
+        chain_count += 1;
+    }
+    lane_chains[..chain_count].sort_unstable();
+
+    // ── Committed-claim regions: one claim per crossed gap per chain,
+    //    so the grouped layout is precomputable before placement. ──
+    for o in lane_committed_offsets[..=n_gaps].iter_mut() {
+        *o = 0;
+    }
+    for &(t, span, _) in lane_chains[..chain_count].iter() {
+        for g in (t - span)..t {
+            lane_committed_offsets[g + 1] += 1;
+        }
+    }
+    for g in 0..n_gaps {
+        lane_committed_offsets[g + 1] += lane_committed_offsets[g];
+    }
+    lane_cursors[..n_gaps].copy_from_slice(&lane_committed_offsets[..n_gaps]);
+
+    let mut reach = 0usize;
+
+    for ci in 0..chain_count {
+        let (t_level, span_levels, ei) = lane_chains[ci];
+        let s_level = t_level - span_levels;
+        let Some((s_idx, d_idx)) = lane_layout_ends(graph, back_edges, ei) else {
+            continue;
+        };
+        let (_, _, sc, sw) = real_coords[s_idx];
+        let (_, _, dc, dw) = real_coords[d_idx];
+        let ch = LaneChain {
+            ei,
+            s_idx,
+            d_idx,
+            s_level,
+            t_level,
+            s_cross: sc + sw / 2,
+            t_cross: dc + dw / 2,
+        };
+        let ds = dummy_offsets[ei] as usize;
+        let de = dummy_offsets[ei + 1] as usize;
+        let wp_count = de - ds;
+
+        // Per-chain span budget, counted before building (mirrors heap).
+        let mut span_need = 0usize;
+        for gap in s_level..t_level {
+            lane_for_filtered(
+                graph,
+                back_edges,
+                &ch,
+                lane_fixed_offsets,
+                lane_fixed,
+                lane_committed_offsets,
+                lane_cursors,
+                lane_committed,
+                gap,
+                &mut |_| span_need += 1,
+            );
+        }
+        for lvl in (s_level + 1)..t_level {
+            lane_for_level_obstacles(
+                has_sg,
+                real_coords,
+                sg_envelopes,
+                n_levels,
+                lvl,
+                &mut |_| span_need += 1,
+            );
+        }
+
+        let contiguous = wp_count == span_levels.saturating_sub(1)
+            && dummy_data[ds..de]
+                .iter()
+                .enumerate()
+                .all(|(i, &(l, _))| l as usize == s_level + 1 + i);
+
+        let mut have_placed = false;
+
+        if contiguous && wp_count > 0 && span_need <= LANE_SPAN_CAP {
+            // ── §4.3: one lane for the whole chain ──
+            let mut n_union = 0usize;
+            for gap in s_level..t_level {
+                lane_for_filtered(
+                    graph,
+                    back_edges,
+                    &ch,
+                    lane_fixed_offsets,
+                    lane_fixed,
+                    lane_committed_offsets,
+                    lane_cursors,
+                    lane_committed,
+                    gap,
+                    &mut |sp| {
+                        lane_spans[n_union] = sp;
+                        n_union += 1;
+                    },
+                );
+            }
+            for lvl in (s_level + 1)..t_level {
+                lane_for_level_obstacles(
+                    has_sg,
+                    real_coords,
+                    sg_envelopes,
+                    n_levels,
+                    lvl,
+                    &mut |sp| {
+                        lane_spans[n_union] = sp;
+                        n_union += 1;
+                    },
+                );
+            }
+            let un = merge_fan(&mut lane_spans[..n_union], clearance);
+
+            // Endpoint components (§4.3.2), each against its own gap,
+            // built in the tail region past the union.
+            let comp_of = |lane_spans: &mut [CrossSpan], gap: usize, at: usize| {
+                let base = un;
+                let mut k = 0usize;
+                lane_for_filtered(
+                    graph,
+                    back_edges,
+                    &ch,
+                    lane_fixed_offsets,
+                    lane_fixed,
+                    lane_committed_offsets,
+                    lane_cursors,
+                    lane_committed,
+                    gap,
+                    &mut |sp| {
+                        lane_spans[base + k] = sp;
+                        k += 1;
+                    },
+                );
+                let kn = merge_fan(&mut lane_spans[base..base + k], clearance);
+                free_gap_containing(&lane_spans[base..base + kn], at)
+            };
+            let s_comp = comp_of(lane_spans, ch.s_level, ch.s_cross);
+            let t_comp = comp_of(lane_spans, ch.t_level - 1, ch.t_cross);
+
+            if let (Some((slo, shi)), Some((tlo, thi))) = (s_comp, t_comp) {
+                let lo_bound = slo.max(tlo);
+                let hi_bound = match (shi, thi) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                    (None, None) => None,
+                };
+                // Ideals into the candidate buffer (disjoint in time
+                // from its DP use); lower median, ties smaller.
+                for (i, lvl) in ((s_level + 1)..t_level).enumerate() {
+                    lane_cands[i] = lane_ideal_at(&ch, lvl);
+                }
+                let ideals = &mut lane_cands[..wp_count];
+                ideals.sort_unstable();
+                let median = ideals[(wp_count - 1) / 2];
+
+                let mut best: Option<(usize, usize)> = None;
+                {
+                    let ideals = &lane_cands[..wp_count];
+                    let union_fan = &lane_spans[..un];
+                    let mut consider = |p: usize| {
+                        let dd: usize = ideals.iter().map(|&i| i.abs_diff(p)).sum();
+                        if best.is_none_or(|(bd, bp)| dd < bd || (dd == bd && p < bp)) {
+                            best = Some((dd, p));
+                        }
+                    };
+                    let mut cursor = 0usize;
+                    for s in union_fan.iter() {
+                        if s.lo > cursor {
+                            let (flo, fhi) = (cursor, s.lo - 1);
+                            let lo = flo.max(lo_bound);
+                            let hi = hi_bound.map_or(fhi, |h| fhi.min(h));
+                            if lo <= hi {
+                                consider(median.clamp(lo, hi));
+                            }
+                        }
+                        cursor = s.hi.saturating_add(1);
+                    }
+                    if cursor != usize::MAX || union_fan.is_empty() {
+                        let lo = cursor.max(lo_bound);
+                        match hi_bound {
+                            Some(h) if lo <= h => consider(median.clamp(lo, h)),
+                            None => consider(median.max(lo)),
+                            _ => {}
+                        }
+                    }
+                }
+
+                if let Some((_, lane)) = best {
+                    for slot in dummy_data[ds..de].iter_mut() {
+                        slot.1 = lane.min(Coord::MAX as usize) as Coord;
+                    }
+                    have_placed = true;
+                }
+            }
+
+            if !have_placed {
+                have_placed = chain_lane_dp_csr::<A>(
+                    graph,
+                    back_edges,
+                    &ch,
+                    n_levels,
+                    has_sg,
+                    real_coords,
+                    sg_envelopes,
+                    lane_fixed_offsets,
+                    lane_fixed,
+                    lane_committed_offsets,
+                    lane_cursors,
+                    lane_committed,
+                    lane_spans,
+                    lane_cands,
+                    lane_cand_offsets,
+                    lane_dp,
+                    dummy_data,
+                    ds,
+                );
+            }
+        }
+        let _ = have_placed; // packed coordinates stand when placement failed
+
+        // Commit the final segment spans — placed or packed alike — so
+        // later chains route around the real geometry (§4.1).
+        let mut prev = ch.s_cross;
+        for i in 0..wp_count {
+            let c = dummy_data[ds + i].1 as usize;
+            let gap = s_level + i;
+            lane_committed[lane_cursors[gap]] = GapClaim {
+                span: CrossSpan {
+                    lo: prev.min(c),
+                    hi: prev.max(c) + body,
+                },
+                edge_idx: ei,
+            };
+            lane_cursors[gap] += 1;
+            reach = reach.max(c + A::DUMMY_CROSS);
+            prev = c;
+        }
+        lane_committed[lane_cursors[t_level - 1]] = GapClaim {
+            span: CrossSpan {
+                lo: prev.min(ch.t_cross),
+                hi: prev.max(ch.t_cross) + body,
+            },
+            edge_idx: ei,
+        };
+        lane_cursors[t_level - 1] += 1;
+    }
+
+    reach
+}
+
+/// CSR mirror of `heap::chain_lane_dp` (§4.7). Returns whether a
+/// placement was written into `dummy_data`.
+#[allow(clippy::too_many_arguments)]
+fn chain_lane_dp_csr<A: Axis>(
+    graph: &CsrGraph<'_>,
+    back_edges: &[bool],
+    ch: &LaneChain,
+    n_levels: usize,
+    has_sg: bool,
+    real_coords: &[(usize, usize, usize, usize)],
+    sg_envelopes: &[(usize, usize, usize, usize)],
+    lane_fixed_offsets: &[usize],
+    lane_fixed: &[crate::algorithms::sugiyama::geometry::GapClaim],
+    lane_committed_offsets: &[usize],
+    lane_cursors: &[usize],
+    lane_committed: &[crate::algorithms::sugiyama::geometry::GapClaim],
+    lane_spans: &mut [crate::algorithms::sugiyama::geometry::CrossSpan],
+    lane_cands: &mut [usize],
+    lane_cand_offsets: &mut [usize],
+    lane_dp: &mut [LaneDpEntry],
+    dummy_data: &mut [(Idx, Coord)],
+    ds: usize,
+) -> bool {
+    use crate::algorithms::sugiyama::geometry::{merge_fan, nearest_outside};
+
+    let span_levels = ch.t_level - ch.s_level;
+    let wp_count = span_levels - 1;
+    let body = A::DUMMY_CROSS.saturating_sub(1);
+    let clearance = A::SIBLING_GAP_CROSS;
+    let cand_cap = lane_cands.len();
+
+    let crossings = |gap: usize, a: usize, b: usize| -> usize {
+        let (lo, hi) = (a.min(b), a.max(b));
+        let mut n = 0usize;
+        for c in lane_fixed[lane_fixed_offsets[gap]..lane_fixed_offsets[gap + 1]].iter() {
+            if !lane_exempt(graph, back_edges, ch, c.edge_idx, gap)
+                && c.span.lo <= hi + body
+                && lo <= c.span.hi.saturating_add(body)
+            {
+                n += 1;
+            }
+        }
+        for c in lane_committed[lane_committed_offsets[gap]..lane_cursors[gap]].iter() {
+            if !lane_exempt(graph, back_edges, ch, c.edge_idx, gap)
+                && c.span.lo <= hi + body
+                && lo <= c.span.hi.saturating_add(body)
+            {
+                n += 1;
+            }
+        }
+        n
+    };
+
+    // ── Candidates per interior level (mirrors the heap generation:
+    //    both gaps' free boundaries, level-obstacle free boundaries,
+    //    probes clamped against gaps ∪ obstacles, filtered by the
+    //    level's obstacles, sorted, deduped). ──
+    let mut total = 0usize;
+    lane_cand_offsets[0] = 0;
+    for (li, lvl) in ((ch.s_level + 1)..ch.t_level).enumerate() {
+        let cstart = total;
+        let push = |cands: &mut [usize], total: &mut usize, v: usize| -> bool {
+            if *total >= cand_cap {
+                return false;
+            }
+            cands[*total] = v;
+            *total += 1;
+            true
+        };
+
+        // Free boundaries of each adjacent gap (claims merged with
+        // clearance), then of the level obstacles; regions carved
+        // sequentially from lane_spans.
+        let mut base = 0usize;
+        let mut overflow = false;
+        for gap in [ch.s_level + li, ch.s_level + li + 1] {
+            let mut k = 0usize;
+            lane_for_filtered(
+                graph,
+                back_edges,
+                ch,
+                lane_fixed_offsets,
+                lane_fixed,
+                lane_committed_offsets,
+                lane_cursors,
+                lane_committed,
+                gap,
+                &mut |sp| {
+                    lane_spans[base + k] = sp;
+                    k += 1;
+                },
+            );
+            let m = merge_fan(&mut lane_spans[base..base + k], clearance);
+            let mut cursor = 0usize;
+            for i in 0..m {
+                let s = lane_spans[base + i];
+                if s.lo > cursor {
+                    overflow |= !push(lane_cands, &mut total, cursor);
+                    overflow |= !push(lane_cands, &mut total, s.lo - 1);
+                }
+                cursor = s.hi.saturating_add(1);
+            }
+            if cursor != usize::MAX {
+                overflow |= !push(lane_cands, &mut total, cursor);
+            }
+            base += m; // keep this gap's merged fan for the probe union
+        }
+        // Level obstacles: merged with clearance; contributes candidates
+        // AND the retain filter below.
+        let obs_base = base;
+        let mut k = 0usize;
+        lane_for_level_obstacles(
+            has_sg,
+            real_coords,
+            sg_envelopes,
+            n_levels,
+            lvl,
+            &mut |sp| {
+                lane_spans[obs_base + k] = sp;
+                k += 1;
+            },
+        );
+        let on = merge_fan(&mut lane_spans[obs_base..obs_base + k], clearance);
+        {
+            let mut cursor = 0usize;
+            for i in 0..on {
+                let s = lane_spans[obs_base + i];
+                if s.lo > cursor {
+                    overflow |= !push(lane_cands, &mut total, cursor);
+                    overflow |= !push(lane_cands, &mut total, s.lo - 1);
+                }
+                cursor = s.hi.saturating_add(1);
+            }
+            if cursor != usize::MAX {
+                overflow |= !push(lane_cands, &mut total, cursor);
+            }
+        }
+        // Probes, clamped clear of both gaps AND this level: union the
+        // three merged regions (already widened) with zero clearance.
+        let both_base = obs_base + on;
+        let both_len = both_base; // regions [0..both_base] are the three merged fans
+        for i in 0..both_len {
+            lane_spans[both_base + i] = lane_spans[i];
+        }
+        let bn = merge_fan(&mut lane_spans[both_base..both_base + both_len], 0);
+        for probe in [ch.s_cross, ch.t_cross, lane_ideal_at(ch, lvl)] {
+            if let Some(p) = nearest_outside(&lane_spans[both_base..both_base + bn], probe, None) {
+                overflow |= !push(lane_cands, &mut total, p);
+            }
+        }
+        if overflow {
+            return false; // shared per-chain DP budget: keep packed
+        }
+        // Filter by the level's own obstacles, then sort + dedup.
+        {
+            let obs = &lane_spans[obs_base..obs_base + on];
+            let mut w = cstart;
+            for r in cstart..total {
+                let p = lane_cands[r];
+                if !obs.iter().any(|s| s.contains(p)) {
+                    lane_cands[w] = p;
+                    w += 1;
+                }
+            }
+            total = w;
+        }
+        let seg = &mut lane_cands[cstart..total];
+        seg.sort_unstable();
+        let mut w = cstart;
+        for r in cstart..total {
+            if w == cstart || lane_cands[r] != lane_cands[w - 1] {
+                lane_cands[w] = lane_cands[r];
+                w += 1;
+            }
+        }
+        total = w;
+        if total == cstart {
+            return false; // no representable candidate — keep packed (§4.6)
+        }
+        lane_cand_offsets[li + 1] = total;
+    }
+
+    // ── DP fill: per candidate, best predecessor (ascending scan with
+    //    strict `<` keeps the first — smaller coordinate, earlier index). ──
+    for li in 0..wp_count {
+        let lvl = ch.s_level + 1 + li;
+        let ideal = lane_ideal_at(ch, lvl);
+        let (cs, ce) = (lane_cand_offsets[li], lane_cand_offsets[li + 1]);
+        for idx in cs..ce {
+            let c = lane_cands[idx];
+            let step = |from: usize, gap: usize| -> LaneCostCsr {
+                (
+                    crossings(gap, from, c),
+                    usize::from(from != c),
+                    ideal.abs_diff(c),
+                    c + A::DUMMY_CROSS,
+                )
+            };
+            let entry = if li == 0 {
+                (step(ch.s_cross, ch.s_level), usize::MAX)
+            } else {
+                let (ps, pe) = (lane_cand_offsets[li - 1], lane_cand_offsets[li]);
+                let mut b: Option<(LaneCostCsr, usize)> = None;
+                for pi in ps..pe {
+                    let pc = lane_cands[pi];
+                    let total_cost = lane_cost_add(lane_dp[pi].0, step(pc, ch.s_level + li));
+                    if b.is_none_or(|(bc, _)| total_cost < bc) {
+                        b = Some((total_cost, pi));
+                    }
+                }
+                match b {
+                    Some(x) => x,
+                    None => return false,
+                }
+            };
+            lane_dp[idx] = entry;
+        }
+    }
+
+    // Close with the final segment into the target.
+    let (ls, le) = (lane_cand_offsets[wp_count - 1], lane_cand_offsets[wp_count]);
+    let mut best_end: Option<(LaneCostCsr, usize)> = None;
+    for idx in ls..le {
+        let c = lane_cands[idx];
+        let tail = (
+            crossings(ch.t_level - 1, c, ch.t_cross),
+            usize::from(c != ch.t_cross),
+            0,
+            0,
+        );
+        let total_cost = lane_cost_add(lane_dp[idx].0, tail);
+        if best_end.is_none_or(|(bc, _)| total_cost < bc) {
+            best_end = Some((total_cost, idx));
+        }
+    }
+    let Some((_, mut idx)) = best_end else {
+        return false;
+    };
+    for li in (0..wp_count).rev() {
+        dummy_data[ds + li].1 = lane_cands[idx].min(Coord::MAX as usize) as Coord;
+        idx = lane_dp[idx].1;
+    }
+    true
+}
+
 /// Build dummy positions for skip-level edges from virtual level positions (CSR version).
 /// This extracts the actual x-coordinates assigned during layout, ensuring edges
 /// route around nodes based on the natural layout ordering.
@@ -4994,6 +5896,46 @@ impl<'a> Graph<'a> {
         // The full temp-arena allocation manifest, in the order the
         // layout pass carves it (saturating throughout).
         let item = |count: usize, size: usize| count.saturating_mul(size);
+        // Lane-pass buffers (temp/09 P4): clamped mirrors of the builder's
+        // formulas. Clamping (not gating) is what keeps the estimate an
+        // upper bound even when this cheap relaxation and the real layout
+        // disagree about depth or dummy count (cyclic graphs): the builder
+        // sizes from exact values which the shared caps bound identically.
+        let lane_bytes: usize = if actual_dummies > 0
+            && edge_count <= crate::algorithms::sugiyama::geometry::LANE_PASS_MAX_WORK
+        {
+            use crate::algorithms::sugiyama::geometry::{
+                CrossSpan, GapClaim, LANE_CAND_CAP, LANE_PASS_MAX_WORK, LANE_SPAN_CAP,
+            };
+            let d = actual_dummies.min(LANE_PASS_MAX_WORK);
+            let c = edge_count.min(d);
+            let comm = d + c;
+            let gaps = max_levels.saturating_sub(1);
+            let span_n = LANE_SPAN_CAP
+                .min(edge_count + comm + node_count + sg_count.saturating_mul(max_levels) + 16)
+                * 2;
+            let cand_n = LANE_CAND_CAP.min(
+                4 * (edge_count + comm)
+                    + 2 * (node_count + sg_count.saturating_mul(max_levels))
+                    + 8 * max_levels
+                    + 16,
+            );
+            item(2 * (gaps + 1) + gaps.max(1), core::mem::size_of::<usize>())
+                .saturating_add(item(edge_count + comm, core::mem::size_of::<GapClaim>()))
+                .saturating_add(item(
+                    c.max(1),
+                    core::mem::size_of::<(usize, usize, usize)>(),
+                ))
+                .saturating_add(item(span_n, core::mem::size_of::<CrossSpan>()))
+                .saturating_add(item(cand_n, core::mem::size_of::<usize>()))
+                .saturating_add(item(max_levels + 1, core::mem::size_of::<usize>()))
+                .saturating_add(item(
+                    cand_n,
+                    core::mem::size_of::<((usize, usize, usize, usize), usize)>(),
+                ))
+        } else {
+            0
+        };
         let temps_size = [
             item(edge_count.max(1), core::mem::size_of::<bool>()), // back_edges
             item(node_count, core::mem::size_of::<Idx>()),         // node_levels
@@ -5077,6 +6019,7 @@ impl<'a> Graph<'a> {
         );
 
         temps_size
+            .saturating_add(lane_bytes)
             .saturating_add(ir_size)
             .saturating_add(custom_entry_bytes)
     }

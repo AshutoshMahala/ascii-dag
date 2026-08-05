@@ -431,6 +431,36 @@ impl CrossSpan {
     }
 }
 
+// Lane-pass budget (temp/09 P3/P4). The chain-lane allocator's scratch
+// scales with claims × levels, which is unbounded on stress-scale graphs
+// — and the CSR backend must pre-size every buffer in the caller's arena.
+// Rather than let the estimator explode (or silently cap quality on one
+// backend only), the pass runs under a budget BOTH backends evaluate
+// identically: over budget → the graph keeps its packed routing, exactly
+// the 0.10.0 output. Human-scale graphs (the entire quality corpus) are
+// far inside the budget; a 50k-node stress diamond is far outside and
+// pays zero arena bytes for the feature.
+
+/// Work ceiling: the pass is skipped when edges or dummies exceed this.
+pub(crate) const LANE_PASS_MAX_WORK: usize = 16_384;
+/// Depth ceiling: the pass is skipped beyond this many levels.
+pub(crate) const LANE_PASS_MAX_LEVELS: usize = 4_096;
+/// Per-chain candidate budget for the §4.7 DP; a chain needing more
+/// keeps its packed coordinates (both backends, same rule).
+pub(crate) const LANE_CAND_CAP: usize = 4_096;
+/// Per-chain span-scratch budget for fan unions; over budget → packed.
+pub(crate) const LANE_SPAN_CAP: usize = 8_192;
+
+/// Whether the chain-lane pass runs at all. Evaluated identically by the
+/// heap backend, the CSR backend, and the arena estimator — the three
+/// must agree or backends diverge / arenas under-provision.
+pub(crate) fn lane_pass_enabled(n_levels: usize, n_edges: usize, dummies: usize) -> bool {
+    dummies > 0
+        && dummies <= LANE_PASS_MAX_WORK
+        && n_edges <= LANE_PASS_MAX_WORK
+        && n_levels <= LANE_PASS_MAX_LEVELS
+}
+
 /// A raw cross-axis claim in one inter-level gap, keeping *whose* it is.
 ///
 /// Provenance is what makes §4.5's endpoint exemptions decidable: a merged
