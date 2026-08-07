@@ -369,9 +369,11 @@ fn hero_horizontal_matches_goldens() {
         // horizontal canvas tight, and a regression that puts the
         // blank rows back would otherwise slip through a trimmed
         // golden (P5 review).
+        // 81×24 before the chain-lane pass; 77×24 after it (temp/09 P3
+        // removed trace's detour, which was what held the extra columns).
         assert_eq!(
             (ir.width(), ir.height()),
-            (81, 24),
+            (77, 24),
             "hero {dir:?} canvas stays tight"
         );
         let engine = render_plain(&ir, &RenderOptions::plain());
@@ -395,6 +397,8 @@ fn hero_matches_golden() {
 // The shared hero fixture refers to the crate by its external name.
 use crate as ascii_dag;
 include!("../../../examples/shared/hero_graph.rs");
+// Clustered stress tiers — the corpus's deep-nesting cases (quality scorer).
+include!("../../../examples/shared/stress_graphs.rs");
 
 // ── BottomUp rendering (RW5) ─────────────────────────────────────────────
 //
@@ -2306,7 +2310,7 @@ mod lr_invariants {
         g
     }
 
-    fn corpus() -> [(&'static str, Graph<'static>); 10] {
+    pub(super) fn corpus() -> [(&'static str, Graph<'static>); 10] {
         [
             ("fan", fan()),
             ("stage", stage()),
@@ -2908,10 +2912,27 @@ mod lr_invariants {
     /// flip, or a wiring gap all fail.
     #[test]
     fn rl_is_the_exact_x_mirror_of_lr() {
-        use crate::ir::EdgePath;
         for (tag, g) in corpus() {
             let a = lr_rl(&g, Direction::LeftRight);
             let b = lr_rl(&g, Direction::RightLeft);
+            assert_exact_x_mirror(tag, &a, &b);
+        }
+    }
+
+    /// Field-by-field x-mirror assertion between an LR and an RL layout
+    /// of the same graph: canvas, node rects and centers, self-loop
+    /// markers, edge endpoints and labels, every path variant including
+    /// `MultiSegment` waypoints, and subgraph boxes. Shared with the
+    /// routing-quality gate, which runs it over the stress tiers as well
+    /// — a skewed waypoint must fail the mirror check, not just move a
+    /// metric.
+    pub(super) fn assert_exact_x_mirror(
+        tag: &str,
+        a: &crate::ir::LayoutIR<'_>,
+        b: &crate::ir::LayoutIR<'_>,
+    ) {
+        use crate::ir::EdgePath;
+        {
             let w = a.width();
             assert_eq!(
                 (a.width(), a.height()),
@@ -3312,5 +3333,474 @@ mod lr_invariants {
         let back = row.find(['⇠', '←']).unwrap();
         let fwd = row.find(['→', '⇢']).unwrap();
         assert!(back < fwd, "back arrow at the source face: {row:?}");
+    }
+}
+
+/// Layout-quality scoring.
+///
+/// Not an invariant suite — a measuring tape. Routing changes are easy
+/// to judge by eye on one graph in one direction and easy to get wrong
+/// everywhere else, so this prints one table over the whole corpus in
+/// all four directions. A theory is accepted or rejected on the table,
+/// not on how the hero example looks.
+///
+/// ```text
+/// cargo test --lib --all-features quality_table -- --ignored --nocapture
+/// ```
+mod quality {
+    use super::lr_invariants::corpus;
+    use super::*;
+    use crate::graph::Direction;
+    use crate::ir::{EdgePath, FlowAxis, LayoutEdge, LayoutIR};
+
+    /// Cross-axis coordinate of a physical point, for this edge's trunk.
+    fn cross(e: &LayoutEdge<'_>, x: usize, y: usize) -> usize {
+        match e.flow_axis {
+            FlowAxis::X => y,
+            FlowAxis::Y => x,
+        }
+    }
+
+    /// How many times the edge changes lane on the cross axis.
+    ///
+    /// This is the number a reader perceives as "kinks". A straight
+    /// edge scores 0 however long it is; the staircase that motivated
+    /// this work scores 5.
+    fn lane_changes(e: &LayoutEdge<'_>) -> usize {
+        match &e.path {
+            EdgePath::Direct => 0,
+            EdgePath::Corner { .. } => 1,
+            EdgePath::SideChannel { .. } => 2,
+            EdgePath::Spline { .. } => 1,
+            EdgePath::MultiSegment { waypoints, .. } => {
+                let mut seq = Vec::with_capacity(waypoints.len() + 2);
+                seq.push(cross(e, e.from_x, e.from_y));
+                for &(wx, wy) in waypoints.iter() {
+                    seq.push(cross(e, wx, wy));
+                }
+                seq.push(cross(e, e.to_x, e.to_y));
+                seq.windows(2).filter(|w| w[0] != w[1]).count()
+            }
+        }
+    }
+
+    /// Cross-axis **overshoot**: how far the edge wanders outside the band
+    /// spanned by its own endpoints.
+    ///
+    /// Defined as overshoot rather than total cross span, because the span
+    /// between two endpoints is unavoidable geometry — an edge joining row 0
+    /// to row 20 is not badly routed for covering 20 rows. What this work
+    /// cares about is an edge leaving the band it needs at all: hero's
+    /// `trace` joins two nodes on row 0 and reaches row 20, which is pure
+    /// excursion.
+    ///
+    /// Every path variant is measured. `Direct` and `Corner` are 0 by
+    /// construction: `bend_at` is a LEVEL-axis line, so a corner's cross
+    /// segment runs between the two endpoints and cannot leave the band.
+    /// `channel_at` by contrast IS a cross-axis line, so `SideChannel` can.
+    fn spread(e: &LayoutEdge<'_>) -> usize {
+        let a = cross(e, e.from_x, e.from_y);
+        let b = cross(e, e.to_x, e.to_y);
+        let (lo, hi) = (a.min(b), a.max(b));
+        // Distance outside [lo, hi]; 0 when inside, both branches saturating.
+        let over = |c: usize| lo.saturating_sub(c).max(c.saturating_sub(hi));
+        match &e.path {
+            EdgePath::Direct | EdgePath::Corner { .. } => 0,
+            EdgePath::SideChannel { channel_at, .. } => over(*channel_at),
+            EdgePath::MultiSegment { waypoints, .. } => waypoints
+                .iter()
+                .map(|&(wx, wy)| over(cross(e, wx, wy)))
+                .max()
+                .unwrap_or(0),
+            EdgePath::Spline {
+                cp1_x,
+                cp1_y,
+                cp2_x,
+                cp2_y,
+            } => over(cross(e, *cp1_x, *cp1_y)).max(over(cross(e, *cp2_x, *cp2_y))),
+        }
+    }
+
+    /// Stroke-crosses-stroke cells in the painted output.
+    ///
+    /// A proxy, deliberately: it counts what the reader sees as a
+    /// crossing. Border junctions (`╪ ╫ ╬`) are excluded — an edge
+    /// crossing a cluster wall is expected and not a routing fault.
+    fn crossings(text: &str) -> usize {
+        text.chars()
+            .filter(|c| matches!(c, '┼' | '┿' | '╂' | '+'))
+            .count()
+    }
+
+    fn score(ir: &LayoutIR<'_>) -> (usize, usize, usize, usize) {
+        let text = ir.render_string(&RenderOptions::plain());
+        let kinks: usize = ir.edges().iter().map(lane_changes).sum();
+        let worst = ir.edges().iter().map(spread).max().unwrap_or(0);
+        (crossings(&text), kinks, worst, ir.width() * ir.height())
+    }
+
+    /// Mirror-invariant metric parity: `RightLeft` and `LeftRight` must
+    /// agree on every quantity the acceptance gate reads.
+    ///
+    /// This is a *necessary* condition, not a sufficient one — two
+    /// different layouts can share all six numbers. `rl_is_an_exact_
+    /// reflection_of_lr` below checks the real invariant. Both exist
+    /// because the first P3 prototype produced tier4 LR 20 vs RL 19 at
+    /// identical dimensions, and nothing then present caught it.
+    #[test]
+    fn lr_and_rl_agree_on_every_scored_metric() {
+        for (name, g) in mirror_corpus() {
+            let scored = |dir| {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                (score(&ir), ir.width(), ir.height())
+            };
+            assert_eq!(
+                scored(Direction::LeftRight),
+                scored(Direction::RightLeft),
+                "{name}: RL must match LR on cross, kinks, spread, area, w, h"
+            );
+        }
+    }
+
+    /// The actual invariant: `RightLeft` is `LeftRight` reflected on x —
+    /// checked field by field via `lr_invariants::assert_exact_x_mirror`
+    /// (canvas, node rects, self-loop markers, edge endpoints, labels,
+    /// every path variant *including `MultiSegment` waypoints*, subgraph
+    /// boxes) over the corpus AND the stress tiers.
+    ///
+    /// The metric gate above is necessary but not sufficient — two
+    /// different layouts can share all six numbers, and a placement pass
+    /// that skews waypoints moves no metric this fixture set happens to
+    /// pin. This one fails on the first skewed coordinate.
+    ///
+    /// Canvas extent is the subtle part: `flip_horizontal` reflects
+    /// around the canvas width, so any placement that widens the canvas
+    /// without the flip seeing it yields a *skewed* RL rather than a
+    /// mirrored one. That is the leading explanation for the first P3
+    /// prototype's tier4 LR 20 / RL 19 asymmetry.
+    #[test]
+    fn rl_is_an_exact_reflection_of_lr() {
+        for (name, g) in mirror_corpus() {
+            let build = |dir| {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                g.compute_layout_with_config(&cfg)
+            };
+            let lr = build(Direction::LeftRight);
+            let rl = build(Direction::RightLeft);
+            super::lr_invariants::assert_exact_x_mirror(name, &lr, &rl);
+        }
+    }
+
+    /// Corpus fixtures plus the clustered stress tiers.
+    fn mirror_corpus() -> Vec<(&'static str, Graph<'static>)> {
+        let mut v: Vec<(&'static str, Graph<'static>)> = corpus().into_iter().collect();
+        v.push(("tier1_micro", tier1_microservices()));
+        v.push(("tier2_plat", tier2_platform()));
+        v.push(("tier3_cloud", tier3_cloud()));
+        v.push(("tier4_ent", tier4_enterprise()));
+        v.push(("tier5_mega", tier5_megacorp()));
+        v
+    }
+
+    /// §4.4 pin: the farthest-travelling chain takes the outer track.
+    ///
+    /// Allocation order and spatial order are opposite — chains are
+    /// allocated shortest-first precisely so each longer chain is pushed
+    /// outside the ones already placed. This relationship was silently
+    /// inverted once (the first P3 prototype placed longest-first and got
+    /// `fan → longest → shortest`), so it is pinned on real layout output:
+    /// two skip chains from one source, the longer must end outermost at
+    /// every shared level, in both an axis-vertical and an axis-horizontal
+    /// direction.
+    #[test]
+    fn longer_chain_takes_the_outer_track() {
+        let mut g = Graph::new();
+        for id in 1..=5 {
+            g.add_node(id, "n");
+        }
+        for (a, b) in [(1usize, 2usize), (2, 3), (3, 4), (4, 5)] {
+            g.add_edge(a, b, None);
+        }
+        g.add_edge(1, 4, None); // span 3 — allocated first
+        g.add_edge(1, 5, None); // span 4 — allocated last, ends outermost
+
+        for dir in [Direction::TopDown, Direction::LeftRight] {
+            let mut cfg = LayoutConfig::standard();
+            cfg.direction = dir;
+            cfg.include_dummy_nodes = true;
+            let ir = g.compute_layout_with_config(&cfg);
+
+            let chain = |edge: usize| -> Vec<(usize, usize)> {
+                let mut v: Vec<(usize, usize)> = ir
+                    .nodes()
+                    .iter()
+                    .filter(|n| n.kind == crate::ir::NodeKind::Dummy)
+                    .filter(|n| n.edge_index == Some(edge))
+                    .map(|n| match dir {
+                        Direction::LeftRight => (n.x, n.y),
+                        _ => (n.y, n.x),
+                    })
+                    .collect();
+                v.sort_unstable();
+                v
+            };
+            let short = chain(4);
+            let long = chain(5);
+            assert_eq!(short.len(), 2, "{dir:?}: span-3 chain has 2 waypoints");
+            assert_eq!(long.len(), 3, "{dir:?}: span-4 chain has 3 waypoints");
+            for &(lvl, sc) in &short {
+                let &(_, lc) = long.iter().find(|&&(l, _)| l == lvl).expect("shared level");
+                assert!(
+                    lc > sc,
+                    "{dir:?}: at level-coord {lvl} the longer chain must be \
+                     outermost (long {lc} vs short {sc})"
+                );
+            }
+        }
+    }
+
+    /// P6: the quality totals are a floor, not a report.
+    ///
+    /// `quality_table` (below, `#[ignore]`d) prints the full per-fixture
+    /// breakdown; this asserts the corpus totals never regress past the
+    /// values the chain-lane pass (temp/09 P3/P4) landed at. Improvements
+    /// lower them — update the pins when they do. This is what stops the
+    /// staircase routing being quietly re-introduced by a change nobody
+    /// connects to routing: the determinism bug of `40df9a2` and the
+    /// first P3 prototype's regressions would both have tripped it.
+    #[test]
+    fn quality_totals_never_regress() {
+        const DIRS: [Direction; 4] = [
+            Direction::TopDown,
+            Direction::BottomUp,
+            Direction::LeftRight,
+            Direction::RightLeft,
+        ];
+        let (mut cross, mut kinks, mut spread, mut area) = (0usize, 0usize, 0usize, 0usize);
+        for (_, g) in mirror_corpus() {
+            for dir in DIRS {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                let (c, k, s, a) = score(&ir);
+                cross += c;
+                kinks += k;
+                spread += s;
+                area += a;
+            }
+        }
+        assert!(cross <= 130, "corpus crossings regressed: {cross} > 130");
+        assert!(kinks <= 646, "corpus kinks regressed: {kinks} > 646");
+        assert!(spread <= 520, "corpus overshoot regressed: {spread} > 520");
+        // 5% over the pre-lane baseline area of 1,429,604 (temp/09 §1).
+        assert!(
+            area <= 1_501_084,
+            "corpus canvas area over the 5% budget: {area} > 1,501,084"
+        );
+    }
+
+    /// Review #2: an EXACTLY estimate-sized arena must survive a cyclic
+    /// graph — the estimator's original unflipped relaxation counted zero
+    /// dummies for an ordered cycle, while cycle breaking turns the
+    /// closing edge into a span-(N-1) chain. The estimator now mirrors
+    /// cycle breaking, so EVERY dummy-derived manifest term is exact.
+    ///
+    /// Cases: small cycle (lane pass enabled), and a cycle past the lane
+    /// work cap (`E > LANE_PASS_MAX_WORK` — lane pass DISABLED, so the
+    /// estimate must be right for the base manifest alone), both with
+    /// `include_dummy_nodes` so the emitted-dummy IR terms are exercised.
+    fn cycle_fits_exact_arena(n: usize) {
+        let mut g = Graph::new();
+        for i in 0..n {
+            g.add_node(i, "n");
+        }
+        for i in 0..n - 1 {
+            g.add_edge(i, i + 1, None);
+        }
+        g.add_edge(n - 1, 0usize, None); // ordered cycle
+
+        let mut cfg = LayoutConfig::standard();
+        cfg.include_dummy_nodes = true;
+        // Conversion arena gets headroom like the rest of the suite
+        // (`csr_engine` doubles it too) — the exact-size contract under
+        // test here is the LAYOUT estimator, not the conversion one.
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+        let est = g.estimate_layout_arena_size_with(&cfg);
+        let mut temp_buf = vec![0u8; est];
+        let mut out_buf = vec![0u8; est];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(&cfg, &mut temp_arena, &mut out_arena)
+            .expect("exactly estimate-sized arena must suffice, cycle included");
+        assert!(ir.width() > 0 && ir.height() > 0);
+        // The broken cycle's chain has N-2 waypoints; with
+        // include_dummy_nodes they must ALL be present in the IR — the
+        // old undercount silently dropped overflowing waypoints instead.
+        let dummies = ir
+            .nodes()
+            .iter()
+            .filter(|nd| nd.kind == crate::ir::NodeKind::Dummy)
+            .count();
+        assert_eq!(dummies, n - 2, "every broken-cycle waypoint emitted");
+    }
+
+    #[test]
+    fn cyclic_graph_layout_fits_exactly_estimated_arena() {
+        cycle_fits_exact_arena(8);
+        cycle_fits_exact_arena(60);
+    }
+
+    /// Review #3 (representability boundary): a chain whose every
+    /// admissible lane is blocked by a giant level obstacle must keep its
+    /// packed routing — never a lane clamped into occupied space, and
+    /// never a waypoint moved INTO the obstacle.
+    #[test]
+    fn oversized_obstacle_refuses_lane_instead_of_clamping() {
+        use crate::algorithms::sugiyama::geometry::LANE_MAX_CROSS;
+        let mut g = Graph::new();
+        g.add_node(0usize, "src");
+        // A node wider than the representable cross axis: every lane at
+        // its level is either inside its body or beyond LANE_MAX_CROSS.
+        g.add_node(
+            1usize,
+            crate::render::engine::CustomNode {
+                label: "wall",
+                width: LANE_MAX_CROSS + 8,
+                height: 1,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_node(2usize, "dst");
+        g.add_edge(0usize, 1usize, None);
+        g.add_edge(1usize, 2usize, None);
+        g.add_edge(0usize, 2usize, None); // skip chain past the wall
+
+        let mut cfg = LayoutConfig::standard();
+        cfg.include_dummy_nodes = true;
+        let ir = g.compute_layout_with_config(&cfg);
+        for nd in ir
+            .nodes()
+            .iter()
+            .filter(|nd| nd.kind == crate::ir::NodeKind::Dummy)
+        {
+            let (wall_x, wall_w) = ir
+                .nodes()
+                .iter()
+                .find(|w| w.id == 1)
+                .map(|w| (w.x, w.width))
+                .expect("wall present");
+            let inside_wall = nd.x >= wall_x && nd.x < wall_x + wall_w;
+            assert!(
+                !inside_wall,
+                "waypoint at x={} moved inside the wall [{}, {})",
+                nd.x,
+                wall_x,
+                wall_x + wall_w
+            );
+        }
+    }
+
+    /// Review #4: the design requires NO crossing regression in any
+    /// fixture/direction — an aggregate floor lets one cell regress while
+    /// another improves. Every corpus cell is pinned at its landed value
+    /// (TD pin covers BT, LR covers RL: exact mirrors, gated above).
+    #[test]
+    fn per_fixture_crossings_never_regress() {
+        let pins: &[(&str, usize, usize)] = &[
+            // (fixture, TD/BT ceiling, LR/RL ceiling)
+            ("fan", 2, 2),
+            ("stage", 0, 0),
+            ("skip", 0, 0),
+            ("back", 0, 0),
+            ("two_cycle", 0, 0),
+            ("self_loop", 0, 0),
+            ("labels", 0, 0),
+            ("nested", 0, 0),
+            ("hero", 2, 1),
+            ("wide_node", 0, 0),
+            ("tier1_micro", 0, 0),
+            ("tier2_plat", 1, 3),
+            ("tier3_cloud", 7, 9),
+            ("tier4_ent", 4, 8),
+            ("tier5_mega", 14, 12),
+        ];
+        for (name, g) in mirror_corpus() {
+            let &(_, td_pin, lr_pin) = pins
+                .iter()
+                .find(|(n, _, _)| *n == name)
+                .unwrap_or_else(|| panic!("fixture {name} has no crossing pin — add one"));
+            for (dir, pin) in [
+                (Direction::TopDown, td_pin),
+                (Direction::BottomUp, td_pin),
+                (Direction::LeftRight, lr_pin),
+                (Direction::RightLeft, lr_pin),
+            ] {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                let (c, _, _, _) = score(&ir);
+                assert!(
+                    c <= pin,
+                    "{name} {dir:?}: crossings regressed to {c} (pin {pin})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "reporting tool, not an assertion — run with --ignored --nocapture"]
+    fn quality_table() {
+        const DIRS: [(&str, Direction); 4] = [
+            ("TD", Direction::TopDown),
+            ("BT", Direction::BottomUp),
+            ("LR", Direction::LeftRight),
+            ("RL", Direction::RightLeft),
+        ];
+
+        println!("\nfixture      dir   cross  kinks  spread     area  canvas");
+        println!("-----------  ---  ------  -----  ------  -------  ------");
+        let mut totals = [0usize; 4];
+        let stress: [(&str, Graph<'static>); 5] = [
+            ("tier1_micro", tier1_microservices()),
+            ("tier2_plat", tier2_platform()),
+            ("tier3_cloud", tier3_cloud()),
+            ("tier4_ent", tier4_enterprise()),
+            ("tier5_mega", tier5_megacorp()),
+        ];
+        for (name, g) in corpus().into_iter().chain(stress) {
+            for (tag, dir) in DIRS {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                let (c, k, s, a) = score(&ir);
+                totals[0] += c;
+                totals[1] += k;
+                totals[2] += s;
+                totals[3] += a;
+                println!(
+                    "{name:<11}  {tag:<3}  {c:>6}  {k:>5}  {s:>6}  {a:>7}  {}x{}",
+                    ir.width(),
+                    ir.height()
+                );
+            }
+        }
+        println!("-----------  ---  ------  -----  ------  -------  ------");
+        println!(
+            "{:<11}  {:<3}  {:>6}  {:>5}  {:>6}  {:>7}",
+            "TOTAL", "", totals[0], totals[1], totals[2], totals[3]
+        );
+        println!(
+            "\ncross = stroke-crosses-stroke cells (border junctions excluded)\n\
+             kinks = cross-axis lane changes summed over edges\n\
+             spread = worst single edge's cross-axis excursion\n\
+             area  = canvas w*h (guards against trading crossings for size)\n"
+        );
     }
 }

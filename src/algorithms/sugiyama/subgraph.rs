@@ -580,6 +580,67 @@ type LevelRanges = Vec<(usize, usize)>;
 /// coordinates, mirroring [`compute_bounding_boxes`] x-math: member
 /// extent, `A::SG_PAD_CROSS`, label minimum width, child → parent
 /// expansion, label recheck. `order` must be deepest-first.
+/// Cluster cross-extents per level, projected from current node
+/// coordinates — the same math the compaction passes use
+/// ([`project_envelopes`]: member extent, `SG_PAD_CROSS`, label minimum,
+/// child→parent expansion), so a waypoint kept clear of these is clear of
+/// the boxes the renderer will actually draw.
+///
+/// Returns, per cluster, `Some((lo, hi))` inclusive cross bounds and the
+/// `(first_level, last_level)` range it covers. Used by fan-aware chain
+/// allocation (temp/09 P3) to keep lanes out of cluster interiors.
+pub(crate) fn cluster_cross_envelopes<A: Axis>(
+    dag: &Graph<'_>,
+    real_node_coords: &[(usize, usize, usize, usize)],
+) -> (Envelopes, LevelRanges) {
+    let sg_count = dag.subgraphs.len();
+    if sg_count == 0 {
+        return (Vec::new(), Vec::new());
+    }
+    let sg_id_to_idx: HashMap<usize, usize> = dag
+        .subgraphs
+        .iter()
+        .enumerate()
+        .map(|(i, sg)| (sg.id, i))
+        .collect();
+    let parent_idx: Vec<Option<usize>> = dag
+        .subgraphs
+        .iter()
+        .map(|sg| sg.parent_id.and_then(|pid| sg_id_to_idx.get(&pid).copied()))
+        .collect();
+    let mut depths = vec![0usize; sg_count];
+    for i in 0..sg_count {
+        let mut d = 0;
+        let mut cur = parent_idx[i];
+        while let Some(p) = cur {
+            d += 1;
+            cur = parent_idx[p];
+        }
+        depths[i] = d;
+    }
+    let mut order: Vec<usize> = (0..sg_count).collect();
+    order.sort_by(|a, b| depths[*b].cmp(&depths[*a]));
+    let node_sg: Vec<Option<usize>> = dag
+        .nodes
+        .iter()
+        .map(|&(nid, _)| {
+            dag.node_subgraph
+                .get(&nid)
+                .and_then(|sid| sg_id_to_idx.get(sid).copied())
+        })
+        .collect();
+
+    let (bbox, range) =
+        project_envelopes::<A>(dag, real_node_coords, &node_sg, &parent_idx, &order);
+    // `project_envelopes` returns exclusive right edges; obstacles are
+    // inclusive spans.
+    let bbox = bbox
+        .into_iter()
+        .map(|b| b.map(|(l, r)| (l, r.saturating_sub(1).max(l))))
+        .collect();
+    (bbox, range)
+}
+
 fn project_envelopes<A: Axis>(
     dag: &Graph<'_>,
     real_node_coords: &[(usize, usize, usize, usize)],
@@ -1117,7 +1178,15 @@ pub(crate) fn fix_subgraph_overlaps<A: Axis>(
 
         let mut any_shifted = false;
 
-        for siblings in parent_groups.values_mut() {
+        // Consume the groups in key order rather than map order. The sweep
+        // below is order-independent in fact — sibling groups are disjoint
+        // sets of subgraphs and each group is sorted before use — but that
+        // rests on the disjointness holding, and this is the same shape as
+        // the non-determinism fixed in `block_partition_level`.
+        let mut groups: Vec<(Option<usize>, Vec<usize>)> = parent_groups.into_iter().collect();
+        groups.sort_unstable_by_key(|(key, _)| *key);
+        for (_, mut siblings) in groups {
+            let siblings = &mut siblings;
             if siblings.len() < 2 {
                 continue;
             }
@@ -1677,4 +1746,62 @@ pub(crate) fn compute_bounding_boxes<'a, A: Axis>(
     }
 
     result
+}
+
+#[cfg(test)]
+mod block_order_tests {
+    use super::*;
+    use crate::graph::Graph;
+
+    /// Regression pin for the non-determinism fixed in `40df9a2`.
+    ///
+    /// `block_partition_level` sorts blocks by their members' average
+    /// original position with a *stable* sort, so tied blocks keep the order
+    /// the block list was built in. That order used to come from `HashMap`
+    /// iteration, which is randomly seeded per process.
+    ///
+    /// Eight blocks are used rather than two on purpose. With two, a broken
+    /// implementation still lands the right order about half the time, so the
+    /// test passed ~65% of runs against known-broken code. With eight tied
+    /// blocks an accidentally-correct hash order is 1 in 8! (~1/40,320).
+    ///
+    /// This pins the invariant itself rather than some graph's rendered
+    /// output, so it stays meaningful as layout evolves.
+    #[test]
+    fn tied_blocks_keep_first_appearance_order() {
+        const BLOCKS: usize = 8;
+        let mut g = Graph::new();
+        for id in 0..(BLOCKS * 2) {
+            g.add_node(id, "n");
+        }
+        // Block i owns positions {i, 2*BLOCKS-1-i}, so every block averages
+        // exactly (2*BLOCKS-1)/2 — a total tie across all eight.
+        let mut sgs = Vec::new();
+        for i in 0..BLOCKS {
+            let sg = g.add_subgraph("b");
+            g.put_nodes(&[i, BLOCKS * 2 - 1 - i])
+                .inside(sg)
+                .expect("place block members");
+            sgs.push(sg);
+        }
+
+        let level: Vec<VNode> = (0..BLOCKS * 2).map(VNode::Real).collect();
+        let out = block_partition_level(&g, &level);
+        assert_eq!(out.len(), level.len(), "no vnodes lost");
+
+        let sg_of = |v: &VNode| root_subgraph(&g, vnode_subgraph(&g, v));
+
+        // Expected: blocks in first-appearance order, each contiguous.
+        let expected: Vec<Option<usize>> = (0..BLOCKS)
+            .flat_map(|i| {
+                let key = sg_of(&level[i]);
+                [key, key]
+            })
+            .collect();
+        let actual: Vec<Option<usize>> = out.iter().map(sg_of).collect();
+        assert_eq!(
+            actual, expected,
+            "tied blocks must stay in first-appearance order and contiguous"
+        );
+    }
 }
