@@ -1,6 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## [0.10.1] - 2026-08-07
+
+Layout-quality and correctness patch. **Two things to check before upgrading:** rendered output changes for any graph with skip-level
+edges (long edges now route in clean lanes — if you pin our output in your own golden tests, they will need regenerating), and `estimate_layout_arena_size` returns larger values for such graphs — if you hardcoded embedded buffer sizes from printed 0.10.0 estimates, re-run the estimate; an undersized arena fails cleanly with an error, never silently.
 
 ### Improved
 - **Skip-level edges route in clean lanes** (both layout backends, byte-identically): a chain-lane allocator gives every multi-level edge a cross-axis lane clear of the *fans* shorter edges sweep — the farther an edge travels, the outer the track it takes, and two long edges no longer weave across each other. Over the routing-quality corpus (15 fixtures × 4 directions): **edge crossings −45%**, bends −7%, worst cross-axis overshoot −66%, total canvas area −0.5%. The hero graph in `LeftRight` drops from 5 crossings to 1 and gets 4 columns narrower. Golden snapshots are regenerated accordingly. The pass runs under a fixed work budget — stress-scale graphs (>16k edges or dummies) keep their previous routing unchanged — and `estimate_layout_arena_size` now includes the allocator's scratch for graphs with skip edges (zero for graphs without them).
@@ -8,6 +11,7 @@
 - **Layout is deterministic across processes**: cluster block ordering no longer inherits `HashMap` iteration order (seeded per process), which could lay the same clustered graph out differently from one run to the next. Pinned by a regression test with eight average-tied blocks (~1/40,320 chance of a false pass).
 
 ### Internal
+- Both pipelines fuzzed for one hour each under coverage-guided libFuzzer (~889k executions total; the arena harness generates cycles and lays out with exactly estimate-sized arenas): zero crashes, OOMs, or timeouts.
 - New layout-quality gates in the parity suite: an exact LR↔RL reflection check over the full corpus including waypoints, a longest-chain-outermost pin, and a non-regression floor on the corpus quality totals (crossings / bends / overshoot / canvas budget).
 - The clustered stress tiers moved to `examples/shared/stress_graphs.rs`, shared between `subgraph_stress` and the quality scorer.
 
