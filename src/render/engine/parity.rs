@@ -3502,7 +3502,118 @@ mod quality {
         v.push(("tier3_cloud", tier3_cloud()));
         v.push(("tier4_ent", tier4_enterprise()));
         v.push(("tier5_mega", tier5_megacorp()));
+        v.push(("label_stress", label_stress()));
         v
+    }
+
+    /// temp/11 P0: the label-placement stress fixture. The rest of the
+    /// corpus concentrates label signal in `hero` and `labels`; this one
+    /// exercises every placement-relevant shape in one graph — labeled
+    /// corners, a labeled skip chain, a labeled reversed edge, even- and
+    /// odd-length labels, and clusters whose borders sit next to the
+    /// natural label spots. Labels are unique strings so the scorer can
+    /// count placements from rendered text.
+    fn label_stress() -> Graph<'static> {
+        let mut g = Graph::new();
+        for (id, name) in [
+            (1, "In"),
+            (2, "Split"),
+            (3, "Alpha"),
+            (4, "Beta"),
+            (5, "Gamma"),
+            (6, "Join"),
+            (7, "Out"),
+            (8, "Side"),
+        ] {
+            g.add_node(id, name);
+        }
+        g.add_edge(1, 2, Some("go")); // even, short, Direct
+        g.add_edge(2, 3, Some("left")); // even, Corner
+        g.add_edge(2, 4, Some("mid")); // odd, Corner
+        g.add_edge(2, 5, Some("right")); // odd, Corner
+        g.add_edge(3, 6, Some("a-in")); // even, Corner into cluster
+        g.add_edge(4, 6, Some("b-in")); // even
+        g.add_edge(5, 6, Some("c-in")); // even
+        g.add_edge(6, 7, Some("done")); // even, Direct
+        g.add_edge(2, 7, Some("express")); // odd, skip chain (3 levels)
+        g.add_edge(1, 8, Some("spur")); // even
+        g.add_edge(8, 7, Some("rejoin")); // even, skip chain
+        g.add_edge(7, 2, Some("undo")); // even, reversed (back edge)
+
+        let core = g.add_subgraph("Core");
+        g.put_nodes(&[3usize, 4, 5]).inside(core).expect("core");
+        let tail = g.add_subgraph("Tail");
+        g.put_nodes(&[6usize]).inside(tail).expect("tail");
+        g
+    }
+
+    /// Strip ANSI SGR escapes so quoted labels can be counted in colored
+    /// output.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for d in chars.by_ref() {
+                    if d == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// temp/11 P0 metric: labels placed inline, on both render surfaces.
+    ///
+    /// `eligible` excludes self-loop labels (no placement host exists —
+    /// tracked separately in temp/11 §8). PLAIN placement is counted
+    /// from the rendered text with the legend off, so an unplaced label
+    /// simply does not appear: what the user sees is what is measured
+    /// (duplicate label strings count up to their edge multiplicity).
+    /// COLORED placement is the colored+legend surface — the one place
+    /// the compositor consults the stricter `placed_colored()` decision
+    /// (whole-row node veto) — counted from the `RenderPlan` directly,
+    /// because that surface's rendered text necessarily contains the
+    /// legend, whose entries would masquerade as inline placements.
+    fn label_counts(ir: &LayoutIR<'_>) -> (usize, usize, usize) {
+        use alloc::collections::BTreeMap;
+        let mut expected: BTreeMap<&str, usize> = BTreeMap::new();
+        for e in ir.edges().iter() {
+            if e.from_id == e.to_id {
+                continue;
+            }
+            if let Some(l) = e.label {
+                *expected.entry(l).or_insert(0) += 1;
+            }
+        }
+        let eligible: usize = expected.values().sum();
+
+        let placed_in = |text: &str| -> usize {
+            expected
+                .iter()
+                .map(|(l, &n)| {
+                    let needle = alloc::format!("\"{l}\"");
+                    text.matches(needle.as_str()).count().min(n)
+                })
+                .sum()
+        };
+
+        let plain = ir.render_string(&RenderOptions::plain());
+        let mut copts = RenderOptions::colored(Palette::Ansi);
+        copts.legend = true;
+        let plan = ir.render_plan(&copts);
+        let colored = plan
+            .labels()
+            .iter()
+            .filter(|l| {
+                let e = &ir.edges()[l.edge_index];
+                e.from_id != e.to_id && l.placed_colored()
+            })
+            .count();
+        (eligible, placed_in(&plain), colored)
     }
 
     /// §4.4 pin: the farthest-travelling chain takes the outer track.
@@ -3592,13 +3703,15 @@ mod quality {
                 area += a;
             }
         }
-        assert!(cross <= 130, "corpus crossings regressed: {cross} > 130");
-        assert!(kinks <= 646, "corpus kinks regressed: {kinks} > 646");
-        assert!(spread <= 520, "corpus overshoot regressed: {spread} > 520");
-        // 5% over the pre-lane baseline area of 1,429,604 (temp/09 §1).
+        // Re-baselined at temp/11 P0 when `label_stress` joined the
+        // corpus (previously 130/646/520 over 15 fixtures).
+        assert!(cross <= 138, "corpus crossings regressed: {cross} > 138");
+        assert!(kinks <= 700, "corpus kinks regressed: {kinks} > 700");
+        assert!(spread <= 630, "corpus overshoot regressed: {spread} > 630");
+        // temp/09's 5% ceiling plus label_stress's own baseline area.
         assert!(
-            area <= 1_501_084,
-            "corpus canvas area over the 5% budget: {area} > 1,501,084"
+            area <= 1_508_870,
+            "corpus canvas area over budget: {area} > 1,508,870"
         );
     }
 
@@ -3730,6 +3843,7 @@ mod quality {
             ("tier3_cloud", 7, 9),
             ("tier4_ent", 4, 8),
             ("tier5_mega", 14, 12),
+            ("label_stress", 4, 0),
         ];
         for (name, g) in mirror_corpus() {
             let &(_, td_pin, lr_pin) = pins
@@ -3754,6 +3868,477 @@ mod quality {
         }
     }
 
+    /// temp/11 P1: placed labels must mirror exactly — LR↔RL on x,
+    /// TD↔BT on y — including even-length labels, whose lead rounding
+    /// is the classic way mirrors break. Positions are extracted from
+    /// the rendered text (char-indexed), so this pins what users see,
+    /// not an internal plan field.
+    #[test]
+    fn label_placements_mirror() {
+        let find_labels = |text: &str| -> alloc::vec::Vec<(String, usize, usize)> {
+            let mut out = alloc::vec::Vec::new();
+            for (row, line) in text.lines().enumerate() {
+                let chars: alloc::vec::Vec<char> = line.chars().collect();
+                let mut c = 0usize;
+                while c < chars.len() {
+                    if chars[c] == '"' {
+                        if let Some(end) = chars[c + 1..].iter().position(|&ch| ch == '"') {
+                            let label: String = chars[c..=c + 1 + end].iter().collect();
+                            out.push((label, row, c));
+                            c += end + 2;
+                            continue;
+                        }
+                    }
+                    c += 1;
+                }
+            }
+            out.sort();
+            out
+        };
+        for (name, g) in mirror_corpus() {
+            let render = |dir| {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                (
+                    ir.render_string(&RenderOptions::plain()),
+                    ir.width(),
+                    ir.height(),
+                )
+            };
+            // LR ↔ RL: x-mirror. A label of char-length L starting at
+            // column c mirrors to width − c − L.
+            let (lr, w, _) = render(Direction::LeftRight);
+            let (rl, _, _) = render(Direction::RightLeft);
+            let mut want: alloc::vec::Vec<(String, usize, usize)> = find_labels(&lr)
+                .into_iter()
+                .map(|(l, r, c)| {
+                    let n = l.chars().count();
+                    (l, r, w - c - n)
+                })
+                .collect();
+            want.sort();
+            let got = find_labels(&rl);
+            assert_eq!(want, got, "{name}: RL labels are not the x-mirror of LR");
+
+            // TD ↔ BT: y-mirror over the canvas height — for labels
+            // placed in BOTH directions. Box labels anchor to the
+            // visual top in every direction (text is never mirrored —
+            // D4), so a cell free in one direction can hold box text
+            // in the other; a label squeezed out that way goes to the
+            // legend there, and per-direction counts are pinned by the
+            // floors test instead. Position symmetry is still exact
+            // for the shared set.
+            let (td, _, h) = render(Direction::TopDown);
+            let (bt, _, _) = render(Direction::BottomUp);
+            let want: alloc::vec::Vec<(String, usize, usize)> = find_labels(&td)
+                .into_iter()
+                .map(|(l, r, c)| (l, h - 1 - r, c))
+                .collect();
+            let got = find_labels(&bt);
+            let mirrored: alloc::vec::Vec<_> = want
+                .iter()
+                .filter(|(l, _, _)| got.iter().any(|(gl, _, _)| gl == l))
+                .cloned()
+                .collect();
+            let shared: alloc::vec::Vec<_> = got
+                .iter()
+                .filter(|(l, _, _)| want.iter().any(|(wl, _, _)| wl == l))
+                .cloned()
+                .collect();
+            let mut mirrored = mirrored;
+            let mut shared = shared;
+            mirrored.sort();
+            shared.sort();
+            assert_eq!(
+                mirrored, shared,
+                "{name}: labels placed in both TD and BT are not y-mirrors"
+            );
+        }
+    }
+
+    /// temp/11 P4: per-fixture label floors, pinned at the values the
+    /// sliding tier landed, on BOTH render surfaces — plain, and the
+    /// colored+legend surface where the compositor consults
+    /// `placed_colored()`'s whole-row node veto (colored ≤ plain by
+    /// construction). Improvements raise them; update the pins when
+    /// they do. `hero` LR sits at 6 of 8 by geometric proof: `read`'s
+    /// every window covering its own ink crosses a box border, and
+    /// `http`'s trunk is three cells on the canvas's first row — the
+    /// legend is the designed fallback for exactly these two.
+    #[test]
+    fn per_fixture_labels_never_regress() {
+        let pins: &[(&str, usize, usize, usize, usize)] = &[
+            // (fixture, TD/BT plain, LR/RL plain, TD/BT colored, LR/RL colored)
+            ("fan", 0, 0, 0, 0),
+            ("stage", 1, 1, 1, 1),
+            ("skip", 0, 0, 0, 0),
+            ("back", 0, 0, 0, 0),
+            ("two_cycle", 0, 0, 0, 0),
+            ("self_loop", 0, 0, 0, 0),
+            ("labels", 0, 0, 0, 0),
+            ("nested", 0, 0, 0, 0),
+            ("hero", 8, 6, 8, 4),
+            ("wide_node", 0, 0, 0, 0),
+            ("tier1_micro", 0, 0, 0, 0),
+            ("tier2_plat", 0, 0, 0, 0),
+            ("tier3_cloud", 0, 0, 0, 0),
+            ("tier4_ent", 0, 0, 0, 0),
+            ("tier5_mega", 0, 0, 0, 0),
+            ("label_stress", 12, 7, 12, 6),
+        ];
+        for (name, g) in mirror_corpus() {
+            let &(_, td_p, lr_p, td_c, lr_c) = pins
+                .iter()
+                .find(|(n, ..)| *n == name)
+                .unwrap_or_else(|| panic!("fixture {name} has no label floor — add one"));
+            for (dir, floor, cfloor) in [
+                (Direction::TopDown, td_p, td_c),
+                (Direction::BottomUp, td_p, td_c),
+                (Direction::LeftRight, lr_p, lr_c),
+                (Direction::RightLeft, lr_p, lr_c),
+            ] {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                let (_, placed, colored) = label_counts(&ir);
+                assert!(
+                    placed >= floor,
+                    "{name} {dir:?}: labels regressed to {placed} (floor {floor})"
+                );
+                assert!(
+                    colored >= cfloor,
+                    "{name} {dir:?}: colored labels regressed to {colored} (floor {cfloor})"
+                );
+            }
+        }
+    }
+
+    /// A self-loop's marker is the edge's ENTIRE visible ink — one
+    /// cell. Text beats markers at the cell layer (a label must never
+    /// be hole-punched), so any label window covering the cell would
+    /// silently erase a whole edge from the drawing — which shipped:
+    /// through 0.10.1 the hero graph in `LeftRight` rendered Gateway
+    /// without its `↺`. The guard lives in `span_blocked`, the base
+    /// check every placement host shares. Sweep: every fixture, all
+    /// four directions, plain and colored-with-legend (the two gate
+    /// extremes; both charsets project the same marker cell), the
+    /// marker glyph must be at its IR cell.
+    #[test]
+    fn self_loop_marker_always_rendered() {
+        let glyph_at = |text: &str, x: usize, y: usize| -> Option<char> {
+            text.lines().nth(y).and_then(|l| l.chars().nth(x))
+        };
+        let mut checked = 0usize;
+        for (name, g) in mirror_corpus() {
+            for dir in [
+                Direction::TopDown,
+                Direction::BottomUp,
+                Direction::LeftRight,
+                Direction::RightLeft,
+            ] {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                let loops: alloc::vec::Vec<(usize, usize, usize)> = ir
+                    .nodes
+                    .iter()
+                    .filter_map(|n| n.self_loop_at.map(|(x, y)| (n.id, x, y)))
+                    .collect();
+                if loops.is_empty() {
+                    continue;
+                }
+                let plain = ir.render_string(&RenderOptions::plain());
+                let colored = strip_ansi(&ir.render_string(&RenderOptions::colored(Palette::Ansi)));
+                for &(id, x, y) in &loops {
+                    for (surface, text) in [("plain", &plain), ("colored", &colored)] {
+                        assert_eq!(
+                            glyph_at(text, x, y),
+                            Some('↺'),
+                            "{name} {dir:?} {surface}: node {id}'s self-loop marker at ({x},{y}) was overwritten"
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= 8,
+            "sweep went vacuous — corpus lost its self-loops"
+        );
+    }
+
+    /// The marker guard itself, pinned mechanically: `span_blocked` —
+    /// the base check every placement host shares — refuses any window
+    /// covering a self-loop marker cell, on both flow axes. The sweep
+    /// above proves the rendered outcome, but today's ladder happens
+    /// never to propose such a window over the corpus, so only this
+    /// test fails if the guard is dropped.
+    #[test]
+    fn span_blocked_refuses_self_loop_marker_cells() {
+        for dir in [Direction::TopDown, Direction::LeftRight] {
+            let mut g = Graph::new();
+            g.add_node(1, "Gate");
+            g.add_node(2, "Next");
+            g.add_edge(1, 1, None);
+            g.add_edge(1, 2, Some("lbl"));
+            let mut cfg = LayoutConfig::standard();
+            cfg.direction = dir;
+            let ir = g.compute_layout_with_config(&cfg);
+            let (mx, my) = ir
+                .nodes
+                .iter()
+                .find_map(|n| n.self_loop_at)
+                .expect("Gate has a marker cell");
+            let li = ir
+                .edges()
+                .iter()
+                .position(|e| e.from_id != e.to_id)
+                .expect("the labeled edge");
+            // A one-cell window on the marker: blocked. One cell
+            // further along the same (otherwise empty) row: free —
+            // the block is the marker itself, not its row.
+            assert!(
+                crate::render::engine::plan::span_blocked(&ir, li, my, mx, mx + 1, &[], false),
+                "{dir:?}: a window covering the marker cell must be blocked"
+            );
+            assert!(
+                !crate::render::engine::plan::span_blocked(&ir, li, my, mx + 1, mx + 2, &[], false),
+                "{dir:?}: the cell beside the marker is not the marker"
+            );
+        }
+    }
+
+    /// The slide tier's lateral-offset ranking, pinned as a mapping.
+    /// op 0 = centered window, op 1 = ink at the window's right edge
+    /// (extends left in +x), op 2 = ink at the left edge (extends
+    /// right). Center always wins. For X edges the side ranks follow
+    /// the flow — extend-backward beats extend-forward — because the
+    /// two side windows are x-mirror counterparts and a fixed order
+    /// would choose visually different windows in LR vs RL when both
+    /// sides are free. Y edges slide on x, which TD↔BT never flips, so
+    /// their order is direction-independent. (A raw `op` key was once
+    /// destroyed by an `op.max(toward)` typo that made the physically
+    /// leftmost window win everywhere — hence a mapping pin, not a
+    /// render test: no corpus fixture currently has two free side
+    /// windows at the winning anchor.)
+    #[test]
+    fn lateral_rank_is_center_first_and_flow_relative() {
+        use crate::render::engine::plan::lateral_rank;
+        for (op, is_x, fwd, want) in [
+            // Center first, in every configuration.
+            (0, true, true, 0),
+            (0, true, false, 0),
+            (0, false, true, 0),
+            (0, false, false, 0),
+            // X forward: extends-left (op 1) is extend-backward.
+            (1, true, true, 1),
+            (2, true, true, 2),
+            // X backward: the roles swap — mirror of the forward case.
+            (1, true, false, 2),
+            (2, true, false, 1),
+            // Y: fixed order regardless of flow sign.
+            (1, false, true, 1),
+            (2, false, true, 2),
+            (1, false, false, 1),
+            (2, false, false, 2),
+        ] {
+            assert_eq!(
+                lateral_rank(op, is_x, fwd),
+                want,
+                "lateral_rank({op}, is_x={is_x}, fwd={fwd})"
+            );
+        }
+    }
+
+    /// No placed label window may cover the label edge's OWN corner or
+    /// endpoint-marker cells — Rule 1 plus the arrowhead rule, asserted
+    /// end-to-end on every plan the corpus produces, in all four
+    /// directions. (Label text paints after edge ink and wins the cell,
+    /// so a covering window erases a bend or an arrowhead from the
+    /// drawing.)
+    #[test]
+    fn label_windows_never_cover_own_fixed_cells() {
+        let mut checked = 0usize;
+        for (name, g) in mirror_corpus() {
+            for dir in [
+                Direction::TopDown,
+                Direction::BottomUp,
+                Direction::LeftRight,
+                Direction::RightLeft,
+            ] {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                let plan = ir.render_plan(&RenderOptions::plain());
+                for l in plan.labels() {
+                    if !l.placeable {
+                        continue;
+                    }
+                    let (from_m, to_m) = plan
+                        .edge_plan(l.edge_index)
+                        .resolved_markers(ir.edges()[l.edge_index].reversed);
+                    assert!(
+                        !crate::render::engine::plan::own_fixed_cell_in_span(
+                            &ir,
+                            l.edge_index,
+                            from_m,
+                            to_m,
+                            l.y,
+                            l.x,
+                            l.x + l.len
+                        ),
+                        "{name} {dir:?}: edge {}'s label window covers its own corner/marker",
+                        l.edge_index
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked >= 60, "sweep went vacuous — corpus lost its labels");
+    }
+
+    /// The cross-segment tie rank, pinned as a mapping: tied candidate
+    /// rows prefer the row nearer the segment's own SOURCE end, in
+    /// both row orientations. Ranking rows with the x-derived
+    /// `toward_flow` sign would prefer the upper row in LR and the
+    /// lower in RL — not an x-mirror, which must preserve y. This key
+    /// depends only on x-mirror-invariant inputs (rows and the
+    /// segment's row direction), so reflection safety is structural.
+    #[test]
+    fn cross_row_rank_prefers_the_source_side_row() {
+        use crate::render::engine::plan::cross_row_rank;
+        // Downward segment (source row 2, target row 9): row 4 is
+        // nearer the source than row 7.
+        assert!(cross_row_rank(4, 2, 9) < cross_row_rank(7, 2, 9));
+        // Upward segment (source row 9, target row 2): row 7 is nearer
+        // the source — the preference flips WITH the segment, not with
+        // the x direction.
+        assert!(cross_row_rank(7, 9, 2) < cross_row_rank(4, 9, 2));
+    }
+
+    /// Dummy waypoints must be placement-neutral while hidden: with
+    /// `include_dummy_nodes` in the IR but `show_dummy_nodes` off (the
+    /// default render), every label plan must be byte-identical to the
+    /// same graph laid out without dummies — a hidden dummy paints
+    /// nothing, so blocking its cell would be phantom. With the marker
+    /// shown it becomes a legitimate blocker (it paints after labels).
+    #[test]
+    fn hidden_dummy_nodes_are_label_placement_neutral() {
+        for dir in [Direction::TopDown, Direction::LeftRight] {
+            let collect = |include: bool| {
+                let g = label_stress();
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                cfg.include_dummy_nodes = include;
+                let ir = g.compute_layout_with_config(&cfg);
+                let plan = ir.render_plan(&RenderOptions::plain());
+                let labels: alloc::vec::Vec<(usize, usize, usize, bool)> = plan
+                    .labels()
+                    .iter()
+                    .map(|l| (l.edge_index, l.x, l.y, l.placeable))
+                    .collect();
+                labels
+            };
+            assert_eq!(
+                collect(true),
+                collect(false),
+                "{dir:?}: hidden dummies changed label placement"
+            );
+            // Shown: only a smoke check — visible markers may
+            // legitimately move labels.
+            let g = label_stress();
+            let mut cfg = LayoutConfig::standard();
+            cfg.direction = dir;
+            cfg.include_dummy_nodes = true;
+            let ir = g.compute_layout_with_config(&cfg);
+            let mut opts = RenderOptions::plain();
+            opts.show_dummy_nodes = true;
+            let _ = ir.render_plan(&opts);
+        }
+    }
+
+    /// The headline corpus totals, pinned directly: the per-fixture
+    /// floors share one TD/BT (and one LR/RL) minimum, so a fixture
+    /// whose two mirror directions ever diverge again (label_stress
+    /// did, 11 TD / 12 BT, until the phantom-marker fix) could regress
+    /// its better direction without tripping a floor. The sums cannot.
+    #[test]
+    fn corpus_label_totals_never_regress() {
+        let (mut plain_t, mut colored_t) = (0usize, 0usize);
+        for (_, g) in mirror_corpus() {
+            for dir in [
+                Direction::TopDown,
+                Direction::BottomUp,
+                Direction::LeftRight,
+                Direction::RightLeft,
+            ] {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                let (_, p, c) = label_counts(&ir);
+                plain_t += p;
+                colored_t += c;
+            }
+        }
+        assert!(plain_t >= 70, "plain corpus total regressed to {plain_t}");
+        assert!(
+            colored_t >= 64,
+            "colored corpus total regressed to {colored_t}"
+        );
+    }
+
+    /// The mirror claim asserted on the `LabelPlan`s themselves —
+    /// rendered-text parsing cannot distinguish duplicate label
+    /// strings. LR↔RL: identical placeable flags per edge, positions
+    /// exact x-mirrors. TD↔BT: for edges placeable in BOTH directions
+    /// (box-label text is direction-canonical — D4 — so feasibility
+    /// may differ), positions are exact y-mirrors.
+    #[test]
+    fn label_plans_reflect_exactly() {
+        for (name, g) in mirror_corpus() {
+            let collect = |dir| {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                let plan = ir.render_plan(&RenderOptions::plain());
+                let labels: alloc::vec::Vec<(usize, usize, usize, usize, bool)> = plan
+                    .labels()
+                    .iter()
+                    .map(|l| (l.edge_index, l.x, l.y, l.len, l.placeable))
+                    .collect();
+                (ir.width(), ir.height(), labels)
+            };
+            let (w, _, lr) = collect(Direction::LeftRight);
+            let (_, _, rl) = collect(Direction::RightLeft);
+            assert_eq!(lr.len(), rl.len(), "{name}: label plan counts differ");
+            for (a, b) in lr.iter().zip(rl.iter()) {
+                assert_eq!(a.0, b.0, "{name}: edge order diverged");
+                assert_eq!(a.4, b.4, "{name} edge {}: LR/RL placeable differ", a.0);
+                if a.4 {
+                    assert_eq!(
+                        (b.2, b.1),
+                        (a.2, w - a.1 - a.3),
+                        "{name} edge {}: RL plan is not the x-mirror of LR",
+                        a.0
+                    );
+                }
+            }
+            let (_, h, td) = collect(Direction::TopDown);
+            let (_, _, bt) = collect(Direction::BottomUp);
+            for (a, b) in td.iter().zip(bt.iter()) {
+                if a.4 && b.4 {
+                    assert_eq!(
+                        (b.1, b.2),
+                        (a.1, h - 1 - a.2),
+                        "{name} edge {}: BT plan is not the y-mirror of TD",
+                        a.0
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     #[ignore = "reporting tool, not an assertion — run with --ignored --nocapture"]
     fn quality_table() {
@@ -3764,37 +4349,45 @@ mod quality {
             ("RL", Direction::RightLeft),
         ];
 
-        println!("\nfixture      dir   cross  kinks  spread     area  canvas");
-        println!("-----------  ---  ------  -----  ------  -------  ------");
+        println!("\nfixture      dir   cross  kinks  spread     area  canvas   lblP   lblC");
+        println!("-----------  ---  ------  -----  ------  -------  ------  -----  -----");
         let mut totals = [0usize; 4];
-        let stress: [(&str, Graph<'static>); 5] = [
-            ("tier1_micro", tier1_microservices()),
-            ("tier2_plat", tier2_platform()),
-            ("tier3_cloud", tier3_cloud()),
-            ("tier4_ent", tier4_enterprise()),
-            ("tier5_mega", tier5_megacorp()),
-        ];
-        for (name, g) in corpus().into_iter().chain(stress) {
+        let mut lbl_totals = [0usize; 3];
+        for (name, g) in mirror_corpus() {
             for (tag, dir) in DIRS {
                 let mut cfg = LayoutConfig::standard();
                 cfg.direction = dir;
                 let ir = g.compute_layout_with_config(&cfg);
                 let (c, k, s, a) = score(&ir);
+                let (elig, lp, lc) = label_counts(&ir);
                 totals[0] += c;
                 totals[1] += k;
                 totals[2] += s;
                 totals[3] += a;
+                lbl_totals[0] += elig;
+                lbl_totals[1] += lp;
+                lbl_totals[2] += lc;
                 println!(
-                    "{name:<11}  {tag:<3}  {c:>6}  {k:>5}  {s:>6}  {a:>7}  {}x{}",
+                    "{name:<11}  {tag:<3}  {c:>6}  {k:>5}  {s:>6}  {a:>7}  {:>4}x{:<4}  {lp:>2}/{elig:<2}  {lc:>2}/{elig:<2}",
                     ir.width(),
                     ir.height()
                 );
             }
         }
-        println!("-----------  ---  ------  -----  ------  -------  ------");
+        println!("-----------  ---  ------  -----  ------  -------  ------  -----  -----");
         println!(
-            "{:<11}  {:<3}  {:>6}  {:>5}  {:>6}  {:>7}",
-            "TOTAL", "", totals[0], totals[1], totals[2], totals[3]
+            "{:<11}  {:<3}  {:>6}  {:>5}  {:>6}  {:>7}  {:>6}  {:>2}/{:<2}  {:>2}/{:<2}",
+            "TOTAL",
+            "",
+            totals[0],
+            totals[1],
+            totals[2],
+            totals[3],
+            "",
+            lbl_totals[1],
+            lbl_totals[0],
+            lbl_totals[2],
+            lbl_totals[0]
         );
         println!(
             "\ncross = stroke-crosses-stroke cells (border junctions excluded)\n\

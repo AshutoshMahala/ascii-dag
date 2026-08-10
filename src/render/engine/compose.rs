@@ -583,18 +583,9 @@ fn paint_edge<V: LayoutView>(
     let ep = plan.edge_plan(edge_index);
     let w = ep.weight.arm();
     let rev = e.reversed;
-    // Which style marker each geometric side carries: reversal swaps
-    // the logical ends. `marker_end` is the arrowhead legacy always
-    // paints; `marker_start` is the (legacy-off) tail marker.
-    use super::style::MarkerShape;
-    let to_m = !matches!(
-        if rev { ep.marker_start } else { ep.marker_end },
-        MarkerShape::None
-    );
-    let from_m = !matches!(
-        if rev { ep.marker_end } else { ep.marker_start },
-        MarkerShape::None
-    );
+    // Which style marker each geometric side carries — the shared
+    // resolution placement also uses, so both agree cell-for-cell.
+    let (from_m, to_m) = ep.resolved_markers(rev);
 
     // Flow derives from the geometry (M4): +1 when the target sits below
     // the source (TopDown layouts), −1 when above (BottomUp layouts).
@@ -748,15 +739,7 @@ fn paint_edge_x<V: LayoutView>(
     let ep = plan.edge_plan(edge_index);
     let w = ep.weight.arm();
     let rev = e.reversed;
-    use super::style::MarkerShape;
-    let to_m = !matches!(
-        if rev { ep.marker_start } else { ep.marker_end },
-        MarkerShape::None
-    );
-    let from_m = !matches!(
-        if rev { ep.marker_end } else { ep.marker_start },
-        MarkerShape::None
-    );
+    let (from_m, to_m) = ep.resolved_markers(rev);
 
     // Flow sign from the geometry: +1 rightward, −1 leftward.
     let dir: isize = if e.to_x >= e.from_x { 1 } else { -1 };

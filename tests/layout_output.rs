@@ -1027,9 +1027,12 @@ mod deep_chain {
 ///
 /// Lives here rather than the lib parity suite because `--all-features`
 /// unions in `arena-idx-u8` (255-node cap); this file runs on default
-/// features like the other deep-graph pins.
+/// features like the other deep-graph pins. The explicit `u8` gate
+/// covers the remaining hole: `--features arena-idx-u8` alone implies
+/// `arena` and would otherwise pull 16,386 nodes through a 255-index.
+/// (`u16` holds 65,535 — fine.)
 #[test]
-#[cfg(feature = "arena")]
+#[cfg(all(feature = "arena", not(feature = "arena-idx-u8")))]
 fn big_cycle_past_lane_cap_fits_exactly_estimated_arena() {
     use ascii_dag::graph::arena::Arena;
 
