@@ -322,7 +322,8 @@ fn plain_legend_lists_unplaced_labels() {
         out.contains(" → "),
         "legend lines present (colliding_labels always overflows):\n{out}"
     );
-    // And the default stays legend-free.
+    // And the default stays legend-free (a 0.11 candidate to flip —
+    // for now, the `warnings` feature is the silent-drop guard).
     let mut plain = String::new();
     ir.render_with(&RenderOptions::plain(), &mut plain)
         .expect("render");
@@ -2645,7 +2646,10 @@ mod lr_invariants {
     #[test]
     fn lr_ink_always_hits() {
         use crate::render::engine::HitResult;
-        let options = RenderOptions::plain();
+        // Canvas-only contract: legend rows sit below the canvas and
+        // are not hit-testable elements — render without them.
+        let mut options = RenderOptions::plain();
+        options.legend = false;
         let ink = [
             '─', '│', '→', '←', '┌', '┐', '└', '┘', '┬', '┴', '├', '┤', '┼', '↺', '┊', '┈', '⇢',
             '⇠',
@@ -3601,7 +3605,11 @@ mod quality {
                 .sum()
         };
 
-        let plain = ir.render_string(&RenderOptions::plain());
+        // Legend off for the text count — legend entries would read as
+        // inline placements.
+        let mut popts = RenderOptions::plain();
+        popts.legend = false;
+        let plain = ir.render_string(&popts);
         let mut copts = RenderOptions::colored(Palette::Ansi);
         copts.legend = true;
         let plan = ir.render_plan(&copts);
@@ -3900,11 +3908,11 @@ mod quality {
                 let mut cfg = LayoutConfig::standard();
                 cfg.direction = dir;
                 let ir = g.compute_layout_with_config(&cfg);
-                (
-                    ir.render_string(&RenderOptions::plain()),
-                    ir.width(),
-                    ir.height(),
-                )
+                // Legend off: this test parses quoted labels from the
+                // text, and legend entries would read as placements.
+                let mut opts = RenderOptions::plain();
+                opts.legend = false;
+                (ir.render_string(&opts), ir.width(), ir.height())
             };
             // LR ↔ RL: x-mirror. A label of char-length L starting at
             // column c mirrors to width − c − L.
@@ -4098,12 +4106,61 @@ mod quality {
             // A one-cell window on the marker: blocked. One cell
             // further along the same (otherwise empty) row: free —
             // the block is the marker itself, not its row.
+            // The ink index the plan build would construct, built the
+            // same way (the row-agnostic visitors, sorted).
+            use crate::render::engine::view::LayoutView;
+            let mut h: alloc::vec::Vec<(usize, usize, usize, usize)> = alloc::vec::Vec::new();
+            let mut v: alloc::vec::Vec<(usize, usize, usize, usize)> = alloc::vec::Vec::new();
+            for i in 0..LayoutView::edge_count(&ir) {
+                let e = LayoutView::edge(&ir, i);
+                crate::render::engine::plan::for_each_h_run_all(
+                    &e.path,
+                    e.from_x,
+                    e.from_y,
+                    e.to_x,
+                    e.to_y,
+                    e.flow_axis,
+                    &mut |r, a, b| h.push((r, a, b, i)),
+                );
+                crate::render::engine::plan::for_each_v_seg_all(
+                    &e.path,
+                    e.from_x,
+                    e.from_y,
+                    e.to_x,
+                    e.to_y,
+                    e.flow_axis,
+                    &mut |c, lo, hi| v.push((c, lo, hi, i)),
+                );
+            }
+            h.sort_unstable();
+            v.sort_unstable();
+            let ink = crate::render::engine::plan::InkSource::Indexed(
+                crate::render::engine::plan::InkIndex { h: &h, v: &v },
+            );
             assert!(
-                crate::render::engine::plan::span_blocked(&ir, li, my, mx, mx + 1, &[], false),
+                crate::render::engine::plan::span_blocked(
+                    &ir,
+                    &ink,
+                    li,
+                    my,
+                    mx,
+                    mx + 1,
+                    &[],
+                    false
+                ),
                 "{dir:?}: a window covering the marker cell must be blocked"
             );
             assert!(
-                !crate::render::engine::plan::span_blocked(&ir, li, my, mx + 1, mx + 2, &[], false),
+                !crate::render::engine::plan::span_blocked(
+                    &ir,
+                    &ink,
+                    li,
+                    my,
+                    mx + 1,
+                    mx + 2,
+                    &[],
+                    false
+                ),
                 "{dir:?}: the cell beside the marker is not the marker"
             );
         }
@@ -4337,6 +4394,145 @@ mod quality {
                 }
             }
         }
+    }
+
+    /// `LabelPlan::paints` is the ONE label-visibility predicate —
+    /// plan build (legend + invisibility warning), compositor, and
+    /// hit-testing all consume it. Pinned as a truth table because a
+    /// divergent copy once existed: the warning path applied the
+    /// colored row-veto whenever color was on, warning about labels a
+    /// colored-without-legend render actually painted.
+    #[test]
+    fn label_visibility_gate_truth_table() {
+        let mk = |placeable: bool, row_has_node: bool| crate::render::engine::plan::LabelPlan {
+            edge_index: 0,
+            x: 0,
+            y: 0,
+            len: 3,
+            placeable,
+            row_has_node,
+        };
+        let hosted = mk(true, true); // placeable, but its row hosts a node
+        let clear = mk(true, false);
+        let unplaced = mk(false, false);
+        for (colored, legend) in [(false, false), (false, true), (true, false)] {
+            assert!(
+                hosted.paints(colored, legend),
+                "row-veto must apply ONLY under colored+legend (case {colored},{legend})"
+            );
+        }
+        assert!(
+            !hosted.paints(true, true),
+            "colored+legend applies the row-veto"
+        );
+        for (colored, legend) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert!(clear.paints(colored, legend));
+            assert!(!unplaced.paints(colored, legend));
+        }
+    }
+
+    /// The ink index must be PURE acceleration: `span_blocked` and
+    /// `slide_blocked` must answer identically whether they read the
+    /// sorted index or walk the geometry visitors per query — the
+    /// adaptive `LABEL_INDEX_MIN_WORK` threshold picks an arm on
+    /// memory grounds and may never change a placement. Swept over
+    /// label-bearing fixtures (Direct/Corner/MultiSegment paths,
+    /// reversed edges, boxes, self-loops), all four directions, every
+    /// row, and a stride of windows per labeled edge.
+    #[test]
+    fn indexed_and_scanned_blockers_agree() {
+        use crate::render::engine::plan::{
+            InkIndex, InkSource, for_each_h_run_all, for_each_v_seg_all, slide_blocked,
+            span_blocked,
+        };
+        use crate::render::engine::view::LayoutView;
+        let picks = ["hero", "label_stress", "stage", "self_loop"];
+        let mut compared = 0usize;
+        for (name, g) in mirror_corpus() {
+            if !picks.contains(&name) {
+                continue;
+            }
+            for dir in [
+                Direction::TopDown,
+                Direction::BottomUp,
+                Direction::LeftRight,
+                Direction::RightLeft,
+            ] {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+                let ir = g.compute_layout_with_config(&cfg);
+                let mut h: alloc::vec::Vec<(usize, usize, usize, usize)> = alloc::vec::Vec::new();
+                let mut v: alloc::vec::Vec<(usize, usize, usize, usize)> = alloc::vec::Vec::new();
+                for i in 0..LayoutView::edge_count(&ir) {
+                    let e = LayoutView::edge(&ir, i);
+                    for_each_h_run_all(
+                        &e.path,
+                        e.from_x,
+                        e.from_y,
+                        e.to_x,
+                        e.to_y,
+                        e.flow_axis,
+                        &mut |r, a, b| h.push((r, a, b, i)),
+                    );
+                    for_each_v_seg_all(
+                        &e.path,
+                        e.from_x,
+                        e.from_y,
+                        e.to_x,
+                        e.to_y,
+                        e.flow_axis,
+                        &mut |c, lo, hi| v.push((c, lo, hi, i)),
+                    );
+                }
+                h.sort_unstable();
+                v.sort_unstable();
+                let indexed = InkSource::Indexed(InkIndex { h: &h, v: &v });
+                let scan = InkSource::Scan;
+                let sg_row = |_: usize, sg: &crate::render::engine::view::SubgraphRef<'_>| sg.y + 1;
+                for le in 0..LayoutView::edge_count(&ir) {
+                    let e = LayoutView::edge(&ir, le);
+                    let Some(text) = e.label else { continue };
+                    let len = text.chars().count() + 2;
+                    for row in 0..ir.height() {
+                        let mut x0 = 0usize;
+                        while x0 + len <= ir.width() {
+                            let a = span_blocked(&ir, &indexed, le, row, x0, x0 + len, &[], false);
+                            let b = span_blocked(&ir, &scan, le, row, x0, x0 + len, &[], false);
+                            assert_eq!(a, b, "{name} {dir:?} span e{le} r{row} x{x0}");
+                            let a = slide_blocked(
+                                &ir,
+                                &indexed,
+                                le,
+                                row,
+                                x0,
+                                x0 + len,
+                                &[],
+                                false,
+                                &sg_row,
+                            );
+                            let b = slide_blocked(
+                                &ir,
+                                &scan,
+                                le,
+                                row,
+                                x0,
+                                x0 + len,
+                                &[],
+                                false,
+                                &sg_row,
+                            );
+                            assert_eq!(a, b, "{name} {dir:?} slide e{le} r{row} x{x0}");
+                            compared += 2;
+                            x0 += 3;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            compared > 10_000,
+            "oracle went vacuous ({compared} comparisons)"
+        );
     }
 
     #[test]

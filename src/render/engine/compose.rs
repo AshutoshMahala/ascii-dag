@@ -541,12 +541,7 @@ pub(crate) fn composite_band<V: LayoutView>(
         if !band_has(label.y) {
             continue;
         }
-        let place = if colored && options.legend {
-            label.placed_colored()
-        } else {
-            label.placeable
-        };
-        if place {
+        if label.paints(colored, options.legend) {
             paint_edge_label(view, plan, label, canvas);
         }
     }

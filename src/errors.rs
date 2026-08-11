@@ -17,7 +17,7 @@
 //! |------|------|------------|
 //! | 1 — Severity | `1-SEVERITY.md` | `E` (Error, blocking), `W` (Warning, non-blocking) |
 //! | 2 — Component | `2-COMPONENT.md` | `Graph` (construction/validation), `ArenaLayout` (arena-based layout), `Arena` (arena allocator, reserved), `Layout` (heap/std layout, reserved) |
-//! | 3 — Primary | `3-PRIMARY.md` | `Node`, `Edge`, `Dag`, `Subgraph`, `Alloc`, `Builder`, `Level` |
+//! | 3 — Primary | `3-PRIMARY.md` | `Node`, `Edge`, `Dag`, `Subgraph`, `Alloc`, `Builder`, `Level`, `Plan`, `Canvas`, `Sink`, `Label` |
 //! | 4 — Sequence | `4-SEQUENCE.md` + `6-SEQUENCE-CONVENTIONS.md` | See table below |
 //!
 //! ## Sequence Conventions Used (WDP §6 §4.1–§4.3)
@@ -29,6 +29,7 @@
 //! | 004 | OVERFLOW | Value too large | `ExceedsMaxNodes`, `ExceedsMaxLevels` |
 //! | 021 | NOT_FOUND | Referenced element not found | `NodeNotFound`, `SubgraphNotFound` |
 //! | 026 | EXHAUSTED | Resource exhausted | `ArenaOom`, `BuilderFailed` |
+//! | 031 | INVISIBLE | Output element will not be rendered | `WARN_LABEL_INVISIBLE` (crate extension) |
 //!
 //! All codes are composed from named macro building blocks at compile time via
 //! `wdp!`. Any unrecognised token causes a compile error.
@@ -103,6 +104,7 @@ macro_rules! component {
 /// - `Plan`   — render-plan build issues (caller plan buffer/arena)
 /// - `Canvas` — band canvas issues (caller cell/color buffers)
 /// - `Sink`   — output sink issues (caller byte buffer)
+/// - `Label`  — edge-label placement diagnostics
 macro_rules! primary {
     (Node) => {
         "Node"
@@ -124,6 +126,9 @@ macro_rules! primary {
     };
     (Level) => {
         "Level"
+    };
+    (Label) => {
+        "Label"
     };
     (Plan) => {
         "Plan"
@@ -150,6 +155,7 @@ macro_rules! primary {
 /// | 009 | UNSUPPORTED | Input/Data | Feature not supported |
 /// | 021 | NOT_FOUND | Resource | Referenced element not found |
 /// | 026 | EXHAUSTED | Resource | Resource exhausted (OOM, capacity) |
+/// | 031 | INVISIBLE | Output | Element will not be rendered (crate extension) |
 macro_rules! sequence {
     (MISSING) => {
         "001"
@@ -174,6 +180,9 @@ macro_rules! sequence {
     };
     (EXHAUSTED) => {
         "026"
+    };
+    (INVISIBLE) => {
+        "031"
     };
 }
 
@@ -312,6 +321,21 @@ pub const WARN_AUTO_REPLACED: &str = wdp!(W.Graph.Node.DUPLICATE);
 /// its historical gate — moving it behind `warnings` would silence it
 /// for existing users.
 pub const WARN_CONFIG_CLAMPED: &str = wdp!(W.Graph.Dag.INVALID);
+
+/// An edge label will not paint AND the legend is disabled (the
+/// default) — the label appears nowhere in the output. With
+/// `RenderOptions.legend` enabled, unplaced labels are listed below
+/// the graph instead and this warning stays silent. The message names
+/// the edge by index and endpoint ids only — label TEXT is caller
+/// data (possibly secret, possibly control characters) and is never
+/// written to stderr.
+///
+/// `W.Render.Label.031` — Sequence 031 = INVISIBLE (Ash's ruling: the
+/// warning names the outcome the user must act on, not the cause —
+/// 026 EXHAUSTED fit only the out-of-space case). Emitted under the
+/// opt-in `warnings` feature, once per affected label per PLAN BUILD:
+/// plans are stateless, so re-rendering the same layout re-emits.
+pub const WARN_LABEL_INVISIBLE: &str = wdp!(W.Render.Label.INVISIBLE);
 
 /// Emit a WDP-coded warning to stderr — best-effort, never panicking.
 ///

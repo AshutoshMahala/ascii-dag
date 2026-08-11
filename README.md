@@ -246,6 +246,7 @@ with stderr closed):
 | `W.Graph.Node.021` | an edge referenced a node that was never added (placeholder auto-created) | `warnings` feature |
 | `W.Graph.Node.007` | a duplicate `add_node` replaced a node with `AUTO` numbering involved | `warnings` feature |
 | `W.Graph.Dag.003` | a layout-config value was clamped (e.g. absurd `crossing_reduction_passes`) | any `std` build |
+| `W.Render.Label.031` | an edge label fits nowhere inline and the legend is off — it will not be rendered | `warnings` feature |
 
 ## Documentation
 

@@ -54,6 +54,19 @@ impl<'m, 'buf> PlanMem<'m, 'buf> {
             PlanMem::Arena(a) => PlanBuf::carve(a, capacity, on_oom),
         }
     }
+
+    /// Whether plan storage is heap-backed. The ink index engages only
+    /// then: on a caller-provided arena every byte is provisioned
+    /// against a published estimate, so the index would be an
+    /// unbounded-looking cost there — Scan serves identical answers
+    /// (the oracle pins that) for zero arena bytes.
+    fn is_heap(&self) -> bool {
+        match self {
+            #[cfg(feature = "alloc")]
+            PlanMem::Heap => true,
+            PlanMem::Arena(_) => false,
+        }
+    }
 }
 
 /// What kind of element a spatial-index entry points at.
@@ -152,6 +165,19 @@ impl LabelPlan {
     /// Placement under the colored path's stricter semantics.
     pub(crate) fn placed_colored(&self) -> bool {
         self.placeable && !self.row_has_node
+    }
+
+    /// Does this label PAINT under the given options? The colored
+    /// row-veto applies only when color AND the legend are BOTH on —
+    /// the compositor's exact gate. Every consumer must go through
+    /// this one predicate: a divergent copy once made colored-without-
+    /// legend renders warn about labels they actually painted.
+    pub(crate) fn paints(&self, colored: bool, legend: bool) -> bool {
+        if colored && legend {
+            self.placed_colored()
+        } else {
+            self.placeable
+        }
     }
 }
 
@@ -377,6 +403,75 @@ impl<'buf> RenderPlan<'buf> {
         let mut labels: PlanBuf<'buf, LabelPlan> = mem.buf(labeled, oom())?;
         let mut legend: PlanBuf<'buf, usize> = mem.buf(labeled, oom())?;
         // Spans already claimed by earlier labels, per row.
+        // ── Edge-ink source (temp/11 §3.99/§3.101): on HEAP-backed
+        // plans past the work threshold, every painted run is
+        // collected once — via the same row-agnostic visitors the
+        // per-row wrappers filter — so each blocker query below
+        // touches a row slice and a column range instead of re-walking
+        // every edge's path per candidate. Caller-arena plans always
+        // Scan: identical answers (pinned by the oracle test), zero
+        // arena bytes — `estimate_render_arena_size` carries no index
+        // term at all.
+        let mut ink_h: PlanBuf<'buf, (usize, usize, usize, usize)>;
+        let mut ink_v: PlanBuf<'buf, (usize, usize, usize, usize)>;
+        let ink =
+            if mem.is_heap() && labeled.saturating_mul(view.edge_count()) >= LABEL_INDEX_MIN_WORK {
+                let mut ink_h_count = 0usize;
+                let mut ink_v_count = 0usize;
+                for i in 0..view.edge_count() {
+                    let e = view.edge(i);
+                    for_each_h_run_all(
+                        &e.path,
+                        e.from_x,
+                        e.from_y,
+                        e.to_x,
+                        e.to_y,
+                        e.flow_axis,
+                        &mut |_, _, _| ink_h_count += 1,
+                    );
+                    for_each_v_seg_all(
+                        &e.path,
+                        e.from_x,
+                        e.from_y,
+                        e.to_x,
+                        e.to_y,
+                        e.flow_axis,
+                        &mut |_, _, _| ink_v_count += 1,
+                    );
+                }
+                ink_h = mem.buf(ink_h_count, oom())?;
+                ink_v = mem.buf(ink_v_count, oom())?;
+                for i in 0..view.edge_count() {
+                    let e = view.edge(i);
+                    for_each_h_run_all(
+                        &e.path,
+                        e.from_x,
+                        e.from_y,
+                        e.to_x,
+                        e.to_y,
+                        e.flow_axis,
+                        &mut |r, a, b| ink_h.push((r, a, b, i)),
+                    );
+                    for_each_v_seg_all(
+                        &e.path,
+                        e.from_x,
+                        e.from_y,
+                        e.to_x,
+                        e.to_y,
+                        e.flow_axis,
+                        &mut |c, lo, hi| ink_v.push((c, lo, hi, i)),
+                    );
+                }
+                ink_h.as_mut_slice().sort_unstable();
+                ink_v.as_mut_slice().sort_unstable();
+                InkSource::Indexed(InkIndex {
+                    h: ink_h.as_slice(),
+                    v: ink_v.as_slice(),
+                })
+            } else {
+                InkSource::Scan
+            };
+
         let mut claimed: PlanBuf<'buf, (usize, usize, usize)> = mem.buf(labeled, oom())?;
         let mut slide_work = 0usize;
 
@@ -471,6 +566,7 @@ impl<'buf> RenderPlan<'buf> {
                                 && !own_fixed_cell_in_span(view, i, from_m, to_m, cy, cx, cx + len)
                                 && !slide_blocked(
                                     view,
+                                    &ink,
                                     i,
                                     cy,
                                     cx,
@@ -531,6 +627,7 @@ impl<'buf> RenderPlan<'buf> {
                                 && !own_fixed_cell_in_span(view, i, from_m, to_m, row, cx, cx + len)
                                 && !span_blocked(
                                     view,
+                                    &ink,
                                     i,
                                     row,
                                     cx,
@@ -562,6 +659,7 @@ impl<'buf> RenderPlan<'buf> {
                     && !own_fixed_cell_in_span(view, i, from_m, to_m, y, x, x + len)
                     && !span_blocked(
                         view,
+                        &ink,
                         i,
                         y,
                         x,
@@ -729,15 +827,14 @@ impl<'buf> RenderPlan<'buf> {
                 }
                 cands[..n_c].sort_unstable();
                 for &(_, _, _, _, _, cx, cy) in cands[..n_c].iter() {
-                    // Slide-tier work purse (the lane pass's pattern):
-                    // each vetted candidate scans every edge, so a
-                    // graph where most of its E labels fail would pay
-                    // E × 24 × E — measured at 93 ms for an 891-edge
-                    // all-labeled worst case. Beyond the budget the
-                    // tier reports "no host" and the ladder continues
-                    // to Host 3/legend — deterministic, and identical
-                    // across mirrors (candidate counts are symmetric)
-                    // and backends (pure counting).
+                    // Slide-tier work purse (the lane pass's pattern).
+                    // The charge is the SCAN-mode cost in both ink
+                    // modes — see LABEL_SLIDE_WORK_BUDGET for why a
+                    // mode-faithful charge would be wrong. Beyond the
+                    // budget the tier reports "no host" and the ladder
+                    // continues to Host 3/legend — deterministic, and
+                    // identical across mirrors (candidate counts are
+                    // symmetric) and backends (pure counting).
                     if slide_work >= LABEL_SLIDE_WORK_BUDGET {
                         break;
                     }
@@ -747,6 +844,7 @@ impl<'buf> RenderPlan<'buf> {
                     }
                     if !slide_blocked(
                         view,
+                        &ink,
                         i,
                         cy,
                         cx,
@@ -781,6 +879,7 @@ impl<'buf> RenderPlan<'buf> {
                     && !own_fixed_cell_in_span(view, i, from_m, to_m, fy, fx, fx + len)
                     && !span_blocked(
                         view,
+                        &ink,
                         i,
                         fy,
                         fx,
@@ -811,17 +910,32 @@ impl<'buf> RenderPlan<'buf> {
                 placeable,
                 row_has_node,
             };
-            // The legend lists exactly the labels that did NOT paint
-            // under the active gate (colored: row-veto; plain:
-            // geometric placement) — `legend_entries` reflects the
-            // options this plan was built with.
-            let painted = if use_color {
-                plan.placed_colored()
-            } else {
-                plan.placeable
-            };
+            // The legend lists exactly the labels that will NOT paint
+            // under the compositor's own gate (`LabelPlan::paints`) —
+            // `legend_entries` reflects the options this plan was
+            // built with.
+            let painted = plan.paints(use_color, options.legend);
             if options.legend && !painted {
                 legend.push(i);
+            }
+            // No inline position AND no legend → the label appears
+            // NOWHERE. Never silent under the `warnings` feature
+            // (emitted per plan build — plans are stateless). The
+            // label TEXT is deliberately not printed: labels are
+            // caller data and may hold secrets or control characters
+            // (terminal/log injection) — the edge is identified by
+            // index and endpoint ids instead.
+            #[cfg(feature = "warnings")]
+            if !painted && !options.legend {
+                crate::errors::emit_warning(
+                    crate::errors::WARN_LABEL_INVISIBLE,
+                    format_args!(
+                        "the label of edge {} ({} -> {}) has no inline position and \
+                         the legend is disabled - it will not be rendered. Enable \
+                         RenderOptions.legend to list it below the graph.",
+                        i, e.from_id, e.to_id
+                    ),
+                );
             }
             labels.push(plan);
         }
@@ -911,13 +1025,11 @@ impl<'buf> RenderPlan<'buf> {
         let mut hit_subgraph = HitResult::None;
         let mut hit_edge = HitResult::None;
         // Painted edge labels belong to their edge (they render above
-        // edge ink). The same placement gate the compositor uses.
+        // edge ink). `labels_colored_gate` stores the compositor's
+        // combined color&&legend gate, which `paints` collapses — so
+        // passing it as both arms is the exact same predicate.
         for label in self.labels.as_slice() {
-            let placed = if self.labels_colored_gate {
-                label.placed_colored()
-            } else {
-                label.placeable
-            };
+            let placed = label.paints(self.labels_colored_gate, self.labels_colored_gate);
             if placed && y == label.y && x >= label.x && x < label.x + label.len {
                 return HitResult::Edge(label.edge_index);
             }
@@ -1176,6 +1288,10 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
         let ed = view.edge(i);
         run_capacity += count_h_runs(&ed.path, ed.from_x, ed.to_x, ed.flow_axis);
     }
+    // Deliberately NO ink-index term: this estimator serves the
+    // caller-arena surface, where the index never engages
+    // (`PlanMem::is_heap` gates it) — arena estimates are
+    // byte-identical to pre-index releases.
     let bands = 2usize
         .saturating_mul(height.div_ceil(cap))
         .saturating_add(2);
@@ -1245,10 +1361,124 @@ fn count_h_runs(
 
 // ── Blocker geometry (mirrors the painter's row formulas) ────────────────
 //
-// Deliberate bound: placement checks every label span against every
-// blocker — O(labels × (edges + subgraphs)) worst case (quadratic when
-// most edges are labeled). Fine at realistic label counts; if profiling
-// ever shows otherwise, bucket blockers by row before this pass.
+// Blocker queries are served by an [`InkSource`]: small plans walk the
+// geometry visitors per query; past [`LABEL_INDEX_MIN_WORK`] the same
+// geometry is collected once into a sorted per-plan index with
+// identical answers — pinned by the indexed-vs-scanned oracle test in
+// the parity suite.
+
+/// Every painted edge-ink run, collected once per plan build via the
+/// same row-agnostic visitors the per-row wrappers filter — so each
+/// blocker query touches its row slice and column range instead of
+/// re-walking every edge's path (the temp/11 §3.98 deferred structural
+/// fix). `h` is sorted by `(row, x0)`, `v` by column; owners tag every
+/// run so the per-rule own-ink exemptions still resolve. Answers are
+/// cell-identical to the visitor walks by construction.
+pub(super) struct InkIndex<'a> {
+    /// `(row, x0, x1)` inclusive horizontal runs + owner edge.
+    pub(super) h: &'a [(usize, usize, usize, usize)],
+    /// `(col, row_lo, row_hi)` inclusive interior vertical rows + owner.
+    pub(super) v: &'a [(usize, usize, usize, usize)],
+}
+
+impl<'a> InkIndex<'a> {
+    /// All horizontal runs on `row` (sorted by x0).
+    fn h_at_row(&self, row: usize) -> &'a [(usize, usize, usize, usize)] {
+        let lo = self.h.partition_point(|t| t.0 < row);
+        let hi = lo + self.h[lo..].partition_point(|t| t.0 == row);
+        &self.h[lo..hi]
+    }
+
+    /// All vertical segments whose column lies in `[x0, x1)`.
+    fn v_in_cols(&self, x0: usize, x1: usize) -> &'a [(usize, usize, usize, usize)] {
+        let lo = self.v.partition_point(|t| t.0 < x0);
+        let hi = self.v.partition_point(|t| t.0 < x1);
+        &self.v[lo..hi]
+    }
+}
+
+/// Where blocker queries read edge ink from. `Indexed` is pure
+/// acceleration — same answers, arena-resident; `Scan` walks the
+/// per-row visitor wrappers per query — same answers, zero arena. The
+/// adaptive choice (see [`LABEL_INDEX_MIN_WORK`]) keeps embedded-scale
+/// plans free of index memory; correctness never depends on the arm.
+pub(super) enum InkSource<'a> {
+    Indexed(InkIndex<'a>),
+    Scan,
+}
+
+impl InkSource<'_> {
+    /// Every horizontal run on `row`, as `(x0, x1 inclusive, owner)`.
+    fn for_each_h_on_row<V: LayoutView>(
+        &self,
+        view: &V,
+        row: usize,
+        f: &mut dyn FnMut(usize, usize, usize),
+    ) {
+        match self {
+            InkSource::Indexed(ix) => {
+                for &(_, a, b, owner) in ix.h_at_row(row) {
+                    f(a, b, owner);
+                }
+            }
+            InkSource::Scan => {
+                for i in 0..view.edge_count() {
+                    let e = view.edge(i);
+                    for_each_h_run(
+                        &e.path,
+                        e.from_x,
+                        e.from_y,
+                        e.to_x,
+                        e.to_y,
+                        row,
+                        e.flow_axis,
+                        &mut |a, b| f(a, b, i),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every vertical segment crossing `row` whose column lies in
+    /// `[x0, x1)`, as `(col, owner)`.
+    fn for_each_v_at<V: LayoutView>(
+        &self,
+        view: &V,
+        row: usize,
+        x0: usize,
+        x1: usize,
+        f: &mut dyn FnMut(usize, usize),
+    ) {
+        match self {
+            InkSource::Indexed(ix) => {
+                for &(col, vlo, vhi, owner) in ix.v_in_cols(x0, x1) {
+                    if vlo <= row && row <= vhi {
+                        f(col, owner);
+                    }
+                }
+            }
+            InkSource::Scan => {
+                for i in 0..view.edge_count() {
+                    let e = view.edge(i);
+                    for_each_v_col(
+                        &e.path,
+                        e.from_x,
+                        e.from_y,
+                        e.to_x,
+                        e.to_y,
+                        row,
+                        e.flow_axis,
+                        &mut |c| {
+                            if c >= x0 && c < x1 {
+                                f(c, i);
+                            }
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
 
 /// Is any cell of `[x0, x1)` at `row` occupied by something a label may
 /// not overwrite? Allowed: empty cells and solid verticals. Blockers:
@@ -1259,6 +1489,7 @@ fn count_h_runs(
 /// (`pub(super)` for the parity pin on the marker rule.)
 pub(super) fn span_blocked<V: LayoutView>(
     view: &V,
+    ink: &InkSource<'_>,
     label_edge: usize,
     row: usize,
     x0: usize,
@@ -1316,115 +1547,53 @@ pub(super) fn span_blocked<V: LayoutView>(
         }
     }
 
-    for i in 0..view.edge_count() {
-        let e = view.edge(i);
-        match e.flow_axis {
-            crate::ir::FlowAxis::Y => {
-                if row < e.from_y.min(e.to_y) || row > e.from_y.max(e.to_y) {
-                    continue;
-                }
-                // Horizontal runs (with their corner endpoints) block.
-                let mut run_blocked = false;
-                for_each_h_run(
-                    &e.path,
-                    e.from_x,
-                    e.from_y,
-                    e.to_x,
-                    e.to_y,
-                    row,
-                    e.flow_axis,
-                    &mut |r0, r1| run_blocked |= r0 < x1 && r1 + 1 > x0,
-                );
-                if run_blocked {
-                    return true;
-                }
-                // Dashed verticals block ('┊' is not '│'); solid verticals are
-                // allowed — including other edges' (legacy checks only the char).
-                if i != label_edge && e.reversed {
-                    let mut col_blocked = false;
-                    for_each_v_col(
-                        &e.path,
-                        e.from_x,
-                        e.from_y,
-                        e.to_x,
-                        e.to_y,
-                        row,
-                        e.flow_axis,
-                        &mut |c| col_blocked |= c >= x0 && c < x1,
-                    );
-                    if col_blocked {
-                        return true;
-                    }
-                }
-            }
-            crate::ir::FlowAxis::X => {
-                // The role mirror of the Y rule. Other edges' cross
-                // ink (the vertical bend runs) blocks; their flow
-                // trunks are replaceable unless dashed. The label
-                // edge's OWN ink — cross and trunk alike — never
-                // blocks its own label: that is what lets D9's
-                // vertical host sit on the line it annotates, exactly
-                // as a Y label sits on its own flow segment.
-                let (lo, hi) = edge_row_span(&e.path, e.from_y, e.to_y, e.flow_axis);
-                if row < lo || row > hi {
-                    continue;
-                }
-                // The label edge's OWN cross ink never blocks its own
-                // label — the exact mirror of the Y rule, where a
-                // label may replace its own flow cells. This is what
-                // makes D9's vertical host reachable.
-                if i != label_edge {
-                    let mut col_blocked = false;
-                    for_each_v_col(
-                        &e.path,
-                        e.from_x,
-                        e.from_y,
-                        e.to_x,
-                        e.to_y,
-                        row,
-                        e.flow_axis,
-                        &mut |c| col_blocked |= c >= x0 && c < x1,
-                    );
-                    if col_blocked {
-                        return true;
-                    }
-                }
-                if i != label_edge && e.reversed {
-                    let mut run_blocked = false;
-                    for_each_h_run(
-                        &e.path,
-                        e.from_x,
-                        e.from_y,
-                        e.to_x,
-                        e.to_y,
-                        row,
-                        e.flow_axis,
-                        &mut |r0, r1| run_blocked |= r0 < x1 && r1 + 1 > x0,
-                    );
-                    if run_blocked {
-                        return true;
-                    }
-                }
-            }
+    // Edge ink, from whichever source engaged — rule-for-rule the
+    // legacy per-edge visitor walk. Y-flow ink: horizontal runs block
+    // (the label edge's OWN included — legacy labels replace only
+    // vertical strokes); verticals block only when foreign AND dashed
+    // ('┊' is not '│'). X-flow ink is the role mirror: cross verticals
+    // block when foreign (any weight — the label edge's own cross ink
+    // never blocks its own label, which is what makes D9's vertical
+    // host reachable); trunks block only when foreign AND dashed.
+    let mut blocked = false;
+    ink.for_each_h_on_row(view, row, &mut |hx0, hx1, owner| {
+        if !blocked && hx0 < x1 && hx1 + 1 > x0 {
+            let oe = view.edge(owner);
+            blocked |= match oe.flow_axis {
+                crate::ir::FlowAxis::Y => true,
+                crate::ir::FlowAxis::X => owner != label_edge && oe.reversed,
+            };
         }
+    });
+    if blocked {
+        return true;
     }
-    false
+    ink.for_each_v_at(view, row, x0, x1, &mut |_, owner| {
+        if !blocked {
+            let oe = view.edge(owner);
+            blocked |= match oe.flow_axis {
+                crate::ir::FlowAxis::Y => owner != label_edge && oe.reversed,
+                crate::ir::FlowAxis::X => owner != label_edge,
+            };
+        }
+    });
+    blocked
 }
 
-/// Visit every horizontal run `[x0, x1]` (inclusive) painted by this
-/// path at `row` — the same formulas the painter uses. Visitor-based so
-/// arbitrarily long multi-segment paths lose nothing to fixed caps.
-fn for_each_h_run(
+/// Visit EVERY horizontal run `(row, x0, x1)` (x-inclusive) this path
+/// paints, on every row — the row-agnostic authority behind
+/// [`for_each_h_run`] and the ink index. One body holds the painter's
+/// formulas; the per-row API filters this.
+pub(super) fn for_each_h_run_all(
     path: &PathRef<'_>,
     from_x: usize,
     from_y: usize,
     to_x: usize,
     to_y: usize,
-    row: usize,
     axis: crate::ir::FlowAxis,
-    f: &mut dyn FnMut(usize, usize),
+    f: &mut dyn FnMut(usize, usize, usize),
 ) {
-    let mut push = |x0: usize, x1: usize| f(x0.min(x1), x0.max(x1));
+    let mut push = |row: usize, x0: usize, x1: usize| f(row, x0.min(x1), x0.max(x1));
     // X flows: horizontal ink is the TRUNK segments (node faces
     // trimmed, arrow cells included, bend corners included) — the
     // exact mirror of the compositor's `paint_edge_x`.
@@ -1434,17 +1603,13 @@ fn for_each_h_run(
         let back = |x: usize| (x as isize - step) as usize;
         match *path {
             PathRef::Direct | PathRef::Spline { .. } => {
-                if row == from_y && from_x.abs_diff(to_x) > 1 {
-                    push(trim(from_x), back(to_x));
+                if from_x.abs_diff(to_x) > 1 {
+                    push(from_y, trim(from_x), back(to_x));
                 }
             }
             PathRef::Corner { bend_at: bend_x } => {
-                if row == from_y {
-                    push(trim(from_x), bend_x);
-                }
-                if row == to_y {
-                    push(bend_x, back(to_x));
-                }
+                push(from_y, trim(from_x), bend_x);
+                push(to_y, bend_x, back(to_x));
             }
             PathRef::SideChannel {
                 channel_at,
@@ -1453,15 +1618,9 @@ fn for_each_h_run(
             } => {
                 // Three flow segments: source → channel entry, along
                 // the far channel row, channel exit → target.
-                if row == from_y {
-                    push(trim(from_x), span_start);
-                }
-                if row == channel_at {
-                    push(span_start, span_end);
-                }
-                if row == to_y {
-                    push(span_end, back(to_x));
-                }
+                push(from_y, trim(from_x), span_start);
+                push(channel_at, span_start, span_end);
+                push(to_y, span_end, back(to_x));
             }
             PathRef::MultiSegment {
                 waypoints,
@@ -1478,27 +1637,23 @@ fn for_each_h_run(
                     };
                     let last = i == waypoints.len();
                     if py == ny {
-                        if row == py && px != nx {
+                        if px != nx {
                             let a = if first { trim(px) } else { px };
                             let b = if last { back(nx) } else { nx };
-                            push(a, b);
+                            push(py, a, b);
                         }
                     } else {
                         let bend_x = (px as isize
                             + step * (1 + if first { start_offset as isize } else { 0 }))
                             as usize;
-                        if row == py {
-                            let a = if first && start_offset > 0 {
-                                trim(px)
-                            } else {
-                                px
-                            };
-                            push(a, bend_x);
-                        }
-                        if row == ny {
-                            let b = if last { back(nx) } else { nx };
-                            push(bend_x, b);
-                        }
+                        let a = if first && start_offset > 0 {
+                            trim(px)
+                        } else {
+                            px
+                        };
+                        push(py, a, bend_x);
+                        let b = if last { back(nx) } else { nx };
+                        push(ny, bend_x, b);
                     }
                     px = nx;
                     py = ny;
@@ -1511,21 +1666,15 @@ fn for_each_h_run(
     match *path {
         PathRef::Direct | PathRef::Spline { .. } => {}
         PathRef::Corner { bend_at } => {
-            if row == bend_at {
-                push(from_x, to_x);
-            }
+            push(bend_at, from_x, to_x);
         }
         PathRef::SideChannel {
             channel_at,
             span_start,
             span_end,
         } => {
-            if row == span_start {
-                push(from_x, channel_at);
-            }
-            if row == span_end {
-                push(to_x, channel_at);
-            }
+            push(span_start, from_x, channel_at);
+            push(span_end, to_x, channel_at);
         }
         PathRef::MultiSegment {
             waypoints,
@@ -1545,11 +1694,9 @@ fn for_each_h_run(
                 if px != nx && py != ny {
                     let step = 1 + if first { start_offset as isize } else { 0 };
                     let corner_y = (py as isize + dir * step) as usize;
-                    if row == corner_y {
-                        push(px, nx);
-                    }
-                } else if py == ny && px != nx && row == py {
-                    push(px, nx);
+                    push(corner_y, px, nx);
+                } else if py == ny && px != nx {
+                    push(py, px, nx);
                 }
                 px = nx;
                 py = ny;
@@ -1557,6 +1704,27 @@ fn for_each_h_run(
             }
         }
     }
+}
+
+/// Visit every horizontal run `[x0, x1]` (inclusive) painted by this
+/// path at `row` — the same formulas the painter uses. Visitor-based so
+/// arbitrarily long multi-segment paths lose nothing to fixed caps.
+/// Filters [`for_each_h_run_all`], the single geometry authority.
+fn for_each_h_run(
+    path: &PathRef<'_>,
+    from_x: usize,
+    from_y: usize,
+    to_x: usize,
+    to_y: usize,
+    row: usize,
+    axis: crate::ir::FlowAxis,
+    f: &mut dyn FnMut(usize, usize),
+) {
+    for_each_h_run_all(path, from_x, from_y, to_x, to_y, axis, &mut |r, a, b| {
+        if r == row {
+            f(a, b);
+        }
+    });
 }
 
 /// How many candidate rows D9's cross host tries per segment, walking
@@ -1772,15 +1940,31 @@ pub(super) fn own_fixed_cell_in_span<V: LayoutView>(
         || own_marker_in_span(view, edge, from_m, to_m, row, x0, x1)
 }
 
-/// Work budget for the slide tier across ONE plan build, in weighted
-/// edge-visits (each vetted candidate costs ~`edge_count`): the same
+/// Work budget for the slide tier across ONE plan build — the same
 /// graceful-degradation pattern as `LANE_WORK_BUDGET` in the lane
-/// pass. 4M edge-visits covers every realistic labeled graph (the
-/// whole corpus spends <60k); a pathological all-labeled worst case
-/// (~900 edges, ~900 mostly-unplaceable labels) would otherwise spend
-/// ~19M edge-visits ≈ 93 ms per plan build. Labels past the budget
-/// skip the slide tier — float and legend still apply.
+/// pass. Each vetted candidate is charged `edge_count`, the cost of a
+/// SCANNED blocker query, in BOTH ink-source modes — deliberately: the
+/// index must be pure acceleration, so whether it engaged may never
+/// change which labels place; a mode-faithful charge would flip
+/// placements right at the adaptive threshold. The purse is therefore
+/// a mode-independent cap on candidate volume (4M edge-visit
+/// equivalents — the whole corpus spends <60k; an all-labeled
+/// ~900-edge worst case is clipped at ~4.7k of its ~21k candidates),
+/// with indexed queries costing less than they are charged. Labels
+/// past the budget skip the slide tier — float and legend still apply.
 const LABEL_SLIDE_WORK_BUDGET: usize = 1 << 22;
+
+/// Work threshold for the ink index, which engages only on HEAP-backed
+/// plans (`PlanMem::is_heap`) with at least this `labeled × edges`
+/// product. Caller-arena plans ALWAYS scan: their every byte is
+/// provisioned against a published estimate, and entry count scales
+/// with routed segments — a workload heuristic alone bounds no memory
+/// (review round 4). The choice is output-invisible (the oracle pins
+/// both arms identical), so the arena path trades only CPU: worst
+/// cases resemble the pre-index ~93 ms all-labeled ~900-edge plan,
+/// while the same plan heap-side indexes at ~11 ms. One entry is 4
+/// `usize`s — 32 B on 64-bit hosts, 16 B on 32-bit.
+const LABEL_INDEX_MIN_WORK: usize = 4096;
 
 /// Rank of a tied cross-segment candidate ROW: prefer rows toward the
 /// segment's own SOURCE end. The x-derived `toward_flow` sign must
@@ -1977,8 +2161,9 @@ fn for_each_flow_host_segment(
 ///
 /// The label edge's OWN ink stays exempt — hosting on its own flow run
 /// is the point.
-fn slide_blocked<V: LayoutView>(
+pub(super) fn slide_blocked<V: LayoutView>(
     view: &V,
+    ink: &InkSource<'_>,
     label_edge: usize,
     row: usize,
     x0: usize,
@@ -1987,7 +2172,7 @@ fn slide_blocked<V: LayoutView>(
     show_dummies: bool,
     sg_label_row: &dyn Fn(usize, &crate::render::engine::view::SubgraphRef<'_>) -> usize,
 ) -> bool {
-    if span_blocked(view, label_edge, row, x0, x1, claimed, show_dummies) {
+    if span_blocked(view, ink, label_edge, row, x0, x1, claimed, show_dummies) {
         return true;
     }
     // Node bodies, regardless of the label edge's flow axis. A dummy
@@ -2026,15 +2211,11 @@ fn slide_blocked<V: LayoutView>(
     // only way either edge's label can host at all. Foreign ink that
     // is NOT collinear with own ink still blocks: a slid label parked
     // on a stranger's line would read as annotating it.
-    let own = view.edge(label_edge);
-    // Precompute the label edge's own ink on this row ONCE — h-run
-    // intervals plus vertical crossing columns — so the foreign-ink
-    // loop below tests each overlapping cell against a tiny interval
-    // set instead of re-walking the own path's visitors per cell
-    // (which multiplied the worst case by label width × own path
-    // segments). Real paths intersect one row a handful of times; a
-    // pathological zigzag overflowing the buffer falls back to the
-    // exact per-cell walk, trading speed, never correctness.
+    //
+    // Own coverage reads the same ink source (owner == label_edge),
+    // gathered into a tiny interval set once per call; a pathological
+    // own path overflowing the buffer falls back to per-cell source
+    // stabs — slower, never wrong.
     const OWN_IVALS: usize = 8;
     let mut own_iv = [(0usize, 0usize); OWN_IVALS];
     let mut n_iv = 0usize;
@@ -2048,26 +2229,16 @@ fn slide_blocked<V: LayoutView>(
                 iv_overflow = true;
             }
         };
-        for_each_h_run(
-            &own.path,
-            own.from_x,
-            own.from_y,
-            own.to_x,
-            own.to_y,
-            row,
-            own.flow_axis,
-            &mut |r0, r1| push_iv(r0, r1 + 1),
-        );
-        for_each_v_col(
-            &own.path,
-            own.from_x,
-            own.from_y,
-            own.to_x,
-            own.to_y,
-            row,
-            own.flow_axis,
-            &mut |c| push_iv(c, c + 1),
-        );
+        ink.for_each_h_on_row(view, row, &mut |a, b, owner| {
+            if owner == label_edge {
+                push_iv(a, b + 1);
+            }
+        });
+        ink.for_each_v_at(view, row, x0, x1, &mut |col, owner| {
+            if owner == label_edge {
+                push_iv(col, col + 1);
+            }
+        });
     }
     let own_covers = |c: usize| -> bool {
         if own_iv[..n_iv].iter().any(|&(a, b)| a <= c && c < b) {
@@ -2077,74 +2248,36 @@ fn slide_blocked<V: LayoutView>(
             return false;
         }
         let mut cov = false;
-        for_each_h_run(
-            &own.path,
-            own.from_x,
-            own.from_y,
-            own.to_x,
-            own.to_y,
-            row,
-            own.flow_axis,
-            &mut |r0, r1| cov |= r0 <= c && c <= r1,
-        );
+        ink.for_each_h_on_row(view, row, &mut |a, b, o| {
+            cov |= o == label_edge && a <= c && c <= b;
+        });
         if !cov {
-            for_each_v_col(
-                &own.path,
-                own.from_x,
-                own.from_y,
-                own.to_x,
-                own.to_y,
-                row,
-                own.flow_axis,
-                &mut |oc| cov |= oc == c,
-            );
+            ink.for_each_v_at(view, row, c, c + 1, &mut |_, o| {
+                cov |= o == label_edge;
+            });
         }
         cov
     };
-    for i in 0..view.edge_count() {
-        if i == label_edge {
-            continue;
-        }
-        let e = view.edge(i);
-        let mut hit = false;
-        for_each_h_run(
-            &e.path,
-            e.from_x,
-            e.from_y,
-            e.to_x,
-            e.to_y,
-            row,
-            e.flow_axis,
-            &mut |r0, r1| {
-                if r0 < x1 && r1 + 1 > x0 {
-                    for c in r0.max(x0)..(r1 + 1).min(x1) {
-                        hit |= !own_covers(c);
-                    }
+    let mut blocked = false;
+    ink.for_each_h_on_row(view, row, &mut |a, b, owner| {
+        if !blocked && owner != label_edge && a < x1 && b + 1 > x0 {
+            for c in a.max(x0)..(b + 1).min(x1) {
+                if !own_covers(c) {
+                    blocked = true;
+                    break;
                 }
-            },
-        );
-        if hit {
-            return true;
+            }
         }
-        for_each_v_col(
-            &e.path,
-            e.from_x,
-            e.from_y,
-            e.to_x,
-            e.to_y,
-            row,
-            e.flow_axis,
-            &mut |c| {
-                if c >= x0 && c < x1 {
-                    hit |= !own_covers(c);
-                }
-            },
-        );
-        if hit {
-            return true;
-        }
+    });
+    if blocked {
+        return true;
     }
-    false
+    ink.for_each_v_at(view, row, x0, x1, &mut |col, owner| {
+        if !blocked && owner != label_edge && !own_covers(col) {
+            blocked = true;
+        }
+    });
+    blocked
 }
 
 /// Visit every CROSS (vertical) segment an X-flow path paints, as
@@ -2204,55 +2337,52 @@ fn for_each_x_cross_segment(
 
 /// Visit every vertical column this path paints at `row` (between, not
 /// touching, the endpoints' node rows). Visitor-based — no fixed cap.
-fn for_each_v_col(
+/// Visit EVERY vertical ink segment `(col, row_lo, row_hi)` this path
+/// paints, rows inclusive and INTERIOR-only (endpoint/corner cells
+/// belong to horizontal ink, exactly as the per-row test excluded them
+/// with its strictly-between rule). The painter's gap-fill cell on a
+/// MultiSegment waypoint row is a one-row segment. The row-agnostic
+/// authority behind [`for_each_v_col`] and the ink index.
+pub(super) fn for_each_v_seg_all(
     path: &PathRef<'_>,
     from_x: usize,
     from_y: usize,
     to_x: usize,
     to_y: usize,
-    row: usize,
     axis: crate::ir::FlowAxis,
-    f: &mut dyn FnMut(usize),
+    f: &mut dyn FnMut(usize, usize, usize),
 ) {
+    // The interior of [a, b] in either order: min+1 ..= max−1.
+    fn interior(f: &mut dyn FnMut(usize, usize, usize), col: usize, a: usize, b: usize) {
+        let (lo, hi) = (a.min(b) + 1, a.max(b).wrapping_sub(1));
+        if lo <= hi && a != b {
+            f(col, lo, hi);
+        }
+    }
     // X flows: vertical ink is the CROSS runs, strictly between the
     // trunk rows (corner cells belong to the trunk rows' horizontal
     // ink). One authority for that geometry — delegate.
     if matches!(axis, crate::ir::FlowAxis::X) {
         for_each_x_cross_segment(path, from_x, from_y, to_x, to_y, &mut |col, a, b| {
-            if row > a.min(b) && row < a.max(b) {
-                f(col);
-            }
+            interior(f, col, a, b);
         });
         return;
     }
-    let mut push = |c: usize| f(c);
-    // Order-free strictly-between test (works for either flow).
-    let betw = |a: usize, b: usize, r: usize| r > a.min(b) && r < a.max(b);
     match *path {
         PathRef::Direct | PathRef::Spline { .. } => {
-            if betw(from_y, to_y, row) {
-                push(from_x);
-            }
+            interior(f, from_x, from_y, to_y);
         }
         PathRef::Corner { bend_at } => {
-            if betw(from_y, bend_at, row) {
-                push(from_x);
-            }
-            if betw(bend_at, to_y, row) {
-                push(to_x);
-            }
+            interior(f, from_x, from_y, bend_at);
+            interior(f, to_x, bend_at, to_y);
         }
         PathRef::SideChannel {
             channel_at,
             span_start,
             span_end,
         } => {
-            if betw(span_start, span_end, row) {
-                push(channel_at);
-            }
-            if betw(span_end, to_y, row) {
-                push(to_x);
-            }
+            interior(f, channel_at, span_start, span_end);
+            interior(f, to_x, span_end, to_y);
         }
         PathRef::MultiSegment {
             waypoints,
@@ -2269,23 +2399,18 @@ fn for_each_v_col(
                     (to_x, to_y)
                 };
                 // Non-first segments carry a vertical on the waypoint
-                // row itself (the painter's gap fill).
-                if !first && row == py {
-                    push(px);
+                // row itself (the painter's gap fill) — a one-row
+                // segment.
+                if !first {
+                    f(px, py, py);
                 }
                 if px == nx {
-                    if betw(py, ny, row) {
-                        push(px);
-                    }
+                    interior(f, px, py, ny);
                 } else if py != ny {
                     let step = 1 + if first { start_offset as isize } else { 0 };
                     let corner_y = (py as isize + dir * step) as usize;
-                    if betw(py, corner_y, row) {
-                        push(px);
-                    }
-                    if betw(corner_y, ny, row) {
-                        push(nx);
-                    }
+                    interior(f, px, py, corner_y);
+                    interior(f, nx, corner_y, ny);
                 }
                 px = nx;
                 py = ny;
@@ -2293,6 +2418,31 @@ fn for_each_v_col(
             }
         }
     }
+}
+
+fn for_each_v_col(
+    path: &PathRef<'_>,
+    from_x: usize,
+    from_y: usize,
+    to_x: usize,
+    to_y: usize,
+    row: usize,
+    axis: crate::ir::FlowAxis,
+    f: &mut dyn FnMut(usize),
+) {
+    for_each_v_seg_all(
+        path,
+        from_x,
+        from_y,
+        to_x,
+        to_y,
+        axis,
+        &mut |col, lo, hi| {
+            if lo <= row && row <= hi {
+                f(col);
+            }
+        },
+    );
 }
 
 #[cfg(all(test, feature = "std"))]

@@ -50,7 +50,10 @@ pub struct RenderOptions {
     pub show_dummy_nodes: bool,
     /// Band height cap in rows (clamped to ≥ 1; see [`DEFAULT_BAND_ROWS`]).
     pub band_rows_cap: usize,
-    /// Append the skipped-label legend (colored path behavior).
+    /// Append the legend listing labels that found no inline position.
+    /// OFF by default (the colored preset turns it on): with it off,
+    /// an unplaced label appears NOWHERE in the output — silently,
+    /// unless the `warnings` feature is enabled (`W.Render.Label.026`).
     pub legend: bool,
     /// Edge color palette used by the default style (modulo assignment,
     /// legacy behavior). Ignored when `color_mode` is `None` or an edge
@@ -106,8 +109,10 @@ mod tests {
         let plain = RenderOptions::plain();
         let colored = RenderOptions::colored(Palette::Ansi);
         assert_eq!(plain.color_mode, ColorMode::None);
-        assert_eq!(plain.legend, colored.color_mode == ColorMode::None);
         assert_eq!(colored.color_mode, ColorMode::Ansi256);
+        // Legend: off for plain (unplaced labels then warn under the
+        // `warnings` feature), on for the colored preset (legacy).
+        assert!(!plain.legend);
         assert!(colored.legend);
 
         let mut o = RenderOptions::plain();
