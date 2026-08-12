@@ -5,6 +5,10 @@
   "folders": [],
   "excludeFolders": ["temp", "fuzz", "tests"],
   "excludeFiles": ["CHANGELOG.md", "SETUP.md"],
+  "previousVersions": [
+    { "tag": "v0.10.2" },
+    { "tag": "v0.9.1" }
+  ],
   "rules": [
     "Build graphs with Graph::new(), add_node(id, content), add_edge(from, to, Option<&str> label); then g.compute_layout() and ir.render_string(&RenderOptions::plain()).",
     "The 0.10 unified render engine supersedes the 0.9 render functions: render_scanline* names remain only as deprecated compatibility wrappers slated for removal in 0.11 — prefer render_string, render_with, or render_to_bytes, and consult docs/migrate-from-0.9.md for the mapping.",
@@ -12,6 +16,7 @@
     "All four rank directions: TopDown, BottomUp, LeftRight, RightLeft (parse from \"TB\"/\"BT\"/\"LR\"/\"RL\"). Heap Graph users call set_direction; direct arena/CSR users set LayoutConfig.direction. LeftRight and RightLeft are native sideways layouts, not transposes.",
     "RenderOptions presets: plain(), colored(palette), ascii(), ascii_colored(palette). The legend is OFF by default — edge labels that fit nowhere inline are dropped silently unless options.legend = true (or the opt-in warnings feature is enabled, which emits W.Render.Label.031).",
     "Node content is an impl NodeContent: plain &str for [label] nodes, BoxedNode for 3-row boxes, CustomNode for custom sizes and painters.",
-    "Cyclic input: the compute_layout() pipeline reverses back edges internally and renders them as dashed return lines; the legacy Graph::render() convenience instead prints a cycle banner."
+    "Cyclic input: the compute_layout() pipeline reverses back edges internally and renders them as dashed return lines; the legacy Graph::render() convenience instead prints a cycle banner.",
+    "The complete per-item API reference lives at https://docs.rs/ascii-dag — fetch it (or read the vendored crate source) for signatures and items not covered by these guides."
   ]
 }
