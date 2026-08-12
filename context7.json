@@ -1,0 +1,17 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "ascii-dag",
+  "description": "Zero-dependency graph layout engine that renders to text: DAGs and cyclic graphs (dashed back edges), clusters, four flow directions, colors. no_std + no-alloc capable, from servers to microcontrollers.",
+  "folders": [],
+  "excludeFolders": ["temp", "fuzz", "tests"],
+  "excludeFiles": ["CHANGELOG.md", "SETUP.md"],
+  "rules": [
+    "Build graphs with Graph::new(), add_node(id, content), add_edge(from, to, Option<&str> label); then g.compute_layout() and ir.render_string(&RenderOptions::plain()).",
+    "The 0.10 unified render engine supersedes the 0.9 render functions: render_scanline* names remain only as deprecated compatibility wrappers slated for removal in 0.11 — prefer render_string, render_with, or render_to_bytes, and consult docs/migrate-from-0.9.md for the mapping.",
+    "For no_std/embedded: an allocation-backed Graph converts via to_csr before compute_layout_arena; TRUE no-alloc construction builds directly with CsrGraphBuilder, then compute_layout_arena and render_to_bytes, with buffers sized by estimate_csr_arena_size / estimate_layout_arena_size / estimate_render_arena_size (see examples/lean_render.rs). Enable the arena feature plus at most one arena-idx-u8/u16/u32 override — with none selected, the index type defaults to u32.",
+    "All four rank directions: TopDown, BottomUp, LeftRight, RightLeft (parse from \"TB\"/\"BT\"/\"LR\"/\"RL\"). Heap Graph users call set_direction; direct arena/CSR users set LayoutConfig.direction. LeftRight and RightLeft are native sideways layouts, not transposes.",
+    "RenderOptions presets: plain(), colored(palette), ascii(), ascii_colored(palette). The legend is OFF by default — edge labels that fit nowhere inline are dropped silently unless options.legend = true (or the opt-in warnings feature is enabled, which emits W.Render.Label.031).",
+    "Node content is an impl NodeContent: plain &str for [label] nodes, BoxedNode for 3-row boxes, CustomNode for custom sizes and painters.",
+    "Cyclic input: the compute_layout() pipeline reverses back edges internally and renders them as dashed return lines; the legacy Graph::render() convenience instead prints a cycle banner."
+  ]
+}

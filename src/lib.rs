@@ -1,13 +1,14 @@
 //! # ascii-dag
 //!
-//! Modular ASCII DAG (Directed Acyclic Graph) renderer for error chains,
-//! build systems, and dependency visualization.
+//! Graph layout engine that renders to text — DAGs, and cyclic graphs
+//! via dashed back edges — for error chains, build systems, and
+//! dependency visualization.
 //!
 //! ## Features
 //!
-//! - **Tiny**: ~77KB WASM (minimal), ~41KB without generic features
-//! - **Fast**: Cached adjacency lists, O(1) lookups, zero-copy rendering
-//! - **no_std**: Works in embedded/WASM environments
+//! - **Small**: ~94 KB WASM no-alloc build (41 KB gzipped); see BENCHMARK.md
+//! - **Fast**: Cached adjacency lists, O(1) lookups, banded zero-copy rendering
+//! - **no_std + no-alloc**: the arena pipeline runs without a heap allocator
 //! - **Modular**: Each component can be used independently
 //! - **Safe**: Cycle detection built-in
 //!

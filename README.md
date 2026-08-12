@@ -6,8 +6,12 @@
 
 A DAG layout engine that renders to text: Sugiyama-style layered
 layout (cycle breaking, layering, crossing reduction, edge routing)
-with a terminal renderer. Zero dependencies. `no_std` ready — the
-arena pipeline runs without a heap allocator.
+with a terminal renderer. The layout pipeline accepts cyclic input —
+`compute_layout()` reverses back edges internally and renders them as
+dashed return lines, so state machines and feedback graphs draw as
+naturally as trees (the legacy `Graph::render()` keeps its
+cycle-banner behavior instead). Zero dependencies. `no_std` + no-alloc
+ready — the arena pipeline runs without a heap allocator.
 
 <img src="assets/hero_colored_heap.png" alt="the hero example rendered with colors and a legend" height="620"/>
 
