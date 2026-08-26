@@ -384,6 +384,17 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             &mut x_coords,
             node_spacing,
         );
+        // Last-resort overlap repair: none of the passes above moves a
+        // node with no edges, so compaction clamps can survive to here as
+        // overlapping cluster members. Layouts with neither a node
+        // overlap nor a leading-pad violation pass through unchanged.
+        // Runs BEFORE dummy clearance so waypoints are nudged off the
+        // final node positions.
+        let widened = crate::algorithms::sugiyama::subgraph::repair_level_overlaps::<A>(
+            dag,
+            &mut real_node_coords,
+            node_spacing,
+        );
         // Waypoints must never cross node text (crossing a border renders
         // as a junction and is acceptable; crossing a node is not).
         crate::algorithms::sugiyama::subgraph::nudge_dummies_off_nodes::<A>(
@@ -391,7 +402,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             &mut x_coords,
             &real_node_coords,
         );
-        (max_width + extra + pushed).saturating_sub(reclaimed)
+        (max_width + extra + pushed + widened).saturating_sub(reclaimed)
     } else {
         max_width
     };

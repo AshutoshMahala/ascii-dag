@@ -644,6 +644,19 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
 
         max_width = max_width.saturating_sub(reclaimed as Coord);
 
+        // Last-resort overlap repair (mirrors the heap backend): none of
+        // the passes above moves a node with no edges, so compaction
+        // clamps can survive to here as overlapping cluster members.
+        // Layouts with neither a node overlap nor a leading-pad
+        // violation pass through unchanged. Runs BEFORE dummy clearance
+        // so waypoints are nudged off the final node positions.
+        let widened = repair_level_overlaps_csr::<A>(
+            graph,
+            temps.real_coords,
+            node_spacing_usize,
+            temps.positions,
+        );
+        max_width = max_width.saturating_add(widened as Coord);
         // Waypoints must never cross node text (crossing a border renders
         // as a junction and is acceptable; crossing a node is not).
         nudge_dummies_off_nodes_csr::<A>(
@@ -2706,6 +2719,93 @@ fn project_sg_envelopes_csr<A: Axis>(
             sg_envelopes[si].1 = l + min_label_width;
         }
     }
+}
+
+/// Last-resort same-level overlap repair — CSR twin of
+/// `subgraph::repair_level_overlaps` (runs after every other x pass on
+/// real coordinates, before dummy clearance).
+///
+/// Sweep each level in x order: push a real node right when it overlaps
+/// its predecessor (restoring the pairwise gap rule for that pair), and
+/// lift a level's leftmost clustered node back to its leading pad. A
+/// layout with neither a node overlap nor a leading-pad violation
+/// passes through unchanged. No level-size cap: this pass is a
+/// correctness guarantee, not a cosmetic one, so every level is swept.
+/// One global `sort_unstable` by `(level, x, index)` over the
+/// node-count-sized `positions` scratch makes the whole pass
+/// `O(N log N)` — no per-level rescan of all nodes, no allocation.
+/// Returns how far the widest right edge grew.
+fn repair_level_overlaps_csr<A: Axis>(
+    graph: &CsrGraph<'_>,
+    real_coords: &mut [(usize, usize, usize, usize)], // (level, pos, x, width)
+    node_spacing: usize,
+    order_scratch: &mut [Idx],
+) -> usize {
+    let node_count = graph
+        .node_count()
+        .min(real_coords.len())
+        .min(order_scratch.len());
+    if node_count < 2 {
+        return 0;
+    }
+
+    let right_edge = |coords: &[(usize, usize, usize, usize)], n: usize| {
+        let mut m = 0usize;
+        for c in coords.iter().take(n) {
+            m = m.max(c.2 + c.3);
+        }
+        m
+    };
+    let before = right_edge(real_coords, node_count);
+
+    // One pass to fill, one sort: contiguous level runs, x order inside
+    // each run (ties by index — deterministic).
+    for (slot, i) in order_scratch[..node_count].iter_mut().zip(0..) {
+        *slot = i as Idx;
+    }
+    order_scratch[..node_count].sort_unstable_by_key(|&i| {
+        let (level, _, x, _) = real_coords[i as usize];
+        (level, x, i)
+    });
+
+    let mut run_start = 0usize;
+    while run_start < node_count {
+        let level = real_coords[order_scratch[run_start] as usize].0;
+        let mut run_end = run_start + 1;
+        while run_end < node_count && real_coords[order_scratch[run_end] as usize].0 == level {
+            run_end += 1;
+        }
+
+        // The saturation clamp can park a member below its cluster's
+        // leading pad, where the box border would overwrite it; lift the
+        // level's leftmost clustered node back to the pad first.
+        let first = order_scratch[run_start] as usize;
+        let first_sg = graph.node_subgraph(first);
+        if first_sg.is_some() {
+            let pad = leading_cross_pad_csr::<A>(graph, first_sg);
+            if real_coords[first].2 < pad {
+                real_coords[first].2 = pad;
+            }
+        }
+        for k in run_start + 1..run_end {
+            let prev = order_scratch[k - 1] as usize;
+            let ni = order_scratch[k] as usize;
+            let prev_end = real_coords[prev].2 + real_coords[prev].3;
+            if real_coords[ni].2 < prev_end {
+                let a = graph.node_subgraph(prev);
+                let b = graph.node_subgraph(ni);
+                let gap = if a != b && (a.is_some() || b.is_some()) {
+                    A::SG_GAP_CROSS
+                } else {
+                    node_spacing
+                };
+                real_coords[ni].2 = prev_end + gap;
+            }
+        }
+        run_start = run_end;
+    }
+
+    right_edge(real_coords, node_count).saturating_sub(before)
 }
 
 /// Compact root clusters and unaffiliated nodes leftward.

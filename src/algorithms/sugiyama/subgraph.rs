@@ -413,6 +413,80 @@ pub(crate) fn tighten_levels<A: Axis>(
     }
 }
 
+/// Last-resort same-level overlap repair (runs after every other x pass).
+///
+/// The compaction cascade clamps at the leading margin (or the
+/// `saturating_sub` floor) without revisiting the nodes it already placed
+/// to its right, and a node with no edges is skipped by every reclaim
+/// pass — so the compression can survive to here as literally
+/// overlapping real nodes. Sweep each level in x order: push a node
+/// right when it overlaps its predecessor (restoring the pairwise gap
+/// rule for that pair), and lift a level's leftmost clustered node back
+/// to its leading pad. A layout with neither a node overlap nor a
+/// leading-pad violation passes through unchanged. Returns how far the
+/// widest right edge grew.
+pub(crate) fn repair_level_overlaps<A: Axis>(
+    dag: &Graph<'_>,
+    real_node_coords: &mut [(usize, usize, usize, usize)], // (level, pos, x, width)
+    node_spacing: usize,
+) -> usize {
+    let n_nodes = real_node_coords.len();
+    if n_nodes < 2 {
+        return 0;
+    }
+
+    let node_sg: Vec<Option<usize>> = dag
+        .nodes
+        .iter()
+        .map(|&(nid, _)| dag.node_subgraph.get(&nid).copied())
+        .collect();
+
+    let max_level = real_node_coords.iter().map(|c| c.0).max().unwrap_or(0);
+    let mut levels: Vec<Vec<usize>> = vec![Vec::new(); max_level + 1];
+    for (ni, &(lvl, _, _, _)) in real_node_coords.iter().enumerate() {
+        levels[lvl].push(ni);
+    }
+
+    let right_edge = |coords: &[(usize, usize, usize, usize)]| {
+        coords.iter().map(|&(_, _, x, w)| x + w).max().unwrap_or(0)
+    };
+    let before = right_edge(real_node_coords);
+
+    for level_nodes in levels.iter_mut() {
+        if level_nodes.is_empty() {
+            continue;
+        }
+        level_nodes.sort_by_key(|&ni| (real_node_coords[ni].2, ni));
+        // The saturation clamp can also park a member below its cluster's
+        // leading pad, where the box border would overwrite it; lift the
+        // level's leftmost clustered node back to the pad first.
+        let first = level_nodes[0];
+        if node_sg[first].is_some() {
+            let pad = leading_cross_pad::<A>(dag, node_sg[first]);
+            if real_node_coords[first].2 < pad {
+                real_node_coords[first].2 = pad;
+            }
+        }
+        for k in 1..level_nodes.len() {
+            let prev = level_nodes[k - 1];
+            let ni = level_nodes[k];
+            let prev_end = real_node_coords[prev].2 + real_node_coords[prev].3;
+            if real_node_coords[ni].2 < prev_end {
+                let gap = if node_sg[prev] != node_sg[ni]
+                    && (node_sg[prev].is_some() || node_sg[ni].is_some())
+                {
+                    A::SG_GAP_CROSS
+                } else {
+                    node_spacing
+                };
+                real_node_coords[ni].2 = prev_end + gap;
+            }
+        }
+    }
+
+    right_edge(real_node_coords).saturating_sub(before)
+}
+
 /// Push unaffiliated nodes clear of subgraph bounding-box envelopes
 /// (cluster-width feedback).
 ///

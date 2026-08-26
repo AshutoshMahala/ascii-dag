@@ -3507,7 +3507,95 @@ mod quality {
         v.push(("tier4_ent", tier4_enterprise()));
         v.push(("tier5_mega", tier5_megacorp()));
         v.push(("label_stress", label_stress()));
+        v.push(("disc_eq", disc_equal_width()));
+        v.push(("disc_mixed", disc_mixed_width()));
         v
+    }
+
+    /// R0 (0.10.3): disconnected cluster members — no edges at all, so
+    /// every connected-neighbor pass skips them and compaction's clamp
+    /// artifacts survive unless repaired. Equal widths are the minimal
+    /// overlap trigger.
+    fn disc_equal_width() -> Graph<'static> {
+        let mut g = Graph::new();
+        g.add_node(1usize, "x");
+        g.add_node(2usize, "x");
+        g.add_node(3usize, "x");
+        let sg = g.add_subgraph("Pool");
+        g.put_nodes(&[1, 2, 3]).inside(sg).unwrap();
+        g
+    }
+
+    /// R0 (0.10.3): the mixed-width variant of [`disc_equal_width`].
+    fn disc_mixed_width() -> Graph<'static> {
+        let mut g = Graph::new();
+        g.add_node(1usize, "xxx");
+        g.add_node(2usize, "xxxxxxxxxxxxxxxxxxx");
+        g.add_node(3usize, "xxx");
+        g.add_node(4usize, "x");
+        let sg = g.add_subgraph("Pool");
+        g.put_nodes(&[1, 2, 3, 4]).inside(sg).unwrap();
+        g
+    }
+
+    /// R0 (0.10.3): no two real nodes may ever overlap — any fixture,
+    /// any direction, either backend. `repair_level_overlaps` (and its
+    /// CSR twin) is the enforcement; this is the corpus-wide gate that
+    /// keeps it honest, including on the disconnected-cluster fixtures
+    /// no other pass can repair.
+    #[test]
+    fn corpus_nodes_never_overlap_any_direction_both_backends() {
+        let assert_no_overlap =
+            |name: &str, backend: &str, dir: Direction, rects: &[(usize, usize, usize, usize)]| {
+                for i in 0..rects.len() {
+                    for j in i + 1..rects.len() {
+                        let (ax, ay, aw, ah) = rects[i];
+                        let (bx, by, bw, bh) = rects[j];
+                        assert!(
+                            !(ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah),
+                            "{name} {backend} {dir:?}: node rect {i} ({ax},{ay} {aw}x{ah}) \
+                         overlaps node rect {j} ({bx},{by} {bw}x{bh})"
+                        );
+                    }
+                }
+            };
+        for (name, g) in mirror_corpus() {
+            for dir in [
+                Direction::TopDown,
+                Direction::BottomUp,
+                Direction::LeftRight,
+                Direction::RightLeft,
+            ] {
+                let mut cfg = LayoutConfig::standard();
+                cfg.direction = dir;
+
+                let heap_ir = g.compute_layout_with_config(&cfg);
+                let rects: Vec<(usize, usize, usize, usize)> = heap_ir
+                    .nodes()
+                    .iter()
+                    .map(|n| (n.x, n.y, n.width, n.height))
+                    .collect();
+                assert_no_overlap(name, "heap", dir, &rects);
+
+                let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+                let mut csr_arena = Arena::new(&mut csr_buf);
+                let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+                let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+                let mut temp_buf = vec![0u8; size];
+                let mut out_buf = vec![0u8; size];
+                let mut temp_arena = Arena::new(&mut temp_buf);
+                let mut out_arena = Arena::new(&mut out_buf);
+                let ir = csr
+                    .compute_layout_arena(&cfg, &mut temp_arena, &mut out_arena)
+                    .expect("CSR layout");
+                let rects: Vec<(usize, usize, usize, usize)> = ir
+                    .nodes()
+                    .iter()
+                    .map(|n| (n.x, n.y, n.width, n.height))
+                    .collect();
+                assert_no_overlap(name, "csr", dir, &rects);
+            }
+        }
     }
 
     /// temp/11 P0: the label-placement stress fixture. The rest of the
@@ -3852,6 +3940,8 @@ mod quality {
             ("tier4_ent", 4, 8),
             ("tier5_mega", 14, 12),
             ("label_stress", 4, 0),
+            ("disc_eq", 0, 0),
+            ("disc_mixed", 0, 0),
         ];
         for (name, g) in mirror_corpus() {
             let &(_, td_pin, lr_pin) = pins
@@ -3994,6 +4084,8 @@ mod quality {
             ("tier4_ent", 0, 0, 0, 0),
             ("tier5_mega", 0, 0, 0, 0),
             ("label_stress", 12, 7, 12, 6),
+            ("disc_eq", 0, 0, 0, 0),
+            ("disc_mixed", 0, 0, 0, 0),
         ];
         for (name, g) in mirror_corpus() {
             let &(_, td_p, lr_p, td_c, lr_c) = pins

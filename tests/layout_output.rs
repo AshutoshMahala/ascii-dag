@@ -1066,3 +1066,283 @@ fn big_cycle_past_lane_cap_fits_exactly_estimated_arena() {
         .count();
     assert_eq!(dummies, N - 2, "every broken-cycle waypoint emitted");
 }
+
+// ── R0: cluster compaction must never overlap nodes ──────────────────────
+
+/// Disconnected cluster members. No edges means every repair pass that
+/// targets connected neighbors skips these nodes, so whatever
+/// `compact_subgraphs` leaves behind is final. Its leftward cascade
+/// clamps a node at the leading margin (or the `saturating_sub` floor)
+/// without re-checking the gaps of the already-placed nodes to its
+/// right; over the compaction rounds the corrupted gaps accumulate
+/// until members overlap.
+fn disconnected_cluster_fixtures() -> Vec<(&'static str, Graph<'static>)> {
+    // Mixed widths (5 / 21 / 5 / 3): the R0 headline shape.
+    let mut mixed = Graph::new();
+    mixed.add_node(1usize, "xxx");
+    mixed.add_node(2usize, "xxxxxxxxxxxxxxxxxxx");
+    mixed.add_node(3usize, "xxx");
+    mixed.add_node(4usize, "x");
+    let sg = mixed.add_subgraph("Pool");
+    mixed.put_nodes(&[1, 2, 3, 4]).inside(sg).unwrap();
+
+    // Equal widths: the minimal failing shape (3 one-char nodes).
+    let mut equal = Graph::new();
+    equal.add_node(1usize, "x");
+    equal.add_node(2usize, "x");
+    equal.add_node(3usize, "x");
+    let sg = equal.add_subgraph("Pool");
+    equal.put_nodes(&[1, 2, 3]).inside(sg).unwrap();
+
+    vec![("mixed-width", mixed), ("equal-width", equal)]
+}
+
+/// Assert that no two real-node rectangles in the IR intersect.
+fn assert_no_node_overlap(nodes: &[(usize, usize, usize, usize)], context: &str) {
+    for (i, &(ax, ay, aw, ah)) in nodes.iter().enumerate() {
+        for (j, &(bx, by, bw, bh)) in nodes.iter().enumerate().skip(i + 1) {
+            let overlap = ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah;
+            assert!(
+                !overlap,
+                "{context}: node rect {i} ({ax},{ay} {aw}x{ah}) overlaps \
+                 node rect {j} ({bx},{by} {bw}x{bh})"
+            );
+        }
+    }
+}
+
+fn all_directions() -> [ascii_dag::Direction; 4] {
+    use ascii_dag::Direction::*;
+    [TopDown, BottomUp, LeftRight, RightLeft]
+}
+
+#[test]
+fn disconnected_mixed_width_cluster_never_overlaps_heap() {
+    for (name, g) in disconnected_cluster_fixtures() {
+        for direction in all_directions() {
+            let mut config = LayoutConfig::standard();
+            config.direction = direction;
+            let ir = g.compute_layout_with_config(&config);
+            let rects: Vec<_> = ir
+                .nodes()
+                .iter()
+                .map(|n| (n.x, n.y, n.width, n.height))
+                .collect();
+            assert_no_node_overlap(&rects, &format!("heap {name} {direction:?}"));
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "arena")]
+fn disconnected_mixed_width_cluster_never_overlaps_csr() {
+    use ascii_dag::graph::arena::Arena;
+
+    for (name, g) in disconnected_cluster_fixtures() {
+        for direction in all_directions() {
+            let mut config = LayoutConfig::standard();
+            config.direction = direction;
+
+            let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+            let mut csr_arena = Arena::new(&mut csr_buf);
+            let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+            let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+            let mut temp_buf = vec![0u8; size];
+            let mut out_buf = vec![0u8; size];
+            let mut temp_arena = Arena::new(&mut temp_buf);
+            let mut out_arena = Arena::new(&mut out_buf);
+            let ir = csr
+                .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+                .expect("CSR layout");
+            let rects: Vec<_> = ir
+                .nodes()
+                .iter()
+                .map(|n| (n.x, n.y, n.width, n.height))
+                .collect();
+            assert_no_node_overlap(&rects, &format!("csr {name} {direction:?}"));
+        }
+    }
+}
+
+/// R0: a level larger than any internal scratch bound must still be
+/// repaired — the CSR repair twin originally inherited a 1,024-node
+/// sort cap from `tighten_levels_csr` and silently skipped bigger
+/// levels, leaving overlapping nodes on a supported graph size.
+#[test]
+fn huge_disconnected_cluster_level_never_overlaps_heap() {
+    const N: usize = 1_025;
+    let mut g = Graph::new();
+    for i in 0..N {
+        g.add_node(i, "x");
+    }
+    let ids: Vec<usize> = (0..N).collect();
+    let sg = g.add_subgraph("Pool");
+    g.put_nodes(&ids).inside(sg).unwrap();
+
+    let config = LayoutConfig::standard();
+    let ir = g.compute_layout_with_config(&config);
+    let rects: Vec<_> = ir
+        .nodes()
+        .iter()
+        .map(|n| (n.x, n.y, n.width, n.height))
+        .collect();
+    assert_no_node_overlap(&rects, "heap 1025-node level");
+}
+
+/// CSR twin of the huge-level pin. Gated off `arena-idx-u8` like the
+/// other >255-node arena tests.
+#[test]
+#[cfg(all(feature = "arena", not(feature = "arena-idx-u8")))]
+fn huge_disconnected_cluster_level_never_overlaps_csr() {
+    use ascii_dag::graph::arena::Arena;
+
+    const N: usize = 1_025;
+    let mut g = Graph::new();
+    for i in 0..N {
+        g.add_node(i, "x");
+    }
+    let ids: Vec<usize> = (0..N).collect();
+    let sg = g.add_subgraph("Pool");
+    g.put_nodes(&ids).inside(sg).unwrap();
+
+    let config = LayoutConfig::standard();
+    let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+    let mut csr_arena = Arena::new(&mut csr_buf);
+    let csr = g.to_csr(&mut csr_arena).expect("CSR conversion");
+    let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+    let mut temp_buf = vec![0u8; size];
+    let mut out_buf = vec![0u8; size];
+    let mut temp_arena = Arena::new(&mut temp_buf);
+    let mut out_arena = Arena::new(&mut out_buf);
+    let ir = csr
+        .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
+        .expect("CSR layout");
+    let rects: Vec<_> = ir
+        .nodes()
+        .iter()
+        .map(|n| (n.x, n.y, n.width, n.height))
+        .collect();
+    assert_no_node_overlap(&rects, "csr 1025-node level");
+}
+
+/// R0: the retained overlap sweep — the 4,104 disconnected-cluster
+/// configurations the fix was validated against (454 overlapped before
+/// it). Families: (A) k disconnected mixed-width members in one
+/// cluster; (B) same plus one member dragged sideways by an external
+/// chain; (C) two sibling clusters with one cross-cluster edge. Heap
+/// backend (the CSR twin is pinned by the corpus gate in
+/// `render::engine::parity` and the fixtures above).
+#[test]
+fn disconnected_cluster_sweep_never_overlaps() {
+    const WIDTHS: [usize; 6] = [3, 5, 11, 21, 31, 41];
+    fn label(w: usize) -> &'static str {
+        match w {
+            3 => "x",
+            5 => "xxx",
+            11 => "xxxxxxxxx",
+            21 => "xxxxxxxxxxxxxxxxxxx",
+            31 => "xxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            41 => "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            _ => unreachable!(),
+        }
+    }
+    fn check(g: &Graph<'_>, desc: &str) {
+        for direction in [
+            ascii_dag::Direction::TopDown,
+            ascii_dag::Direction::BottomUp,
+            ascii_dag::Direction::LeftRight,
+            ascii_dag::Direction::RightLeft,
+        ] {
+            let mut config = LayoutConfig::standard();
+            config.direction = direction;
+            let ir = g.compute_layout_with_config(&config);
+            let rects: Vec<_> = ir
+                .nodes()
+                .iter()
+                .map(|n| (n.x, n.y, n.width, n.height))
+                .collect();
+            assert_no_node_overlap(&rects, &format!("{desc} {direction:?}"));
+        }
+    }
+
+    let mut tried = 0usize;
+    // Family A: pure disconnected clusters, 3 and 4 members.
+    for &w1 in &WIDTHS {
+        for &w2 in &WIDTHS {
+            for &w3 in &WIDTHS {
+                let mut g = Graph::new();
+                g.add_node(1usize, label(w1));
+                g.add_node(2usize, label(w2));
+                g.add_node(3usize, label(w3));
+                let sg = g.add_subgraph("S");
+                g.put_nodes(&[1, 2, 3]).inside(sg).unwrap();
+                check(&g, &format!("A3 {w1}/{w2}/{w3}"));
+                tried += 1;
+
+                for &w4 in &WIDTHS {
+                    let mut g = Graph::new();
+                    g.add_node(1usize, label(w1));
+                    g.add_node(2usize, label(w2));
+                    g.add_node(3usize, label(w3));
+                    g.add_node(4usize, label(w4));
+                    let sg = g.add_subgraph("S");
+                    g.put_nodes(&[1, 2, 3, 4]).inside(sg).unwrap();
+                    check(&g, &format!("A4 {w1}/{w2}/{w3}/{w4}"));
+                    tried += 1;
+                }
+            }
+        }
+    }
+    // Family B: one member dragged by an external two-node chain.
+    for &w1 in &WIDTHS {
+        for &w2 in &WIDTHS {
+            for &w3 in &WIDTHS {
+                for dragged in [1usize, 2, 3] {
+                    for parent in [true, false] {
+                        let mut g = Graph::new();
+                        g.add_node(1usize, label(w1));
+                        g.add_node(2usize, label(w2));
+                        g.add_node(3usize, label(w3));
+                        g.add_node(10usize, "E");
+                        g.add_node(11usize, "F");
+                        g.add_edge(10usize, 11usize, None);
+                        if parent {
+                            g.add_edge(11usize, dragged, None);
+                        } else {
+                            g.add_edge(dragged, 10usize, None);
+                        }
+                        let sg = g.add_subgraph("S");
+                        g.put_nodes(&[1, 2, 3]).inside(sg).unwrap();
+                        check(
+                            &g,
+                            &format!("B {w1}/{w2}/{w3} drag={dragged} parent={parent}"),
+                        );
+                        tried += 1;
+                    }
+                }
+            }
+        }
+    }
+    // Family C: two sibling clusters, one cross-cluster edge.
+    for &w1 in &WIDTHS {
+        for &w2 in &WIDTHS {
+            for &w3 in &WIDTHS {
+                for &w4 in &WIDTHS {
+                    let mut g = Graph::new();
+                    g.add_node(1usize, label(w1));
+                    g.add_node(2usize, label(w2));
+                    g.add_node(3usize, label(w3));
+                    g.add_node(4usize, label(w4));
+                    let s1 = g.add_subgraph("S1");
+                    let s2 = g.add_subgraph("S2");
+                    g.put_nodes(&[1, 2]).inside(s1).unwrap();
+                    g.put_nodes(&[3, 4]).inside(s2).unwrap();
+                    g.add_edge(1usize, 4usize, None);
+                    check(&g, &format!("C {w1}/{w2} | {w3}/{w4}"));
+                    tried += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(tried, 4_104, "sweep lost coverage — family sizes changed");
+}
