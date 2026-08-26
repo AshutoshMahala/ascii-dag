@@ -502,7 +502,7 @@ impl<'a> Graph<'a> {
     /// Set the full Sugiyama pipeline configuration.
     ///
     /// **Removed in 0.11** together with [`SugiyamaConfig`]: configure
-    /// layout through [`LayoutConfig`](crate::LayoutConfig) and
+    /// layout through [`LayoutConfig`] and
     /// [`compute_layout_with_config`](Self::compute_layout_with_config)
     /// instead. (No `#[deprecated]` attribute is added on the 0.10.x
     /// line, so `-D warnings` builds keep compiling.)
@@ -618,7 +618,7 @@ impl<'a> Graph<'a> {
     /// Builder method: apply a full [`SugiyamaConfig`] (chainable).
     ///
     /// **Removed in 0.11** together with [`SugiyamaConfig`]: configure
-    /// layout through [`LayoutConfig`](crate::LayoutConfig) and
+    /// layout through [`LayoutConfig`] and
     /// [`compute_layout_with_config`](Self::compute_layout_with_config)
     /// instead. (No `#[deprecated]` attribute is added on the 0.10.x
     /// line, so `-D warnings` builds keep compiling.)

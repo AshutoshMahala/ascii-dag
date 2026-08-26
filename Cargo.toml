@@ -1,6 +1,6 @@
 [package]
 name = "ascii-dag"
-version = "0.10.2"
+version = "0.10.3"
 edition = "2024"
 authors = ["Ash"]
 license = "MIT OR Apache-2.0"
@@ -70,4 +70,3 @@ panic = "abort"     # Remove panic unwinding (critical for WASM size)
 
 [profile.dev]
 # Note: panic = "abort" removed - set in downstream project for embedded targets
-
