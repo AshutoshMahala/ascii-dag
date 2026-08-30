@@ -167,6 +167,10 @@ pub use graph::{Direction, Graph, Subgraph};
 #[cfg(feature = "alloc")]
 pub use ir::{EdgePath, FlowAxis, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};
 pub use render::colors::Palette;
+pub use render::engine::{
+    ArmWeight, ArmWeights, CellKind, CellMarker, CellView, CompositionRequirements,
+    MarkerDirection, SceneComposer,
+};
 pub use render::engine::{BoxedNode, CustomNode, NodeContent, SimpleNode};
 pub use render::engine::{CellColor, HitResult};
 pub use render::engine::{

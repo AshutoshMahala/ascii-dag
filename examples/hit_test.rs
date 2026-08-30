@@ -22,9 +22,7 @@ mod csr;
 
 fn card(region: &mut NodeRegion<'_, '_>, ctx: NodePaintCtx<'_>) {
     region.write_str(1, 0, ctx.label);
-    for x in 0..region.width() {
-        region.set(x, 1, '─');
-    }
+    region.hrule(0, region.width() - 1, 1); // semantic: `-` under --ascii
     for (i, line) in ctx.payload.lines().enumerate() {
         region.write_str(1, 2 + i, line);
     }

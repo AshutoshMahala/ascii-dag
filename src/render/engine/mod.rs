@@ -24,21 +24,18 @@
 //! public introspection surface (dimensions, legend, hit-testing).
 
 pub(crate) mod api;
-#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
-mod composer_spike;
-#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
-mod ownership_spike;
-#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
-mod painter_spike;
 
 pub(crate) mod cell;
+pub(crate) mod cells;
 pub(crate) mod charset;
 pub(crate) mod color;
 pub(crate) mod compose;
+pub(crate) mod composer;
 pub(crate) mod config;
 pub(crate) mod emit;
 pub(crate) mod mem;
 pub(crate) mod node_content;
+pub(crate) mod owner;
 #[cfg(all(test, feature = "std", feature = "arena"))]
 mod parity;
 pub(crate) mod plan;
@@ -78,7 +75,7 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
     for (y0, rows) in plan.bands(cap) {
         let plane = colored.then(|| &mut colors_plane[..]);
         let mut canvas = compose::BandCanvas::new(&mut cells, plane, plan.width(), y0, rows);
-        compose::composite_band(view_ref, &plan, options, &mut canvas, &mut scratch);
+        compose::composite_band(view_ref, &plan, &mut canvas, &mut scratch);
         if colored {
             emit::emit_colored_band(&canvas, options.emit.charset, options.emit.color_mode, out)?;
         } else {
@@ -169,7 +166,7 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
         for (y0, rows) in plan.bands(cap) {
             let mut canvas =
                 compose::BandCanvas::new(cells, colors.as_deref_mut(), plan.width(), y0, rows);
-            compose::composite_band(view_ref, &plan, options, &mut canvas, &mut scratch);
+            compose::composite_band(view_ref, &plan, &mut canvas, &mut scratch);
             if colored {
                 emit::emit_colored_band(
                     &canvas,
@@ -224,8 +221,10 @@ pub(crate) fn estimate_render_output_size<V: view::LayoutView>(
     emit::estimate_output_size(view_ref, colored, options.emit.render_legend)
 }
 
+pub use cells::{ArmWeight, ArmWeights, CellKind, CellMarker, CellView, MarkerDirection};
 pub use charset::Charset;
 pub use color::{CellColor, ColorMode};
+pub use composer::{CompositionRequirements, SceneComposer};
 pub use config::{
     ComposeBudget, DEFAULT_BAND_ROWS, EmitOptions, LabelOverflow, LabelPlacementPolicy,
     LabelPolicy, PlanOptions, RenderOptions,

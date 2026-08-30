@@ -23,7 +23,6 @@
 
 use super::cell::{Cell, Dir, MarkerKind, Weight};
 use super::color::CellColor;
-use super::config::RenderOptions;
 use super::mem::{PlanBuf, SliceHeap};
 use super::plan::{LabelPlan, PlanElement, RenderPlan};
 use super::view::{LayoutView, PathRef};
@@ -258,11 +257,9 @@ impl<'a> PaintScratch<'a> {
     }
 
     /// The exact `carve` sequence as `(bytes, align)` pairs, in carve
-    /// order — the composer spike's workspace layout calculation
-    /// mirrors the real carves through this instead of guessing
-    /// alignment slop. Test-gated with the spikes; the real
-    /// `CompositionRequirements` computes its layout the same way.
-    #[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+    /// order — `CompositionRequirements` folds its workspace layout
+    /// through this instead of guessing alignment slop, so the sizing
+    /// and the carves can never drift apart.
     pub(crate) fn carve_layout(
         run_capacity: usize,
         subgraphs: usize,
@@ -527,7 +524,6 @@ fn flush_row(
 pub(crate) fn composite_band<V: LayoutView>(
     view: &V,
     plan: &RenderPlan<'_>,
-    options: &RenderOptions,
     canvas: &mut BandCanvas<'_>,
     scratch: &mut PaintScratch<'_>,
 ) {
@@ -583,7 +579,7 @@ pub(crate) fn composite_band<V: LayoutView>(
     }
     // Z3: nodes.
     for i in 0..scratch.nodes.len() {
-        paint_node(view, plan, scratch.nodes.as_slice()[i], options, canvas);
+        paint_node(view, plan, scratch.nodes.as_slice()[i], canvas);
     }
     // Z4: subgraph labels (always readable; colors untouched).
     for i in 0..scratch.sgs.len() {
@@ -1093,7 +1089,6 @@ fn paint_node<V: LayoutView>(
     view: &V,
     plan: &RenderPlan<'_>,
     index: usize,
-    options: &RenderOptions,
     canvas: &mut BandCanvas<'_>,
 ) {
     use super::node_content::NodeKindTag;
@@ -1149,7 +1144,6 @@ fn paint_node<V: LayoutView>(
                         label: n.label,
                         width: n.width,
                         height,
-                        charset: options.emit.charset,
                         visible_rows,
                         payload,
                     },
@@ -1268,6 +1262,7 @@ fn paint_edge_label<V: LayoutView>(
 mod tests {
     use super::*;
     use crate::graph::Graph;
+    use crate::render::engine::config::RenderOptions;
 
     /// Composite one band and return its emitted text.
     fn band_text<V: LayoutView>(
@@ -1280,7 +1275,7 @@ mod tests {
         rows: usize,
     ) -> alloc::string::String {
         let mut canvas = BandCanvas::new(cells, None, plan.width(), y0, rows);
-        composite_band(view, plan, options, &mut canvas, scratch);
+        composite_band(view, plan, &mut canvas, scratch);
         let mut out = alloc::string::String::new();
         super::super::emit::emit_plain_band(&canvas, options.emit.charset, &mut out).unwrap();
         out

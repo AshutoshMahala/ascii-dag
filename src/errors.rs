@@ -104,6 +104,7 @@ macro_rules! component {
 /// - `Plan`   — render-plan build issues (caller plan buffer/arena)
 /// - `Canvas` — band canvas issues (caller cell/color buffers)
 /// - `Sink`   — output sink issues (caller byte buffer)
+/// - `Workspace` — composer/planner workspace issues (caller chunk)
 /// - `Label`  — edge-label placement diagnostics
 macro_rules! primary {
     (Node) => {
@@ -135,6 +136,9 @@ macro_rules! primary {
     };
     (Canvas) => {
         "Canvas"
+    };
+    (Workspace) => {
+        "Workspace"
     };
     (Sink) => {
         "Sink"
@@ -229,6 +233,7 @@ macro_rules! wdp {
 //   Render.Plan.026    RenderPlanOom         (EXHAUSTED)
 //   Render.Canvas.026  RenderCanvasTooSmall  (EXHAUSTED)
 //   Render.Sink.026    RenderOutputTooSmall  (EXHAUSTED)
+//   Render.Workspace.026  RenderWorkspaceTooSmall (EXHAUSTED)
 
 /// Graph is empty — no nodes present.
 ///
@@ -290,6 +295,9 @@ pub const RENDER_CANVAS_TOO_SMALL: &str = wdp!(E.Render.Canvas.EXHAUSTED);
 ///
 /// `E.Render.Sink.026` — Sequence 026 = EXHAUSTED.
 pub const RENDER_OUTPUT_TOO_SMALL: &str = wdp!(E.Render.Sink.EXHAUSTED);
+
+/// The caller-provided composer/planner workspace is too small.
+pub const RENDER_WORKSPACE_TOO_SMALL: &str = wdp!(E.Render.Workspace.EXHAUSTED);
 
 // ── Warning codes (severity W — non-blocking, WDP Part 1) ───────────────
 //
@@ -372,6 +380,7 @@ pub(crate) fn emit_warning(code: &str, message: core::fmt::Arguments<'_>) {
 /// | `RenderPlanOom` | `E.Render.Plan.026` | EXHAUSTED — plan buffer |
 /// | `RenderCanvasTooSmall` | `E.Render.Canvas.026` | EXHAUSTED — band buffer |
 /// | `RenderOutputTooSmall` | `E.Render.Sink.026` | EXHAUSTED — output buffer |
+/// | `RenderWorkspaceTooSmall` | `E.Render.Workspace.026` | EXHAUSTED — composer workspace |
 ///
 /// # Examples
 ///
@@ -464,6 +473,20 @@ pub enum GraphError {
     ///
     /// **WDP:** `E.Render.Sink.026` (EXHAUSTED)
     RenderOutputTooSmall,
+
+    /// A fixed composer workspace cannot hold this scene's
+    /// composition. Units are BYTES — explicit in the field names so
+    /// they can never be confused with the cell counts of
+    /// [`RenderCanvasTooSmall`](Self::RenderCanvasTooSmall).
+    ///
+    /// **WDP:** `E.Render.Workspace.026` (EXHAUSTED)
+    RenderWorkspaceTooSmall {
+        /// Bytes the composition needs (`usize::MAX`: the requirement
+        /// itself overflowed — the scene cannot fit any workspace).
+        needed_bytes: usize,
+        /// Bytes the workspace holds.
+        got_bytes: usize,
+    },
 }
 
 impl GraphError {
@@ -488,6 +511,7 @@ impl GraphError {
             Self::RenderPlanOom => RENDER_PLAN_OOM,
             Self::RenderCanvasTooSmall { .. } => RENDER_CANVAS_TOO_SMALL,
             Self::RenderOutputTooSmall => RENDER_OUTPUT_TOO_SMALL,
+            Self::RenderWorkspaceTooSmall { .. } => RENDER_WORKSPACE_TOO_SMALL,
         }
     }
 
@@ -516,6 +540,10 @@ impl GraphError {
             }
             Self::RenderOutputTooSmall => {
                 "Provide a larger output buffer; plan width × height plus escapes when colored"
+            }
+            Self::RenderWorkspaceTooSmall { .. } => {
+                "Size the workspace with CompositionRequirements::workspace_bytes(); \
+                 lower band_rows_cap to shrink it"
             }
         }
     }
@@ -547,6 +575,16 @@ impl fmt::Display for GraphError {
                 write!(f, "band buffer holds {} cells, needs {}", got, needed)
             }
             Self::RenderOutputTooSmall => write!(f, "render output buffer exhausted"),
+            Self::RenderWorkspaceTooSmall {
+                needed_bytes,
+                got_bytes,
+            } => {
+                write!(
+                    f,
+                    "composer workspace holds {} bytes, needs {}",
+                    got_bytes, needed_bytes
+                )
+            }
         }
     }
 }

@@ -43,10 +43,6 @@ pub struct NodePaintCtx<'a> {
     pub width: usize,
     /// Declared height in rows (the region's vertical extent).
     pub height: usize,
-    /// The active output charset. Painter text passes through
-    /// untranslated, so charset-faithful painters should pick their
-    /// own glyphs (e.g. `-` vs `─`) from this.
-    pub charset: super::charset::Charset,
     /// The node-local, half-open row range visible in the band being
     /// composited. Rendering is banded: a tall node's painter runs
     /// once per band it spans, and writes outside this range are
@@ -130,20 +126,16 @@ impl<'r, 'a> NodeRegion<'r, 'a> {
     }
 }
 
-// ── Semantic painter primitives (0.11 prototype, test-gated) ─────────────
+// ── Semantic painter primitives ──────────────────────────────────────────
 //
 // Painters that draw structure through these emit SEMANTIC stroke and
 // marker cells, decoded per charset at emission like all engine ink —
-// so `NodePaintCtx.charset` becomes unnecessary and one painter is
-// byte-correct under every charset. Stroke cells also merge per-arm
-// with each other (a rule flush against a frame becomes a tee, a
-// crossing becomes a junction), which raw `char` writes can never do.
-// Test-only while the spike runs; the real 0.11 painter API promotes
-// these and removes `charset` from the context. See
-// temp/spike-4.0d-findings.md.
-#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+// one painter is byte-correct under every charset, with no charset in
+// sight. Stroke cells also merge per-arm with each other (a rule
+// flush against a frame becomes a tee, a crossing becomes a
+// junction), which raw `char` writes can never do.
 impl NodeRegion<'_, '_> {
-    fn spike_stroke(
+    fn stroke_at(
         &mut self,
         x: usize,
         y: usize,
@@ -190,7 +182,7 @@ impl NodeRegion<'_, '_> {
     /// another rule merges into the right tee or junction. Iteration
     /// is clipped to the region and the current band BEFORE looping;
     /// arm semantics follow the ORIGINAL endpoints.
-    pub(crate) fn spike_hrule(&mut self, x0: usize, x1: usize, y: usize) {
+    pub fn hrule(&mut self, x0: usize, x1: usize, y: usize) {
         use super::cell::Weight::{Light, None as No};
         let (row_lo, row_hi) = self.visible_rows();
         if x0 > x1 || y >= self.height || y < row_lo || y >= row_hi {
@@ -199,13 +191,13 @@ impl NodeRegion<'_, '_> {
         for x in x0..=x1.min(self.width - 1) {
             let left = if x > x0 || x0 == x1 { Light } else { No };
             let right = if x < x1 || x0 == x1 { Light } else { No };
-            self.spike_stroke(x, y, No, No, left, right);
+            self.stroke_at(x, y, No, No, left, right);
         }
     }
 
     /// Light vertical rule spanning `y0..=y1` at column `x` (end-arm
-    /// semantics and clipping as [`spike_hrule`](Self::spike_hrule)).
-    pub(crate) fn spike_vrule(&mut self, x: usize, y0: usize, y1: usize) {
+    /// semantics and clipping as [`hrule`](Self::hrule)).
+    pub fn vrule(&mut self, x: usize, y0: usize, y1: usize) {
         use super::cell::Weight::{Light, None as No};
         let (row_lo, row_hi) = self.visible_rows();
         if y0 > y1 || x >= self.width || row_lo == row_hi {
@@ -214,14 +206,14 @@ impl NodeRegion<'_, '_> {
         for y in y0.max(row_lo)..=y1.min(row_hi - 1) {
             let up = if y > y0 || y0 == y1 { Light } else { No };
             let down = if y < y1 || y0 == y1 { Light } else { No };
-            self.spike_stroke(x, y, up, down, No, No);
+            self.stroke_at(x, y, up, down, No, No);
         }
     }
 
     /// Light border around the full region (the boxed-node arm
     /// conventions), clipped to the current band like the boxed-node
     /// painter. No-op on regions too small for a border.
-    pub(crate) fn spike_frame(&mut self) {
+    pub fn frame(&mut self) {
         use super::cell::Weight::{Light as L, None as No};
         if self.width < 2 || self.height < 2 {
             return;
@@ -232,27 +224,29 @@ impl NodeRegion<'_, '_> {
         }
         let (r, b) = (self.width - 1, self.height - 1);
         if row_lo == 0 {
-            self.spike_stroke(0, 0, No, L, No, L);
-            self.spike_stroke(r, 0, No, L, L, No);
+            self.stroke_at(0, 0, No, L, No, L);
+            self.stroke_at(r, 0, No, L, L, No);
             for x in 1..r {
-                self.spike_stroke(x, 0, No, No, L, L);
+                self.stroke_at(x, 0, No, No, L, L);
             }
         }
         if b >= row_lo && b < row_hi {
-            self.spike_stroke(0, b, L, No, No, L);
-            self.spike_stroke(r, b, L, No, L, No);
+            self.stroke_at(0, b, L, No, No, L);
+            self.stroke_at(r, b, L, No, L, No);
             for x in 1..r {
-                self.spike_stroke(x, b, No, No, L, L);
+                self.stroke_at(x, b, No, No, L, L);
             }
         }
         for y in row_lo.max(1)..row_hi.min(b) {
-            self.spike_stroke(0, y, L, L, No, No);
-            self.spike_stroke(r, y, L, L, No, No);
+            self.stroke_at(0, y, L, L, No, No);
+            self.stroke_at(r, y, L, L, No, No);
         }
     }
 
-    /// Arrowhead marker pointing `dir`, in the node's ink color.
-    pub(crate) fn spike_arrow(&mut self, x: usize, y: usize, dir: super::cell::Dir) {
+    /// Arrowhead marker pointing `direction`, in the node's ink
+    /// color — a real marker cell, decoded per charset at emission
+    /// (`↓`/`v`, `→`/`>`, …).
+    pub fn arrow(&mut self, x: usize, y: usize, direction: super::cells::MarkerDirection) {
         if x >= self.width || y >= self.height {
             return;
         }
@@ -260,9 +254,126 @@ impl NodeRegion<'_, '_> {
             self.x0 + x,
             self.y0 + y,
             super::cell::MarkerKind::Arrow,
-            dir,
+            direction.to_dir(),
             false,
             Paint::Color(self.color),
         );
+    }
+}
+
+#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+mod tests {
+    use super::super::cells::MarkerDirection;
+    use super::*;
+    use crate::graph::Graph;
+    use crate::render::engine::CustomNode;
+    use crate::{Charset, RenderOptions};
+
+    /// Structure-heavy card drawn entirely through the semantic
+    /// primitives — no charset anywhere in the painter.
+    fn semantic_card(region: &mut NodeRegion<'_, '_>, ctx: NodePaintCtx<'_>) {
+        let right = region.width() - 1;
+        region.frame();
+        region.write_str(2, 1, ctx.label);
+        region.hrule(0, right, 2);
+        region.hrule(0, right, 4);
+        region.vrule(7, 2, 6);
+        for (i, line) in ctx.payload.lines().enumerate() {
+            region.write_str(1, 3 + i, line);
+        }
+        region.arrow(3, 5, MarkerDirection::Down);
+        region.write_str(1, 6, "ok");
+    }
+
+    fn card_graph() -> Graph<'static> {
+        let mut g = Graph::new();
+        g.add_node(1usize, "A");
+        g.add_node(
+            10usize,
+            CustomNode {
+                label: "Server",
+                width: 12,
+                height: 8,
+                painter: Some(semantic_card),
+                payload: "cpu: 4",
+            },
+        );
+        g.add_edge(1usize, 10usize, None);
+        g
+    }
+
+    fn options(charset: Charset) -> RenderOptions {
+        let mut o = RenderOptions::plain();
+        o.emit.charset = charset;
+        o
+    }
+
+    /// One charset-blind painter, byte-correct under both charsets:
+    /// its rules meet its frame as tees (`├ ┬ ┤`), cross as `┼`, and
+    /// its arrow is a real marker (`↓`/`v`) — all decoded per charset
+    /// at emission. Raw `char` writes could produce none of those
+    /// junctions.
+    #[test]
+    fn semantic_painter_is_byte_correct_under_both_charsets() {
+        let g = card_graph();
+        let ir = g.compute_layout();
+        assert_eq!(
+            ir.render_string(&options(Charset::Unicode)),
+            "      [A]\n       └┐\n        ↓\n  \
+             ┌──────────┐\n  \
+             │ Server   │\n  \
+             ├──────┬───┤\n  \
+             │cpu: 4│   │\n  \
+             ├──────┼───┤\n  \
+             │  ↓   │   │\n  \
+             │ok    │   │\n  \
+             └──────────┘\n\n\n"
+        );
+        assert_eq!(
+            ir.render_string(&options(Charset::Ascii)),
+            "      [A]\n       ++\n        v\n  \
+             +----------+\n  \
+             | Server   |\n  \
+             +------+---+\n  \
+             |cpu: 4|   |\n  \
+             +------+---+\n  \
+             |  v   |   |\n  \
+             |ok    |   |\n  \
+             +----------+\n\n\n"
+        );
+    }
+
+    /// The arena backend serves the same painter path byte-for-byte,
+    /// both charsets.
+    #[test]
+    fn arena_backend_serves_painters_byte_identically() {
+        let g = card_graph();
+        let heap_ir = g.compute_layout();
+        for charset in [Charset::Unicode, Charset::Ascii] {
+            let opts = options(charset);
+            let g = card_graph();
+            let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+            let mut csr_arena = crate::graph::arena::Arena::new(&mut csr_buf);
+            let csr = g.to_csr(&mut csr_arena).unwrap();
+            let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+            let mut temp_buf = vec![0u8; size];
+            let mut out_buf = vec![0u8; size];
+            let mut temp_arena = crate::graph::arena::Arena::new(&mut temp_buf);
+            let mut out_arena = crate::graph::arena::Arena::new(&mut out_buf);
+            let arena_ir = csr
+                .compute_layout_arena(
+                    &crate::LayoutConfig::standard(),
+                    &mut temp_arena,
+                    &mut out_arena,
+                )
+                .unwrap();
+            let mut arena_out = String::new();
+            arena_ir.render_with(&opts, &mut arena_out).unwrap();
+            assert_eq!(
+                heap_ir.render_string(&opts),
+                arena_out,
+                "backend divergence under {charset:?}"
+            );
+        }
     }
 }

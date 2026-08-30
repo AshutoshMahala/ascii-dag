@@ -277,6 +277,32 @@ changes; a scene is a snapshot, not a live view.
 `Scene` also exposes `width`, `height`, and `legend_entries` for
 laying out a viewport around the graph.
 
+## Beyond the terminal (`SceneComposer`)
+
+Terminal strings are one projection of the composed canvas. A
+`SceneComposer` hands you the canvas itself — one `CellView` per cell,
+row-major — for SVG writers, TUI buffers, or interactive pickers:
+
+```rust
+use ascii_dag::SceneComposer;
+
+let req = scene.composition_requirements(&options.compose);
+let mut composer = SceneComposer::new(req);
+composer.visit_cells(&scene, |x, y, cell| {
+    // cell.kind:  Empty / Text / Stroke { per-arm weights } / Marker
+    // cell.color: resolved color, whatever the emission mode
+    // cell.owner: what hit_test reports for this cell
+})?;
+```
+
+Stroke cells carry per-arm weights instead of pre-picked glyphs —
+Unicode and ASCII terminal output are two projections of this same
+vocabulary, and an SVG consumer can draw real vector strokes from it.
+`try_visit_cells` is the early-exit form for fallible sinks. The
+composer retains its workspace: steady-state repaint allocates
+nothing, and `SceneComposer::new_in` composes out of a caller-provided
+byte slice for no-alloc targets.
+
 See `examples/hit_test.rs` for a working terminal program — it enables
 xterm mouse reporting with raw escape sequences and no dependencies,
 and `--probe X Y` makes it scriptable.

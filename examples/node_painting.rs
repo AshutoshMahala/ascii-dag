@@ -23,15 +23,10 @@ use ascii_dag::{BoxedNode, CustomNode, Graph, RenderOptions};
 /// contract.
 fn card(region: &mut NodeRegion<'_, '_>, ctx: NodePaintCtx<'_>) {
     region.write_str(1, 0, ctx.label);
-    // Painter text passes through untranslated — pick glyphs per the
-    // active charset to stay ASCII-clean under `--ascii`.
-    let rule = match ctx.charset {
-        ascii_dag::Charset::Ascii => '-',
-        _ => '─',
-    };
-    for x in 0..region.width() {
-        region.set(x, 1, rule);
-    }
+    // A semantic rule: stroke cells, decoded per charset at emission
+    // like all engine ink — `─` normally, `-` under `--ascii`, with
+    // no charset handling in the painter.
+    region.hrule(0, region.width() - 1, 1);
     for (i, line) in ctx.payload.lines().enumerate() {
         region.write_str(1, 2 + i, line);
     }
