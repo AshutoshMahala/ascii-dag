@@ -1,6 +1,6 @@
 use ascii_dag::Graph;
 use ascii_dag::render::colors::Palette;
-use ascii_dag::render::engine::RenderOptions;
+use ascii_dag::render::engine::{LabelPolicy, RenderOptions};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -54,7 +54,8 @@ fn run_heap() {
         "{}",
         ir.render_string(&{
             let mut o = RenderOptions::colored(Palette::Ansi);
-            o.legend = false;
+            o.plan.label_policy = LabelPolicy::default(); // 0.10 colored-no-legend look
+            o.emit.render_legend = false;
             o
         })
     );
@@ -64,7 +65,8 @@ fn run_heap() {
         "{}",
         ir.render_string(&{
             let mut o = RenderOptions::colored(Palette::AnsiDark);
-            o.legend = false;
+            o.plan.label_policy = LabelPolicy::default(); // 0.10 colored-no-legend look
+            o.emit.render_legend = false;
             o
         })
     );

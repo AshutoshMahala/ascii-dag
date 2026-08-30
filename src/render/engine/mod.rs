@@ -52,9 +52,9 @@ pub(crate) mod style;
 pub(crate) mod view;
 
 /// Stream a rendered view into any writer — the one alloc-backed
-/// band loop behind every std entry point. `options` decides the mode:
-/// colors when `color_mode != None` (plus the legend when `legend`),
-/// plain glyphs otherwise. One band-sized buffer set is reused across
+/// band loop behind every std entry point. `options.emit` decides the
+/// mode: colors when `color_mode != None` (plus the legend block when
+/// `render_legend`), plain glyphs otherwise. One band-sized buffer set is reused across
 /// bands (N3.4): memory is `width × min(band_cap, height)` cells
 /// regardless of graph height.
 #[cfg(feature = "alloc")]
@@ -63,7 +63,7 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
     options: &config::RenderOptions,
     out: &mut W,
 ) -> core::fmt::Result {
-    let colored = !matches!(options.color_mode, color::ColorMode::None);
+    let colored = !matches!(options.emit.color_mode, color::ColorMode::None);
     let plan = plan::RenderPlan::build(view_ref, options);
     let band_rows = plan.max_band_rows().max(1);
     let area = plan.width() * band_rows;
@@ -79,9 +79,9 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
         let mut canvas = compose::BandCanvas::new(&mut cells, plane, plan.width(), y0, rows);
         compose::composite_band(view_ref, &plan, options, &mut canvas, &mut scratch);
         if colored {
-            emit::emit_colored_band(&canvas, options.charset, options.color_mode, out)?;
+            emit::emit_colored_band(&canvas, options.emit.charset, options.emit.color_mode, out)?;
         } else {
-            emit::emit_plain_band(&canvas, options.charset, out)?;
+            emit::emit_plain_band(&canvas, options.emit.charset, out)?;
         }
     }
     // D4 (temp/08): the legend works in plain mode too — labels that
@@ -89,8 +89,14 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
     // legend is self-keying (`from -> to: label`). `ColorMode::None`
     // emits no escapes. Default plain options keep `legend = false`,
     // so default output is unchanged.
-    if options.legend {
-        emit::emit_legend(view_ref, &plan, options.charset, options.color_mode, out)?;
+    if options.emit.render_legend {
+        emit::emit_legend(
+            view_ref,
+            &plan,
+            options.emit.charset,
+            options.emit.color_mode,
+            out,
+        )?;
     }
     Ok(())
 }
@@ -109,7 +115,7 @@ pub(crate) fn render_plain<V: view::LayoutView>(
 
 /// Owned-`String` render of colored-mode `options` (parity-suite
 /// helper; the 0.9 `render_scanline_colored_with_legend` shape when
-/// `options.legend` is set).
+/// `options.emit.render_legend` is set).
 #[cfg(all(test, feature = "std"))]
 pub(crate) fn render_colored<V: view::LayoutView>(
     view_ref: &V,
@@ -133,7 +139,7 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
     arena: &crate::graph::arena::Arena<'_>,
     out: &mut [u8],
 ) -> Result<usize, crate::GraphError> {
-    let colored = !matches!(options.color_mode, color::ColorMode::None);
+    let colored = !matches!(options.emit.color_mode, color::ColorMode::None);
     let plan = plan::RenderPlan::build_in(view_ref, options, arena)?;
     let band_rows = plan.max_band_rows().max(1);
     let area = plan.width() * band_rows;
@@ -163,18 +169,23 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
                 compose::BandCanvas::new(cells, colors.as_deref_mut(), plan.width(), y0, rows);
             compose::composite_band(view_ref, &plan, options, &mut canvas, &mut scratch);
             if colored {
-                emit::emit_colored_band(&canvas, options.charset, options.color_mode, &mut sink)?;
+                emit::emit_colored_band(
+                    &canvas,
+                    options.emit.charset,
+                    options.emit.color_mode,
+                    &mut sink,
+                )?;
             } else {
-                emit::emit_plain_band(&canvas, options.charset, &mut sink)?;
+                emit::emit_plain_band(&canvas, options.emit.charset, &mut sink)?;
             }
         }
         // D4: plain legends too — the same gate the alloc path uses.
-        if options.legend {
+        if options.emit.render_legend {
             emit::emit_legend(
                 view_ref,
                 &plan,
-                options.charset,
-                options.color_mode,
+                options.emit.charset,
+                options.emit.color_mode,
                 &mut sink,
             )?;
         }
@@ -207,13 +218,16 @@ pub(crate) fn estimate_render_output_size<V: view::LayoutView>(
     view_ref: &V,
     options: &config::RenderOptions,
 ) -> usize {
-    let colored = !matches!(options.color_mode, color::ColorMode::None);
-    emit::estimate_output_size(view_ref, colored, options.legend)
+    let colored = !matches!(options.emit.color_mode, color::ColorMode::None);
+    emit::estimate_output_size(view_ref, colored, options.emit.render_legend)
 }
 
 pub use charset::Charset;
 pub use color::{CellColor, ColorMode};
-pub use config::{DEFAULT_BAND_ROWS, RenderOptions};
+pub use config::{
+    ComposeBudget, DEFAULT_BAND_ROWS, EmitOptions, LabelOverflow, LabelPlacementPolicy,
+    LabelPolicy, PlanOptions, RenderOptions,
+};
 pub use node_content::{BoxedNode, CustomNode, NodeContent, NodeKindTag, SimpleNode};
 pub use plan::{HitResult, RenderPlan};
 pub use region::{NodePaintCtx, NodeRegion};

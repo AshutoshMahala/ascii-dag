@@ -73,7 +73,7 @@ pub type NodePaintFn = fn(&mut NodeRegion<'_, '_>, NodePaintCtx<'_>);
 /// g.put_nodes(&[1]).inside(sg).unwrap();
 ///
 /// let mut options = RenderOptions::plain();
-/// options.subgraph_style_fn = borderless;
+/// options.plan.subgraph_style_fn = borderless;
 /// let text = g.compute_layout().render_string(&options);
 /// assert!(!text.contains('╔'));      // no border ink
 /// assert!(text.contains("Group"));   // label still there
@@ -232,7 +232,7 @@ pub struct SubgraphStyleCtx<'a> {
 ///
 /// let g = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
 /// let mut options = RenderOptions::plain();
-/// options.edge_style_fn = style;
+/// options.plan.edge_style_fn = style;
 /// let text = g.compute_layout().render_string(&options);
 /// # #[cfg(feature = "layout-vertical")] // arrow glyph is axis-specific
 /// assert!(text.contains('↓'));

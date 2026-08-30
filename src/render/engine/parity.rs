@@ -59,7 +59,10 @@ fn csr_engine(g: &Graph<'_>, options: &RenderOptions) -> String {
     let ir = csr
         .compute_layout_arena(&config, &mut temp_arena, &mut out_arena)
         .expect("CSR layout");
-    if matches!(options.color_mode, crate::render::engine::ColorMode::None) {
+    if matches!(
+        options.emit.color_mode,
+        crate::render::engine::ColorMode::None
+    ) {
         render_plain(&ir, options)
     } else {
         render_colored(&ir, options)
@@ -305,14 +308,15 @@ fn hero_self_parity_across_backends() {
 /// D4 (temp/08): the legend works in PLAIN mode — labels that fail
 /// geometric placement are listed as self-keying `from → to: label`
 /// lines, no color required, no escapes emitted. Off by default
-/// (`RenderOptions::plain()` keeps `legend = false`), so default
+/// (`RenderOptions::plain()` keeps the legend block off), so default
 /// plain output is unchanged.
 #[test]
 fn plain_legend_lists_unplaced_labels() {
     let g = colliding_labels();
     let ir = g.compute_layout();
     let mut options = RenderOptions::plain();
-    options.legend = true;
+    options.plan.label_policy.overflow = crate::render::engine::LabelOverflow::Legend;
+    options.emit.render_legend = true;
     let mut out = String::new();
     ir.render_with(&options, &mut out).expect("render");
     assert!(
@@ -463,7 +467,10 @@ mod bt {
             assert_same(&format!("{tag} (BT heap vs csr)"), &heap_out, &csr_out);
 
             let mut colored = RenderOptions::colored(Palette::Ansi);
-            colored.legend = false;
+            // The 0.10 colored-no-legend look: geometric placement,
+            // overflow omitted, no legend block.
+            colored.plan.label_policy = crate::render::engine::LabelPolicy::default();
+            colored.emit.render_legend = false;
             let heap_col = render_colored(&heap_ir, &colored);
             let mut config = LayoutConfig::standard();
             config.direction = Direction::BottomUp;
@@ -595,7 +602,7 @@ mod bands {
     const CAPS: [usize; 6] = [1, 2, 3, 5, 7, 1000];
 
     fn with_cap(mut options: RenderOptions, cap: usize) -> RenderOptions {
-        options.band_rows_cap = cap;
+        options.compose.band_rows_cap = cap;
         options
     }
 
@@ -682,7 +689,7 @@ mod bands {
                 &with_cap(RenderOptions::plain(), 3),
             );
             let mut opts = RenderOptions::plain();
-            opts.band_rows_cap = 3;
+            opts.compose.band_rows_cap = 3;
             let csr_out = csr_engine(&build(), &opts);
             assert_same("banded cap=3 (heap vs csr)", &heap_out, &csr_out);
         }
@@ -744,14 +751,14 @@ mod no_alloc {
             for direction in [Direction::TopDown, Direction::BottomUp] {
                 for cap in [3usize, 64] {
                     let mut plain = RenderOptions::plain();
-                    plain.band_rows_cap = cap;
+                    plain.compose.band_rows_cap = cap;
                     let mut colored = RenderOptions::colored(Palette::Ansi);
-                    colored.band_rows_cap = cap;
+                    colored.compose.band_rows_cap = cap;
                     for options in [plain, colored] {
                         let mut g = build();
                         g.set_direction(direction);
                         let ir = g.compute_layout();
-                        let want = if matches!(options.color_mode, ColorMode::None) {
+                        let want = if matches!(options.emit.color_mode, ColorMode::None) {
                             render_plain(&ir, &options)
                         } else {
                             render_colored(&ir, &options)
@@ -911,7 +918,7 @@ mod styles {
             g.set_direction(direction);
             let ir = g.compute_layout();
             let mut options = RenderOptions::plain();
-            options.edge_style_fn = no_arrowheads;
+            options.plan.edge_style_fn = no_arrowheads;
             let out = render_plain(&ir, &options);
             for arrow in ['\u{2193}', '\u{2191}', '\u{21E1}', '\u{21E3}'] {
                 assert!(
@@ -928,7 +935,7 @@ mod styles {
     fn marker_start_arrow_gives_double_heads() {
         let ir = chain().compute_layout();
         let mut options = RenderOptions::plain();
-        options.edge_style_fn = double_headed;
+        options.plan.edge_style_fn = double_headed;
         let out = render_plain(&ir, &options);
         // TD forward edges gain an up-arrow tail beneath the source.
         assert!(out.contains('\u{2191}'), "tail arrowheads appear:\n{out}");
@@ -940,19 +947,19 @@ mod styles {
         let ir = nested_boxes().compute_layout();
 
         let mut light = RenderOptions::plain();
-        light.subgraph_style_fn = light_boxes;
+        light.plan.subgraph_style_fn = light_boxes;
         let out = render_plain(&ir, &light);
         assert!(out.contains('\u{250c}'), "light corner:\n{out}");
         assert!(!out.contains('\u{2554}'), "no double corner:\n{out}");
 
         let mut dashed = RenderOptions::plain();
-        dashed.subgraph_style_fn = dashed_boxes;
+        dashed.plan.subgraph_style_fn = dashed_boxes;
         let out = render_plain(&ir, &dashed);
         assert!(out.contains('\u{2508}'), "dashed horizontal:\n{out}");
         assert!(!out.contains('\u{2550}'), "no double horizontal:\n{out}");
 
         let mut none = RenderOptions::plain();
-        none.subgraph_style_fn = invisible_boxes;
+        none.plan.subgraph_style_fn = invisible_boxes;
         let out = render_plain(&ir, &none);
         // Only double strokes are box ink here — light corners belong
         // to edge routing and must survive.
@@ -970,8 +977,8 @@ mod styles {
     fn subgraph_and_label_colors_reach_the_escape_stream() {
         let ir = stage_graph_for_styles().compute_layout();
         let mut options = RenderOptions::colored(Palette::Ansi);
-        options.subgraph_style_fn = green_boxes;
-        options.edge_label_style_fn = magenta_labels;
+        options.plan.subgraph_style_fn = green_boxes;
+        options.plan.edge_label_style_fn = magenta_labels;
         let out = render_colored(&ir, &options);
         assert!(
             out.contains("\x1b[38;5;42m"),
@@ -987,7 +994,7 @@ mod styles {
     fn label_position_inside_bottom_moves_the_box_label() {
         let ir = stage_graph_for_styles().compute_layout();
         let mut options = RenderOptions::plain();
-        options.subgraph_style_fn = bottom_labels;
+        options.plan.subgraph_style_fn = bottom_labels;
         let out = render_plain(&ir, &options);
         let sg = &ir.subgraphs()[0];
         let lines: alloc::vec::Vec<&str> = out.lines().collect();
@@ -1042,8 +1049,8 @@ mod styles {
     #[test]
     fn acceptance_6_style_overrides_from_both_irs() {
         let mut options = RenderOptions::colored(Palette::Ansi);
-        options.subgraph_style_fn = bottom_labels;
-        options.edge_style_fn = red_edges;
+        options.plan.subgraph_style_fn = bottom_labels;
+        options.plan.edge_style_fn = red_edges;
 
         let heap_ir = stage().compute_layout();
         let heap_out = render_colored(&heap_ir, &options);
@@ -1175,7 +1182,7 @@ mod review_fixes {
         );
 
         let mut options = RenderOptions::plain();
-        options.show_dummy_nodes = true;
+        options.plan.show_dummy_nodes = true;
         let shown = ir.render_plan(&options);
         assert_eq!(
             ir.hit_test(&shown, dummy.x, dummy.y),
@@ -1198,7 +1205,7 @@ mod review_fixes {
         let ir = stage().compute_layout();
         let sg = &ir.subgraphs()[0];
         let mut options = RenderOptions::plain();
-        options.subgraph_style_fn = no_border;
+        options.plan.subgraph_style_fn = no_border;
         let plan = ir.render_plan(&options);
         assert_eq!(
             ir.hit_test(&plan, sg.x, sg.y),
@@ -1225,8 +1232,8 @@ mod review_fixes {
         }
         let ir = colliding_labels().compute_layout();
         let mut options = RenderOptions::colored(Palette::Ansi);
-        options.color_mode = crate::render::engine::ColorMode::TrueColor;
-        options.edge_style_fn = rgb_edges;
+        options.emit.color_mode = crate::render::engine::ColorMode::TrueColor;
+        options.plan.edge_style_fn = rgb_edges;
         let out = render_colored(&ir, &options);
         let legend = out.split("Edge labels:").nth(1).expect("legend present");
         assert!(
@@ -1254,7 +1261,7 @@ mod review_fixes {
         g.add_edge(4, 6, Some("fourth-very-long-colliding-label"));
         let ir = g.compute_layout();
         let mut options = RenderOptions::colored(Palette::Ansi);
-        options.color_mode = crate::render::engine::ColorMode::TrueColor;
+        options.emit.color_mode = crate::render::engine::ColorMode::TrueColor;
         let mut arena_buf = vec![0u8; ir.estimate_render_arena_size(&options)];
         let arena = Arena::new(&mut arena_buf);
         let mut out = vec![0u8; ir.estimate_render_output_size(&options)];
@@ -1402,7 +1409,7 @@ mod node_painters {
             let reference = render_plain(&ir, &options);
             for cap in [1usize, 2, 3] {
                 let mut capped = options;
-                capped.band_rows_cap = cap;
+                capped.compose.band_rows_cap = cap;
                 assert_same(
                     "painted node banding",
                     &reference,
@@ -1526,7 +1533,7 @@ mod node_painters {
         let reference = render_plain(&ir, &RenderOptions::plain());
         for cap in [1usize, 2, 7, 1000] {
             let mut capped = RenderOptions::plain();
-            capped.band_rows_cap = cap;
+            capped.compose.band_rows_cap = cap;
             assert_same(
                 "tall custom banding",
                 &reference,
@@ -1558,7 +1565,7 @@ mod node_painters {
         assert!(reference.contains('\u{250c}'), "box paints:\n{reference}");
         for cap in [1usize, 3, 7] {
             let mut capped = RenderOptions::plain();
-            capped.band_rows_cap = cap;
+            capped.compose.band_rows_cap = cap;
             assert_same(
                 "tall boxed banding",
                 &reference,
@@ -1576,7 +1583,7 @@ mod node_painters {
         };
         for build in [boxed_graph as fn() -> Graph<'static>, card_graph] {
             let mut options = RenderOptions::plain();
-            options.band_rows_cap = 2;
+            options.compose.band_rows_cap = 2;
             let ir = build().compute_layout();
             let want = render_plain(&ir, &options);
             let mut backing = vec![0u8; estimate_render_arena_size(&ir, &options)];
@@ -2557,7 +2564,7 @@ mod lr_invariants {
         // Canvas-only contract: legend rows sit below the canvas and
         // are not hit-testable elements — render without them.
         let mut options = RenderOptions::plain();
-        options.legend = false;
+        options.emit.render_legend = false;
         let ink = [
             '─', '│', '→', '←', '┌', '┐', '└', '┘', '┬', '┴', '├', '┤', '┼', '↺', '┊', '┈', '⇢',
             '⇠',
@@ -2599,7 +2606,7 @@ mod lr_invariants {
                 } else {
                     RenderOptions::plain()
                 };
-                base_opts.band_rows_cap = 1000;
+                base_opts.compose.band_rows_cap = 1000;
                 let base = if colored {
                     render_colored(&ir, &base_opts)
                 } else {
@@ -2607,7 +2614,7 @@ mod lr_invariants {
                 };
                 for cap in [1usize, 2, 3, 5, 7, 64] {
                     let mut opts = base_opts;
-                    opts.band_rows_cap = cap;
+                    opts.compose.band_rows_cap = cap;
                     let out = if colored {
                         render_colored(&ir, &opts)
                     } else {
@@ -2801,7 +2808,7 @@ mod lr_invariants {
         );
         // Banding must not lose it: cap 1 forces a band per row.
         let mut capped = options;
-        capped.band_rows_cap = 1;
+        capped.compose.band_rows_cap = 1;
         assert_same("x side-channel banding", &out, &render_plain(&ir, &capped));
         // And the channel ink hit-tests to its edge.
         let plan = ir.render_plan(&options);
@@ -3607,10 +3614,10 @@ mod quality {
         // Legend off for the text count — legend entries would read as
         // inline placements.
         let mut popts = RenderOptions::plain();
-        popts.legend = false;
+        popts.emit.render_legend = false;
         let plain = ir.render_string(&popts);
         let mut copts = RenderOptions::colored(Palette::Ansi);
-        copts.legend = true;
+        copts.emit.render_legend = true;
         let plan = ir.render_plan(&copts);
         let colored = plan
             .labels()
@@ -3912,7 +3919,7 @@ mod quality {
                 // Legend off: this test parses quoted labels from the
                 // text, and legend entries would read as placements.
                 let mut opts = RenderOptions::plain();
-                opts.legend = false;
+                opts.emit.render_legend = false;
                 (ir.render_string(&opts), ir.width(), ir.height())
             };
             // LR ↔ RL: x-mirror. A label of char-length L starting at
@@ -4313,7 +4320,7 @@ mod quality {
             cfg.include_dummy_nodes = true;
             let ir = g.compute_layout_with_config(&cfg);
             let mut opts = RenderOptions::plain();
-            opts.show_dummy_nodes = true;
+            opts.plan.show_dummy_nodes = true;
             let _ = ir.render_plan(&opts);
         }
     }
@@ -4415,22 +4422,24 @@ mod quality {
             placeable,
             row_has_node,
         };
+        use crate::render::engine::LabelPlacementPolicy::{AvoidNodeRows, Geometric};
         let hosted = mk(true, true); // placeable, but its row hosts a node
         let clear = mk(true, false);
         let unplaced = mk(false, false);
-        for (colored, legend) in [(false, false), (false, true), (true, false)] {
-            assert!(
-                hosted.paints(colored, legend),
-                "row-veto must apply ONLY under colored+legend (case {colored},{legend})"
-            );
-        }
+        // The row-veto is the AvoidNodeRows policy and nothing else —
+        // in 0.10 it was implicitly tied to colored+legend; the four
+        // presets now select it explicitly.
         assert!(
-            !hosted.paints(true, true),
-            "colored+legend applies the row-veto"
+            hosted.paints_under(Geometric),
+            "geometric placement never vetoes node rows"
         );
-        for (colored, legend) in [(false, false), (false, true), (true, false), (true, true)] {
-            assert!(clear.paints(colored, legend));
-            assert!(!unplaced.paints(colored, legend));
+        assert!(
+            !hosted.paints_under(AvoidNodeRows),
+            "AvoidNodeRows applies the row-veto"
+        );
+        for placement in [Geometric, AvoidNodeRows] {
+            assert!(clear.paints_under(placement));
+            assert!(!unplaced.paints_under(placement));
         }
     }
 

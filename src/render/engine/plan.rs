@@ -162,21 +162,22 @@ pub(crate) struct LabelPlan {
 }
 
 impl LabelPlan {
-    /// Placement under the colored path's stricter semantics.
+    /// Placement under the node-row-avoiding policy's stricter
+    /// semantics (the legacy colored-with-legend path).
     pub(crate) fn placed_colored(&self) -> bool {
         self.placeable && !self.row_has_node
     }
 
-    /// Does this label PAINT under the given options? The colored
-    /// row-veto applies only when color AND the legend are BOTH on —
-    /// the compositor's exact gate. Every consumer must go through
-    /// this one predicate: a divergent copy once made colored-without-
-    /// legend renders warn about labels they actually painted.
-    pub(crate) fn paints(&self, colored: bool, legend: bool) -> bool {
-        if colored && legend {
-            self.placed_colored()
-        } else {
-            self.placeable
+    /// Does this label PAINT under the given placement policy? Every
+    /// consumer must go through this one predicate: a divergent copy
+    /// once made renders warn about labels they actually painted.
+    pub(crate) fn paints_under(&self, placement: super::config::LabelPlacementPolicy) -> bool {
+        // Exhaustive on purpose (in-crate matches on the
+        // `#[non_exhaustive]` enum still are): a future policy must
+        // decide its veto behavior here, never inherit one silently.
+        match placement {
+            super::config::LabelPlacementPolicy::Geometric => self.placeable,
+            super::config::LabelPlacementPolicy::AvoidNodeRows => self.placed_colored(),
         }
     }
 }
@@ -244,7 +245,7 @@ pub struct RenderPlan<'buf> {
     show_dummy_nodes: bool,
     /// Whether label placement uses the colored-with-legend gate
     /// (hit-testing must agree with the compositor).
-    labels_colored_gate: bool,
+    label_placement: super::config::LabelPlacementPolicy,
 }
 
 impl<'buf> RenderPlan<'buf> {
@@ -285,8 +286,8 @@ impl<'buf> RenderPlan<'buf> {
         let oom = || GraphError::RenderPlanOom;
 
         // ── Resolved styles (the only place style fns run — Q4) ────────
-        let palette = options.palette.colors();
-        let use_color = !matches!(options.color_mode, super::color::ColorMode::None);
+        let palette = options.plan.palette.colors();
+        let label_policy = options.plan.label_policy;
         let mut edge_plans: PlanBuf<'buf, EdgePlan> = mem.buf(view.edge_count(), oom())?;
         for i in 0..view.edge_count() {
             let e = view.edge(i);
@@ -299,10 +300,13 @@ impl<'buf> RenderPlan<'buf> {
                 reversed: e.reversed,
                 total_edges: view.edge_count(),
             };
-            let style: EdgeStyle = (options.edge_style_fn)(ctx);
+            let style: EdgeStyle = (options.plan.edge_style_fn)(ctx);
             let color = if style.color.is_set() {
                 style.color
-            } else if use_color && !palette.is_empty() {
+            } else if !palette.is_empty() {
+                // Colors are ALWAYS resolved at plan time — plain
+                // emission ignores them, which is what lets one plan
+                // serve colored and plain output alike.
                 // Legacy default: palette modulo by the IR edge-list
                 // index (NOT the original edge_index — self-loops are
                 // absent from the list, so positions shift; the legacy
@@ -316,7 +320,7 @@ impl<'buf> RenderPlan<'buf> {
             } else {
                 LineWeight::Light
             });
-            let label_style = (options.edge_label_style_fn)(ctx);
+            let label_style = (options.plan.edge_label_style_fn)(ctx);
             let label_color = if label_style.color.is_set() {
                 label_style.color
             } else {
@@ -340,7 +344,7 @@ impl<'buf> RenderPlan<'buf> {
                 label: sg.label,
                 has_parent: sg.parent.is_some(),
             };
-            let style = (options.subgraph_style_fn)(ctx);
+            let style = (options.plan.subgraph_style_fn)(ctx);
             subgraph_plans.push(SubgraphPlan {
                 border: style.border,
                 color: style.color,
@@ -572,7 +576,7 @@ impl<'buf> RenderPlan<'buf> {
                                     cx,
                                     cx + len,
                                     claimed.as_slice(),
-                                    options.show_dummy_nodes,
+                                    options.plan.show_dummy_nodes,
                                     &sg_label_row,
                                 )
                             {
@@ -633,7 +637,7 @@ impl<'buf> RenderPlan<'buf> {
                                     cx,
                                     cx + len,
                                     claimed.as_slice(),
-                                    options.show_dummy_nodes,
+                                    options.plan.show_dummy_nodes,
                                 )
                             {
                                 chosen = Some((cx, row));
@@ -665,7 +669,7 @@ impl<'buf> RenderPlan<'buf> {
                         x,
                         x + len,
                         claimed.as_slice(),
-                        options.show_dummy_nodes,
+                        options.plan.show_dummy_nodes,
                     );
             }
 
@@ -850,7 +854,7 @@ impl<'buf> RenderPlan<'buf> {
                         cx,
                         cx + len,
                         claimed.as_slice(),
-                        options.show_dummy_nodes,
+                        options.plan.show_dummy_nodes,
                         &sg_label_row,
                     ) {
                         x = cx;
@@ -885,7 +889,7 @@ impl<'buf> RenderPlan<'buf> {
                         fx,
                         fx + len,
                         claimed.as_slice(),
-                        options.show_dummy_nodes,
+                        options.plan.show_dummy_nodes,
                     )
                 {
                     x = fx;
@@ -914,28 +918,36 @@ impl<'buf> RenderPlan<'buf> {
             // under the compositor's own gate (`LabelPlan::paints`) —
             // `legend_entries` reflects the options this plan was
             // built with.
-            let painted = plan.paints(use_color, options.legend);
-            if options.legend && !painted {
-                legend.push(i);
-            }
-            // No inline position AND no legend → the label appears
-            // NOWHERE. Never silent under the `warnings` feature
-            // (emitted per plan build — plans are stateless). The
-            // label TEXT is deliberately not printed: labels are
-            // caller data and may hold secrets or control characters
-            // (terminal/log injection) — the edge is identified by
-            // index and endpoint ids instead.
-            #[cfg(feature = "warnings")]
-            if !painted && !options.legend {
-                crate::errors::emit_warning(
-                    crate::errors::WARN_LABEL_INVISIBLE,
-                    format_args!(
-                        "the label of edge {} ({} -> {}) has no inline position and \
-                         the legend is disabled - it will not be rendered. Enable \
-                         RenderOptions.legend to list it below the graph.",
-                        i, e.from_id, e.to_id
-                    ),
-                );
+            let painted = plan.paints_under(label_policy.placement);
+            if !painted {
+                // Exhaustive on purpose: every overflow variant —
+                // future ones included — must decide what happens to
+                // an unplaced label right here; a silently inherited
+                // behavior would either lose the label or lose the
+                // diagnostic.
+                match label_policy.overflow {
+                    super::config::LabelOverflow::Legend => legend.push(i),
+                    // Omitted entirely → the label appears NOWHERE.
+                    // Never silent under the `warnings` feature
+                    // (emitted per plan build — plans are stateless).
+                    // The label TEXT is deliberately not printed:
+                    // labels are caller data and may hold secrets or
+                    // control characters (terminal/log injection) —
+                    // the edge is identified by index and endpoint
+                    // ids instead.
+                    super::config::LabelOverflow::Omit => {
+                        #[cfg(feature = "warnings")]
+                        crate::errors::emit_warning(
+                            crate::errors::WARN_LABEL_INVISIBLE,
+                            format_args!(
+                                "the label of edge {} ({} -> {}) has no inline position and \
+                                 overflow is set to omit - it will not be rendered. Set \
+                                 LabelOverflow::Legend to list it below the graph.",
+                                i, e.from_id, e.to_id
+                            ),
+                        );
+                    }
+                }
             }
             labels.push(plan);
         }
@@ -947,7 +959,7 @@ impl<'buf> RenderPlan<'buf> {
         // replayed in every band they intersect — canvas clipping makes
         // out-of-band writes no-ops. The partition runs twice: a count
         // pass sizes the buffer exactly, then a fill pass stores it.
-        let cap = options.band_cap();
+        let cap = options.compose.cap();
         let mut tops: PlanBuf<'buf, usize> = mem.buf(view.node_count(), oom())?;
         for i in 0..view.node_count() {
             tops.push(view.node(i).y);
@@ -969,8 +981,8 @@ impl<'buf> RenderPlan<'buf> {
             index,
             legend,
             run_capacity,
-            show_dummy_nodes: options.show_dummy_nodes,
-            labels_colored_gate: use_color && options.legend,
+            show_dummy_nodes: options.plan.show_dummy_nodes,
+            label_placement: label_policy.placement,
         })
     }
 
@@ -993,11 +1005,27 @@ impl<'buf> RenderPlan<'buf> {
 
     /// Edge indices (IR-list order) whose labels go to the legend under
     /// the options this plan was built with: the labels that did not
-    /// paint under the active placement gate (colored: the row-veto
-    /// rule; plain: geometric placement). Empty unless the options
-    /// enable the legend — matching what actually renders.
+    /// paint under the active placement policy (`AvoidNodeRows`: the
+    /// row-veto rule; `Geometric`: pure geometric placement). Empty
+    /// unless `LabelOverflow::Legend` was set — matching what actually
+    /// renders.
     pub fn legend_entries(&self) -> &[usize] {
         self.legend.as_slice()
+    }
+
+    /// The label placement policy this plan resolved under (plan
+    /// state — the compositor and hit-testing read it from here, never
+    /// from options).
+    pub(crate) fn label_placement(&self) -> super::config::LabelPlacementPolicy {
+        self.label_placement
+    }
+
+    /// Whether this plan shows dummy nodes (plan state, same rule as
+    /// [`label_placement`](Self::label_placement): planning options
+    /// are read back from the plan, never re-read from options — two
+    /// sources of truth would let a scene/composer pair disagree).
+    pub(crate) fn show_dummy_nodes(&self) -> bool {
+        self.show_dummy_nodes
     }
 
     /// What occupies the cell at (x, y)? Nodes win over edges, edges
@@ -1025,11 +1053,10 @@ impl<'buf> RenderPlan<'buf> {
         let mut hit_subgraph = HitResult::None;
         let mut hit_edge = HitResult::None;
         // Painted edge labels belong to their edge (they render above
-        // edge ink). `labels_colored_gate` stores the compositor's
-        // combined color&&legend gate, which `paints` collapses — so
-        // passing it as both arms is the exact same predicate.
+        // edge ink). The placement policy is plan state, so this is
+        // exactly the compositor's paint predicate.
         for label in self.labels.as_slice() {
-            let placed = label.paints(self.labels_colored_gate, self.labels_colored_gate);
+            let placed = label.paints_under(self.label_placement);
             if placed && y == label.y && x >= label.x && x < label.x + label.len {
                 return HitResult::Edge(label.edge_index);
             }
@@ -1280,8 +1307,8 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
     let s = view.subgraph_count();
     let width = view.width();
     let height = view.height();
-    let cap = options.band_cap();
-    let colored = !matches!(options.color_mode, super::color::ColorMode::None);
+    let cap = options.compose.cap();
+    let colored = !matches!(options.emit.color_mode, super::color::ColorMode::None);
     let labeled = (0..e).filter(|&i| view.edge(i).label.is_some()).count();
     let mut run_capacity = 0usize;
     for i in 0..e {
@@ -2530,9 +2557,17 @@ mod tests {
                 "edge {i} palette color"
             );
         }
-        // Plain mode resolves no colors at all.
+        // Colors are ALWAYS resolved at plan time — a plain-preset
+        // plan carries the same resolved colors (plain emission just
+        // ignores them). One plan serves colored and plain output.
         let plain = RenderPlan::build(&ir, &RenderOptions::plain());
-        assert!(!plain.edge_plan(0).color.is_set());
+        for i in 0..legacy.len() {
+            assert_eq!(
+                plain.edge_plan(i).color,
+                plan.edge_plan(i).color,
+                "edge {i}: color resolution must not depend on emission mode"
+            );
+        }
     }
 
     #[test]

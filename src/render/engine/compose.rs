@@ -22,7 +22,7 @@
 //! canonical for 0.10.0).
 
 use super::cell::{Cell, Dir, MarkerKind, Weight};
-use super::color::{CellColor, ColorMode};
+use super::color::CellColor;
 use super::config::RenderOptions;
 use super::mem::{PlanBuf, SliceHeap};
 use super::plan::{LabelPlan, PlanElement, RenderPlan};
@@ -567,22 +567,23 @@ pub(crate) fn composite_band<V: LayoutView>(
         paint_edge(view, plan, i, &mut painter);
     }
     painter.flush();
-    // Z2: edge labels. Placement gate mirrors the three legacy paths:
-    // plain and colored-without-legend place geometrically; only the
-    // colored-with-legend path additionally vetoes rows hosting nodes.
-    let colored = !matches!(options.color_mode, ColorMode::None);
+    // Z2: edge labels. The placement policy is plan state (resolved
+    // from `PlanOptions.label_policy` at build): `Geometric` places
+    // purely geometrically, `AvoidNodeRows` additionally vetoes rows
+    // hosting nodes — the presets map the three legacy paths onto
+    // these explicitly.
     let band_has = |y: usize| y >= y0 && y < y0 + rows;
     for label in plan.labels() {
         if !band_has(label.y) {
             continue;
         }
-        if label.paints(colored, options.legend) {
+        if label.paints_under(plan.label_placement()) {
             paint_edge_label(view, plan, label, canvas);
         }
     }
     // Z3: nodes.
     for i in 0..scratch.nodes.len() {
-        paint_node(view, scratch.nodes.as_slice()[i], options, canvas);
+        paint_node(view, plan, scratch.nodes.as_slice()[i], options, canvas);
     }
     // Z4: subgraph labels (always readable; colors untouched).
     for i in 0..scratch.sgs.len() {
@@ -1090,6 +1091,7 @@ fn paint_subgraph_label<V: LayoutView>(
 
 fn paint_node<V: LayoutView>(
     view: &V,
+    plan: &RenderPlan<'_>,
     index: usize,
     options: &RenderOptions,
     canvas: &mut BandCanvas<'_>,
@@ -1097,7 +1099,7 @@ fn paint_node<V: LayoutView>(
     use super::node_content::NodeKindTag;
     let n = view.node(index);
     if matches!(n.kind, NodeKind::Dummy) {
-        if options.show_dummy_nodes {
+        if plan.show_dummy_nodes() {
             let default = Paint::Color(CellColor::DEFAULT);
             canvas.marker(n.x, n.y, MarkerKind::Dummy, Dir::Up, false, default);
         }
@@ -1147,7 +1149,7 @@ fn paint_node<V: LayoutView>(
                         label: n.label,
                         width: n.width,
                         height,
-                        charset: options.charset,
+                        charset: options.emit.charset,
                         visible_rows,
                         payload,
                     },
@@ -1280,7 +1282,7 @@ mod tests {
         let mut canvas = BandCanvas::new(cells, None, plan.width(), y0, rows);
         composite_band(view, plan, options, &mut canvas, scratch);
         let mut out = alloc::string::String::new();
-        super::super::emit::emit_plain_band(&canvas, options.charset, &mut out).unwrap();
+        super::super::emit::emit_plain_band(&canvas, options.emit.charset, &mut out).unwrap();
         out
     }
 
@@ -1300,7 +1302,7 @@ mod tests {
         }
         let ir = g.compute_layout();
         let mut options = RenderOptions::plain();
-        options.band_rows_cap = 3;
+        options.compose.band_rows_cap = 3;
         let plan = RenderPlan::build(&ir, &options);
         assert!(plan.band_count() > 2, "corpus must actually band");
         let mut cells = alloc::vec![Cell::EMPTY; plan.width() * plan.max_band_rows()];

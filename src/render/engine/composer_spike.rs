@@ -249,8 +249,7 @@ fn compose_carved<V: LayoutView>(
         got: 0,
     };
     let scratch_colored = req.scratch_colored();
-    let emit_colored = !matches!(options.color_mode, super::color::ColorMode::None);
-    let labels_gate = emit_colored && options.legend;
+    let emit_colored = !matches!(options.emit.color_mode, super::color::ColorMode::None);
 
     let mut scratch = PaintScratch::carve(view, plan, scratch_colored, req.band_rows, arena)?;
     let cells = arena
@@ -308,8 +307,6 @@ fn compose_carved<V: LayoutView>(
                 y0,
                 y0 + rows,
                 req.width,
-                labels_gate,
-                options.show_dummy_nodes,
                 band_plane,
                 owner_scratch,
                 sweep,
@@ -325,16 +322,27 @@ fn compose_carved<V: LayoutView>(
             }
         }
         let written = if emit_colored {
-            super::emit::emit_colored_band(&canvas, options.charset, options.color_mode, out)
+            super::emit::emit_colored_band(
+                &canvas,
+                options.emit.charset,
+                options.emit.color_mode,
+                out,
+            )
         } else {
-            super::emit::emit_plain_band(&canvas, options.charset, out)
+            super::emit::emit_plain_band(&canvas, options.emit.charset, out)
         };
         written.expect("string sink never fails");
         y0 += rows;
     }
-    if options.legend {
-        super::emit::emit_legend(view, plan, options.charset, options.color_mode, out)
-            .expect("string sink never fails");
+    if options.emit.render_legend {
+        super::emit::emit_legend(
+            view,
+            plan,
+            options.emit.charset,
+            options.emit.color_mode,
+            out,
+        )
+        .expect("string sink never fails");
     }
     Ok(())
 }
@@ -452,9 +460,9 @@ fn plain() -> RenderOptions {
 }
 
 fn colored_legend() -> RenderOptions {
-    let mut o = RenderOptions::colored(Palette::Ansi);
-    o.legend = true;
-    o
+    // The colored preset now carries the whole legacy pair explicitly:
+    // AvoidNodeRows + Legend overflow + printed legend block.
+    RenderOptions::colored(Palette::Ansi)
 }
 
 /// The engine's own band partition, as a budget — makes byte
@@ -466,8 +474,10 @@ fn default_budget(plan: &RenderPlan<'_>) -> BudgetSpike {
 }
 
 fn reserve_for<V: LayoutView>(view: &V, options: &RenderOptions) -> String {
-    let colored = !matches!(options.color_mode, super::color::ColorMode::None);
-    String::with_capacity(super::emit::estimate_output_size(view, colored, options.legend) * 2)
+    let colored = !matches!(options.emit.color_mode, super::color::ColorMode::None);
+    String::with_capacity(
+        super::emit::estimate_output_size(view, colored, options.emit.render_legend) * 2,
+    )
 }
 
 // ── The proofs ───────────────────────────────────────────────────────────
@@ -486,7 +496,7 @@ fn requirements_bytes_are_sufficient_and_output_correct() {
         (fan_graph(40), "fan-40"),
     ] {
         for options in [plain(), colored_legend()] {
-            let colored = !matches!(options.color_mode, super::color::ColorMode::None);
+            let colored = !matches!(options.emit.color_mode, super::color::ColorMode::None);
             for profile in [Profile::Semantic, Profile::Lean { colored }] {
                 let ir = graph.compute_layout();
                 let plan = RenderPlan::build(&ir, &options);

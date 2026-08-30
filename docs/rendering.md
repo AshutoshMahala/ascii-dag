@@ -36,22 +36,30 @@ print!("{}", ir.render_string(&RenderOptions::plain()));
 
 ## Options
 
+Options live in three homes by what they affect: `plan` holds
+everything that changes resolved semantics, `emit` holds how those
+semantics are written, and `compose` holds memory knobs that never
+affect output.
+
 ```rust
 let mut options = RenderOptions::plain();
-options.charset = ascii_dag::Charset::Ascii;
-options.legend = true;
-options.band_rows_cap = 32;
+options.emit.charset = ascii_dag::Charset::Ascii;
+options.plan.label_policy.overflow = ascii_dag::LabelOverflow::Legend;
+options.emit.render_legend = true;
+options.compose.band_rows_cap = 32;
 ```
 
 | Field | Values | Default | What it does |
 |---|---|---|---|
-| `charset` | `Unicode` / `Ascii` | `Unicode` | Equal projections of one canvas — `Ascii` swaps `┌─│→` for `+-\|>` |
-| `color_mode` | `None` / `Ansi256` / `TrueColor` | `None` | ANSI escapes for edge coloring |
-| `palette` | `Palette::*` | `Ansi` | Which colors the edge coloring draws from |
-| `legend` | `bool` | `false` | List labels that could not be placed inline |
-| `show_dummy_nodes` | `bool` | `false` | Draw `◍` at routing waypoints (see [layout.md](layout.md#routing-waypoints)) |
-| `band_rows_cap` | `usize` | `64` | Canvas memory ceiling — see [banding](#banding-and-memory) |
-| `edge_style_fn` etc. | `fn` pointers | legacy look | Per-element styling, below |
+| `emit.charset` | `Unicode` / `Ascii` | `Unicode` | Equal projections of one canvas — `Ascii` swaps `┌─│→` for `+-\|>` |
+| `emit.color_mode` | `None` / `Ansi256` / `TrueColor` | `None` | ANSI escapes for edge coloring |
+| `emit.render_legend` | `bool` | `false` | Print the legend block after the diagram |
+| `plan.palette` | `Palette::*` | `Ansi` | Which colors the edge coloring draws from |
+| `plan.label_policy.placement` | `Geometric` / `AvoidNodeRows` | `Geometric` | Whether inline labels may sit on rows hosting nodes |
+| `plan.label_policy.overflow` | `Omit` / `Legend` | `Omit` | Where labels that found no inline position go |
+| `plan.show_dummy_nodes` | `bool` | `false` | Draw `◍` at routing waypoints (see [layout.md](layout.md#routing-waypoints)) |
+| `plan.edge_style_fn` etc. | `fn` pointers | legacy look | Per-element styling, below |
+| `compose.band_rows_cap` | `usize` | `64` | Canvas memory ceiling — see [banding](#banding-and-memory) |
 
 Four `const` presets cover the common combinations:
 `RenderOptions::plain()`, `::colored(palette)`, `::ascii()`,
@@ -74,7 +82,8 @@ dropped:
 
 ```rust
 let mut options = RenderOptions::plain();
-options.legend = true;
+options.plan.label_policy.overflow = ascii_dag::LabelOverflow::Legend;
+options.emit.render_legend = true;
 ```
 
 ```text
@@ -108,7 +117,7 @@ fn dashed_back_edges(ctx: EdgeStyleCtx<'_>) -> EdgeStyle {
 }
 
 let mut options = RenderOptions::plain();
-options.edge_style_fn = dashed_back_edges;
+options.plan.edge_style_fn = dashed_back_edges;
 ```
 
 `EdgeStyleCtx` carries the edge index, both endpoint ids, the label,

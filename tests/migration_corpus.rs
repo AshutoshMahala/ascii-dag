@@ -40,14 +40,19 @@ const GOLDEN_COLORED: &str = include_str!("golden/migration-colored.txt");
 const GOLDEN_COLORED_LEGEND: &str = include_str!("golden/migration-colored-legend.txt");
 
 fn colored_no_legend() -> RenderOptions {
+    // The 0.10 `render_scanline_colored(palette)` look: colored ink,
+    // geometric label placement, overflow omitted, no legend block —
+    // in 0.10 this was the implicit consequence of `legend = false`;
+    // the mapping is now explicit.
     let mut o = RenderOptions::colored(Palette::Ansi);
-    o.legend = false;
+    o.plan.label_policy = ascii_dag::LabelPolicy::default();
+    o.emit.render_legend = false;
     o
 }
 
 /// Replacements for the removed `render_scanline*` family
 /// (`render_string` / `render_with` per the 0.10 deprecation notes;
-/// colored wrappers mapped with `legend = false`) reproduce the frozen
+/// colored wrappers mapped per `colored_no_legend`) reproduce the frozen
 /// legacy bytes.
 #[test]
 fn render_string_reproduces_legacy_scanline_output() {

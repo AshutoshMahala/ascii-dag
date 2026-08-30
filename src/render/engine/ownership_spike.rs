@@ -145,8 +145,6 @@ pub(super) fn owner_rasterize_band<V: LayoutView>(
     y0: usize,
     y1: usize,
     width: usize,
-    labels_gate: bool,
-    show_dummies: bool,
     plane: &mut [u32],
     scratch: &mut OwnerScratch<'_>,
     sweep: &mut OwnerSweep,
@@ -332,7 +330,7 @@ pub(super) fn owner_rasterize_band<V: LayoutView>(
             }
             let n = view.node(el.index);
             if matches!(n.kind, crate::ir::NodeKind::Dummy) {
-                if show_dummies && n.y == y && n.x < width {
+                if plan.show_dummy_nodes() && n.y == y && n.x < width {
                     plane[base + n.x] = owner;
                 }
                 continue;
@@ -352,7 +350,7 @@ pub(super) fn owner_rasterize_band<V: LayoutView>(
 
     // Pass 4: painted labels — top priority, owned by their edge.
     for label in plan.labels() {
-        if !label.paints(labels_gate, labels_gate) {
+        if !label.paints_under(plan.label_placement()) {
             continue;
         }
         if label.y >= y0 && label.y < y1 {
@@ -406,14 +404,7 @@ impl RasterBufs {
 
 // ── Agreement driver ─────────────────────────────────────────────────────
 
-fn agree<V: LayoutView>(
-    plan: &RenderPlan<'_>,
-    view: &V,
-    band_rows: usize,
-    labels_gate: bool,
-    show_dummies: bool,
-    what: &str,
-) {
+fn agree<V: LayoutView>(plan: &RenderPlan<'_>, view: &V, band_rows: usize, what: &str) {
     let (w, h) = (plan.width(), plan.height());
     let band_rows = band_rows.max(1);
     let mut bufs = RasterBufs::new(plan, view, w, band_rows);
@@ -429,8 +420,6 @@ fn agree<V: LayoutView>(
             y0,
             y1,
             w,
-            labels_gate,
-            show_dummies,
             &mut plane[..w * (y1 - y0)],
             &mut bufs.scratch(),
             &mut sweep,
@@ -469,18 +458,15 @@ fn check_graph(g: &Graph<'_>, what: &str) {
         let mut cfg = LayoutConfig::standard();
         cfg.direction = dir;
 
-        for (gate, options) in [
-            (false, RenderOptions::plain()),
-            (
-                true,
-                RenderOptions::colored(crate::render::colors::Palette::Ansi),
-            ),
+        for options in [
+            RenderOptions::plain(),
+            RenderOptions::colored(crate::render::colors::Palette::Ansi),
         ] {
             let heap_ir = g.compute_layout_with_config(&cfg);
             let plan = RenderPlan::build(&heap_ir, &options);
             let h = plan.height();
-            agree(&plan, &heap_ir, h.max(1), gate, false, what);
-            agree(&plan, &heap_ir, 3, gate, false, what); // multi-band
+            agree(&plan, &heap_ir, h.max(1), what);
+            agree(&plan, &heap_ir, 3, what); // multi-band
 
             // Arena backend.
             let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
@@ -495,7 +481,7 @@ fn check_graph(g: &Graph<'_>, what: &str) {
                 .compute_layout_arena(&cfg, &mut temp_arena, &mut out_arena)
                 .unwrap();
             let plan = RenderPlan::build(&arena_ir, &options);
-            agree(&plan, &arena_ir, 3, gate, false, what);
+            agree(&plan, &arena_ir, 3, what);
         }
     }
 }
@@ -596,9 +582,9 @@ fn plane_agrees_for_borderless_clusters() {
     let g = nested_graph();
     let ir = g.compute_layout();
     let mut options = RenderOptions::plain();
-    options.subgraph_style_fn = borderless;
+    options.plan.subgraph_style_fn = borderless;
     let plan = RenderPlan::build(&ir, &options);
-    agree(&plan, &ir, 3, false, false, "borderless nested");
+    agree(&plan, &ir, 3, "borderless nested");
 }
 
 /// Shown dummies own exactly their marker cell.
@@ -615,9 +601,9 @@ fn plane_agrees_for_shown_dummies() {
     cfg.include_dummy_nodes = true;
     let ir = g.compute_layout_with_config(&cfg);
     let mut options = RenderOptions::plain();
-    options.show_dummy_nodes = true;
+    options.plan.show_dummy_nodes = true;
     let plan = RenderPlan::build(&ir, &options);
-    agree(&plan, &ir, 3, false, true, "shown dummies");
+    agree(&plan, &ir, 3, "shown dummies");
 }
 
 /// Manual cost report — wide fans AND tall chains (the row-bucket
@@ -654,8 +640,6 @@ fn ownership_cost_report() {
                 y0,
                 y1,
                 w,
-                false,
-                false,
                 &mut plane[..w * (y1 - y0)],
                 &mut bufs.scratch(),
                 &mut sweep,

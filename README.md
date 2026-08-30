@@ -146,15 +146,19 @@ Both modules need the `generic` feature, on by default.
 
 ### Render settings (`RenderOptions`)
 
+Options live in three homes by what they affect: `plan` (resolved
+semantics), `emit` (how they are written), `compose` (memory only).
+
 | Field | Values | Default |
 |---|---|---|
-| `charset` | `Unicode` / `Ascii` (equal projections of one canvas) | `Unicode` |
-| `color_mode` | `None` / `Ansi256` / `TrueColor` | `None` |
-| `palette` | ANSI palette for edge coloring | `Ansi` |
-| `legend` | list labels that could not be placed inline | off |
-| `band_rows_cap` | banded rendering: canvas memory = `width × cap` | 64 |
-| `show_dummy_nodes` | draw `◍` at routing waypoints | off |
-| `edge_style_fn` / `subgraph_style_fn` / `edge_label_style_fn` | per-element style callbacks (plain `fn`) | legacy look |
+| `emit.charset` | `Unicode` / `Ascii` (equal projections of one canvas) | `Unicode` |
+| `emit.color_mode` | `None` / `Ansi256` / `TrueColor` | `None` |
+| `emit.render_legend` | print the legend block after the diagram | off |
+| `plan.palette` | ANSI palette for edge coloring | `Ansi` |
+| `plan.label_policy` | `placement`: `Geometric` / `AvoidNodeRows`; `overflow`: `Omit` / `Legend` | geometric, omit |
+| `plan.show_dummy_nodes` | draw `◍` at routing waypoints | off |
+| `plan.edge_style_fn` / `.subgraph_style_fn` / `.edge_label_style_fn` | per-element style callbacks (plain `fn`) | legacy look |
+| `compose.band_rows_cap` | banded rendering: canvas memory = `width × cap` | 64 |
 
 Presets: `RenderOptions::plain()`, `::colored(palette)`, `::ascii()`,
 `::ascii_colored()`. Render surfaces on both IR types:

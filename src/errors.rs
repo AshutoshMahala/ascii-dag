@@ -324,7 +324,7 @@ pub const WARN_CONFIG_CLAMPED: &str = wdp!(W.Graph.Dag.INVALID);
 
 /// An edge label will not paint AND the legend is disabled (the
 /// default) — the label appears nowhere in the output. With
-/// `RenderOptions.legend` enabled, unplaced labels are listed below
+/// `LabelOverflow::Legend` set, unplaced labels are listed below
 /// the graph instead and this warning stays silent. The message names
 /// the edge by index and endpoint ids only — label TEXT is caller
 /// data (possibly secret, possibly control characters) and is never

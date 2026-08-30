@@ -92,7 +92,7 @@ fn card_graph(painter: Painter, width: usize, height: usize) -> Graph<'static> {
 
 fn options(charset: Charset) -> RenderOptions {
     let mut o = RenderOptions::plain();
-    o.charset = charset;
+    o.emit.charset = charset;
     o
 }
 

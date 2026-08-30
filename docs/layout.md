@@ -190,7 +190,7 @@ config.include_dummy_nodes = true;   // layout: emit them into the IR
 let ir = g.compute_layout_with_config(&config);
 
 let mut options = RenderOptions::plain();
-options.show_dummy_nodes = true;     // render: draw the marker
+options.plan.show_dummy_nodes = true; // render: draw the marker
 ```
 
 Both are required — the render switch has nothing to draw unless the
