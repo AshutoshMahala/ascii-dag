@@ -185,7 +185,7 @@ impl NodeRegion<'_, '_> {
     pub fn hrule(&mut self, x0: usize, x1: usize, y: usize) {
         use super::cell::Weight::{Light, None as No};
         let (row_lo, row_hi) = self.visible_rows();
-        if x0 > x1 || y >= self.height || y < row_lo || y >= row_hi {
+        if self.width == 0 || x0 > x1 || y >= self.height || y < row_lo || y >= row_hi {
             return;
         }
         for x in x0..=x1.min(self.width - 1) {

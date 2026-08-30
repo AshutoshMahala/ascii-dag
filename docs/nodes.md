@@ -41,9 +41,7 @@ use ascii_dag::render::engine::{NodePaintCtx, NodeRegion};
 
 fn card(region: &mut NodeRegion<'_, '_>, ctx: NodePaintCtx<'_>) {
     region.write_str(1, 0, ctx.label);
-    for x in 0..region.width() {
-        region.set(x, 1, '─');
-    }
+    region.hrule(0, region.width() - 1, 1); // semantic rule: `─`, or `-` under --ascii
     for (i, line) in ctx.payload.lines().enumerate() {
         region.write_str(1, 2 + i, line);
     }
@@ -54,8 +52,10 @@ Rules of the region: coordinates are node-local, writes outside the
 declared area are silently dropped (painters cannot damage the rest of
 the diagram), and painters are replayed per band — draw the same
 content every call, and use `ctx.visible_rows` to skip clipped rows in
-tall nodes. Pick glyphs from `ctx.charset` if you want `--ascii`
-output to stay ASCII.
+tall nodes. Draw structure through the semantic primitives — `hrule`,
+`vrule`, `frame`, `arrow` — and it decodes per charset at emission
+like all engine ink (and merges into proper tees and junctions where
+strokes meet); text via `set`/`write_str` passes through untranslated.
 
 For full control without a struct of your own, implement the
 `NodeContent` trait: `label()`, `size()`, `painter()`, `payload()`.

@@ -195,7 +195,8 @@ options.plan.show_dummy_nodes = true; // render: draw the marker
 
 Both are required — the render switch has nothing to draw unless the
 layout emitted them. With `include_dummy_nodes` on they appear in the
-IR as nodes with `kind == NodeKind::Dummy` and an `edge_index`
+IR as nodes with `kind == ascii_dag::ir::NodeKind::Dummy` (the IR
+enum — crate-root `NodeKind` is the scene vocabulary) and an `edge_index`
 back-link to the edge they belong to, which is how you attribute a
 routing cell to its edge.
 

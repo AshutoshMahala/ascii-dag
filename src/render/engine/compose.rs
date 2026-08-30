@@ -259,7 +259,9 @@ impl<'a> PaintScratch<'a> {
     /// The exact `carve` sequence as `(bytes, align)` pairs, in carve
     /// order — `CompositionRequirements` folds its workspace layout
     /// through this instead of guessing alignment slop, so the sizing
-    /// and the carves can never drift apart.
+    /// and the carves can never drift apart. Checked: `None` when any
+    /// term overflows (the requirement then reports unfittable instead
+    /// of panicking — hand-built IRs can declare absurd dimensions).
     pub(crate) fn carve_layout(
         run_capacity: usize,
         subgraphs: usize,
@@ -268,25 +270,38 @@ impl<'a> PaintScratch<'a> {
         colored: bool,
         width: usize,
         band_rows: usize,
-    ) -> [(usize, usize); 7] {
+    ) -> Option<[(usize, usize); 7]> {
         use core::mem::{align_of, size_of};
-        let seq = if colored { width * band_rows } else { 0 };
+        let seq = if colored {
+            width.checked_mul(band_rows)?
+        } else {
+            0
+        };
         type HeapEntry = (u32, usize, u32);
-        [
-            (run_capacity * size_of::<Run>(), align_of::<Run>()),
+        Some([
             (
-                run_capacity * size_of::<HeapEntry>(),
+                run_capacity.checked_mul(size_of::<Run>())?,
+                align_of::<Run>(),
+            ),
+            (
+                run_capacity.checked_mul(size_of::<HeapEntry>())?,
                 align_of::<HeapEntry>(),
             ),
-            (seq * size_of::<u32>(), align_of::<u32>()),
-            (subgraphs * size_of::<usize>(), align_of::<usize>()),
-            (edges * size_of::<usize>(), align_of::<usize>()),
-            (nodes * size_of::<usize>(), align_of::<usize>()),
+            (seq.checked_mul(size_of::<u32>())?, align_of::<u32>()),
             (
-                (subgraphs + edges + nodes) * size_of::<u32>(),
+                subgraphs.checked_mul(size_of::<usize>())?,
+                align_of::<usize>(),
+            ),
+            (edges.checked_mul(size_of::<usize>())?, align_of::<usize>()),
+            (nodes.checked_mul(size_of::<usize>())?, align_of::<usize>()),
+            (
+                subgraphs
+                    .checked_add(edges)?
+                    .checked_add(nodes)?
+                    .checked_mul(size_of::<u32>())?,
                 align_of::<u32>(),
             ),
-        ]
+        ])
     }
 
     /// Bytes an arena needs for this scratch (estimate companion).

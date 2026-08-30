@@ -14,6 +14,15 @@ use super::color::CellColor;
 use super::plan::HitResult;
 
 /// One composed canvas cell: meaning, color, owner.
+///
+/// `CellView` is **callback-scoped** (a lending visitor): its
+/// lifetime is reserved for future band-borrowed payloads, so the
+/// values handed to
+/// [`visit_cells`](super::composer::SceneComposer::visit_cells)
+/// cannot be collected into a `Vec` or otherwise outlive the
+/// callback — even while the scene is alive. To retain cells, copy
+/// the fields you need (`kind`, `color`, and `owner` are all small
+/// `Copy` values).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy)]
 pub struct CellView<'s> {

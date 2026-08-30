@@ -1174,7 +1174,10 @@ mod review_fixes {
         let hidden =
             crate::render::engine::plan::RenderPlan::build(&ir, &RenderOptions::plain().plan);
         assert!(
-            !matches!(hidden.element_at(&ir, dummy.x, dummy.y), HitResult::Node(id) if id == dummy.id),
+            !matches!(
+                hidden.element_at(&ir, dummy.x, dummy.y),
+                HitResult::Dummy { .. }
+            ),
             "hidden dummy must not hit"
         );
 
@@ -1183,8 +1186,12 @@ mod review_fixes {
         let shown = crate::render::engine::plan::RenderPlan::build(&ir, &options.plan);
         assert_eq!(
             shown.element_at(&ir, dummy.x, dummy.y),
-            HitResult::Node(dummy.id),
-            "shown dummy hits its marker cell"
+            HitResult::Dummy {
+                edge: dummy.edge_index.expect("dummies carry their edge"),
+                level: dummy.level,
+            },
+            "shown dummy hits its marker cell with SEMANTIC identity \
+             (synthetic ids never leak)"
         );
     }
 

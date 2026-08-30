@@ -56,8 +56,11 @@ pub struct NodeView<'s> {
     /// backend-specific, so the scene never exposes them. Dummies
     /// carry [`dummy_of`](Self::dummy_of) instead.
     pub id: Option<usize>,
-    /// Backend-stable dummy identity: the owning edge's scene index
-    /// and the level the dummy occupies. `None` for real nodes.
+    /// Backend-stable dummy identity: the owning edge's INPUT index
+    /// (the style-callback / [`EdgeView::input_index`] convention) and
+    /// the level the dummy occupies — the same pair
+    /// [`HitResult::Dummy`](super::plan::HitResult::Dummy) reports.
+    /// `None` for real nodes.
     pub dummy_of: Option<(usize, usize)>,
     /// Left edge, in cells.
     pub x: usize,

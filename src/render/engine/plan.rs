@@ -121,6 +121,18 @@ pub enum HitResult {
     Edge(usize),
     /// A subgraph box (by subgraph id).
     Subgraph(usize),
+    /// A shown dummy node (routing waypoint), by its SEMANTIC
+    /// identity — dummies never expose their synthetic backend ids
+    /// (the same rule as
+    /// [`NodeView::dummy_of`](super::views::NodeView::dummy_of), and
+    /// the same pair of values).
+    Dummy {
+        /// Input index of the edge this waypoint belongs to (the
+        /// style-callback / `EdgeView::input_index` convention).
+        edge: usize,
+        /// Level the waypoint occupies.
+        level: usize,
+    },
     /// Nothing here.
     None,
 }
@@ -1061,9 +1073,14 @@ impl<'buf> RenderPlan<'buf> {
                     let n = view.node(el.index);
                     if matches!(n.kind, crate::ir::NodeKind::Dummy) {
                         // A dummy is a single marker cell, and only
-                        // when the render shows it.
+                        // when the render shows it. Its identity is
+                        // semantic (input edge + level) — synthetic
+                        // backend ids never leak.
                         if self.show_dummy_nodes && x == n.x && y == n.y {
-                            return HitResult::Node(n.id);
+                            return HitResult::Dummy {
+                                edge: n.edge_index.unwrap_or(usize::MAX),
+                                level: n.level,
+                            };
                         }
                         continue;
                     }

@@ -40,7 +40,19 @@ pub(crate) fn owner_to_hit<V: LayoutView>(
     }
     let el = &plan.elements()[(owner - 1) as usize];
     match el.kind {
-        ElementKind::Node => super::HitResult::Node(view.node(el.index).id),
+        ElementKind::Node => {
+            let n = view.node(el.index);
+            if matches!(n.kind, crate::ir::NodeKind::Dummy) {
+                // Dummies never expose their synthetic backend ids —
+                // their semantic identity is (input edge, level).
+                super::HitResult::Dummy {
+                    edge: n.edge_index.unwrap_or(usize::MAX),
+                    level: n.level,
+                }
+            } else {
+                super::HitResult::Node(n.id)
+            }
+        }
         ElementKind::Edge => super::HitResult::Edge(el.index),
         ElementKind::Subgraph => super::HitResult::Subgraph(view.subgraph(el.index).id),
     }
@@ -79,12 +91,12 @@ pub(crate) struct OwnerSweep {
 
 /// Upper bound on any single band's row-incidence entries: each
 /// element contributes at most `min(row span, band_rows)` rows to one
-/// band. O(elements), computed at requirements time.
-pub(crate) fn owner_incidence_capacity(plan: &RenderPlan<'_>, band_rows: usize) -> usize {
-    plan.elements()
-        .iter()
-        .map(|el| (el.y_max - el.y_min + 1).min(band_rows))
-        .sum()
+/// band. O(elements), computed at requirements time. Checked: `None`
+/// when the sum overflows (the requirement then reports unfittable).
+pub(crate) fn owner_incidence_capacity(plan: &RenderPlan<'_>, band_rows: usize) -> Option<usize> {
+    plan.elements().iter().try_fold(0usize, |acc, el| {
+        acc.checked_add((el.y_max - el.y_min + 1).min(band_rows))
+    })
 }
 
 /// Fill the per-plan tables and reset the sweep. Call once before a
@@ -397,7 +409,7 @@ mod tests {
             let mut active = vec![0u32; elements];
             let mut row_off = vec![0u32; band_rows + 1];
             let mut row_cur = vec![0u32; band_rows];
-            let mut row_inc = vec![0u32; owner_incidence_capacity(&plan, band_rows)];
+            let mut row_inc = vec![0u32; owner_incidence_capacity(&plan, band_rows).unwrap()];
             let mut scratch = OwnerScratch {
                 claim_next: &mut claim,
                 edge_slot: &mut edge_slot,

@@ -263,8 +263,10 @@ right under a cursor:
 - **Edges** hit as *painted ink* — the exact cells the compositor drew,
   not a bounding box, so two crossing edges resolve correctly. A
   painted edge label belongs to its edge.
-- **Clusters** hit on their border, or on their label when the border
-  is `None`.
+- **Bordered clusters** own their complete rectangle — border, label,
+  and blank interior alike (clicking inside a box selects it); a
+  borderless cluster (`SubgraphBorder::None`) has only its label cells
+  to hit.
 
 Nodes win over edges, edges over clusters — the visual z-order.
 

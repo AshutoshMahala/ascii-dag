@@ -95,7 +95,10 @@ impl CompositionRequirements {
             edges: view.edge_count(),
             subgraphs: view.subgraph_count(),
             elements: plan.elements().len(),
-            incidence: owner_incidence_capacity(plan, band_rows),
+            // `usize::MAX` marks an overflowed incidence sum; the
+            // checked fold below then reports the whole requirement
+            // unfittable.
+            incidence: owner_incidence_capacity(plan, band_rows).unwrap_or(usize::MAX),
             bytes: None,
         };
         req.bytes = req.layout_bytes();
@@ -120,7 +123,7 @@ impl CompositionRequirements {
             true, // the composer is always color-complete
             self.width,
             self.band_rows,
-        );
+        )?;
         let extra_terms: [(Option<usize>, usize); 10] = [
             (area.checked_mul(size_of::<Cell>()), align_of::<Cell>()),
             (
@@ -190,6 +193,11 @@ pub struct SceneComposer<'ws> {
 impl SceneComposer<'static> {
     /// Heap composer, presized for `requirements`; visits for larger
     /// scenes grow the workspace to their high-water mark.
+    ///
+    /// Unfittable requirements (`workspace_bytes()` returned `None`)
+    /// presize nothing; every visit of such a scene then reports
+    /// [`GraphError::RenderWorkspaceTooSmall`] instead of attempting
+    /// an absurd allocation.
     pub fn new(requirements: CompositionRequirements) -> Self {
         Self {
             ws: Workspace::Heap(alloc::vec![
@@ -226,6 +234,10 @@ impl<'ws> SceneComposer<'ws> {
     /// CellView)`. Composed in bands internally; band boundaries are
     /// unspecified and UNOBSERVABLE — the callback sees a seamless
     /// row-major stream, and workspace size never affects the values.
+    ///
+    /// The `CellView` is callback-scoped (a lending visitor) — copy
+    /// its fields to retain cells; the view itself cannot escape the
+    /// callback.
     pub fn visit_cells<F>(&mut self, scene: &Scene<'_, '_>, mut f: F) -> Result<(), GraphError>
     where
         F: FnMut(usize, usize, CellView<'_>),
@@ -253,7 +265,19 @@ impl<'ws> SceneComposer<'ws> {
         let cap = self.band_rows_cap;
         with_view!(scene, v => {
             let req = CompositionRequirements::compute(v, scene.plan(), &ComposeBudget::new().with_band_rows_cap(cap));
-            let needed = req.workspace_bytes().unwrap_or(usize::MAX);
+            // An overflowed requirement is an ERROR in both modes —
+            // never a `usize::MAX` heap grow.
+            let Some(needed) = req.workspace_bytes() else {
+                let got_bytes = match &self.ws {
+                    #[cfg(feature = "alloc")]
+                    Workspace::Heap(buf) => buf.len(),
+                    Workspace::Fixed(buf) => buf.len(),
+                };
+                return Err(GraphError::RenderWorkspaceTooSmall {
+                    needed_bytes: usize::MAX,
+                    got_bytes,
+                });
+            };
             let chunk: &mut [u8] = match &mut self.ws {
                 #[cfg(feature = "alloc")]
                 Workspace::Heap(buf) => {
@@ -538,7 +562,7 @@ mod tests {
         }
     }
 
-    fn check_scene<L: super::super::scene::LayoutSource>(
+    pub(super) fn check_scene<L: super::super::scene::LayoutSource>(
         ir: &L,
         options: &PlanOptions,
         dir: crate::graph::Direction,
@@ -744,5 +768,136 @@ mod tests {
             .unwrap();
         assert_eq!(flow, ControlFlow::Break("stopped"));
         assert!(seen < scene.width() * scene.height());
+    }
+}
+
+#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+mod review_tests {
+    use super::super::config::PlanOptions;
+    use super::super::scene::ScenePlanner;
+    use super::super::style::{SubgraphBorder, SubgraphStyle, SubgraphStyleCtx};
+    use super::*;
+    use crate::graph::Graph;
+    use crate::render::engine::HitResult;
+
+    fn budget(cap: usize) -> ComposeBudget {
+        ComposeBudget::new().with_band_rows_cap(cap)
+    }
+
+    /// Borderless clusters and shown dummies hold the agreement gate
+    /// too — and shown dummies surface as `HitResult::Dummy` with
+    /// their SEMANTIC identity (input edge + level), never a
+    /// synthetic backend id.
+    #[test]
+    fn agreement_covers_borderless_and_shown_dummies() {
+        fn borderless(_ctx: SubgraphStyleCtx<'_>) -> SubgraphStyle {
+            SubgraphStyle {
+                border: SubgraphBorder::None,
+                ..Default::default()
+            }
+        }
+        let mut g = Graph::new();
+        g.add_node(1usize, "outer");
+        g.add_node(2usize, "inner");
+        g.add_node(3usize, "leaf");
+        g.add_edge(1usize, 2usize, None);
+        g.add_edge(2usize, 3usize, None);
+        let outer = g.add_subgraph("Outer");
+        let inner = g.add_subgraph("Inner");
+        g.put_nodes(&[1, 2, 3]).inside(inner).unwrap();
+        g.put_subgraphs(&[inner]).inside(outer).unwrap();
+        let ir = g.compute_layout();
+        super::tests::check_scene(
+            &ir,
+            &PlanOptions::new().with_subgraph_style_fn(borderless),
+            crate::graph::Direction::TopDown,
+            "borderless nested",
+        );
+
+        // A self-loop BEFORE a skip edge: input and scene edge
+        // indices diverge, so this pins that dummy identity follows
+        // the INPUT convention.
+        let mut g = Graph::new();
+        g.add_node(1usize, "A");
+        g.add_node(2usize, "B");
+        g.add_node(3usize, "C");
+        g.add_edge(1usize, 1usize, None); // self-loop: input 0, no scene index
+        g.add_edge(1usize, 2usize, None); // input 1
+        g.add_edge(2usize, 3usize, None); // input 2
+        g.add_edge(1usize, 3usize, None); // input 3: skip edge → dummy
+        let mut cfg = crate::LayoutConfig::standard();
+        cfg.include_dummy_nodes = true;
+        let ir = g.compute_layout_with_config(&cfg);
+        let options = PlanOptions::new().with_show_dummy_nodes(true);
+        super::tests::check_scene(
+            &ir,
+            &options,
+            crate::graph::Direction::TopDown,
+            "shown dummies",
+        );
+
+        let mut planner = ScenePlanner::new();
+        let scene = planner.plan(&ir, &options).unwrap();
+        let mut composer = SceneComposer::new(scene.composition_requirements(&budget(64)));
+        let mut dummy_owners = Vec::new();
+        composer
+            .visit_cells(&scene, |_, _, cell| {
+                if let HitResult::Dummy { edge, level } = cell.owner {
+                    dummy_owners.push((edge, level));
+                }
+            })
+            .unwrap();
+        assert!(!dummy_owners.is_empty(), "skip edge must surface a dummy");
+        for &(edge, _) in &dummy_owners {
+            assert_eq!(edge, 3, "dummy identity uses the INPUT edge index");
+        }
+        // The views agree: same identity pair on the NodeView side.
+        let dummies: Vec<(usize, usize)> = scene.nodes().filter_map(|n| n.dummy_of).collect();
+        assert!(dummy_owners.iter().all(|d| dummies.contains(d)));
+    }
+
+    /// Absurd hand-built dimensions: the requirement reports
+    /// unfittable, and BOTH composer modes error instead of panicking
+    /// or attempting a `usize::MAX` allocation.
+    #[test]
+    fn absurd_dimensions_error_instead_of_panicking() {
+        let mut b = crate::ir::LayoutIRBuilder::new().with_levels(1);
+        b.add_node(crate::ir::LayoutNode {
+            id: 0,
+            label: "a",
+            x: 0,
+            y: 0,
+            width: 3,
+            height: 1,
+            center_x: 1,
+            center_y: 0,
+            level: 0,
+            level_position: 0,
+            kind: crate::ir::NodeKind::Explicit,
+            has_self_loop: false,
+            self_loop_at: None,
+            edge_index: None,
+            content_tag: 0,
+        });
+        b.set_dimensions(usize::MAX, 1);
+        let ir = b.build();
+        let mut planner = ScenePlanner::new();
+        let scene = planner.plan(&ir, &PlanOptions::new()).unwrap();
+        let req = scene.composition_requirements(&budget(64));
+        assert_eq!(req.workspace_bytes(), None, "requirement must overflow");
+
+        let mut composer = SceneComposer::new(req);
+        assert!(matches!(
+            composer.visit_cells(&scene, |_, _, _| {}),
+            Err(GraphError::RenderWorkspaceTooSmall {
+                needed_bytes: usize::MAX,
+                ..
+            })
+        ));
+        let mut ws = [0u8; 64];
+        assert!(matches!(
+            SceneComposer::new_in(req, &mut ws),
+            Err(GraphError::RenderWorkspaceTooSmall { .. })
+        ));
     }
 }
