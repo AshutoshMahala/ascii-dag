@@ -30,8 +30,6 @@ mod composer_spike;
 mod ownership_spike;
 #[cfg(all(test, feature = "std", feature = "layout-vertical"))]
 mod painter_spike;
-#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
-mod view_spike;
 
 pub(crate) mod cell;
 pub(crate) mod charset;
@@ -48,7 +46,10 @@ pub(crate) mod presets;
 pub(crate) mod region;
 pub(crate) mod scene;
 pub(crate) mod style;
+#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+mod test_alloc;
 pub(crate) mod view;
+pub(crate) mod views;
 
 /// Stream a rendered view into any writer — the one alloc-backed
 /// band loop behind every std entry point. `options.emit` decides the
@@ -236,4 +237,7 @@ pub use scene::{LayoutSource, Scene, ScenePlanner, SourceRef};
 pub use style::{
     EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPlacement, LabelPosition, LineWeight,
     MarkerShape, NodePaintFn, SubgraphBorder, SubgraphStyle, SubgraphStyleCtx,
+};
+pub use views::{
+    EdgePathView, EdgeView, LabelSlot, LabelView, NodeKind, NodeOrigin, NodeView, SubgraphView,
 };

@@ -55,6 +55,7 @@ pub struct SourceRef<'ir>(pub(crate) ViewRef<'ir>);
 
 /// The scene's storage-neutral view of its layout: one private enum,
 /// monomorphized cores behind it — `Scene` itself stays non-generic.
+#[derive(Clone, Copy)]
 pub(crate) enum ViewRef<'ir> {
     #[cfg(feature = "alloc")]
     Heap(&'ir LayoutIR<'ir>),
@@ -255,16 +256,12 @@ impl Scene<'_, '_> {
         self.plan.legend_entries()
     }
 
-    /// The resolved plan (composer/emission internals; the consumer
-    /// lands with `SceneComposer`).
-    #[allow(dead_code)]
+    /// The resolved plan (views/composer/emission internals).
     pub(crate) fn plan(&self) -> &RenderPlan<'_> {
         &self.plan
     }
 
-    /// The layout view (composer/emission internals; the consumer
-    /// lands with `SceneComposer`).
-    #[allow(dead_code)]
+    /// The layout view (views/composer/emission internals).
     pub(crate) fn view(&self) -> &ViewRef<'_> {
         &self.view
     }
@@ -274,7 +271,7 @@ impl Scene<'_, '_> {
 mod tests {
     use super::*;
     use crate::graph::Graph;
-    use crate::render::engine::view_spike::allocations_on_this_thread;
+    use crate::render::engine::test_alloc::allocations_on_this_thread;
 
     fn small_graph() -> Graph<'static> {
         let mut g = Graph::new();

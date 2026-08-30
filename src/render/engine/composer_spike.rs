@@ -41,7 +41,7 @@ use crate::graph::Graph;
 use crate::graph::arena::Arena;
 use crate::render::colors::Palette;
 
-use super::view_spike::allocations_on_this_thread;
+use super::test_alloc::allocations_on_this_thread;
 
 // ── CompositionRequirements prototype ────────────────────────────────────
 

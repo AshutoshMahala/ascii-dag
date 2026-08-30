@@ -28,7 +28,6 @@ use super::style::NodePaintFn;
 /// built-ins override it so both backends can render them as pure
 /// data. Overriding it to a built-in tag in a user impl is harmless —
 /// the node simply renders through that built-in painter.
-#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 #[repr(u8)]
