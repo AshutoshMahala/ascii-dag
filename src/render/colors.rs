@@ -6,11 +6,11 @@
 //! # Usage
 //!
 //! ```rust
-//! use ascii_dag::render::colors::{self, Palette};
+//! use ascii_dag::render::colors::Palette;
 //!
-//! // Get color by index (cycles through palette)
-//! let color = colors::get(Palette::Ansi, 0);
-//! assert_eq!(color, 196); // Bright Red
+//! // Index the palette table directly (cycle with `%` if needed)
+//! let colors = Palette::Ansi.colors();
+//! assert_eq!(colors[0], 196); // Bright Red
 //! ```
 
 /// ANSI 256-color codes for terminal edge coloring.
@@ -112,17 +112,6 @@ impl Palette {
     }
 }
 
-/// Get an ANSI color code from a palette by index (cycles through)
-#[inline]
-#[deprecated(
-    since = "0.10.0",
-    note = "use `Palette::colors()` and index directly, or the engine's per-edge styling"
-)]
-pub fn get(palette: Palette, index: usize) -> u8 {
-    let colors = palette.colors();
-    colors[index % colors.len()]
-}
-
 /// Get an ANSI color code from a custom palette by index (cycles through)
 #[inline]
 pub fn get_custom(palette: &[u8], index: usize) -> u8 {
@@ -133,65 +122,14 @@ pub fn get_custom(palette: &[u8], index: usize) -> u8 {
 pub mod escape {
     /// Reset all formatting
     pub const RESET: &str = "\x1b[0m";
-
-    /// Format a foreground color using 256-color palette
-    /// Returns the escape sequence as a fixed-size array
-    #[inline]
-    #[deprecated(
-        since = "0.10.0",
-        note = "the engine emits color escapes internally; use `RenderOptions::colored`"
-    )]
-    pub fn fg256(color: u8) -> [u8; 11] {
-        let mut buf = [0u8; 11];
-        buf[0] = 0x1b; // ESC
-        buf[1] = b'[';
-        buf[2] = b'3';
-        buf[3] = b'8';
-        buf[4] = b';';
-        buf[5] = b'5';
-        buf[6] = b';';
-        // Write color as 3 digits with leading zeros
-        buf[7] = b'0' + (color / 100);
-        buf[8] = b'0' + ((color / 10) % 10);
-        buf[9] = b'0' + (color % 10);
-        buf[10] = b'm';
-        buf
-    }
-
-    /// Format a foreground color and write to a string
-    #[cfg(feature = "alloc")]
-    #[inline]
-    #[deprecated(
-        since = "0.10.0",
-        note = "the engine emits color escapes internally; use `RenderOptions::colored`"
-    )]
-    pub fn write_fg256(output: &mut alloc::string::String, color: u8) {
-        use core::fmt::Write;
-        let _ = write!(output, "\x1b[38;5;{}m", color);
-    }
 }
 
 // Re-export for convenience
 pub use escape::RESET;
 
 #[cfg(test)]
-#[allow(deprecated)] // the deprecated helpers stay pinned until 0.11 removal
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_get_cycles_through_palette() {
-        assert_eq!(get(Palette::Ansi, 0), ANSI[0]);
-        assert_eq!(get(Palette::Ansi, 1), ANSI[1]);
-        assert_eq!(get(Palette::Ansi, ANSI.len()), ANSI[0]); // cycles back
-    }
-
-    #[test]
-    fn test_fg256_format() {
-        let seq = escape::fg256(39);
-        assert_eq!(seq[0], 0x1b); // ESC
-        assert_eq!(seq[1], b'[');
-    }
 
     #[test]
     fn test_palettes_not_empty() {

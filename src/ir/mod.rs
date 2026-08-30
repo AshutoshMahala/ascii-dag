@@ -40,45 +40,16 @@
 pub mod arena;
 pub(crate) mod arena_builder;
 pub mod json;
-mod legacy;
 
 #[cfg(feature = "alloc")]
 use alloc::vec;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-#[cfg(feature = "alloc")]
-use core::cell::OnceCell;
 
 #[cfg(all(feature = "alloc", not(feature = "std")))]
 use alloc::collections::BTreeMap as HashMap;
 #[cfg(all(feature = "alloc", feature = "std"))]
 use std::collections::HashMap;
-
-/// Spatial index for fast scanline rendering.
-/// Maps a Y coordinate to the nodes and edges that occupy that line.
-#[cfg(feature = "alloc")]
-#[deprecated(
-    since = "0.10.0",
-    note = "the render engine's `RenderPlan` (via `render_plan`/`hit_test`) replaces the scanline index"
-)]
-#[derive(Debug, Clone)]
-pub struct LineOccupancy {
-    /// Indices of nodes that appear on this line
-    pub node_indices: Vec<usize>,
-    /// Indices of edges that cross this line
-    pub edge_indices: Vec<usize>,
-}
-
-#[cfg(feature = "alloc")]
-#[allow(deprecated)]
-impl LineOccupancy {
-    fn new() -> Self {
-        Self {
-            node_indices: Vec::new(),
-            edge_indices: Vec::new(),
-        }
-    }
-}
 
 /// Classification of a node in the layout.
 ///
@@ -313,9 +284,6 @@ pub struct LayoutIR<'a> {
     pub(crate) id_to_index: HashMap<usize, usize>,
     /// Rank direction the layout was computed for.
     pub(crate) direction: crate::graph::Direction,
-    /// Spatial index for fast scanline rendering (built lazily on first access)
-    #[allow(deprecated)]
-    y_index: OnceCell<Vec<LineOccupancy>>,
 }
 
 #[cfg(feature = "alloc")]
@@ -399,7 +367,6 @@ impl<'a> LayoutIR<'a> {
         for sg in &mut self.subgraphs {
             sg.y = h.saturating_sub(sg.y + sg.height);
         }
-        self.y_index = OnceCell::new();
     }
 
     /// Horizontally mirror every coordinate in place (involutive).
@@ -481,7 +448,6 @@ impl<'a> LayoutIR<'a> {
         for sg in &mut self.subgraphs {
             sg.x = w.saturating_sub(sg.x + sg.width);
         }
-        self.y_index = OnceCell::new();
     }
 
     /// Get the number of levels (depth) in the graph.
@@ -533,60 +499,6 @@ impl<'a> LayoutIR<'a> {
     /// Get all edges ending at a node.
     pub fn edges_to(&self, node_id: usize) -> impl Iterator<Item = &LayoutEdge<'a>> {
         self.edges.iter().filter(move |e| e.to_id == node_id)
-    }
-
-    /// Get or build the spatial Y-index for fast scanline rendering.
-    /// This is computed lazily on first access and cached for subsequent calls.
-    ///
-    /// Returns a slice where index `y` contains all nodes and edges that occupy line `y`.
-    #[deprecated(
-        since = "0.10.0",
-        note = "use `render_plan(&options)` + `hit_test` — the engine's spatial queries"
-    )]
-    #[allow(deprecated)]
-    pub fn y_index(&self) -> &[LineOccupancy] {
-        self.y_index.get_or_init(|| self.build_y_index())
-    }
-
-    /// Build the Y-index spatial structure.
-    /// Maps each Y coordinate to the nodes and edges that appear on that line.
-    #[allow(deprecated)]
-    fn build_y_index(&self) -> Vec<LineOccupancy> {
-        let mut index = vec![LineOccupancy::new(); self.height];
-
-        // Index nodes: each node occupies `height` lines starting at its Y coordinate
-        for (node_idx, node) in self.nodes.iter().enumerate() {
-            for y in node.y..node.y + node.height {
-                if y < self.height {
-                    index[y].node_indices.push(node_idx);
-                }
-            }
-        }
-
-        // Index edges: each edge may span multiple lines
-        for (edge_idx, edge) in self.edges.iter().enumerate() {
-            let min_y = edge.from_y.min(edge.to_y);
-            let max_y = edge.from_y.max(edge.to_y);
-
-            for y in min_y..=max_y {
-                if y < self.height {
-                    index[y].edge_indices.push(edge_idx);
-                }
-            }
-        }
-
-        index
-    }
-
-    /// Get items that occupy a specific line (fast lookup with Y-index).
-    /// Returns node and edge indices for the given Y coordinate.
-    #[deprecated(
-        since = "0.10.0",
-        note = "use `render_plan(&options)` + `hit_test` — the engine's spatial queries"
-    )]
-    #[allow(deprecated)]
-    pub fn items_at_line(&self, y: usize) -> Option<&LineOccupancy> {
-        self.y_index().get(y)
     }
 
     /// Check if two edges cross each other.
@@ -800,7 +712,6 @@ impl<'a> LayoutIRBuilder<'a> {
             levels: self.levels,
             id_to_index,
             direction: self.direction,
-            y_index: OnceCell::new(),
         }
     }
 }

@@ -53,7 +53,7 @@ pub struct RenderOptions {
     /// Append the legend listing labels that found no inline position.
     /// OFF by default (the colored preset turns it on): with it off,
     /// an unplaced label appears NOWHERE in the output — silently,
-    /// unless the `warnings` feature is enabled (`W.Render.Label.026`).
+    /// unless the `warnings` feature is enabled (`W.Render.Label.031`).
     pub legend: bool,
     /// Edge color palette used by the default style (modulo assignment,
     /// legacy behavior). Ignored when `color_mode` is `None` or an edge

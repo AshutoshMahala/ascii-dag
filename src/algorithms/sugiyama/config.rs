@@ -6,8 +6,9 @@
 //! algorithm-specific fields are scoped inside [`AlgorithmConfig`]
 //! variants.
 //!
-//! `SugiyamaConfig` (feature `alloc`) is the legacy type, deprecated
-//! in favour of `LayoutConfig`.
+//! `SugiyamaConfig` (feature `alloc`) is the crate-private legacy
+//! storage behind `Graph`'s pipeline settings; `LayoutConfig` is the
+//! public configuration type.
 //!
 //! # Examples
 //!
@@ -291,9 +292,8 @@ impl Default for LayoutConfig<'static> {
 /// | [`standard()`](Self::standard) | DepthFirst | LongestPath | Median(4)→AdjExch(2) | Compact |
 /// | [`quality()`](Self::quality) | DepthFirst | LongestPath | Median(8)→AdjExch(4)→Median(2) | Compact |
 #[cfg(feature = "alloc")]
-#[deprecated(since = "0.9.0", note = "use LayoutConfig instead")]
 #[derive(Debug, Clone)]
-pub struct SugiyamaConfig {
+pub(crate) struct SugiyamaConfig {
     /// Cycle-breaking strategy.
     pub cycle_breaking: CycleBreaking,
 
@@ -314,6 +314,9 @@ pub struct SugiyamaConfig {
 #[allow(deprecated)]
 impl SugiyamaConfig {
     /// Fast preset — minimal crossing reduction, maximum speed.
+    /// (Test-only since the public surface's 0.11 removal; the 0.12
+    /// storage rework retires this type entirely.)
+    #[cfg(test)]
     pub fn fast() -> Self {
         Self {
             cycle_breaking: CycleBreaking::DepthFirst,
@@ -336,6 +339,7 @@ impl SugiyamaConfig {
     }
 
     /// Quality preset — thorough reduction for complex graphs.
+    #[cfg(test)]
     pub fn quality() -> Self {
         Self {
             cycle_breaking: CycleBreaking::DepthFirst,
@@ -349,6 +353,7 @@ impl SugiyamaConfig {
     /// Create a config from a custom crossing pipeline (convenience).
     ///
     /// Sets all other stages to standard defaults.
+    #[cfg(test)]
     pub fn with_crossing(pipeline: &[CrossingReducer]) -> Self {
         Self {
             cycle_breaking: CycleBreaking::DepthFirst,

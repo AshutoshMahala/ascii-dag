@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased] — 0.11
+
+### Removed
+- **The 0.9.x render entry points** announced for removal in 0.10.0 are gone. Heap (`LayoutIR`): `render_scanline`, `render_scanline_to`, `render_scanline_with_buffer`, `render_scanline_to_bytes`, `render_scanline_colored`, `render_scanline_colored_to`, `render_scanline_colored_with_legend` → `render_string` / `render_with` (colored: set `legend = false` to match the no-legend wrappers). Arena (`LayoutIRArena`): `render_to_buffer`, `render_to_buffer_colored`, `render_to_buffer_colored_with_legend`, `estimate_render_size`, `compute_edge_colors` → `render_to_bytes` + `estimate_render_arena_size`/`estimate_render_output_size`. The live `CsrGraph::render_to_buffer`/`estimate_render_size` debug helpers are unrelated and remain.
+- **`Graph::add_node_with_size` and `Graph::add_node_with_width`** → declare content that knows its area: `CustomNode { label, width, height, painter, payload }`. For byte-identical 0.10 output, use the `legacy_sized_look` painter recipe from `tests/migration_corpus.rs`; `painter: None` reserves the area without painting it.
+- **`LayoutIR::y_index`, `LayoutIR::items_at_line`, and `LineOccupancy`** → `render_plan(&options)` + `hit_test(&plan, x, y)`.
+- **The raw color-escape helpers** `colors::get`, `escape::fg256`, `escape::write_fg256` → index `Palette::colors()` directly; the engine emits escapes itself under `RenderOptions::colored`. (`colors::get_custom` and `escape::RESET` remain.)
+- **The `SugiyamaConfig` public surface**: the crate-root re-export, `Graph::compute_layout_with` (deprecated since 0.9.0), and — **without a deprecation cycle, as announced in 0.10.3** — `Graph::set_sugiyama_config` and `Graph::with_sugiyama_config`. Configure layout through `LayoutConfig` and `compute_layout_with_config`. The type survives as private storage; `set_crossing_reduction_passes` / `set_crossing_pipeline` keep working.
+
+### Internal
+- Every removal was frozen first: `tests/migration_corpus.rs` pinned each legacy API's output against goldens or its documented replacement on 0.10.3 before deletion, and the canonical-vs-golden assertions remain as the permanent migration proof.
+
 ## [0.10.3] - 2026-08-25
 
 ### Fixed

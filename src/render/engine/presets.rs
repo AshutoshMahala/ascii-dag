@@ -12,13 +12,13 @@ use super::config::RenderOptions;
 use crate::render::colors::Palette;
 
 impl RenderOptions {
-    /// Plain text output — matches the legacy `render_scanline()` family.
+    /// Plain text output — the 0.9 `render_scanline()` family's look.
     pub const fn plain() -> Self {
         Self::defaults()
     }
 
     /// ANSI-colored output with a legend — matches the legacy
-    /// `render_scanline_colored_with_legend(palette)`.
+    /// 0.9's `render_scanline_colored_with_legend(palette)` look.
     pub const fn colored(palette: Palette) -> Self {
         Self {
             color_mode: ColorMode::Ansi256,

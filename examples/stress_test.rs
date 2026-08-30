@@ -142,7 +142,7 @@ fn run_heap_test(name: &str, dag: &Graph, preset_name: Option<&str>) {
     println!(">>> [HEAP] Rendered in {:?} <<<\n", duration);
 }
 
-/// True no-alloc CSR pipeline: Graph → to_csr → compute_layout_arena_csr → render_to_buffer.
+/// True no-alloc CSR pipeline: Graph → to_csr → compute_layout_arena_csr → render_to_bytes.
 /// The only heap allocations are the pre-sized Vec<u8> buffers (which on embedded would be static).
 #[cfg(feature = "arena")]
 fn run_csr_test(name: &str, dag: &Graph) {

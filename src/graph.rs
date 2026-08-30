@@ -499,27 +499,6 @@ impl<'a> Graph<'a> {
         self.direction
     }
 
-    /// Set the full Sugiyama pipeline configuration.
-    ///
-    /// **Removed in 0.11** together with [`SugiyamaConfig`]: configure
-    /// layout through [`LayoutConfig`] and
-    /// [`compute_layout_with_config`](Self::compute_layout_with_config)
-    /// instead. (No `#[deprecated]` attribute is added on the 0.10.x
-    /// line, so `-D warnings` builds keep compiling.)
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ascii_dag::graph::Graph;
-    /// use ascii_dag::SugiyamaConfig;
-    ///
-    /// let mut dag = Graph::new();
-    /// dag.set_sugiyama_config(SugiyamaConfig::quality());
-    /// ```
-    pub fn set_sugiyama_config(&mut self, config: SugiyamaConfig) {
-        self.sugiyama_config = config;
-    }
-
     /// Set the number of passes for the crossing reduction algorithm.
     ///
     /// This is a **compatibility shim** — it replaces the entire pipeline
@@ -612,28 +591,6 @@ impl<'a> Graph<'a> {
     /// Builder method: set the rank direction (chainable).
     pub fn with_direction(mut self, direction: Direction) -> Self {
         self.direction = direction;
-        self
-    }
-
-    /// Builder method: apply a full [`SugiyamaConfig`] (chainable).
-    ///
-    /// **Removed in 0.11** together with [`SugiyamaConfig`]: configure
-    /// layout through [`LayoutConfig`] and
-    /// [`compute_layout_with_config`](Self::compute_layout_with_config)
-    /// instead. (No `#[deprecated]` attribute is added on the 0.10.x
-    /// line, so `-D warnings` builds keep compiling.)
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ascii_dag::Graph;
-    /// use ascii_dag::SugiyamaConfig;
-    ///
-    /// let dag = Graph::new()
-    ///     .with_sugiyama_config(SugiyamaConfig::quality());
-    /// ```
-    pub fn with_sugiyama_config(mut self, config: SugiyamaConfig) -> Self {
-        self.sugiyama_config = config;
         self
     }
 
@@ -846,109 +803,6 @@ impl<'a> Graph<'a> {
             self.set_custom_entry(idx, painter, payload);
         }
         NodeId(id)
-    }
-
-    /// Add a node with explicit width and height overrides.
-    ///
-    /// This is useful for pixel-based renderers or complex nodes where size
-    /// is determined by rendered content (HTML elements, custom graphics,
-    /// multi-line content) rather than label length.
-    ///
-    /// # Arguments
-    ///
-    /// * `id` - Unique node identifier
-    /// * `label` - Node label text (used for display, not for size calculation)
-    /// * `width` - Explicit width in layout units
-    /// * `height` - Explicit height in layout rows (1 = single-line node)
-    ///
-    /// The declared `width × height` area is reserved by layout —
-    /// edges route around it — and rendered as a simple `[label]` on
-    /// the top row with the extra rows left blank. For content that
-    /// fills the area, declare it on the node instead
-    /// (`CustomNode { … }` / a `NodeContent` impl). See
-    /// `examples/node_painting.rs`.
-    ///
-    /// Like [`add_node`](Self::add_node), returns a typed [`NodeId`]
-    /// handle for the added node.
-    ///
-    /// Explicit ids only — the id slot deliberately does **not**
-    /// accept [`AUTO`]: this method keeps its 0.9 signature and is
-    /// superseded in 0.10 by sized node objects, which ride
-    /// `add_node`'s full id slot. New code should not need it.
-    #[deprecated(
-        since = "0.10.0",
-        note = "size is a property of the node object now — declare content that \
-                knows its area: `add_node(id, CustomNode { label, width, height, \
-                painter, payload })` or your own `NodeContent` impl"
-    )]
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ascii_dag::graph::Graph;
-    ///
-    /// let mut dag = Graph::new();
-    /// // Single-line node with explicit width
-    /// dag.add_node_with_size(1, "Short", 20, 1);
-    /// // Multi-row node for complex content
-    /// dag.add_node_with_size(2, "Pipeline", 12, 3);
-    /// ```
-    pub fn add_node_with_size(
-        &mut self,
-        id: usize,
-        label: &'a str,
-        width: usize,
-        height: usize,
-    ) -> NodeId {
-        self.bump_next_auto(id);
-        #[cfg(feature = "warnings")]
-        {
-            // D5: an explicit id silently overwriting an auto-numbered
-            // node deserves the same diagnostic as in `add_node`.
-            if self.id_to_index.contains_key(&id) && self.auto_numbered.contains(&id) {
-                crate::errors::emit_warning(
-                    crate::errors::WARN_AUTO_REPLACED,
-                    format_args!(
-                        "node {} replaced (an explicit id overwrote an auto-numbered \
-                         node). Replace-on-duplicate is the standing semantic; this \
-                         diagnostic fires because AUTO numbering was involved.",
-                        id,
-                    ),
-                );
-            }
-            self.auto_numbered.remove(&id);
-        }
-        let height = height.max(1);
-        if let Some(&idx) = self.id_to_index.get(&id) {
-            self.nodes[idx] = (id, label);
-            self.auto_created.remove(&id);
-            self.node_widths[idx] = width;
-            self.node_heights[idx] = height;
-            // A sized simple node: reset the tag and drop any custom
-            // entry a previous occupant of this id left behind.
-            self.node_kind_tag[idx] = NodeKindTag::Simple.to_u8();
-            self.set_custom_entry(idx, None, "");
-        } else {
-            let idx = self.nodes.len();
-            self.nodes.push((id, label));
-            self.id_to_index.insert(id, idx);
-            self.node_widths.push(width);
-            self.node_heights.push(height);
-            self.node_kind_tag.push(NodeKindTag::Simple.to_u8());
-            self.children.push(Vec::new());
-            self.parents.push(Vec::new());
-        }
-        NodeId(id)
-    }
-
-    /// Add a node with an explicit width override (height defaults to 1).
-    #[deprecated(
-        since = "0.9.0",
-        note = "declare a content object with its own size (`CustomNode` or a \
-                `NodeContent` impl) — `add_node_with_size` is itself deprecated"
-    )]
-    pub fn add_node_with_width(&mut self, id: usize, label: &'a str, width: usize) {
-        self.add_node_with_size(id, label, width, 1);
     }
 
     /// Add an edge from one node to another with an optional label.
@@ -1261,35 +1115,6 @@ impl<'a> Graph<'a> {
         let mut dag = self.clone();
         dag.render_mode = config.render_mode;
         dag.layout_with(config)
-    }
-
-    /// Compute the layout using a custom [`SugiyamaConfig`].
-    ///
-    /// Applies the config's full pipeline (cycle breaking, layering,
-    /// crossing, positioning) then computes the layout.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use ascii_dag::{Graph, SugiyamaConfig};
-    ///
-    /// let dag = Graph::from_edges(
-    ///     &[(1, "A"), (2, "B"), (3, "C")],
-    ///     &[(1, 2), (2, 3)]
-    /// );
-    ///
-    /// let ir = dag.compute_layout_with(&SugiyamaConfig::quality());
-    /// ```
-    #[deprecated(
-        since = "0.9.0",
-        note = "use compute_layout_with_config(&LayoutConfig) instead"
-    )]
-    pub fn compute_layout_with(
-        &self,
-        config: &crate::algorithms::sugiyama::config::SugiyamaConfig,
-    ) -> crate::ir::LayoutIR<'a> {
-        let lc = LayoutConfig::from(config);
-        self.compute_layout_with_config(&lc)
     }
 
     // ── Subgraph / Cluster API ───────────────────────────────────────────
@@ -1646,12 +1471,11 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)] // deliberately pins the deprecated method's counter behavior
     fn auto_numbers_from_zero_on_fresh_graphs() {
         let mut g = Graph::new();
         assert_eq!(usize::from(g.add_node(AUTO, "a")), 0);
         assert_eq!(usize::from(g.add_node(AUTO, "b")), 1);
-        assert_eq!(usize::from(g.add_node_with_size(9, "big", 10, 3)), 9);
+        assert_eq!(usize::from(g.add_node(9, "big")), 9);
         assert_eq!(usize::from(g.add_node(AUTO, "c")), 10);
     }
 
@@ -1753,8 +1577,17 @@ mod tests {
         let s = g.add_node(AUTO, "sat");
         assert_eq!(s.id(), usize::MAX);
         assert!(g.auto_numbered.contains(&usize::MAX));
-        // add_node_with_size is an explicit path too — it clears.
-        g.add_node_with_size(usize::MAX, "sized", 8, 1);
+        // Explicit custom content is an explicit path too — it clears.
+        g.add_node(
+            usize::MAX,
+            crate::CustomNode {
+                label: "sized",
+                width: 8,
+                height: 1,
+                painter: None,
+                payload: "",
+            },
+        );
         assert!(!g.auto_numbered.contains(&usize::MAX));
     }
 
@@ -1880,8 +1713,8 @@ mod tests {
         g.add_node(2, custom("b"));
         assert_eq!(g.node_custom.len(), 2);
         assert_eq!((g.node_custom[0].0, g.node_custom[1].0), (1, 2));
-        // add_node_with_size replacing a custom node clears its entry.
-        g.add_node_with_size(3, "sized", 9, 2);
+        // A simple node replacing a custom node clears its entry.
+        g.add_node(3, "sized");
         assert_eq!(g.node_custom.len(), 1);
         assert_eq!(g.node_kind_tag[2], 0);
         // Re-declaring custom content restores the entry with the

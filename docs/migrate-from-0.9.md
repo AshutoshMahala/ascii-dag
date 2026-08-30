@@ -58,8 +58,9 @@ See [nodes.md](nodes.md) for painters, `BoxedNode`, and blank nodes.
 
 ## 3. If you used the render entry points directly
 
-The 0.9 renderers were replaced by one engine; the old names still
-work (deprecated, removed in 0.11):
+The 0.9 renderers were replaced by one engine. The old names worked
+through 0.10.x (deprecated) and are removed in 0.11 — chain with
+migrate-from-0.10.md for the current equivalents:
 
 | 0.9 call | 0.10 call |
 |---|---|

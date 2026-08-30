@@ -172,9 +172,6 @@ pub use algorithms::sugiyama::crossing::{CrossingReducer, FAST, QUALITY, STANDAR
 
 // Legacy type (alloc-dependent, deprecated)
 #[cfg(feature = "alloc")]
-#[allow(deprecated)]
-pub use algorithms::sugiyama::config::SugiyamaConfig;
-
 #[cfg(test)]
 mod tests {
     use crate::graph::Graph;

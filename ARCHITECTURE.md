@@ -109,7 +109,6 @@ sign; the `Direction` enum is never consulted at paint time.
 | `render/engine/style.rs`, `presets.rs`, `config.rs` | Styling vocabulary, const presets, options | `RenderOptions`, `EdgeStyle`, … |
 | `render/engine/mem.rs` | Heap-or-arena buffer shape behind the no-alloc path | `PlanBuf` |
 | `render/ascii.rs` | `Graph::render()` entry, cycle banner, chain shortcut | `render()`, `render_to()` |
-| `render/legacy.rs`, `ir/legacy.rs` | Deprecated 0.9.x entry points as engine wrappers (removed in 0.11) | `render_scanline*`, `render_to_buffer*` |
 | `render/chars.rs`, `render/colors.rs` | Box-drawing utilities, palettes | `mask_to_char()`, `Palette` |
 
 Rendering is **banded**: the canvas holds `width × min(band_rows_cap, height)`

@@ -91,10 +91,3 @@ pub(crate) fn count_crossings_pair(u_positions: &[usize], v_positions: &[usize])
 
     (cross_uv, cross_vu)
 }
-
-// ── Backward compatibility ───────────────────────────────────────────────
-
-/// **Deprecated**: Use [`LayoutConfig`](super::config::LayoutConfig) instead.
-#[cfg(feature = "alloc")]
-#[allow(deprecated)]
-pub use super::config::SugiyamaConfig;
