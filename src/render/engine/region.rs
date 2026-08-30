@@ -129,3 +129,140 @@ impl<'r, 'a> NodeRegion<'r, 'a> {
         }
     }
 }
+
+// ── Semantic painter primitives (0.11 prototype, test-gated) ─────────────
+//
+// Painters that draw structure through these emit SEMANTIC stroke and
+// marker cells, decoded per charset at emission like all engine ink —
+// so `NodePaintCtx.charset` becomes unnecessary and one painter is
+// byte-correct under every charset. Stroke cells also merge per-arm
+// with each other (a rule flush against a frame becomes a tee, a
+// crossing becomes a junction), which raw `char` writes can never do.
+// Test-only while the spike runs; the real 0.11 painter API promotes
+// these and removes `charset` from the context. See
+// temp/spike-4.0d-findings.md.
+#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+impl NodeRegion<'_, '_> {
+    fn spike_stroke(
+        &mut self,
+        x: usize,
+        y: usize,
+        up: super::cell::Weight,
+        down: super::cell::Weight,
+        left: super::cell::Weight,
+        right: super::cell::Weight,
+    ) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        self.canvas.stroke(
+            self.x0 + x,
+            self.y0 + y,
+            up,
+            down,
+            left,
+            right,
+            Paint::Color(self.color),
+        );
+    }
+
+    /// Node-local rows of this region visible in the band being
+    /// composited, as a half-open range — the iteration bound for
+    /// every primitive below. A tall painter is replayed once per
+    /// band; looping only the visible rows keeps that replay
+    /// O(band), not O(full extent), and bounds arbitrarily large
+    /// caller endpoints.
+    fn visible_rows(&self) -> (usize, usize) {
+        let band_lo = self.canvas.y0();
+        let band_hi = band_lo + self.canvas.rows();
+        let lo = self.y0.max(band_lo);
+        let hi = (self.y0 + self.height).min(band_hi);
+        if lo < hi {
+            (lo - self.y0, hi - self.y0)
+        } else {
+            (0, 0)
+        }
+    }
+
+    /// Light horizontal rule spanning `x0..=x1` at row `y`. End cells
+    /// carry only the inward arm: a standalone rule still decodes to a
+    /// plain line at every cell, and a rule flush with a frame or
+    /// another rule merges into the right tee or junction. Iteration
+    /// is clipped to the region and the current band BEFORE looping;
+    /// arm semantics follow the ORIGINAL endpoints.
+    pub(crate) fn spike_hrule(&mut self, x0: usize, x1: usize, y: usize) {
+        use super::cell::Weight::{Light, None as No};
+        let (row_lo, row_hi) = self.visible_rows();
+        if x0 > x1 || y >= self.height || y < row_lo || y >= row_hi {
+            return;
+        }
+        for x in x0..=x1.min(self.width - 1) {
+            let left = if x > x0 || x0 == x1 { Light } else { No };
+            let right = if x < x1 || x0 == x1 { Light } else { No };
+            self.spike_stroke(x, y, No, No, left, right);
+        }
+    }
+
+    /// Light vertical rule spanning `y0..=y1` at column `x` (end-arm
+    /// semantics and clipping as [`spike_hrule`](Self::spike_hrule)).
+    pub(crate) fn spike_vrule(&mut self, x: usize, y0: usize, y1: usize) {
+        use super::cell::Weight::{Light, None as No};
+        let (row_lo, row_hi) = self.visible_rows();
+        if y0 > y1 || x >= self.width || row_lo == row_hi {
+            return;
+        }
+        for y in y0.max(row_lo)..=y1.min(row_hi - 1) {
+            let up = if y > y0 || y0 == y1 { Light } else { No };
+            let down = if y < y1 || y0 == y1 { Light } else { No };
+            self.spike_stroke(x, y, up, down, No, No);
+        }
+    }
+
+    /// Light border around the full region (the boxed-node arm
+    /// conventions), clipped to the current band like the boxed-node
+    /// painter. No-op on regions too small for a border.
+    pub(crate) fn spike_frame(&mut self) {
+        use super::cell::Weight::{Light as L, None as No};
+        if self.width < 2 || self.height < 2 {
+            return;
+        }
+        let (row_lo, row_hi) = self.visible_rows();
+        if row_lo == row_hi {
+            return;
+        }
+        let (r, b) = (self.width - 1, self.height - 1);
+        if row_lo == 0 {
+            self.spike_stroke(0, 0, No, L, No, L);
+            self.spike_stroke(r, 0, No, L, L, No);
+            for x in 1..r {
+                self.spike_stroke(x, 0, No, No, L, L);
+            }
+        }
+        if b >= row_lo && b < row_hi {
+            self.spike_stroke(0, b, L, No, No, L);
+            self.spike_stroke(r, b, L, No, L, No);
+            for x in 1..r {
+                self.spike_stroke(x, b, No, No, L, L);
+            }
+        }
+        for y in row_lo.max(1)..row_hi.min(b) {
+            self.spike_stroke(0, y, L, L, No, No);
+            self.spike_stroke(r, y, L, L, No, No);
+        }
+    }
+
+    /// Arrowhead marker pointing `dir`, in the node's ink color.
+    pub(crate) fn spike_arrow(&mut self, x: usize, y: usize, dir: super::cell::Dir) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        self.canvas.marker(
+            self.x0 + x,
+            self.y0 + y,
+            super::cell::MarkerKind::Arrow,
+            dir,
+            false,
+            Paint::Color(self.color),
+        );
+    }
+}

@@ -24,6 +24,17 @@
 //! introspection type (dimensions, bands, legend, hit-testing).
 
 pub(crate) mod api;
+#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+mod composer_spike;
+#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+mod ownership_spike;
+#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+mod painter_spike;
+#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+mod scene_spike;
+#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+mod view_spike;
+
 pub(crate) mod cell;
 pub(crate) mod charset;
 pub(crate) mod color;

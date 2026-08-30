@@ -1,0 +1,693 @@
+//! Spike: per-cell ownership representation for the 0.11 scene work
+//! (prototype stage — see temp/scene-api-sketch.md §9 and
+//! temp/spike-4.0b-findings.md).
+//!
+//! **THROWAWAY CODE.** Test-only, ships in no build, deleted when the
+//! real composer lands. It answers one question: how should
+//! `CellView.owner` be produced so it agrees with hit-testing?
+//!
+//! Candidates:
+//!
+//! - **(A) Owner plane** — a band-sized `u32` plane rasterized from the
+//!   plan's elements in hit-test priority order, with two disciplines
+//!   both required for the claimed linear cost: the compositor-style
+//!   **run-dedup claim fill** (overlapping fan runs write each cell
+//!   once) and **per-band row bucketing** (each element visits only its
+//!   own rows — without it, every row scanning every element makes tall
+//!   graphs quadratic).
+//! - **(B) Derive per cell** — call `element_at` for every visited
+//!   cell. No memory, but O(cells × row-candidates).
+//!
+//! Owner encoding: `element slot + 1` (`0` = none) into the plan's
+//! element table; the kind is resolved through the table, so the full
+//! index range stays available (no bits stolen for a kind tag) and an
+//! out-of-range slot is impossible by construction.
+//!
+//! The agreement contract: for every canvas cell — across both
+//! backends, every enabled direction, multi-band chunking, plain and
+//! colored/legend label gates, shown dummies, and borderless plus
+//! nested clusters — the plane answers exactly what `element_at`
+//! answers. KNOWN CAVEAT (decision 15): today's `element_at` gives the
+//! self-loop marker to its NODE; once self-loop records land, the
+//! marker and its label belong to the self-loop EDGE — this corpus
+//! pins the legacy rule and must be re-pointed with decision 15.
+//!
+//! Costs: `ownership_cost_report` (`#[ignore]`) covers wide fans AND
+//! tall chains; the claim scratch (width+1 `u32`) and row buckets are
+//! retained workspace and belong in `CompositionRequirements`
+//! alongside the plane itself.
+
+use super::plan::{ElementKind, RenderPlan, for_each_h_run, for_each_v_col};
+use super::view::LayoutView;
+use crate::graph::Graph;
+use crate::{LayoutConfig, RenderOptions};
+
+use crate as ascii_dag;
+
+include!("../../../examples/shared/hero_graph.rs");
+
+// ── Owner encoding: element slot + 1, kind via the element table ─────────
+
+pub(super) const OWNER_NONE: u32 = 0;
+
+pub(super) fn owner_to_hit<V: LayoutView>(
+    plan: &RenderPlan<'_>,
+    view: &V,
+    owner: u32,
+) -> super::HitResult {
+    if owner == OWNER_NONE {
+        return super::HitResult::None;
+    }
+    let el = &plan.elements()[(owner - 1) as usize];
+    match el.kind {
+        ElementKind::Node => super::HitResult::Node(view.node(el.index).id),
+        ElementKind::Edge => super::HitResult::Edge(el.index),
+        ElementKind::Subgraph => super::HitResult::Subgraph(view.subgraph(el.index).id),
+    }
+}
+
+/// Slice-backed rasterizer workspace — carved from an arena by the
+/// composer (spike 4.0e) or Vec-backed by this spike's drivers. It is
+/// part of the composition requirements, not per-call allocation.
+/// Sizes: `claim_next` width+1; `edge_slot` edge count;
+/// `by_y_min`/`active` element count; `row_off` band_rows+1;
+/// `row_cur` band_rows; `row_inc` ≥ [`owner_incidence_capacity`].
+pub(super) struct OwnerScratch<'a> {
+    /// Pointer-jumping "next unclaimed cell" array.
+    pub claim_next: &'a mut [u32],
+    /// `edge_index → element slot + 1`, built once per plan.
+    pub edge_slot: &'a mut [u32],
+    /// Element slots (`+1`) sorted by `y_min` — the rolling sweep's
+    /// entry order. Built once per plan.
+    pub by_y_min: &'a mut [u32],
+    /// Slots whose y-ranges intersect the current band.
+    pub active: &'a mut [u32],
+    /// Counting-sort row buckets: per-row offsets into `row_inc`.
+    pub row_off: &'a mut [u32],
+    /// Per-row placement cursors for the counting sort.
+    pub row_cur: &'a mut [u32],
+    /// Flat row-incidence entries (`slot + 1` per element per row).
+    pub row_inc: &'a mut [u32],
+}
+
+/// Rolling-sweep position, owned by the caller across one ascending
+/// band pass.
+#[derive(Default)]
+pub(super) struct OwnerSweep {
+    cursor: usize,
+    active_len: usize,
+}
+
+/// Upper bound on any single band's row-incidence entries: each
+/// element contributes at most `min(row span, band_rows)` rows to one
+/// band. O(elements), computed at requirements time.
+pub(super) fn owner_incidence_capacity(plan: &RenderPlan<'_>, band_rows: usize) -> usize {
+    plan.elements()
+        .iter()
+        .map(|el| (el.y_max - el.y_min + 1).min(band_rows))
+        .sum()
+}
+
+/// Fill the per-plan tables and reset the sweep. Call once before a
+/// (re)pass of ascending bands.
+pub(super) fn owner_prepare(
+    plan: &RenderPlan<'_>,
+    scratch: &mut OwnerScratch<'_>,
+    sweep: &mut OwnerSweep,
+) {
+    scratch.edge_slot.fill(OWNER_NONE);
+    for (slot, el) in plan.elements().iter().enumerate() {
+        if matches!(el.kind, ElementKind::Edge) {
+            scratch.edge_slot[el.index] = slot as u32 + 1;
+        }
+    }
+    for (i, o) in scratch.by_y_min.iter_mut().enumerate() {
+        *o = i as u32 + 1;
+    }
+    scratch
+        .by_y_min
+        .sort_unstable_by_key(|&o| plan.elements()[(o - 1) as usize].y_min);
+    sweep.cursor = 0;
+    sweep.active_len = 0;
+}
+
+// ── Candidate A: the ownership rasterizer ────────────────────────────────
+
+/// Rasterize ownership for rows `[y0, y1)` into `plane`
+/// (`width × (y1 - y0)`, row-major). Priority is encoded as write
+/// order per row: subgraphs (first-in-index wins, write-if-empty),
+/// then edges (ascending index, claim fill), then nodes, then painted
+/// labels — mirroring `element_at` branch for branch.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn owner_rasterize_band<V: LayoutView>(
+    plan: &RenderPlan<'_>,
+    view: &V,
+    y0: usize,
+    y1: usize,
+    width: usize,
+    labels_gate: bool,
+    show_dummies: bool,
+    plane: &mut [u32],
+    scratch: &mut OwnerScratch<'_>,
+    sweep: &mut OwnerSweep,
+) {
+    let OwnerScratch {
+        claim_next,
+        edge_slot,
+        by_y_min,
+        active,
+        row_off,
+        row_cur,
+        row_inc,
+    } = &mut *scratch;
+    plane.fill(OWNER_NONE);
+    let rows = y1 - y0;
+    let elements = plan.elements();
+
+    // Rolling active-element sweep: bands arrive in ascending row
+    // order, so admit elements as their y_min enters the band and
+    // retire them once y_max falls behind — every element is touched
+    // O(1) times across the whole pass, never once per band.
+    let mut kept = 0;
+    for i in 0..sweep.active_len {
+        let o = active[i];
+        if elements[(o - 1) as usize].y_max >= y0 {
+            active[kept] = o;
+            kept += 1;
+        }
+    }
+    sweep.active_len = kept;
+    while sweep.cursor < by_y_min.len() {
+        let o = by_y_min[sweep.cursor];
+        let el = &elements[(o - 1) as usize];
+        if el.y_min >= y1 {
+            break;
+        }
+        if el.y_max >= y0 {
+            active[sweep.active_len] = o;
+            sweep.active_len += 1;
+        }
+        sweep.cursor += 1;
+    }
+    // Keep the priority scans deterministic: buckets in slot order.
+    active[..sweep.active_len].sort_unstable();
+
+    // Row buckets from the ACTIVE set only, as a counting sort into
+    // flat arrays (arena-carvable) — O(Σ per-element row spans within
+    // the band), never O(rows × elements).
+    row_off[..=rows].fill(0);
+    for &o in active[..sweep.active_len].iter() {
+        let el = &elements[(o - 1) as usize];
+        let lo = el.y_min.max(y0);
+        let hi = (el.y_max + 1).min(y1);
+        for y in lo..hi {
+            row_off[y - y0 + 1] += 1;
+        }
+    }
+    for r in 0..rows {
+        row_off[r + 1] += row_off[r];
+    }
+    row_cur[..rows].copy_from_slice(&row_off[..rows]);
+    for &o in active[..sweep.active_len].iter() {
+        let el = &elements[(o - 1) as usize];
+        let lo = el.y_min.max(y0);
+        let hi = (el.y_max + 1).min(y1);
+        for y in lo..hi {
+            let r = y - y0;
+            row_inc[row_cur[r] as usize] = o;
+            row_cur[r] += 1;
+        }
+    }
+
+    fn find(next: &mut [u32], i: usize) -> usize {
+        let mut j = i;
+        while next[j] != j as u32 {
+            j = next[j] as usize;
+        }
+        let mut k = i;
+        while next[k] != j as u32 {
+            let n = next[k] as usize;
+            next[k] = j as u32;
+            k = n;
+        }
+        j
+    }
+
+    for row in 0..rows {
+        let y = y0 + row;
+        let base = row * width;
+        let bucket = &row_inc[row_off[row] as usize..row_off[row + 1] as usize];
+
+        // Pass 1: subgraphs — below everything; first-in-index wins,
+        // so ascending order with write-if-empty.
+        for &owner in bucket {
+            let el = &elements[(owner - 1) as usize];
+            if !matches!(el.kind, ElementKind::Subgraph) {
+                continue;
+            }
+            let sg = view.subgraph(el.index);
+            let sp = plan.subgraph_plan(el.index);
+            if matches!(sp.border, super::style::SubgraphBorder::None) {
+                if sg.width >= 4 && sg.height >= 3 && !sg.label.is_empty() {
+                    let label_y = match sp.label_pos {
+                        super::style::LabelPosition::InsideTop => sg.y + 1,
+                        super::style::LabelPosition::InsideBottom => {
+                            (sg.y + sg.height).saturating_sub(2)
+                        }
+                    };
+                    if label_y == y {
+                        let len = sg.label.chars().count().min(sg.width - 4);
+                        for x in sg.x + 2..(sg.x + 2 + len).min(width) {
+                            if plane[base + x] == OWNER_NONE {
+                                plane[base + x] = owner;
+                            }
+                        }
+                    }
+                }
+            } else {
+                for x in sg.x..(sg.x + sg.width).min(width) {
+                    if plane[base + x] == OWNER_NONE {
+                        plane[base + x] = owner;
+                    }
+                }
+            }
+        }
+
+        // Pass 2: edges — lowest index wins: ascending order, claim
+        // fill (each cell edge-claimed once; subgraph ink below stays
+        // overwritable, node/label ink above overwrites freely).
+        for (i, slot) in claim_next.iter_mut().enumerate() {
+            *slot = i as u32;
+        }
+        for &owner in bucket {
+            let el = &elements[(owner - 1) as usize];
+            if !matches!(el.kind, ElementKind::Edge) {
+                continue;
+            }
+            let e = view.edge(el.index);
+            let mut claim = |plane: &mut [u32], x0: usize, x1: usize| {
+                let mut x = find(claim_next, x0);
+                while x <= x1 && x < width {
+                    plane[base + x] = owner;
+                    claim_next[x] = x as u32 + 1;
+                    x = find(claim_next, x + 1);
+                }
+            };
+            for_each_v_col(
+                &e.path,
+                e.from_x,
+                e.from_y,
+                e.to_x,
+                e.to_y,
+                y,
+                e.flow_axis,
+                &mut |c| {
+                    if c < width {
+                        claim(plane, c, c);
+                    }
+                },
+            );
+            for_each_h_run(
+                &e.path,
+                e.from_x,
+                e.from_y,
+                e.to_x,
+                e.to_y,
+                y,
+                e.flow_axis,
+                &mut |x0, x1| {
+                    claim(plane, x0, x1.min(width.saturating_sub(1)));
+                },
+            );
+        }
+
+        // Pass 3: nodes — overwrite everything below. Dummies are a
+        // single marker cell, only when shown. Self-loop markers
+        // follow today's element_at (node-owned; re-pointed to the
+        // loop EDGE with decision 15).
+        for &owner in bucket {
+            let el = &elements[(owner - 1) as usize];
+            if !matches!(el.kind, ElementKind::Node) {
+                continue;
+            }
+            let n = view.node(el.index);
+            if matches!(n.kind, crate::ir::NodeKind::Dummy) {
+                if show_dummies && n.y == y && n.x < width {
+                    plane[base + n.x] = owner;
+                }
+                continue;
+            }
+            if y >= n.y && y < n.y + n.height.max(1) {
+                for x in n.x..(n.x + n.width).min(width) {
+                    plane[base + x] = owner;
+                }
+            }
+            if let Some((sx, sy)) = n.self_loop_at {
+                if sy == y && sx < width {
+                    plane[base + sx] = owner;
+                }
+            }
+        }
+    }
+
+    // Pass 4: painted labels — top priority, owned by their edge.
+    for label in plan.labels() {
+        if !label.paints(labels_gate, labels_gate) {
+            continue;
+        }
+        if label.y >= y0 && label.y < y1 {
+            let owner = edge_slot[label.edge_index];
+            let base = (label.y - y0) * width;
+            for x in label.x..(label.x + label.len).min(width) {
+                plane[base + x] = owner;
+            }
+        }
+    }
+}
+
+/// Vec-backed workspace for this spike's drivers (the composer spike
+/// carves the same slices from its arena instead).
+struct RasterBufs {
+    claim: Vec<u32>,
+    edge_slot: Vec<u32>,
+    by_y_min: Vec<u32>,
+    active: Vec<u32>,
+    row_off: Vec<u32>,
+    row_cur: Vec<u32>,
+    row_inc: Vec<u32>,
+}
+
+impl RasterBufs {
+    fn new<V: LayoutView>(plan: &RenderPlan<'_>, view: &V, width: usize, band_rows: usize) -> Self {
+        let elements = plan.elements().len();
+        Self {
+            claim: vec![0; width + 1],
+            edge_slot: vec![0; view.edge_count()],
+            by_y_min: vec![0; elements],
+            active: vec![0; elements],
+            row_off: vec![0; band_rows + 1],
+            row_cur: vec![0; band_rows],
+            row_inc: vec![0; owner_incidence_capacity(plan, band_rows)],
+        }
+    }
+
+    fn scratch(&mut self) -> OwnerScratch<'_> {
+        OwnerScratch {
+            claim_next: &mut self.claim,
+            edge_slot: &mut self.edge_slot,
+            by_y_min: &mut self.by_y_min,
+            active: &mut self.active,
+            row_off: &mut self.row_off,
+            row_cur: &mut self.row_cur,
+            row_inc: &mut self.row_inc,
+        }
+    }
+}
+
+// ── Agreement driver ─────────────────────────────────────────────────────
+
+fn agree<V: LayoutView>(
+    plan: &RenderPlan<'_>,
+    view: &V,
+    band_rows: usize,
+    labels_gate: bool,
+    show_dummies: bool,
+    what: &str,
+) {
+    let (w, h) = (plan.width(), plan.height());
+    let band_rows = band_rows.max(1);
+    let mut bufs = RasterBufs::new(plan, view, w, band_rows);
+    let mut sweep = OwnerSweep::default();
+    owner_prepare(plan, &mut bufs.scratch(), &mut sweep);
+    let mut plane = vec![OWNER_NONE; w * band_rows];
+    let mut y0 = 0;
+    while y0 < h {
+        let y1 = (y0 + band_rows).min(h);
+        owner_rasterize_band(
+            plan,
+            view,
+            y0,
+            y1,
+            w,
+            labels_gate,
+            show_dummies,
+            &mut plane[..w * (y1 - y0)],
+            &mut bufs.scratch(),
+            &mut sweep,
+        );
+        for y in y0..y1 {
+            for x in 0..w {
+                let from_plane = owner_to_hit(plan, view, plane[(y - y0) * w + x]);
+                let from_hit = plan.element_at(view, x, y);
+                assert_eq!(
+                    from_plane, from_hit,
+                    "{what}: plane and element_at disagree at ({x},{y}) \
+                     [band {y0}..{y1}]"
+                );
+            }
+        }
+        y0 = y1;
+    }
+}
+
+/// Full variant sweep for one graph: both backends × every enabled
+/// direction × plain and colored/legend gates × full-canvas and
+/// deliberately tiny (3-row) bands.
+fn check_graph(g: &Graph<'_>, what: &str) {
+    #[cfg_attr(not(feature = "layout-horizontal"), allow(unused_mut))]
+    let mut directions = vec![
+        crate::graph::Direction::TopDown,
+        crate::graph::Direction::BottomUp,
+    ];
+    #[cfg(feature = "layout-horizontal")]
+    directions.extend([
+        crate::graph::Direction::LeftRight,
+        crate::graph::Direction::RightLeft,
+    ]);
+
+    for dir in directions {
+        let mut cfg = LayoutConfig::standard();
+        cfg.direction = dir;
+
+        for (gate, options) in [
+            (false, RenderOptions::plain()),
+            (
+                true,
+                RenderOptions::colored(crate::render::colors::Palette::Ansi),
+            ),
+        ] {
+            let heap_ir = g.compute_layout_with_config(&cfg);
+            let plan = RenderPlan::build(&heap_ir, &options);
+            let h = plan.height();
+            agree(&plan, &heap_ir, h.max(1), gate, false, what);
+            agree(&plan, &heap_ir, 3, gate, false, what); // multi-band
+
+            // Arena backend.
+            let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+            let mut csr_arena = crate::graph::arena::Arena::new(&mut csr_buf);
+            let csr = g.to_csr(&mut csr_arena).unwrap();
+            let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+            let mut temp_buf = vec![0u8; size];
+            let mut out_buf = vec![0u8; size];
+            let mut temp_arena = crate::graph::arena::Arena::new(&mut temp_buf);
+            let mut out_arena = crate::graph::arena::Arena::new(&mut out_buf);
+            let arena_ir = csr
+                .compute_layout_arena(&cfg, &mut temp_arena, &mut out_arena)
+                .unwrap();
+            let plan = RenderPlan::build(&arena_ir, &options);
+            agree(&plan, &arena_ir, 3, gate, false, what);
+        }
+    }
+}
+
+// ── Fixtures ─────────────────────────────────────────────────────────────
+
+fn stage_graph() -> Graph<'static> {
+    let mut g = Graph::new();
+    g.add_node(1usize, "Start");
+    g.add_node(2usize, "Middle");
+    g.add_node(3usize, "End");
+    g.add_edge(1usize, 2usize, Some("go"));
+    g.add_edge(2usize, 3usize, None);
+    let sg = g.add_subgraph("Stage");
+    g.put_nodes(&[2]).inside(sg).unwrap();
+    g
+}
+
+fn fan(n: usize) -> Graph<'static> {
+    let mut g = Graph::new();
+    g.add_node(0usize, "R");
+    for i in 1..=n {
+        g.add_node(i, "c");
+        g.add_edge(0usize, i, None);
+    }
+    g
+}
+
+fn chain(n: usize) -> Graph<'static> {
+    let mut g = Graph::new();
+    for i in 0..n {
+        g.add_node(i, "n");
+    }
+    for i in 0..n - 1 {
+        g.add_edge(i, i + 1, None);
+    }
+    g
+}
+
+fn clusters_graph() -> Graph<'static> {
+    let mut g = Graph::new();
+    g.add_node(1usize, "a");
+    g.add_node(2usize, "b");
+    g.add_node(3usize, "c");
+    g.add_node(4usize, "d");
+    let s1 = g.add_subgraph("S1");
+    let s2 = g.add_subgraph("S2");
+    g.put_nodes(&[1, 2]).inside(s1).unwrap();
+    g.put_nodes(&[3, 4]).inside(s2).unwrap();
+    g.add_edge(1usize, 4usize, None);
+    g
+}
+
+fn nested_graph() -> Graph<'static> {
+    let mut g = Graph::new();
+    g.add_node(1usize, "outer");
+    g.add_node(2usize, "inner");
+    g.add_node(3usize, "leaf");
+    g.add_edge(1usize, 2usize, None);
+    g.add_edge(2usize, 3usize, None);
+    let outer = g.add_subgraph("Outer");
+    let inner = g.add_subgraph("Inner");
+    g.put_nodes(&[1, 2, 3]).inside(inner).unwrap();
+    g.put_subgraphs(&[inner]).inside(outer).unwrap();
+    g
+}
+
+fn self_loop_graph() -> Graph<'static> {
+    let mut g = Graph::new();
+    g.add_node(1usize, "Gate");
+    g.add_node(2usize, "Next");
+    g.add_edge(1usize, 1usize, Some("retry"));
+    g.add_edge(1usize, 2usize, None);
+    g
+}
+
+// ── The proofs ───────────────────────────────────────────────────────────
+
+#[test]
+fn plane_agrees_with_element_at_everywhere() {
+    check_graph(&stage_graph(), "stage");
+    check_graph(&hero_graph(), "hero");
+    check_graph(&fan(60), "fan-60");
+    check_graph(&clusters_graph(), "clusters");
+    check_graph(&nested_graph(), "nested");
+    check_graph(&self_loop_graph(), "self-loop (LEGACY node-owned rule)");
+}
+
+/// Borderless clusters: only the label cells belong to the box.
+#[test]
+fn plane_agrees_for_borderless_clusters() {
+    fn borderless(_ctx: super::style::SubgraphStyleCtx<'_>) -> super::style::SubgraphStyle {
+        super::style::SubgraphStyle {
+            border: super::style::SubgraphBorder::None,
+            ..Default::default()
+        }
+    }
+    let g = nested_graph();
+    let ir = g.compute_layout();
+    let mut options = RenderOptions::plain();
+    options.subgraph_style_fn = borderless;
+    let plan = RenderPlan::build(&ir, &options);
+    agree(&plan, &ir, 3, false, false, "borderless nested");
+}
+
+/// Shown dummies own exactly their marker cell.
+#[test]
+fn plane_agrees_for_shown_dummies() {
+    let mut g = Graph::new();
+    g.add_node(1usize, "A");
+    g.add_node(2usize, "B");
+    g.add_node(3usize, "C");
+    g.add_edge(1usize, 2usize, None);
+    g.add_edge(2usize, 3usize, None);
+    g.add_edge(1usize, 3usize, None); // skip edge → dummy
+    let mut cfg = LayoutConfig::standard();
+    cfg.include_dummy_nodes = true;
+    let ir = g.compute_layout_with_config(&cfg);
+    let mut options = RenderOptions::plain();
+    options.show_dummy_nodes = true;
+    let plan = RenderPlan::build(&ir, &options);
+    agree(&plan, &ir, 3, false, true, "shown dummies");
+}
+
+/// Manual cost report — wide fans AND tall chains (the row-bucket
+/// discipline is what keeps chains linear). Run with:
+///   cargo test --release --features arena ownership_cost_report -- --ignored --nocapture
+#[test]
+#[ignore = "reporting tool, not an assertion"]
+fn ownership_cost_report() {
+    let shapes: Vec<(&str, Graph<'static>)> = vec![
+        ("fan-500", fan(500)),
+        ("fan-5000", fan(5_000)),
+        ("fan-50000", fan(50_000)),
+        ("chain-5000", chain(5_000)),
+        ("chain-20000", chain(20_000)),
+    ];
+    for (name, g) in shapes {
+        let ir = g.compute_layout();
+        let options = RenderOptions::plain();
+        let plan = RenderPlan::build(&ir, &options);
+        let (w, h) = (ir.width(), ir.height());
+        let band_rows = plan.max_band_rows().min(h).max(1);
+        let mut plane = vec![OWNER_NONE; w * band_rows];
+        let mut bufs = RasterBufs::new(&plan, &ir, w, band_rows);
+        let mut sweep = OwnerSweep::default();
+        owner_prepare(&plan, &mut bufs.scratch(), &mut sweep);
+
+        let t = std::time::Instant::now();
+        let mut y0 = 0;
+        while y0 < h {
+            let y1 = (y0 + band_rows).min(h);
+            owner_rasterize_band(
+                &plan,
+                &ir,
+                y0,
+                y1,
+                w,
+                false,
+                false,
+                &mut plane[..w * (y1 - y0)],
+                &mut bufs.scratch(),
+                &mut sweep,
+            );
+            y0 = y1;
+        }
+        let a = t.elapsed();
+
+        let small = ir.nodes().len() <= 10_000;
+        let b = if small {
+            let t = std::time::Instant::now();
+            let mut acc = 0usize;
+            for y in 0..h {
+                for x in 0..w {
+                    if plan.element_at(&ir, x, y) != super::HitResult::None {
+                        acc += 1;
+                    }
+                }
+            }
+            std::hint::black_box(acc);
+            Some(t.elapsed())
+        } else {
+            None
+        };
+
+        eprintln!(
+            "{name}: canvas {w}x{h}, plane {} KiB/band + claim {} KiB + incidence {} KiB | A {a:?} | B {}",
+            (w * band_rows * 4) / 1024,
+            ((w + 1) * 4) / 1024,
+            (bufs.row_inc.len() * 4) / 1024,
+            b.map(|d| alloc::format!("{d:?}"))
+                .unwrap_or_else(|| "skipped (infeasible)".into()),
+        );
+    }
+}

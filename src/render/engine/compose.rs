@@ -257,6 +257,41 @@ impl<'a> PaintScratch<'a> {
         })
     }
 
+    /// The exact `carve` sequence as `(bytes, align)` pairs, in carve
+    /// order — the composer spike's workspace layout calculation
+    /// mirrors the real carves through this instead of guessing
+    /// alignment slop. Test-gated with the spikes; the real
+    /// `CompositionRequirements` computes its layout the same way.
+    #[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+    pub(crate) fn carve_layout(
+        run_capacity: usize,
+        subgraphs: usize,
+        edges: usize,
+        nodes: usize,
+        colored: bool,
+        width: usize,
+        band_rows: usize,
+    ) -> [(usize, usize); 7] {
+        use core::mem::{align_of, size_of};
+        let seq = if colored { width * band_rows } else { 0 };
+        type HeapEntry = (u32, usize, u32);
+        [
+            (run_capacity * size_of::<Run>(), align_of::<Run>()),
+            (
+                run_capacity * size_of::<HeapEntry>(),
+                align_of::<HeapEntry>(),
+            ),
+            (seq * size_of::<u32>(), align_of::<u32>()),
+            (subgraphs * size_of::<usize>(), align_of::<usize>()),
+            (edges * size_of::<usize>(), align_of::<usize>()),
+            (nodes * size_of::<usize>(), align_of::<usize>()),
+            (
+                (subgraphs + edges + nodes) * size_of::<u32>(),
+                align_of::<u32>(),
+            ),
+        ]
+    }
+
     /// Bytes an arena needs for this scratch (estimate companion).
     pub(crate) fn estimate_bytes(
         run_capacity: usize,

@@ -1710,7 +1710,7 @@ pub(super) fn for_each_h_run_all(
 /// path at `row` — the same formulas the painter uses. Visitor-based so
 /// arbitrarily long multi-segment paths lose nothing to fixed caps.
 /// Filters [`for_each_h_run_all`], the single geometry authority.
-fn for_each_h_run(
+pub(super) fn for_each_h_run(
     path: &PathRef<'_>,
     from_x: usize,
     from_y: usize,
@@ -2420,7 +2420,7 @@ pub(super) fn for_each_v_seg_all(
     }
 }
 
-fn for_each_v_col(
+pub(super) fn for_each_v_col(
     path: &PathRef<'_>,
     from_x: usize,
     from_y: usize,

@@ -23,7 +23,7 @@ embedded-alloc = "0.5"
 
 # Our crate! (use path for local dev, or version for published)
 # alloc for heap benchmark, arena-idx-u8 for arena benchmark
-ascii-dag = { path = "../..", default-features = false, features = ["alloc", "arena-idx-u8"] }
+ascii-dag = { path = "../..", default-features = false, features = ["alloc", "arena-idx-u8", "layout-vertical"] }
 
 [profile.release]
 opt-level = "s"      # Optimize for size
