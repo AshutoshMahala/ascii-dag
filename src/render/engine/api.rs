@@ -76,6 +76,22 @@ macro_rules! render_surface {
             pub fn estimate_render_output_size(&self, options: &RenderOptions) -> usize {
                 super::estimate_render_output_size(self, options)
             }
+
+            /// Bytes of workspace a
+            /// [`ScenePlanner::new_in`](super::scene::ScenePlanner::new_in)
+            /// needs to plan this layout — the scene-pipeline third of
+            /// the sizing split (workspace:
+            /// [`CompositionRequirements::workspace_bytes`](super::composer::CompositionRequirements::workspace_bytes);
+            /// output:
+            /// [`Scene::estimate_output_size`](super::scene::Scene::estimate_output_size)).
+            /// Today's plan storage depends only on the layout's
+            /// cardinalities; `options` is part of the contract so a
+            /// future planning option that grows storage cannot change
+            /// this signature.
+            pub fn estimate_scene_size(&self, options: &super::config::PlanOptions) -> usize {
+                let _ = options;
+                super::plan::plan_storage_bytes(self)
+            }
         }
     };
 }

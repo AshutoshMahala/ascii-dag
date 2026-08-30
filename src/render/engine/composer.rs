@@ -105,10 +105,21 @@ impl CompositionRequirements {
         req
     }
 
-    /// Workspace bytes for the LEAN terminal profile: same checked
-    /// carve-mirrored fold, but no ownership terms and a color plane
-    /// only for colored emission — the semantic tier's cost never
-    /// becomes an unavoidable part of the terminal surface.
+    /// Bytes of workspace a
+    /// [`TerminalRenderer::new_in`](super::terminal::TerminalRenderer::new_in)
+    /// needs for this scene under `emit` — the LEAN terminal profile:
+    /// the same checked carve-mirrored fold as
+    /// [`workspace_bytes`](Self::workspace_bytes), but with no
+    /// ownership plane and a color plane only for colored emission.
+    /// The semantic composer's introspection cost never becomes an
+    /// unavoidable part of the terminal surface. `None` means the
+    /// requirement itself overflows.
+    pub fn terminal_workspace_bytes(&self, emit: &super::config::EmitOptions) -> Option<usize> {
+        self.terminal_bytes(!matches!(emit.color_mode, super::color::ColorMode::None))
+    }
+
+    /// Internal bool-flag form of
+    /// [`terminal_workspace_bytes`](Self::terminal_workspace_bytes).
     pub(crate) fn terminal_bytes(&self, colored: bool) -> Option<usize> {
         use core::mem::{align_of, size_of};
         let area = self.width.checked_mul(self.band_rows)?;

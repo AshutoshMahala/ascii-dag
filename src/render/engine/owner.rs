@@ -312,8 +312,9 @@ pub(crate) fn owner_rasterize_band<V: LayoutView>(
 
         // Pass 3: nodes — overwrite everything below. Dummies are a
         // single marker cell, only when shown. Self-loop markers
-        // follow today's element_at (node-owned; re-pointed to the
-        // loop EDGE with decision 15).
+        // follow today's element_at rule (node-owned); once preserved
+        // self-loop records exist, the marker and its label belong to
+        // the self-loop EDGE instead, and this pass re-points with it.
         for &owner in bucket {
             let el = &elements[(owner - 1) as usize];
             if !matches!(el.kind, ElementKind::Node) {

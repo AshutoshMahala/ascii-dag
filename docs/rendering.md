@@ -306,6 +306,23 @@ composer retains its workspace: steady-state repaint allocates
 nothing, and `SceneComposer::new_in` composes out of a caller-provided
 byte slice for no-alloc targets.
 
+### No-alloc sizing (three contracts)
+
+Every retained buffer in the scene pipeline has its own estimator, and
+each is pinned by exact-size tests — a buffer of precisely the
+estimated size always suffices:
+
+| Buffer | Sized by | Handed to |
+|---|---|---|
+| Scene storage | `ir.estimate_scene_size(&plan_options)` | `ScenePlanner::new_in` |
+| Composition workspace | `req.workspace_bytes()` (semantic) / `req.terminal_workspace_bytes(&emit)` (terminal) | `SceneComposer::new_in` / `TerminalRenderer::new_in` |
+| Output bytes | `scene.estimate_output_size(&emit)` | your buffer |
+
+(`req` is `scene.composition_requirements(&budget)`. The one-shot
+`render_to_bytes` keeps its combined
+`estimate_render_arena_size`/`estimate_render_output_size` pair — it
+plans and composes in a single arena.)
+
 See `examples/hit_test.rs` for a working terminal program — it enables
 xterm mouse reporting with raw escape sequences and no dependencies,
 and `--probe X Y` makes it scriptable.

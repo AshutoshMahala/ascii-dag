@@ -182,6 +182,19 @@ impl<'ws> TerminalRenderer<'ws> {
     }
 }
 
+impl Scene<'_, '_> {
+    /// Upper bound on the bytes rendering this scene under `emit` can
+    /// produce — sizes the caller's buffer for
+    /// [`TerminalRenderer::render_into`]. The output-bytes third of
+    /// the sizing split (scene storage:
+    /// `estimate_scene_size` on the layout; workspace:
+    /// [`CompositionRequirements`](super::composer::CompositionRequirements)).
+    pub fn estimate_output_size(&self, emit: &EmitOptions) -> usize {
+        let colored = !matches!(emit.color_mode, ColorMode::None);
+        with_view!(self, v => super::emit::estimate_output_size(v, colored, emit.render_legend))
+    }
+}
+
 /// Internal failure split: workspace carving vs the caller's sink.
 enum RenderFailure {
     Workspace(GraphError),
