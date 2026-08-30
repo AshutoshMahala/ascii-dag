@@ -160,6 +160,7 @@ macro_rules! primary {
 /// | 021 | NOT_FOUND | Resource | Referenced element not found |
 /// | 026 | EXHAUSTED | Resource | Resource exhausted (OOM, capacity) |
 /// | 031 | INVISIBLE | Output | Element will not be rendered (crate extension) |
+/// | 032 | FAILED | Output | Downstream sink reported failure (crate extension) |
 macro_rules! sequence {
     (MISSING) => {
         "001"
@@ -187,6 +188,9 @@ macro_rules! sequence {
     };
     (INVISIBLE) => {
         "031"
+    };
+    (FAILED) => {
+        "032"
     };
 }
 
@@ -234,6 +238,7 @@ macro_rules! wdp {
 //   Render.Canvas.026  RenderCanvasTooSmall  (EXHAUSTED)
 //   Render.Sink.026    RenderOutputTooSmall  (EXHAUSTED)
 //   Render.Workspace.026  RenderWorkspaceTooSmall (EXHAUSTED)
+//   Render.Sink.032    RenderSinkFailed      (FAILED)
 
 /// Graph is empty — no nodes present.
 ///
@@ -298,6 +303,9 @@ pub const RENDER_OUTPUT_TOO_SMALL: &str = wdp!(E.Render.Sink.EXHAUSTED);
 
 /// The caller-provided composer/planner workspace is too small.
 pub const RENDER_WORKSPACE_TOO_SMALL: &str = wdp!(E.Render.Workspace.EXHAUSTED);
+
+/// The caller's output sink reported a write failure.
+pub const RENDER_SINK_FAILED: &str = wdp!(E.Render.Sink.FAILED);
 
 // ── Warning codes (severity W — non-blocking, WDP Part 1) ───────────────
 //
@@ -381,6 +389,7 @@ pub(crate) fn emit_warning(code: &str, message: core::fmt::Arguments<'_>) {
 /// | `RenderCanvasTooSmall` | `E.Render.Canvas.026` | EXHAUSTED — band buffer |
 /// | `RenderOutputTooSmall` | `E.Render.Sink.026` | EXHAUSTED — output buffer |
 /// | `RenderWorkspaceTooSmall` | `E.Render.Workspace.026` | EXHAUSTED — composer workspace |
+/// | `RenderSinkFailed` | `E.Render.Sink.032` | FAILED — caller's writer errored |
 ///
 /// # Examples
 ///
@@ -487,6 +496,15 @@ pub enum GraphError {
         /// Bytes the workspace holds.
         got_bytes: usize,
     },
+
+    /// The caller's `fmt::Write` sink reported an error mid-render.
+    /// The failure originated downstream of the renderer (the writer
+    /// itself); rendering state is unaffected and the render may be
+    /// retried with a healthy sink. Previously a writer failure could
+    /// only surface as a bare `fmt::Error` with no code.
+    ///
+    /// **WDP:** `E.Render.Sink.032` (FAILED)
+    RenderSinkFailed,
 }
 
 impl GraphError {
@@ -512,6 +530,7 @@ impl GraphError {
             Self::RenderCanvasTooSmall { .. } => RENDER_CANVAS_TOO_SMALL,
             Self::RenderOutputTooSmall => RENDER_OUTPUT_TOO_SMALL,
             Self::RenderWorkspaceTooSmall { .. } => RENDER_WORKSPACE_TOO_SMALL,
+            Self::RenderSinkFailed => RENDER_SINK_FAILED,
         }
     }
 
@@ -544,6 +563,10 @@ impl GraphError {
             Self::RenderWorkspaceTooSmall { .. } => {
                 "Size the workspace with CompositionRequirements::workspace_bytes(); \
                  lower band_rows_cap to shrink it"
+            }
+            Self::RenderSinkFailed => {
+                "The failure came from the caller's writer, not the renderer; \
+                 check the sink and retry"
             }
         }
     }
@@ -585,6 +608,7 @@ impl fmt::Display for GraphError {
                     got_bytes, needed_bytes
                 )
             }
+            Self::RenderSinkFailed => write!(f, "output sink reported a write failure"),
         }
     }
 }

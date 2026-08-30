@@ -21,6 +21,7 @@ feature: the convenience surfaces need somewhere to put their result.
 | To inspect, not paint | `ScenePlanner::new().plan(&ir, &options.plan)` | yes |
 | …the same, no-alloc | `ScenePlanner::new_in(&mut workspace)` | no |
 | What is at this cell | `scene.hit_test(x, y)` | no |
+| Repeated renders of one scene | `TerminalRenderer::new(&emit, req)` + `render(&scene, &mut out)` | no (`new_in`) |
 
 On a build with `default-features = false, features = ["arena"]`,
 `render_to_bytes` and the `new_in` planner are what you have — which

@@ -59,17 +59,17 @@ macro_rules! with_view {
 /// sizes a [`SceneComposer`].
 #[derive(Debug, Clone, Copy)]
 pub struct CompositionRequirements {
-    band_rows_cap: usize,
-    band_rows: usize,
-    width: usize,
-    height: usize,
-    run_capacity: usize,
-    nodes: usize,
-    edges: usize,
-    subgraphs: usize,
-    elements: usize,
-    incidence: usize,
-    bytes: Option<usize>,
+    pub(crate) band_rows_cap: usize,
+    pub(crate) band_rows: usize,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+    pub(crate) run_capacity: usize,
+    pub(crate) nodes: usize,
+    pub(crate) edges: usize,
+    pub(crate) subgraphs: usize,
+    pub(crate) elements: usize,
+    pub(crate) incidence: usize,
+    pub(crate) bytes: Option<usize>,
 }
 
 impl CompositionRequirements {
@@ -103,6 +103,49 @@ impl CompositionRequirements {
         };
         req.bytes = req.layout_bytes();
         req
+    }
+
+    /// Workspace bytes for the LEAN terminal profile: same checked
+    /// carve-mirrored fold, but no ownership terms and a color plane
+    /// only for colored emission — the semantic tier's cost never
+    /// becomes an unavoidable part of the terminal surface.
+    pub(crate) fn terminal_bytes(&self, colored: bool) -> Option<usize> {
+        use core::mem::{align_of, size_of};
+        let area = self.width.checked_mul(self.band_rows)?;
+        let scratch_terms = PaintScratch::carve_layout(
+            self.run_capacity,
+            self.subgraphs,
+            self.edges,
+            self.nodes,
+            colored,
+            self.width,
+            self.band_rows,
+        )?;
+        let extra_terms: [(Option<usize>, usize); 2] = [
+            (area.checked_mul(size_of::<Cell>()), align_of::<Cell>()),
+            if colored {
+                (
+                    area.checked_mul(size_of::<CellColor>()),
+                    align_of::<CellColor>(),
+                )
+            } else {
+                (Some(0), 1)
+            },
+        ];
+        let mut cursor = 0usize;
+        let mut max_align = 1usize;
+        for &(bytes, align) in scratch_terms.iter() {
+            max_align = max_align.max(align);
+            cursor = cursor.checked_add(align - 1)? & !(align - 1);
+            cursor = cursor.checked_add(bytes)?;
+        }
+        for (bytes, align) in extra_terms {
+            let bytes = bytes?;
+            max_align = max_align.max(align);
+            cursor = cursor.checked_add(align - 1)? & !(align - 1);
+            cursor = cursor.checked_add(bytes)?;
+        }
+        cursor.checked_add(max_align - 1)
     }
 
     /// Fold the exact `(bytes, align)` carve sequence — the

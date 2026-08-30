@@ -169,7 +169,7 @@ pub use ir::{EdgePath, FlowAxis, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNo
 pub use render::colors::Palette;
 pub use render::engine::{
     ArmWeight, ArmWeights, CellKind, CellMarker, CellView, CompositionRequirements,
-    MarkerDirection, SceneComposer,
+    MarkerDirection, SceneComposer, TerminalRenderer,
 };
 pub use render::engine::{BoxedNode, CustomNode, NodeContent, SimpleNode};
 pub use render::engine::{CellColor, HitResult};
@@ -180,6 +180,7 @@ pub use render::engine::{
 pub use render::engine::{
     EdgePathView, EdgeView, LabelSlot, LabelView, NodeKind, NodeOrigin, NodeView, SubgraphView,
 };
+pub use render::engine::{LabelPosition, LineWeight, MarkerShape, SubgraphBorder};
 pub use validation::Requirements;
 // Primary config types (always available, no alloc needed)
 pub use algorithms::sugiyama::config::{

@@ -43,6 +43,7 @@ pub(crate) mod presets;
 pub(crate) mod region;
 pub(crate) mod scene;
 pub(crate) mod style;
+pub(crate) mod terminal;
 #[cfg(all(test, feature = "std", feature = "layout-vertical"))]
 mod test_alloc;
 pub(crate) mod view;
@@ -72,27 +73,54 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
     } else {
         alloc::vec::Vec::new()
     };
+    emit_bands(
+        view_ref,
+        &plan,
+        &options.emit,
+        cap,
+        &mut scratch,
+        &mut cells,
+        colored.then(|| &mut colors_plane[..]),
+        out,
+    )
+}
+
+/// The ONE band-emission loop behind every terminal surface — the
+/// one-step wrappers and [`TerminalRenderer`](terminal::TerminalRenderer)
+/// compose and emit through exactly this path (plan → compose → emit).
+///
+/// D4 (temp/08): the legend works in plain mode too — labels that
+/// don't fit go to the legend regardless of color mode; a plain
+/// legend is self-keying (`from -> to: label`). `ColorMode::None`
+/// emits no escapes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_bands<V: view::LayoutView, W: core::fmt::Write>(
+    view_ref: &V,
+    plan: &plan::RenderPlan<'_>,
+    emit_options: &config::EmitOptions,
+    cap: usize,
+    scratch: &mut compose::PaintScratch<'_>,
+    cells: &mut [cell::Cell],
+    mut colors: Option<&mut [color::CellColor]>,
+    out: &mut W,
+) -> core::fmt::Result {
+    let colored = !matches!(emit_options.color_mode, color::ColorMode::None);
     for (y0, rows) in plan.bands(cap) {
-        let plane = colored.then(|| &mut colors_plane[..]);
-        let mut canvas = compose::BandCanvas::new(&mut cells, plane, plan.width(), y0, rows);
-        compose::composite_band(view_ref, &plan, &mut canvas, &mut scratch);
+        let plane = if colored { colors.as_deref_mut() } else { None };
+        let mut canvas = compose::BandCanvas::new(cells, plane, plan.width(), y0, rows);
+        compose::composite_band(view_ref, plan, &mut canvas, scratch);
         if colored {
-            emit::emit_colored_band(&canvas, options.emit.charset, options.emit.color_mode, out)?;
+            emit::emit_colored_band(&canvas, emit_options.charset, emit_options.color_mode, out)?;
         } else {
-            emit::emit_plain_band(&canvas, options.emit.charset, out)?;
+            emit::emit_plain_band(&canvas, emit_options.charset, out)?;
         }
     }
-    // D4 (temp/08): the legend works in plain mode too — labels that
-    // don't fit go to the legend regardless of color mode; a plain
-    // legend is self-keying (`from -> to: label`). `ColorMode::None`
-    // emits no escapes. Default plain options keep `legend = false`,
-    // so default output is unchanged.
-    if options.emit.render_legend {
+    if emit_options.render_legend {
         emit::emit_legend(
             view_ref,
-            &plan,
-            options.emit.charset,
-            options.emit.color_mode,
+            plan,
+            emit_options.charset,
+            emit_options.color_mode,
             out,
         )?;
     }
@@ -159,38 +187,19 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
     } else {
         None
     };
-    let mut colors = colors;
 
     let mut sink = emit::ByteSink::new(out);
-    let mut write = || -> core::fmt::Result {
-        for (y0, rows) in plan.bands(cap) {
-            let mut canvas =
-                compose::BandCanvas::new(cells, colors.as_deref_mut(), plan.width(), y0, rows);
-            compose::composite_band(view_ref, &plan, &mut canvas, &mut scratch);
-            if colored {
-                emit::emit_colored_band(
-                    &canvas,
-                    options.emit.charset,
-                    options.emit.color_mode,
-                    &mut sink,
-                )?;
-            } else {
-                emit::emit_plain_band(&canvas, options.emit.charset, &mut sink)?;
-            }
-        }
-        // D4: plain legends too — the same gate the alloc path uses.
-        if options.emit.render_legend {
-            emit::emit_legend(
-                view_ref,
-                &plan,
-                options.emit.charset,
-                options.emit.color_mode,
-                &mut sink,
-            )?;
-        }
-        Ok(())
-    };
-    match write() {
+    let write = emit_bands(
+        view_ref,
+        &plan,
+        &options.emit,
+        cap,
+        &mut scratch,
+        cells,
+        colors,
+        &mut sink,
+    );
+    match write {
         Ok(()) => Ok(sink.written()),
         // The sink is the only fallible writer here; a fmt error that
         // isn't the sink overflowing would be an engine bug.
@@ -237,6 +246,7 @@ pub use style::{
     EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPlacement, LabelPosition, LineWeight,
     MarkerShape, NodePaintFn, SubgraphBorder, SubgraphStyle, SubgraphStyleCtx,
 };
+pub use terminal::TerminalRenderer;
 pub use views::{
     EdgePathView, EdgeView, LabelSlot, LabelView, NodeKind, NodeOrigin, NodeView, SubgraphView,
 };
