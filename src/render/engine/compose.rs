@@ -1303,7 +1303,7 @@ mod tests {
         let ir = g.compute_layout();
         let mut options = RenderOptions::plain();
         options.compose.band_rows_cap = 3;
-        let plan = RenderPlan::build(&ir, &options);
+        let plan = RenderPlan::build(&ir, &options.plan);
         let cap = options.compose.cap();
         let bands: alloc::vec::Vec<_> = plan.bands(cap).collect();
         assert!(bands.len() > 2, "corpus must actually band");

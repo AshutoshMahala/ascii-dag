@@ -649,7 +649,8 @@ mod bands {
         let ir = hero_graph().compute_layout();
         // One plan, every budget: the partition is a compose-time
         // choice, so the SAME plan serves both caps below.
-        let plan = crate::render::engine::plan::RenderPlan::build(&ir, &RenderOptions::plain());
+        let plan =
+            crate::render::engine::plan::RenderPlan::build(&ir, &RenderOptions::plain().plan);
         assert!(plan.bands(5).count() > 1, "hero at cap 5 must band");
         // Bands tile the height exactly, in order, no gaps.
         let mut next = 0usize;
@@ -1064,11 +1065,11 @@ mod styles {
         assert_same("acceptance #6 (heap vs csr)", &heap_out, &csr_out);
 
         // Public plan queries over the same layout (criterion #7 spot).
-        let plan = heap_ir.render_plan(&options);
+        let plan = crate::render::engine::plan::RenderPlan::build(&heap_ir, &options.plan);
         assert!(plan.width() > 0 && plan.height() > 0 && plan.bands(64).count() >= 1);
         let start = heap_ir.node_by_id(1).unwrap();
         assert_eq!(
-            heap_ir.hit_test(&plan, start.x + 1, start.y),
+            plan.element_at(&heap_ir, start.x + 1, start.y),
             crate::render::engine::HitResult::Node(1)
         );
     }
@@ -1135,10 +1136,10 @@ mod review_fixes {
             let ir = build().compute_layout();
             let options = RenderOptions::plain();
             let out = render_plain(&ir, &options);
-            let plan = ir.render_plan(&options);
+            let plan = crate::render::engine::plan::RenderPlan::build(&ir, &options.plan);
             for (y, line) in out.lines().enumerate() {
                 for (x, ch) in line.chars().enumerate() {
-                    let hit = ir.hit_test(&plan, x, y);
+                    let hit = plan.element_at(&ir, x, y);
                     if EDGE_GLYPHS.contains(ch) {
                         assert_ne!(
                             hit,
@@ -1170,17 +1171,18 @@ mod review_fixes {
             .find(|n| matches!(n.kind, crate::ir::NodeKind::Dummy))
             .expect("skip graph produces a dummy");
 
-        let hidden = ir.render_plan(&RenderOptions::plain());
+        let hidden =
+            crate::render::engine::plan::RenderPlan::build(&ir, &RenderOptions::plain().plan);
         assert!(
-            !matches!(ir.hit_test(&hidden, dummy.x, dummy.y), HitResult::Node(id) if id == dummy.id),
+            !matches!(hidden.element_at(&ir, dummy.x, dummy.y), HitResult::Node(id) if id == dummy.id),
             "hidden dummy must not hit"
         );
 
         let mut options = RenderOptions::plain();
         options.plan.show_dummy_nodes = true;
-        let shown = ir.render_plan(&options);
+        let shown = crate::render::engine::plan::RenderPlan::build(&ir, &options.plan);
         assert_eq!(
-            ir.hit_test(&shown, dummy.x, dummy.y),
+            shown.element_at(&ir, dummy.x, dummy.y),
             HitResult::Node(dummy.id),
             "shown dummy hits its marker cell"
         );
@@ -1201,16 +1203,17 @@ mod review_fixes {
         let sg = &ir.subgraphs()[0];
         let mut options = RenderOptions::plain();
         options.plan.subgraph_style_fn = no_border;
-        let plan = ir.render_plan(&options);
+        let plan = crate::render::engine::plan::RenderPlan::build(&ir, &options.plan);
         assert_eq!(
-            ir.hit_test(&plan, sg.x, sg.y),
+            plan.element_at(&ir, sg.x, sg.y),
             HitResult::None,
             "borderless box corner is empty canvas"
         );
         // With the default border the same cell hits the box.
-        let bordered = ir.render_plan(&RenderOptions::plain());
+        let bordered =
+            crate::render::engine::plan::RenderPlan::build(&ir, &RenderOptions::plain().plan);
         assert_eq!(
-            ir.hit_test(&bordered, sg.x, sg.y),
+            bordered.element_at(&ir, sg.x, sg.y),
             HitResult::Subgraph(sg.id)
         );
     }
@@ -1275,14 +1278,14 @@ mod review_fixes {
     fn edge_indices_are_ir_list_indices() {
         let ir = colliding_labels().compute_layout();
         let options = RenderOptions::colored(Palette::Ansi);
-        let plan = ir.render_plan(&options);
+        let plan = crate::render::engine::plan::RenderPlan::build(&ir, &options.plan);
         for &ei in plan.legend_entries() {
             assert!(ei < ir.edges().len(), "legend index {ei} is a list index");
         }
         // A hit on an edge's own vertical resolves to its list index.
         let e = &ir.edges()[0];
         let probe_y = e.from_y + 1;
-        if let HitResult::Edge(idx) = ir.hit_test(&plan, e.from_x, probe_y) {
+        if let HitResult::Edge(idx) = plan.element_at(&ir, e.from_x, probe_y) {
             assert!(idx < ir.edges().len());
         }
     }
@@ -1450,9 +1453,9 @@ mod node_painters {
                 "row {dy} of the reserved area stays blank:\n{out}"
             );
         }
-        let plan = ir.render_plan(&options);
+        let plan = crate::render::engine::plan::RenderPlan::build(&ir, &options.plan);
         assert_eq!(
-            ir.hit_test(&plan, spacer.x + 1, spacer.y + 1),
+            plan.element_at(&ir, spacer.x + 1, spacer.y + 1),
             crate::render::engine::HitResult::Node(2),
             "blank node still hit-tests as itself"
         );
@@ -1977,17 +1980,17 @@ mod node_painters {
     fn multi_row_nodes_hit_across_their_area() {
         let ir = boxed_graph().compute_layout();
         let options = RenderOptions::plain();
-        let plan = ir.render_plan(&options);
+        let plan = crate::render::engine::plan::RenderPlan::build(&ir, &options.plan);
         let server = ir.node_by_id(1).unwrap();
         for dy in 0..3 {
             assert_eq!(
-                ir.hit_test(&plan, server.x + 1, server.y + dy),
+                plan.element_at(&ir, server.x + 1, server.y + dy),
                 crate::render::engine::HitResult::Node(1),
                 "row {dy} of the reserved area"
             );
         }
         assert_ne!(
-            ir.hit_test(&plan, server.x + 1, server.y + 3),
+            plan.element_at(&ir, server.x + 1, server.y + 3),
             crate::render::engine::HitResult::Node(1),
             "below the reserved area"
         );
@@ -2497,9 +2500,9 @@ mod lr_invariants {
             .enumerate()
             .find_map(|(r, l)| l.find("\"go\"").map(|c| (r, c)))
             .expect("label location");
-        let plan = ir.render_plan(&options);
+        let plan = crate::render::engine::plan::RenderPlan::build(&ir, &options.plan);
         assert_eq!(
-            ir.hit_test(&plan, col + 1, row_i),
+            plan.element_at(&ir, col + 1, row_i),
             HitResult::Edge(0),
             "label cell owns its edge:\n{out}"
         );
@@ -2570,12 +2573,12 @@ mod lr_invariants {
         {
             let ir = lr_rl(&g, dir);
             let out = render_plain(&ir, &options);
-            let plan = ir.render_plan(&options);
+            let plan = crate::render::engine::plan::RenderPlan::build(&ir, &options.plan);
             for (r, line) in out.lines().enumerate() {
                 for (c, ch) in line.chars().enumerate() {
                     if ink.contains(&ch) {
                         assert!(
-                            ir.hit_test(&plan, c, r) != HitResult::None,
+                            plan.element_at(&ir, c, r) != HitResult::None,
                             "{tag} {dir:?}: orphan ink {ch:?} at ({c}, {r})\n{out}"
                         );
                     }
@@ -2806,9 +2809,9 @@ mod lr_invariants {
         capped.compose.band_rows_cap = 1;
         assert_same("x side-channel banding", &out, &render_plain(&ir, &capped));
         // And the channel ink hit-tests to its edge.
-        let plan = ir.render_plan(&options);
+        let plan = crate::render::engine::plan::RenderPlan::build(&ir, &options.plan);
         assert_eq!(
-            ir.hit_test(&plan, 7, 4),
+            plan.element_at(&ir, 7, 4),
             HitResult::Edge(0),
             "channel-row ink belongs to the edge:\n{out}"
         );
@@ -3171,9 +3174,9 @@ mod lr_invariants {
             let w = lr_ir.width();
             assert_eq!(w, rl_ir.width(), "{text}: canvas width");
 
-            let lr_plan = lr_ir.render_plan(&options);
-            let rl_plan = rl_ir.render_plan(&options);
-            let pick = |p: &crate::render::engine::RenderPlan<'_>| {
+            let lr_plan = crate::render::engine::plan::RenderPlan::build(&lr_ir, &options.plan);
+            let rl_plan = crate::render::engine::plan::RenderPlan::build(&rl_ir, &options.plan);
+            let pick = |p: &crate::render::engine::plan::RenderPlan<'_>| {
                 p.labels()
                     .iter()
                     .find(|l| l.edge_index == 0)
@@ -3613,7 +3616,7 @@ mod quality {
         let plain = ir.render_string(&popts);
         let mut copts = RenderOptions::colored(Palette::Ansi);
         copts.emit.render_legend = true;
-        let plan = ir.render_plan(&copts);
+        let plan = crate::render::engine::plan::RenderPlan::build(ir, &copts.plan);
         let colored = plan
             .labels()
             .iter()
@@ -4232,7 +4235,10 @@ mod quality {
                 let mut cfg = LayoutConfig::standard();
                 cfg.direction = dir;
                 let ir = g.compute_layout_with_config(&cfg);
-                let plan = ir.render_plan(&RenderOptions::plain());
+                let plan = crate::render::engine::plan::RenderPlan::build(
+                    &ir,
+                    &RenderOptions::plain().plan,
+                );
                 for l in plan.labels() {
                     if !l.placeable {
                         continue;
@@ -4294,7 +4300,10 @@ mod quality {
                 cfg.direction = dir;
                 cfg.include_dummy_nodes = include;
                 let ir = g.compute_layout_with_config(&cfg);
-                let plan = ir.render_plan(&RenderOptions::plain());
+                let plan = crate::render::engine::plan::RenderPlan::build(
+                    &ir,
+                    &RenderOptions::plain().plan,
+                );
                 let labels: alloc::vec::Vec<(usize, usize, usize, bool)> = plan
                     .labels()
                     .iter()
@@ -4316,7 +4325,7 @@ mod quality {
             let ir = g.compute_layout_with_config(&cfg);
             let mut opts = RenderOptions::plain();
             opts.plan.show_dummy_nodes = true;
-            let _ = ir.render_plan(&opts);
+            let _ = crate::render::engine::plan::RenderPlan::build(&ir, &opts.plan);
         }
     }
 
@@ -4363,7 +4372,10 @@ mod quality {
                 let mut cfg = LayoutConfig::standard();
                 cfg.direction = dir;
                 let ir = g.compute_layout_with_config(&cfg);
-                let plan = ir.render_plan(&RenderOptions::plain());
+                let plan = crate::render::engine::plan::RenderPlan::build(
+                    &ir,
+                    &RenderOptions::plain().plan,
+                );
                 let labels: alloc::vec::Vec<(usize, usize, usize, usize, bool)> = plan
                     .labels()
                     .iter()

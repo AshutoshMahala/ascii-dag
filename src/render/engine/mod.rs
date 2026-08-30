@@ -20,8 +20,8 @@
 //! The streaming writer is primary: `render_with` on both IR types
 //! feeds any `core::fmt::Write`; `render_string` is the owned
 //! convenience; `render_to_bytes` is the zero-allocation byte surface
-//! with a caller arena + buffer. `RenderPlan` is the public
-//! introspection type (dimensions, bands, legend, hit-testing).
+//! with a caller arena + buffer. `ScenePlanner`/`Scene` are the
+//! public introspection surface (dimensions, legend, hit-testing).
 
 pub(crate) mod api;
 #[cfg(all(test, feature = "std", feature = "layout-vertical"))]
@@ -30,8 +30,6 @@ mod composer_spike;
 mod ownership_spike;
 #[cfg(all(test, feature = "std", feature = "layout-vertical"))]
 mod painter_spike;
-#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
-mod scene_spike;
 #[cfg(all(test, feature = "std", feature = "layout-vertical"))]
 mod view_spike;
 
@@ -48,6 +46,7 @@ mod parity;
 pub(crate) mod plan;
 pub(crate) mod presets;
 pub(crate) mod region;
+pub(crate) mod scene;
 pub(crate) mod style;
 pub(crate) mod view;
 
@@ -64,7 +63,7 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
     out: &mut W,
 ) -> core::fmt::Result {
     let colored = !matches!(options.emit.color_mode, color::ColorMode::None);
-    let plan = plan::RenderPlan::build(view_ref, options);
+    let plan = plan::RenderPlan::build(view_ref, &options.plan);
     let cap = options.compose.cap();
     let band_rows = plan.max_band_rows(cap).max(1);
     let area = plan.width() * band_rows;
@@ -141,7 +140,7 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
     out: &mut [u8],
 ) -> Result<usize, crate::GraphError> {
     let colored = !matches!(options.emit.color_mode, color::ColorMode::None);
-    let plan = plan::RenderPlan::build_in(view_ref, options, arena)?;
+    let plan = plan::RenderPlan::build_in(view_ref, &options.plan, arena)?;
     let cap = options.compose.cap();
     let band_rows = plan.max_band_rows(cap).max(1);
     let area = plan.width() * band_rows;
@@ -231,8 +230,9 @@ pub use config::{
     LabelPolicy, PlanOptions, RenderOptions,
 };
 pub use node_content::{BoxedNode, CustomNode, NodeContent, NodeKindTag, SimpleNode};
-pub use plan::{HitResult, RenderPlan};
+pub use plan::HitResult;
 pub use region::{NodePaintCtx, NodeRegion};
+pub use scene::{LayoutSource, Scene, ScenePlanner, SourceRef};
 pub use style::{
     EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPlacement, LabelPosition, LineWeight,
     MarkerShape, NodePaintFn, SubgraphBorder, SubgraphStyle, SubgraphStyleCtx,

@@ -18,13 +18,13 @@ feature: the convenience surfaces need somewhere to put their result.
 | A `String` | `render_string(&options)` | yes |
 | To write into something | `render_with(&options, &mut writer)` | yes |
 | Bytes, into your buffer | `render_to_bytes(&options, &arena, &mut buf)` | no |
-| To inspect, not paint | `render_plan(&options)` | yes |
-| …the same, into your arena | `render_plan_in(&options, &arena)` | no |
-| What is at this cell | `hit_test(&plan, x, y)` | no |
+| To inspect, not paint | `ScenePlanner::new().plan(&ir, &options.plan)` | yes |
+| …the same, no-alloc | `ScenePlanner::new_in(&mut workspace)` | no |
+| What is at this cell | `scene.hit_test(x, y)` | no |
 
-On a build with `default-features = false, features = ["arena"]` the
-right-hand three are what you have — which is the whole no-allocation
-story, just spelled explicitly.
+On a build with `default-features = false, features = ["arena"]`,
+`render_to_bytes` and the `new_in` planner are what you have — which
+is the whole no-allocation story, just spelled explicitly.
 
 ```rust
 use ascii_dag::{Graph, RenderOptions};
@@ -230,14 +230,19 @@ balance. Lower it on memory-constrained targets.
 
 ## Hit-testing (interactive and IDE consumers)
 
-`render_plan` gives you the renderer's own geometry without painting
-anything, and `hit_test` answers what occupies a cell:
+A `Scene` gives you the renderer's own geometry without painting
+anything: a `ScenePlanner` resolves the layout once (styles run
+exactly once), and `hit_test` answers what occupies a cell. The scene
+borrows both the planner and the layout, so a stale plan/layout
+pairing is a compile error:
 
 ```rust
 use ascii_dag::render::engine::HitResult;
+use ascii_dag::ScenePlanner;
 
-let plan = ir.render_plan(&options);
-match ir.hit_test(&plan, x, y) {
+let mut planner = ScenePlanner::new();
+let scene = planner.plan(&ir, &options.plan)?;
+match scene.hit_test(x, y) {
     HitResult::Node(id) => println!("node {id}"),
     HitResult::Edge(index) => println!("edge #{index}"),
     HitResult::Subgraph(id) => println!("cluster {id}"),

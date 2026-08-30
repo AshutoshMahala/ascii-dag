@@ -463,7 +463,7 @@ fn check_graph(g: &Graph<'_>, what: &str) {
             RenderOptions::colored(crate::render::colors::Palette::Ansi),
         ] {
             let heap_ir = g.compute_layout_with_config(&cfg);
-            let plan = RenderPlan::build(&heap_ir, &options);
+            let plan = RenderPlan::build(&heap_ir, &options.plan);
             let h = plan.height();
             agree(&plan, &heap_ir, h.max(1), what);
             agree(&plan, &heap_ir, 3, what); // multi-band
@@ -480,7 +480,7 @@ fn check_graph(g: &Graph<'_>, what: &str) {
             let arena_ir = csr
                 .compute_layout_arena(&cfg, &mut temp_arena, &mut out_arena)
                 .unwrap();
-            let plan = RenderPlan::build(&arena_ir, &options);
+            let plan = RenderPlan::build(&arena_ir, &options.plan);
             agree(&plan, &arena_ir, 3, what);
         }
     }
@@ -583,7 +583,7 @@ fn plane_agrees_for_borderless_clusters() {
     let ir = g.compute_layout();
     let mut options = RenderOptions::plain();
     options.plan.subgraph_style_fn = borderless;
-    let plan = RenderPlan::build(&ir, &options);
+    let plan = RenderPlan::build(&ir, &options.plan);
     agree(&plan, &ir, 3, "borderless nested");
 }
 
@@ -602,7 +602,7 @@ fn plane_agrees_for_shown_dummies() {
     let ir = g.compute_layout_with_config(&cfg);
     let mut options = RenderOptions::plain();
     options.plan.show_dummy_nodes = true;
-    let plan = RenderPlan::build(&ir, &options);
+    let plan = RenderPlan::build(&ir, &options.plan);
     agree(&plan, &ir, 3, "shown dummies");
 }
 
@@ -622,7 +622,7 @@ fn ownership_cost_report() {
     for (name, g) in shapes {
         let ir = g.compute_layout();
         let options = RenderOptions::plain();
-        let plan = RenderPlan::build(&ir, &options);
+        let plan = RenderPlan::build(&ir, &options.plan);
         let (w, h) = (ir.width(), ir.height());
         let band_rows = plan
             .max_band_rows(super::config::DEFAULT_BAND_ROWS)

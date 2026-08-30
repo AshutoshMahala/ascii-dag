@@ -21,7 +21,7 @@
 //! mirroring the compositor (M4).
 
 use super::color::CellColor;
-use super::config::RenderOptions;
+use super::config::{PlanOptions, RenderOptions};
 use super::mem::PlanBuf;
 use super::style::{
     EdgeStyle, EdgeStyleCtx, LabelPosition, LineWeight, MarkerShape, SubgraphBorder,
@@ -87,16 +87,17 @@ pub(crate) struct PlanElement {
     pub y_max: usize,
 }
 
-/// Result of a hit-test query.
+/// Result of a hit-test query ([`Scene::hit_test`](super::scene::Scene::hit_test)).
 ///
 /// ```
-/// use ascii_dag::{Graph, RenderOptions};
+/// use ascii_dag::{Graph, RenderOptions, ScenePlanner};
 /// use ascii_dag::render::engine::HitResult;
 ///
 /// let g = Graph::from_edges(&[(1, "Alpha"), (2, "Beta")], &[(1, 2)]);
 /// let ir = g.compute_layout();
 /// let options = RenderOptions::plain();
-/// let plan = ir.render_plan(&options);
+/// let mut planner = ScenePlanner::new();
+/// let scene = planner.plan(&ir, &options.plan).unwrap();
 ///
 /// // Find where "Alpha" was painted, then ask what is there.
 /// let text = ir.render_string(&options);
@@ -105,10 +106,10 @@ pub(crate) struct PlanElement {
 ///     .enumerate()
 ///     .find_map(|(r, l)| l.find("Alpha").map(|c| (r, c)))
 ///     .unwrap();
-/// assert_eq!(ir.hit_test(&plan, col, row), HitResult::Node(1));
+/// assert_eq!(scene.hit_test(col, row), HitResult::Node(1));
 ///
 /// // Off the canvas is `None`, never a panic.
-/// assert_eq!(ir.hit_test(&plan, 9999, 9999), HitResult::None);
+/// assert_eq!(scene.hit_test(9999, 9999), HitResult::None);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -211,22 +212,12 @@ impl EdgePlan {
 /// Storage is heap- or arena-backed behind `PlanBuf` — one build
 /// path serves std and no-alloc callers alike.
 ///
-/// A plan is a snapshot for **introspection** (dimensions, bands,
-/// legend, hit-testing) of the layout and options it was built from;
-/// the render entry points build their own plan internally. Queries
-/// must be paired with the same layout the plan was built from —
-/// out-of-canvas queries return `HitResult::None`.
-///
-/// ```
-/// use ascii_dag::{Graph, RenderOptions};
-///
-/// let g = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
-/// let ir = g.compute_layout();
-/// let plan = ir.render_plan(&RenderOptions::plain());
-///
-/// // Size a viewport without painting anything.
-/// assert!(plan.width() > 0 && plan.height() > 0);
-/// ```
+/// A plan is a snapshot of one layout resolved under one
+/// [`PlanOptions`]; the render entry points build their own plan
+/// internally, and [`Scene`](super::scene::Scene) is the public
+/// carrier (plan + layout view bound together, so queries can never
+/// be paired with the wrong layout). Out-of-canvas queries return
+/// `HitResult::None`.
 pub struct RenderPlan<'buf> {
     width: usize,
     height: usize,
@@ -256,7 +247,7 @@ impl<'buf> RenderPlan<'buf> {
     /// Build a heap-backed plan (std/alloc convenience). Heap pushes
     /// cannot fail, so this surface stays infallible.
     #[cfg(feature = "alloc")]
-    pub(crate) fn build<V: LayoutView>(view: &V, options: &RenderOptions) -> RenderPlan<'static> {
+    pub(crate) fn build<V: LayoutView>(view: &V, options: &PlanOptions) -> RenderPlan<'static> {
         match RenderPlan::<'static>::build_impl(view, options, PlanMem::Heap) {
             Ok(plan) => plan,
             // Heap-backed building has no failing carve.
@@ -269,7 +260,7 @@ impl<'buf> RenderPlan<'buf> {
     /// arena with `estimate_render_arena_size`.
     pub(crate) fn build_in<V: LayoutView>(
         view: &V,
-        options: &RenderOptions,
+        options: &PlanOptions,
         arena: &Arena<'buf>,
     ) -> Result<RenderPlan<'buf>, GraphError> {
         Self::build_impl(view, options, PlanMem::Arena(arena))
@@ -282,7 +273,7 @@ impl<'buf> RenderPlan<'buf> {
     /// it is created.
     fn build_impl<V: LayoutView>(
         view: &V,
-        options: &RenderOptions,
+        options: &PlanOptions,
         mem: PlanMem<'_, 'buf>,
     ) -> Result<RenderPlan<'buf>, GraphError> {
         let width = view.width();
@@ -290,8 +281,8 @@ impl<'buf> RenderPlan<'buf> {
         let oom = || GraphError::RenderPlanOom;
 
         // ── Resolved styles (the only place style fns run — Q4) ────────
-        let palette = options.plan.palette.colors();
-        let label_policy = options.plan.label_policy;
+        let palette = options.palette.colors();
+        let label_policy = options.label_policy;
         let mut edge_plans: PlanBuf<'buf, EdgePlan> = mem.buf(view.edge_count(), oom())?;
         for i in 0..view.edge_count() {
             let e = view.edge(i);
@@ -304,7 +295,7 @@ impl<'buf> RenderPlan<'buf> {
                 reversed: e.reversed,
                 total_edges: view.edge_count(),
             };
-            let style: EdgeStyle = (options.plan.edge_style_fn)(ctx);
+            let style: EdgeStyle = (options.edge_style_fn)(ctx);
             let color = if style.color.is_set() {
                 style.color
             } else if !palette.is_empty() {
@@ -324,7 +315,7 @@ impl<'buf> RenderPlan<'buf> {
             } else {
                 LineWeight::Light
             });
-            let label_style = (options.plan.edge_label_style_fn)(ctx);
+            let label_style = (options.edge_label_style_fn)(ctx);
             let label_color = if label_style.color.is_set() {
                 label_style.color
             } else {
@@ -348,7 +339,7 @@ impl<'buf> RenderPlan<'buf> {
                 label: sg.label,
                 has_parent: sg.parent.is_some(),
             };
-            let style = (options.plan.subgraph_style_fn)(ctx);
+            let style = (options.subgraph_style_fn)(ctx);
             subgraph_plans.push(SubgraphPlan {
                 border: style.border,
                 color: style.color,
@@ -580,7 +571,7 @@ impl<'buf> RenderPlan<'buf> {
                                     cx,
                                     cx + len,
                                     claimed.as_slice(),
-                                    options.plan.show_dummy_nodes,
+                                    options.show_dummy_nodes,
                                     &sg_label_row,
                                 )
                             {
@@ -641,7 +632,7 @@ impl<'buf> RenderPlan<'buf> {
                                     cx,
                                     cx + len,
                                     claimed.as_slice(),
-                                    options.plan.show_dummy_nodes,
+                                    options.show_dummy_nodes,
                                 )
                             {
                                 chosen = Some((cx, row));
@@ -673,7 +664,7 @@ impl<'buf> RenderPlan<'buf> {
                         x,
                         x + len,
                         claimed.as_slice(),
-                        options.plan.show_dummy_nodes,
+                        options.show_dummy_nodes,
                     );
             }
 
@@ -858,7 +849,7 @@ impl<'buf> RenderPlan<'buf> {
                         cx,
                         cx + len,
                         claimed.as_slice(),
-                        options.plan.show_dummy_nodes,
+                        options.show_dummy_nodes,
                         &sg_label_row,
                     ) {
                         x = cx;
@@ -893,7 +884,7 @@ impl<'buf> RenderPlan<'buf> {
                         fx,
                         fx + len,
                         claimed.as_slice(),
-                        options.plan.show_dummy_nodes,
+                        options.show_dummy_nodes,
                     )
                 {
                     x = fx;
@@ -984,7 +975,7 @@ impl<'buf> RenderPlan<'buf> {
             index,
             legend,
             run_capacity,
-            show_dummy_nodes: options.plan.show_dummy_nodes,
+            show_dummy_nodes: options.show_dummy_nodes,
             label_placement: label_policy.placement,
         })
     }
@@ -1310,7 +1301,6 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
     let height = view.height();
     let cap = options.compose.cap();
     let colored = !matches!(options.emit.color_mode, super::color::ColorMode::None);
-    let labeled = (0..e).filter(|&i| view.edge(i).label.is_some()).count();
     let mut run_capacity = 0usize;
     for i in 0..e {
         let ed = view.edge(i);
@@ -1323,12 +1313,7 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
     let band_rows = cap.min(height).max(1);
     let area = width.saturating_mul(band_rows);
 
-    let plan_bytes = e * size_of::<EdgePlan>()
-        + s * size_of::<SubgraphPlan>()
-        + (n + e + s) * size_of::<PlanElement>()
-        + labeled
-            * (size_of::<LabelPlan>() + size_of::<usize>() + size_of::<(usize, usize, usize)>())
-        + n * size_of::<usize>(); // level tops
+    let plan_bytes = plan_storage_bytes(view);
     let scratch_bytes = super::compose::PaintScratch::estimate_bytes(
         run_capacity,
         s,
@@ -1344,8 +1329,28 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
         } else {
             0
         };
-    // Per-allocation alignment slack (≤ 8 bytes × ~18 carves) + margin.
-    plan_bytes + scratch_bytes + canvas_bytes + 18 * 8 + 64
+    // Alignment slack for the compositor's carves (the plan term
+    // carries its own).
+    plan_bytes + scratch_bytes + canvas_bytes + 10 * 8 + 64
+}
+
+/// Bytes of storage one [`RenderPlan::build_in`] needs for this view —
+/// the plan's OWN buffers only (no compositing scratch, no canvas).
+/// Sizes a [`ScenePlanner`](super::scene::ScenePlanner) workspace.
+pub(crate) fn plan_storage_bytes<V: LayoutView>(view: &V) -> usize {
+    use core::mem::size_of;
+    let n = view.node_count();
+    let e = view.edge_count();
+    let s = view.subgraph_count();
+    let labeled = (0..e).filter(|&i| view.edge(i).label.is_some()).count();
+    e * size_of::<EdgePlan>()
+        + s * size_of::<SubgraphPlan>()
+        + (n + e + s) * size_of::<PlanElement>()
+        + labeled
+            * (size_of::<LabelPlan>() + size_of::<usize>() + size_of::<(usize, usize, usize)>())
+        + n * size_of::<usize>() // level tops
+        // Per-carve alignment slack (≤ 8 bytes × ~8 plan carves).
+        + 8 * 8
 }
 
 /// Structural count of horizontal-run interiors a path paints — the
@@ -2516,7 +2521,7 @@ mod tests {
     fn placement_matches_legacy_legend_no_collision() {
         let g = stage_graph();
         let ir = g.compute_layout();
-        let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi));
+        let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi).plan);
         assert_eq!(
             plan.legend_entries().len(),
             legend_line_count(&g),
@@ -2530,7 +2535,7 @@ mod tests {
     fn placement_matches_legacy_legend_with_collision() {
         let g = colliding_graph();
         let ir = g.compute_layout();
-        let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi));
+        let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi).plan);
         let legacy = legend_line_count(&g);
         assert_eq!(
             plan.legend_entries().len(),
@@ -2544,7 +2549,7 @@ mod tests {
     fn edge_styles_match_legacy_palette_assignment() {
         let g = stage_graph();
         let ir = g.compute_layout();
-        let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi));
+        let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi).plan);
         let palette = Palette::Ansi.colors();
         let legacy = ir.compute_edge_colors(palette.len());
         for (i, want_idx) in legacy.iter().enumerate() {
@@ -2557,7 +2562,7 @@ mod tests {
         // Colors are ALWAYS resolved at plan time — a plain-preset
         // plan carries the same resolved colors (plain emission just
         // ignores them). One plan serves colored and plain output.
-        let plain = RenderPlan::build(&ir, &RenderOptions::plain());
+        let plain = RenderPlan::build(&ir, &RenderOptions::plain().plan);
         for i in 0..legacy.len() {
             assert_eq!(
                 plain.edge_plan(i).color,
@@ -2571,7 +2576,7 @@ mod tests {
     fn hit_testing_finds_nodes_boxes_and_nothing() {
         let g = stage_graph();
         let ir = g.compute_layout();
-        let plan = RenderPlan::build(&ir, &RenderOptions::plain());
+        let plan = RenderPlan::build(&ir, &RenderOptions::plain().plan);
 
         let start = ir.node_by_id(1).unwrap();
         assert_eq!(
@@ -2594,7 +2599,7 @@ mod tests {
     fn spatial_index_is_sorted_and_single_band() {
         let g = stage_graph();
         let ir = g.compute_layout();
-        let plan = RenderPlan::build(&ir, &RenderOptions::plain());
+        let plan = RenderPlan::build(&ir, &RenderOptions::plain().plan);
         assert!(plan.elements().windows(2).all(|w| w[0].y_min <= w[1].y_min));
         let bands: Vec<(usize, usize)> = plan
             .bands(super::super::config::DEFAULT_BAND_ROWS)
@@ -2612,7 +2617,7 @@ mod tests {
         g.add_edge(1, 2, None);
         g.add_edge(2, 1, None); // back edge
         let ir = g.compute_layout();
-        let plan = RenderPlan::build(&ir, &RenderOptions::plain());
+        let plan = RenderPlan::build(&ir, &RenderOptions::plain().plan);
         let reversed: Vec<bool> = ir.edges().iter().map(|e| e.reversed).collect();
         for (i, rev) in reversed.iter().enumerate() {
             let want = if *rev {
@@ -2631,7 +2636,7 @@ mod tests {
         let g = stage_graph();
         let ir = g.compute_layout_with_config(&config);
         // Plan builds fine over an IR containing dummy nodes.
-        let plan = RenderPlan::build(&ir, &RenderOptions::plain());
+        let plan = RenderPlan::build(&ir, &RenderOptions::plain().plan);
         assert_eq!(
             plan.bands(super::super::config::DEFAULT_BAND_ROWS).count(),
             1

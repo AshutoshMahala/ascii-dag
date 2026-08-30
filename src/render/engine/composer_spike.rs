@@ -499,7 +499,7 @@ fn requirements_bytes_are_sufficient_and_output_correct() {
             let colored = !matches!(options.emit.color_mode, super::color::ColorMode::None);
             for profile in [Profile::Semantic, Profile::Lean { colored }] {
                 let ir = graph.compute_layout();
-                let plan = RenderPlan::build(&ir, &options);
+                let plan = RenderPlan::build(&ir, &options.plan);
                 let budget = default_budget(&plan);
                 let req = ReqSpike::of(&ir, &plan, &budget, profile);
                 let mut ws = vec![0u8; req.workspace_bytes().unwrap()];
@@ -540,7 +540,7 @@ fn requirements_bytes_are_sufficient_and_output_correct() {
         .compute_layout_arena(&cfg, &mut temp_arena, &mut out_arena)
         .unwrap();
     let options = plain();
-    let plan = RenderPlan::build(&arena_ir, &options);
+    let plan = RenderPlan::build(&arena_ir, &options.plan);
     let budget = default_budget(&plan);
     let req = ReqSpike::of(&arena_ir, &plan, &budget, Profile::Semantic);
     let mut ws = vec![0u8; req.workspace_bytes().unwrap()];
@@ -557,7 +557,7 @@ fn requirements_bytes_are_sufficient_and_output_correct() {
 fn steady_state_repaint_allocates_nothing() {
     for options in [plain(), colored_legend()] {
         let ir = cluster_graph().compute_layout();
-        let plan = RenderPlan::build(&ir, &options);
+        let plan = RenderPlan::build(&ir, &options.plan);
         let budget = default_budget(&plan);
         let req = ReqSpike::of(&ir, &plan, &budget, Profile::Semantic);
         let mut composer = HeapComposerSpike::new(&req);
@@ -605,11 +605,11 @@ fn scene_switch_reuses_grows_once_then_holds_gate() {
     let options = plain();
     let profile = Profile::Semantic;
     let big_ir = fan_graph(60).compute_layout();
-    let big_plan = RenderPlan::build(&big_ir, &options);
+    let big_plan = RenderPlan::build(&big_ir, &options.plan);
     let small_ir = small_graph().compute_layout();
-    let small_plan = RenderPlan::build(&small_ir, &options);
+    let small_plan = RenderPlan::build(&small_ir, &options.plan);
     let mid_ir = cluster_graph().compute_layout();
-    let mid_plan = RenderPlan::build(&mid_ir, &options);
+    let mid_plan = RenderPlan::build(&mid_ir, &options.plan);
 
     let budget = BudgetSpike { band_rows: 8 };
     let mid_req = ReqSpike::of(&mid_ir, &mid_plan, &budget, profile);
@@ -707,11 +707,11 @@ fn arena_composer_errors_on_misfit_and_survives() {
     let options = plain();
     let profile = Profile::Semantic;
     let small_ir = small_graph().compute_layout();
-    let small_plan = RenderPlan::build(&small_ir, &options);
+    let small_plan = RenderPlan::build(&small_ir, &options.plan);
     let budget = default_budget(&small_plan);
     let small_req = ReqSpike::of(&small_ir, &small_plan, &budget, profile);
     let big_ir = fan_graph(60).compute_layout();
-    let big_plan = RenderPlan::build(&big_ir, &options);
+    let big_plan = RenderPlan::build(&big_ir, &options.plan);
 
     let ws_len = small_req.workspace_bytes().unwrap();
     let mut ws = vec![0u8; ws_len];
@@ -748,7 +748,7 @@ fn arena_composer_errors_on_misfit_and_survives() {
 fn band_budget_never_affects_composed_bytes() {
     for options in [plain(), colored_legend()] {
         let ir = cluster_graph().compute_layout();
-        let plan = RenderPlan::build(&ir, &options);
+        let plan = RenderPlan::build(&ir, &options.plan);
         let tiny = BudgetSpike { band_rows: 2 };
         let full = default_budget(&plan);
         assert!(full.band_rows > tiny.band_rows, "budget must differ");

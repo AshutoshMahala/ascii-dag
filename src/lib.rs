@@ -171,7 +171,7 @@ pub use render::colors::Palette;
 pub use render::engine::{BoxedNode, CustomNode, NodeContent, SimpleNode};
 pub use render::engine::{
     Charset, ColorMode, ComposeBudget, EmitOptions, LabelOverflow, LabelPlacementPolicy,
-    LabelPolicy, PlanOptions, RenderOptions,
+    LabelPolicy, LayoutSource, PlanOptions, RenderOptions, Scene, ScenePlanner,
 };
 pub use validation::Requirements;
 // Primary config types (always available, no alloc needed)

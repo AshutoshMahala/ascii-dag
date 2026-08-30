@@ -163,8 +163,8 @@ semantics), `emit` (how they are written), `compose` (memory only).
 Presets: `RenderOptions::plain()`, `::colored(palette)`, `::ascii()`,
 `::ascii_colored()`. Render surfaces on both IR types:
 `render_string`, `render_with(&options, &mut impl fmt::Write)`
-(streaming), `render_to_bytes` (no-alloc), `render_plan` + `hit_test`
-(introspection).
+(streaming), `render_to_bytes` (no-alloc). Introspection lives on
+`Scene` (`ScenePlanner::plan` + `scene.hit_test(x, y)`).
 
 ### Layout settings
 
