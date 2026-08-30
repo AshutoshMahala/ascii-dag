@@ -253,7 +253,7 @@ match scene.hit_test(x, y) {
 
 This is what an editor plugin, TUI, or web terminal needs to make a
 rendered graph clickable: translate a click to a cell (subtract your
-own origin, account for scroll), then ask the plan.
+own origin, account for scroll), then ask the scene.
 
 The semantics are deliberately hybrid, because that is what feels
 right under a cursor:
@@ -268,12 +268,14 @@ right under a cursor:
 
 Nodes win over edges, edges over clusters — the visual z-order.
 
-A plan answers only for the layout it was built from; a query outside
-its canvas returns `HitResult::None` rather than panicking. Rebuild
-the plan when the layout changes; it is a snapshot, not a live view.
+A scene is bound to the layout it was planned from — it borrows both
+its planner and the layout, so a stale pairing is a compile error
+rather than a runtime surprise. A query outside its canvas returns
+`HitResult::None` rather than panicking. Re-plan when the layout
+changes; a scene is a snapshot, not a live view.
 
-`RenderPlan` also exposes `width`, `height`, `band_count`, and
-`legend_entries` for laying out a viewport around the graph.
+`Scene` also exposes `width`, `height`, and `legend_entries` for
+laying out a viewport around the graph.
 
 See `examples/hit_test.rs` for a working terminal program — it enables
 xterm mouse reporting with raw escape sequences and no dependencies,

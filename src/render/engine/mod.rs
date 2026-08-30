@@ -233,7 +233,7 @@ pub use config::{
 pub use node_content::{BoxedNode, CustomNode, NodeContent, NodeKindTag, SimpleNode};
 pub use plan::HitResult;
 pub use region::{NodePaintCtx, NodeRegion};
-pub use scene::{LayoutSource, Scene, ScenePlanner, SourceRef};
+pub use scene::{LayoutSource, Scene, ScenePlanner};
 pub use style::{
     EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPlacement, LabelPosition, LineWeight,
     MarkerShape, NodePaintFn, SubgraphBorder, SubgraphStyle, SubgraphStyleCtx,

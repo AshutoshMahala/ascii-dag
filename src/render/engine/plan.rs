@@ -1175,6 +1175,7 @@ impl<'buf> RenderPlan<'buf> {
             cap: cap.max(1),
             tops: self.level_tops.as_slice(),
             start: 0,
+            next_top: 0,
         }
     }
 
@@ -1201,6 +1202,12 @@ pub(crate) struct Bands<'a> {
     cap: usize,
     tops: &'a [usize],
     start: usize,
+    /// Cursor: index of the first top known to be `> start`. Bands
+    /// advance monotonically, so each top is passed once across the
+    /// whole iteration — O(levels + bands·log levels) total, never
+    /// O(levels × bands) (hard-cut runs through a tall node or sparse
+    /// tail would otherwise rescan every earlier top per band).
+    next_top: usize,
 }
 
 impl Iterator for Bands<'_> {
@@ -1216,13 +1223,15 @@ impl Iterator for Bands<'_> {
             self.start = self.height;
             return Some(band);
         }
-        let ub = self.tops.partition_point(|&t| t <= cap_end);
-        let boundary = self.tops[..ub]
-            .iter()
-            .rev()
-            .find(|&&t| t > self.start)
-            .copied()
-            .unwrap_or(cap_end);
+        while self.next_top < self.tops.len() && self.tops[self.next_top] <= self.start {
+            self.next_top += 1;
+        }
+        let ub = self.next_top + self.tops[self.next_top..].partition_point(|&t| t <= cap_end);
+        let boundary = if self.next_top < ub {
+            self.tops[ub - 1]
+        } else {
+            cap_end
+        };
         let band = (self.start, boundary - self.start);
         self.start = boundary;
         Some(band)

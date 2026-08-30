@@ -34,45 +34,50 @@ use crate::ir::arena::LayoutIRArena;
 use crate::ir::LayoutIR;
 
 mod sealed {
-    pub trait Sealed {}
+    use super::ViewRef;
+
+    /// The private half of [`LayoutSource`](super::LayoutSource):
+    /// dispatch lives here so no storage handle ever enters the
+    /// public semver surface.
+    pub trait Sealed {
+        fn source_ref(&self) -> ViewRef<'_>;
+    }
+
     #[cfg(feature = "alloc")]
-    impl Sealed for crate::ir::LayoutIR<'_> {}
-    impl Sealed for crate::ir::arena::LayoutIRArena<'_> {}
+    impl Sealed for crate::ir::LayoutIR<'_> {
+        fn source_ref(&self) -> ViewRef<'_> {
+            ViewRef::Heap(self)
+        }
+    }
+
+    impl Sealed for crate::ir::arena::LayoutIRArena<'_> {
+        fn source_ref(&self) -> ViewRef<'_> {
+            ViewRef::Arena(self)
+        }
+    }
 }
 
-/// A layout a [`ScenePlanner`] can plan: both IR types, nothing else
-/// (sealed). The scene type stays the same whichever backend produced
-/// the layout — the pipeline has no user-visible "backends".
-pub trait LayoutSource: sealed::Sealed {
-    /// Implementation detail: the planner's internal handle to this
-    /// layout.
-    #[doc(hidden)]
-    fn source_ref(&self) -> SourceRef<'_>;
-}
+/// A layout a [`ScenePlanner`] can plan: both IR types, nothing else.
+/// An empty sealed marker — the dispatch method is private, so the
+/// trait exposes semantics ("plannable"), never a storage handle. The
+/// scene type stays the same whichever backend produced the layout —
+/// the pipeline has no user-visible "backends".
+pub trait LayoutSource: sealed::Sealed {}
 
-/// Opaque layout handle (implementation detail of [`LayoutSource`]).
-pub struct SourceRef<'ir>(pub(crate) ViewRef<'ir>);
+#[cfg(feature = "alloc")]
+impl LayoutSource for LayoutIR<'_> {}
+
+impl LayoutSource for LayoutIRArena<'_> {}
 
 /// The scene's storage-neutral view of its layout: one private enum,
 /// monomorphized cores behind it — `Scene` itself stays non-generic.
+/// Nominally `pub` for the sealed-trait method signature; the module
+/// is crate-private, so the type never reaches the public API.
 #[derive(Clone, Copy)]
-pub(crate) enum ViewRef<'ir> {
+pub enum ViewRef<'ir> {
     #[cfg(feature = "alloc")]
     Heap(&'ir LayoutIR<'ir>),
     Arena(&'ir LayoutIRArena<'ir>),
-}
-
-#[cfg(feature = "alloc")]
-impl LayoutSource for LayoutIR<'_> {
-    fn source_ref(&self) -> SourceRef<'_> {
-        SourceRef(ViewRef::Heap(self))
-    }
-}
-
-impl LayoutSource for LayoutIRArena<'_> {
-    fn source_ref(&self) -> SourceRef<'_> {
-        SourceRef(ViewRef::Arena(self))
-    }
 }
 
 enum Workspace<'ws> {
@@ -159,12 +164,19 @@ impl<'ws> ScenePlanner<'ws> {
     /// Resolve one layout into a [`Scene`] under `options`. Style
     /// callbacks run here, once per element, never again; the scene
     /// borrows this planner (`'p`) and the layout (`'ir`).
+    ///
+    /// **Provisional signature (pre-release):** 0.11's diagnostics
+    /// integration adds the context-aware terminal from the accepted
+    /// diagnostics design (planning warnings flow into a caller's
+    /// diagnostic run, never to stderr). This exact signature is not
+    /// frozen until that lands, together with the proof that a
+    /// diagnostic run survives both successful and failed planning.
     pub fn plan<'p, 'ir, L: LayoutSource>(
         &'p mut self,
         layout: &'ir L,
         options: &PlanOptions,
     ) -> Result<Scene<'p, 'ir>, GraphError> {
-        match layout.source_ref().0 {
+        match sealed::Sealed::source_ref(layout) {
             #[cfg(feature = "alloc")]
             ViewRef::Heap(v) => {
                 let plan = Self::plan_core(&mut self.ws, v, options)?;
