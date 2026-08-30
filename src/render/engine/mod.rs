@@ -65,7 +65,8 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
 ) -> core::fmt::Result {
     let colored = !matches!(options.emit.color_mode, color::ColorMode::None);
     let plan = plan::RenderPlan::build(view_ref, options);
-    let band_rows = plan.max_band_rows().max(1);
+    let cap = options.compose.cap();
+    let band_rows = plan.max_band_rows(cap).max(1);
     let area = plan.width() * band_rows;
     let mut scratch = compose::PaintScratch::heap_backed(view_ref, &plan, colored, band_rows);
     let mut cells = alloc::vec![cell::Cell::EMPTY; area];
@@ -74,7 +75,7 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
     } else {
         alloc::vec::Vec::new()
     };
-    for &(y0, rows) in plan.band_ranges() {
+    for (y0, rows) in plan.bands(cap) {
         let plane = colored.then(|| &mut colors_plane[..]);
         let mut canvas = compose::BandCanvas::new(&mut cells, plane, plan.width(), y0, rows);
         compose::composite_band(view_ref, &plan, options, &mut canvas, &mut scratch);
@@ -141,7 +142,8 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
 ) -> Result<usize, crate::GraphError> {
     let colored = !matches!(options.emit.color_mode, color::ColorMode::None);
     let plan = plan::RenderPlan::build_in(view_ref, options, arena)?;
-    let band_rows = plan.max_band_rows().max(1);
+    let cap = options.compose.cap();
+    let band_rows = plan.max_band_rows(cap).max(1);
     let area = plan.width() * band_rows;
     let canvas_oom = || crate::GraphError::RenderCanvasTooSmall {
         needed: area,
@@ -164,7 +166,7 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
 
     let mut sink = emit::ByteSink::new(out);
     let mut write = || -> core::fmt::Result {
-        for &(y0, rows) in plan.band_ranges() {
+        for (y0, rows) in plan.bands(cap) {
             let mut canvas =
                 compose::BandCanvas::new(cells, colors.as_deref_mut(), plan.width(), y0, rows);
             compose::composite_band(view_ref, &plan, options, &mut canvas, &mut scratch);

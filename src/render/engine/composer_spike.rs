@@ -469,7 +469,7 @@ fn colored_legend() -> RenderOptions {
 /// comparisons against `render_string` band-structure-identical.
 fn default_budget(plan: &RenderPlan<'_>) -> BudgetSpike {
     BudgetSpike {
-        band_rows: plan.max_band_rows().max(1),
+        band_rows: plan.max_band_rows(super::config::DEFAULT_BAND_ROWS).max(1),
     }
 }
 

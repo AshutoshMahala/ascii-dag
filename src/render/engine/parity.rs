@@ -647,27 +647,22 @@ mod bands {
     #[test]
     fn small_caps_produce_multiple_bands() {
         let ir = hero_graph().compute_layout();
-        let plan = crate::render::engine::plan::RenderPlan::build(
-            &ir,
-            &with_cap(RenderOptions::plain(), 5),
-        );
-        assert!(plan.band_count() > 1, "hero at cap 5 must band");
+        // One plan, every budget: the partition is a compose-time
+        // choice, so the SAME plan serves both caps below.
+        let plan = crate::render::engine::plan::RenderPlan::build(&ir, &RenderOptions::plain());
+        assert!(plan.bands(5).count() > 1, "hero at cap 5 must band");
         // Bands tile the height exactly, in order, no gaps.
         let mut next = 0usize;
-        for &(y0, rows) in plan.band_ranges() {
+        for (y0, rows) in plan.bands(5) {
             assert_eq!(y0, next, "bands must be contiguous");
             assert!(rows >= 1);
             next = y0 + rows;
         }
         assert_eq!(next, plan.height(), "bands must cover the full height");
         // Level-aligned: with a workable cap, every boundary is a node row.
-        let plan64 = crate::render::engine::plan::RenderPlan::build(
-            &ir,
-            &with_cap(RenderOptions::plain(), 10),
-        );
         let tops: alloc::vec::Vec<usize> = ir.nodes().iter().map(|n| n.y).collect();
         let mut prev = 0usize;
-        for &(y0, _) in plan64.band_ranges().iter().skip(1) {
+        for (y0, _) in plan.bands(10).skip(1) {
             // A boundary is either level-aligned or a hard cut forced by
             // a level chunk taller than the cap (no top in the window).
             assert!(
@@ -1070,7 +1065,7 @@ mod styles {
 
         // Public plan queries over the same layout (criterion #7 spot).
         let plan = heap_ir.render_plan(&options);
-        assert!(plan.width() > 0 && plan.height() > 0 && plan.band_count() >= 1);
+        assert!(plan.width() > 0 && plan.height() > 0 && plan.bands(64).count() >= 1);
         let start = heap_ir.node_by_id(1).unwrap();
         assert_eq!(
             heap_ir.hit_test(&plan, start.x + 1, start.y),

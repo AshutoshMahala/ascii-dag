@@ -624,7 +624,10 @@ fn ownership_cost_report() {
         let options = RenderOptions::plain();
         let plan = RenderPlan::build(&ir, &options);
         let (w, h) = (ir.width(), ir.height());
-        let band_rows = plan.max_band_rows().min(h).max(1);
+        let band_rows = plan
+            .max_band_rows(super::config::DEFAULT_BAND_ROWS)
+            .min(h)
+            .max(1);
         let mut plane = vec![OWNER_NONE; w * band_rows];
         let mut bufs = RasterBufs::new(&plan, &ir, w, band_rows);
         let mut sweep = OwnerSweep::default();

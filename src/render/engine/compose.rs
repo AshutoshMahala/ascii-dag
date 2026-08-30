@@ -1304,18 +1304,20 @@ mod tests {
         let mut options = RenderOptions::plain();
         options.compose.band_rows_cap = 3;
         let plan = RenderPlan::build(&ir, &options);
-        assert!(plan.band_count() > 2, "corpus must actually band");
-        let mut cells = alloc::vec![Cell::EMPTY; plan.width() * plan.max_band_rows()];
+        let cap = options.compose.cap();
+        let bands: alloc::vec::Vec<_> = plan.bands(cap).collect();
+        assert!(bands.len() > 2, "corpus must actually band");
+        let band_rows = plan.max_band_rows(cap);
+        let mut cells = alloc::vec![Cell::EMPTY; plan.width() * band_rows];
 
-        let mut fwd = PaintScratch::heap_backed(&ir, &plan, false, plan.max_band_rows());
-        let ascending: alloc::vec::Vec<_> = plan
-            .band_ranges()
+        let mut fwd = PaintScratch::heap_backed(&ir, &plan, false, band_rows);
+        let ascending: alloc::vec::Vec<_> = bands
             .iter()
             .map(|&(y0, rows)| band_text(&ir, &plan, &options, &mut fwd, &mut cells, y0, rows))
             .collect();
 
-        let mut rev = PaintScratch::heap_backed(&ir, &plan, false, plan.max_band_rows());
-        for (i, &(y0, rows)) in plan.band_ranges().iter().enumerate().rev() {
+        let mut rev = PaintScratch::heap_backed(&ir, &plan, false, band_rows);
+        for (i, &(y0, rows)) in bands.iter().enumerate().rev() {
             let got = band_text(&ir, &plan, &options, &mut rev, &mut cells, y0, rows);
             assert_eq!(got, ascending[i], "band {i} (y0={y0}) reverse order");
             let again = band_text(&ir, &plan, &options, &mut rev, &mut cells, y0, rows);

@@ -226,12 +226,16 @@ impl EdgePlan {
 ///
 /// // Size a viewport without painting anything.
 /// assert!(plan.width() > 0 && plan.height() > 0);
-/// assert!(plan.band_count() >= 1);
 /// ```
 pub struct RenderPlan<'buf> {
     width: usize,
     height: usize,
-    band_ranges: PlanBuf<'buf, (usize, usize)>,
+    /// Sorted, deduped node top rows — the geometry the band
+    /// partition aligns to. Budget-independent plan state; the
+    /// partition itself is computed per composition from
+    /// [`ComposeBudget`](super::config::ComposeBudget) via
+    /// [`bands`](Self::bands).
+    level_tops: PlanBuf<'buf, usize>,
     edge_plans: PlanBuf<'buf, EdgePlan>,
     subgraph_plans: PlanBuf<'buf, SubgraphPlan>,
     labels: PlanBuf<'buf, LabelPlan>,
@@ -952,29 +956,28 @@ impl<'buf> RenderPlan<'buf> {
             labels.push(plan);
         }
 
-        // ── Band partition (Q1: level-aligned, capped) ─────────────────
-        // Boundaries prefer level tops (distinct node rows) so bands
-        // don't split levels; a level chunk taller than the cap is
-        // hard-cut at the cap. Elements spanning a boundary are simply
-        // replayed in every band they intersect — canvas clipping makes
-        // out-of-band writes no-ops. The partition runs twice: a count
-        // pass sizes the buffer exactly, then a fill pass stores it.
-        let cap = options.compose.cap();
-        let mut tops: PlanBuf<'buf, usize> = mem.buf(view.node_count(), oom())?;
+        // ── Level tops (band-partition geometry) ───────────────────────
+        // The plan stores only the sorted, deduped node top rows; the
+        // level-aligned partition itself is a COMPOSITION decision,
+        // computed per render from the caller's `ComposeBudget` cap
+        // (see [`Bands`]). Plan identity stays free of workspace-shaped
+        // state — the same plan serves every band budget.
+        let mut level_tops: PlanBuf<'buf, usize> = mem.buf(view.node_count(), oom())?;
         for i in 0..view.node_count() {
-            tops.push(view.node(i).y);
+            level_tops.push(view.node(i).y);
         }
-        tops.as_mut_slice().sort_unstable();
-        let tops = dedup_in_place(&mut tops);
-        let mut band_count = 0usize;
-        partition_bands(height, cap, tops, |_, _| band_count += 1);
-        let mut band_ranges: PlanBuf<'buf, (usize, usize)> = mem.buf(band_count, oom())?;
-        partition_bands(height, cap, tops, |y0, rows| band_ranges.push((y0, rows)));
+        level_tops.as_mut_slice().sort_unstable();
+        let mut last = None;
+        level_tops.retain(|&t| {
+            let keep = last != Some(t);
+            last = Some(t);
+            keep
+        });
 
         Ok(RenderPlan {
             width,
             height,
-            band_ranges,
+            level_tops,
             edge_plans,
             subgraph_plans,
             labels,
@@ -996,11 +999,6 @@ impl<'buf> RenderPlan<'buf> {
     /// Rendered height in rows.
     pub fn height(&self) -> usize {
         self.height
-    }
-
-    /// Number of composite bands.
-    pub fn band_count(&self) -> usize {
-        self.band_ranges.len()
     }
 
     /// Edge indices (IR-list order) whose labels go to the legend under
@@ -1175,19 +1173,23 @@ impl<'buf> RenderPlan<'buf> {
         self.index.as_slice()
     }
 
-    /// Band list as `(first_row, rows)` pairs covering `0..height`.
-    pub(crate) fn band_ranges(&self) -> &[(usize, usize)] {
-        self.band_ranges.as_slice()
+    /// The level-aligned band partition under `cap`, as ascending
+    /// `(first_row, rows)` pairs tiling `0..height`. Pure computation
+    /// over stored geometry — banding is a composition-budget choice,
+    /// never plan state, and band boundaries are unobservable in the
+    /// output (canvas clipping replays boundary-spanning elements).
+    pub(crate) fn bands(&self, cap: usize) -> Bands<'_> {
+        Bands {
+            height: self.height,
+            cap: cap.max(1),
+            tops: self.level_tops.as_slice(),
+            start: 0,
+        }
     }
 
-    /// Rows of the tallest band — the reusable band buffer's height.
-    pub(crate) fn max_band_rows(&self) -> usize {
-        self.band_ranges
-            .as_slice()
-            .iter()
-            .map(|b| b.1)
-            .max()
-            .unwrap_or(0)
+    /// Rows of the tallest band under `cap` — the band buffer's height.
+    pub(crate) fn max_band_rows(&self, cap: usize) -> usize {
+        self.bands(cap).map(|(_, rows)| rows).max().unwrap_or(0)
     }
 
     /// Exact h-run interior count — sizes the compositor's run scratch.
@@ -1196,42 +1198,44 @@ impl<'buf> RenderPlan<'buf> {
     }
 }
 
-/// Emit the level-aligned band partition as `(y0, rows)` pairs.
-fn partition_bands(height: usize, cap: usize, tops: &[usize], mut emit: impl FnMut(usize, usize)) {
-    if height <= cap {
-        emit(0, height);
-        return;
-    }
-    let mut start = 0usize;
-    while start < height {
-        let cap_end = start + cap;
-        if cap_end >= height {
-            emit(start, height - start);
-            break;
-        }
-        let ub = tops.partition_point(|&t| t <= cap_end);
-        let boundary = tops[..ub]
-            .iter()
-            .rev()
-            .find(|&&t| t > start)
-            .copied()
-            .unwrap_or(cap_end);
-        emit(start, boundary - start);
-        start = boundary;
-    }
+/// The level-aligned band partition (Q1: level-aligned, capped), as
+/// an iterator of `(y0, rows)` pairs. Boundaries prefer level tops
+/// (distinct node rows) so bands don't split levels; a level chunk
+/// taller than the cap is hard-cut at the cap. Elements spanning a
+/// boundary are simply replayed in every band they intersect — canvas
+/// clipping makes out-of-band writes no-ops, which is what makes the
+/// partition (a memory decision) unobservable in the output.
+pub(crate) struct Bands<'a> {
+    height: usize,
+    cap: usize,
+    tops: &'a [usize],
+    start: usize,
 }
 
-/// Dedup a sorted `PlanBuf` in place, returning the deduped prefix.
-fn dedup_in_place<'a, 'buf>(buf: &'a mut PlanBuf<'buf, usize>) -> &'a [usize] {
-    let s = buf.as_mut_slice();
-    let mut w = 0usize;
-    for r in 0..s.len() {
-        if w == 0 || s[r] != s[w - 1] {
-            s[w] = s[r];
-            w += 1;
+impl Iterator for Bands<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<(usize, usize)> {
+        if self.start >= self.height {
+            return None;
         }
+        let cap_end = self.start + self.cap;
+        if cap_end >= self.height {
+            let band = (self.start, self.height - self.start);
+            self.start = self.height;
+            return Some(band);
+        }
+        let ub = self.tops.partition_point(|&t| t <= cap_end);
+        let boundary = self.tops[..ub]
+            .iter()
+            .rev()
+            .find(|&&t| t > self.start)
+            .copied()
+            .unwrap_or(cap_end);
+        let band = (self.start, boundary - self.start);
+        self.start = boundary;
+        Some(band)
     }
-    &buf.as_slice()[..w]
 }
 
 /// The rows a path can paint, from the same formulas the painter uses
@@ -1294,12 +1298,9 @@ fn edge_row_span(
 
 /// Bytes of arena [`RenderPlan::build_in`] plus the compositor's carve
 /// calls need for this view and options — plan storage, paint scratch,
-/// and the band canvas planes, with alignment slack.
-///
-/// The band-list term uses a proven bound instead of a dry run: a band
-/// shorter than the cap always ends on a level top with no further top
-/// in its window, forcing the next advance toward the cap — so at most
-/// two bands fit per cap window, plus edge slack.
+/// and the band canvas planes, with alignment slack. The plan stores
+/// level tops (one `usize` per node, before dedup) instead of a band
+/// list — the partition is computed per composition.
 pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptions) -> usize {
     use core::mem::size_of;
     let n = view.node_count();
@@ -1319,9 +1320,6 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
     // caller-arena surface, where the index never engages
     // (`PlanMem::is_heap` gates it) — arena estimates are
     // byte-identical to pre-index releases.
-    let bands = 2usize
-        .saturating_mul(height.div_ceil(cap))
-        .saturating_add(2);
     let band_rows = cap.min(height).max(1);
     let area = width.saturating_mul(band_rows);
 
@@ -1330,8 +1328,7 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
         + (n + e + s) * size_of::<PlanElement>()
         + labeled
             * (size_of::<LabelPlan>() + size_of::<usize>() + size_of::<(usize, usize, usize)>())
-        + n * size_of::<usize>()
-        + bands * size_of::<(usize, usize)>();
+        + n * size_of::<usize>(); // level tops
     let scratch_bytes = super::compose::PaintScratch::estimate_bytes(
         run_capacity,
         s,
@@ -2599,8 +2596,10 @@ mod tests {
         let ir = g.compute_layout();
         let plan = RenderPlan::build(&ir, &RenderOptions::plain());
         assert!(plan.elements().windows(2).all(|w| w[0].y_min <= w[1].y_min));
-        assert_eq!(plan.band_count(), 1);
-        assert_eq!(plan.band_ranges()[0], (0, plan.height()));
+        let bands: Vec<(usize, usize)> = plan
+            .bands(super::super::config::DEFAULT_BAND_ROWS)
+            .collect();
+        assert_eq!(bands, vec![(0, plan.height())]);
         assert_eq!(plan.width(), ir.width());
         assert_eq!(plan.height(), ir.height());
     }
@@ -2633,6 +2632,9 @@ mod tests {
         let ir = g.compute_layout_with_config(&config);
         // Plan builds fine over an IR containing dummy nodes.
         let plan = RenderPlan::build(&ir, &RenderOptions::plain());
-        assert_eq!(plan.band_count(), 1);
+        assert_eq!(
+            plan.bands(super::super::config::DEFAULT_BAND_ROWS).count(),
+            1
+        );
     }
 }
