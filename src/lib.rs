@@ -141,6 +141,13 @@ extern crate alloc;
 //   ir/             layout intermediate representation
 //   render/         unified render engine + glyph/palette utilities
 
+#[cfg(not(any(feature = "layout-vertical", feature = "layout-horizontal")))]
+compile_error!(
+    "ascii-dag: enable at least one layout axis feature — \
+     `layout-vertical` (TopDown/BottomUp) and/or `layout-horizontal` \
+     (LeftRight/RightLeft). Both are in the default feature set."
+);
+
 pub mod algorithms;
 pub mod errors;
 pub mod graph;
@@ -223,6 +230,7 @@ mod tests {
         assert!(output.contains("D"));
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn test_auto_created_nodes() {
         let mut dag = Graph::new();
@@ -265,6 +273,7 @@ mod tests {
         assert!(!dag.is_auto_created(2));
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn test_edge_to_missing_node_no_panic() {
         let mut dag = Graph::new();
@@ -350,6 +359,7 @@ mod tests {
         assert!(output.contains("[A]"));
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn test_auto_created_node_promotion() {
         let mut dag = Graph::new();
@@ -389,6 +399,7 @@ mod tests {
         assert_eq!(node_count, 1, "Should only have one node with id=2");
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn test_skewed_children_rendering_order() {
         // Test that nodes are rendered left-to-right by x-coordinate,

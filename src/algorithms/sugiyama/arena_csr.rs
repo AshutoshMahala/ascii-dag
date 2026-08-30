@@ -228,6 +228,7 @@ pub fn compute_layout_arena_csr<'b>(
     output_arena: &'b mut Arena<'b>,
 ) -> Result<LayoutIRArena<'b>, GraphError> {
     match config.direction {
+        #[cfg(feature = "layout-horizontal")]
         crate::graph::Direction::LeftRight | crate::graph::Direction::RightLeft => {
             compute_layout_arena_csr_axis::<super::geometry::Horizontal>(
                 graph,
@@ -236,6 +237,7 @@ pub fn compute_layout_arena_csr<'b>(
                 output_arena,
             )
         }
+        #[cfg(feature = "layout-vertical")]
         _ => compute_layout_arena_csr_axis::<super::geometry::Vertical>(
             graph,
             config,
@@ -1628,6 +1630,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         }
     }
 
+    #[cfg(feature = "layout-vertical")]
     if config.direction == crate::graph::Direction::BottomUp {
         // Physical-space contract: IR coordinates match rendered cells.
         // Runs after the final set_dimensions — the mirror uses the height.
@@ -1638,6 +1641,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     // on the PROFILE (see the heap twin): mirroring a vertical layout
     // would be neither direction. Also pre-build, after the final
     // set_dimensions.
+    #[cfg(feature = "layout-horizontal")]
     if config.direction == crate::graph::Direction::RightLeft
         && matches!(A::FLOW_AXIS, crate::ir::FlowAxis::X)
     {
@@ -6496,6 +6500,7 @@ mod tests {
         assert!(len > 0, "should produce non-empty output");
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn test_diamond_with_back_edge() {
         // Diamond: A→B, A→C, B→D, C→D, plus back edge D→A
@@ -6565,6 +6570,7 @@ mod tests {
         assert!(rendered.is_ok(), "render should succeed: {rendered:?}");
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn test_two_node_cycle_layout() {
         use crate::graph::Graph;
@@ -6616,6 +6622,7 @@ mod tests {
         assert!(rendered.is_ok(), "render should succeed: {rendered:?}");
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn test_self_loop_renders_indicator() {
         use crate::graph::Graph;
@@ -6660,6 +6667,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn test_geometry_aware_slot_sharing() {
         // Fan-out: Root splits to Left and Right, then they merge.
@@ -6858,8 +6866,10 @@ mod tests {
     // ── Spacing config (regression: fields were silently ignored) ──────
 
     /// A fans out to B/C/D (three adjacent nodes on level 1), converging on E.
+    #[cfg(feature = "layout-vertical")]
     const SPACING_TEST_EDGES: &[(usize, usize)] = &[(0, 1), (0, 2), (0, 3), (1, 4), (2, 4), (3, 4)];
 
+    #[cfg(feature = "layout-vertical")]
     fn layout_with_config<'b>(
         config: &LayoutConfig<'_>,
         graph_buf: &mut [u8],
@@ -6872,6 +6882,7 @@ mod tests {
         compute_layout_arena_csr(&graph, config, &mut temp_arena, out_arena).expect("layout")
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn test_node_spacing_config_applied_csr() {
         for spacing in [3usize, 8] {
@@ -6903,6 +6914,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn test_level_spacing_config_applied_csr() {
         let base_config = LayoutConfig::standard();

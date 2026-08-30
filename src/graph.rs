@@ -57,17 +57,94 @@ pub enum RenderMode {
 /// shallow graph reads better sideways. `BottomUp` and `RightLeft`
 /// are exact mirrors of their counterparts, applied to the finished
 /// layout, so IR coordinates always match rendered cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Variants are gated by the axis features: `TopDown`/`BottomUp` exist
+/// under `layout-vertical`, `LeftRight`/`RightLeft` under
+/// `layout-horizontal` (both are default features). A disabled
+/// direction is a compile error, never a runtime fallback. The enum is
+/// `#[non_exhaustive]` so a feature union adding variants can never
+/// break a downstream exhaustive `match` — always keep a wildcard arm.
+///
+/// The default is the first enabled axis, vertical before horizontal:
+/// both/vertical-only → `TopDown`, horizontal-only → `LeftRight`.
+/// It re-resolves with the feature set at **compile time**: code that
+/// relies on the default automatically picks up the other axis's
+/// default when the enabled axes change — no code changes needed. The
+/// flip side: a dependency's feature union that enables an axis your
+/// crate did not ask for silently changes the resolved default (and
+/// with it the rendered orientation). That is why libraries should set
+/// a direction explicitly; the default is an application-level
+/// convenience.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Direction {
     /// Levels flow top → bottom (default; edges point down).
-    #[default]
+    #[cfg(feature = "layout-vertical")]
     TopDown,
     /// Levels flow bottom → top (edges point up).
+    #[cfg(feature = "layout-vertical")]
     BottomUp,
     /// Levels flow left → right (edges point right).
+    #[cfg(feature = "layout-horizontal")]
     LeftRight,
     /// Levels flow right → left (edges point left).
+    #[cfg(feature = "layout-horizontal")]
     RightLeft,
+}
+
+impl Direction {
+    /// The feature-dependent default (first enabled axis, vertical
+    /// before horizontal) as a `const` — usable in `const fn` preset
+    /// constructors, and what `Default` delegates to. Resolved at
+    /// compile time from the enabled features: change the axis set and
+    /// every default-relying call site follows automatically.
+    #[cfg(feature = "layout-vertical")]
+    pub const DEFAULT: Direction = Direction::TopDown;
+    /// The feature-dependent default (first enabled axis, vertical
+    /// before horizontal) as a `const` — usable in `const fn` preset
+    /// constructors, and what `Default` delegates to. Resolved at
+    /// compile time from the enabled features: change the axis set and
+    /// every default-relying call site follows automatically.
+    #[cfg(all(feature = "layout-horizontal", not(feature = "layout-vertical")))]
+    pub const DEFAULT: Direction = Direction::LeftRight;
+}
+
+impl Default for Direction {
+    fn default() -> Self {
+        Direction::DEFAULT
+    }
+}
+
+/// Compile-time guidance marker: if this type shows up in one of your
+/// build errors, the direction you named exists but is behind a
+/// disabled cargo feature of ascii-dag — the accompanying deprecation
+/// note names the feature to enable.
+#[cfg(not(all(feature = "layout-vertical", feature = "layout-horizontal")))]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct DisabledDirectionSeeDeprecationNote;
+
+/// Guidance shims: same names as the feature-disabled variants, so a
+/// use site resolves to THIS const instead of dying with a bare
+/// "variant not found" — the type error plus the deprecation note tell
+/// the user exactly which feature to enable.
+#[cfg(not(feature = "layout-horizontal"))]
+#[doc(hidden)]
+#[allow(non_upper_case_globals)] // shim names must match the gated variants
+impl Direction {
+    #[deprecated = "`Direction::LeftRight` needs ascii-dag's `layout-horizontal` cargo feature — enable it (it is in the default feature set)"]
+    pub const LeftRight: DisabledDirectionSeeDeprecationNote = DisabledDirectionSeeDeprecationNote;
+    #[deprecated = "`Direction::RightLeft` needs ascii-dag's `layout-horizontal` cargo feature — enable it (it is in the default feature set)"]
+    pub const RightLeft: DisabledDirectionSeeDeprecationNote = DisabledDirectionSeeDeprecationNote;
+}
+
+#[cfg(not(feature = "layout-vertical"))]
+#[doc(hidden)]
+#[allow(non_upper_case_globals)] // shim names must match the gated variants
+impl Direction {
+    #[deprecated = "`Direction::TopDown` needs ascii-dag's `layout-vertical` cargo feature — enable it (it is in the default feature set)"]
+    pub const TopDown: DisabledDirectionSeeDeprecationNote = DisabledDirectionSeeDeprecationNote;
+    #[deprecated = "`Direction::BottomUp` needs ascii-dag's `layout-vertical` cargo feature — enable it (it is in the default feature set)"]
+    pub const BottomUp: DisabledDirectionSeeDeprecationNote = DisabledDirectionSeeDeprecationNote;
 }
 
 /// Error returned when parsing a [`Direction`] from an unknown string.
@@ -76,7 +153,18 @@ pub struct ParseDirectionError;
 
 impl core::fmt::Display for ParseDirectionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("unknown direction (expected TB/TD, BT, LR, or RL)")
+        #[cfg(all(feature = "layout-vertical", feature = "layout-horizontal"))]
+        return f.write_str("unknown direction (expected TB/TD, BT, LR, or RL)");
+        #[cfg(all(feature = "layout-vertical", not(feature = "layout-horizontal")))]
+        return f.write_str(
+            "unknown direction (expected TB/TD or BT; LR/RL need ascii-dag's \
+             `layout-horizontal` feature)",
+        );
+        #[cfg(all(feature = "layout-horizontal", not(feature = "layout-vertical")))]
+        return f.write_str(
+            "unknown direction (expected LR or RL; TB/TD/BT need ascii-dag's \
+             `layout-vertical` feature)",
+        );
     }
 }
 
@@ -84,17 +172,26 @@ impl core::str::FromStr for Direction {
     type Err = ParseDirectionError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Untyped input is rejected at this boundary; a string naming a
+        // feature-disabled axis parses like any unknown string (the
+        // typed variant does not exist to return).
+        #[cfg(feature = "layout-vertical")]
         if s.eq_ignore_ascii_case("TB") || s.eq_ignore_ascii_case("TD") {
-            Ok(Direction::TopDown)
-        } else if s.eq_ignore_ascii_case("BT") {
-            Ok(Direction::BottomUp)
-        } else if s.eq_ignore_ascii_case("LR") {
-            Ok(Direction::LeftRight)
-        } else if s.eq_ignore_ascii_case("RL") {
-            Ok(Direction::RightLeft)
-        } else {
-            Err(ParseDirectionError)
+            return Ok(Direction::TopDown);
         }
+        #[cfg(feature = "layout-vertical")]
+        if s.eq_ignore_ascii_case("BT") {
+            return Ok(Direction::BottomUp);
+        }
+        #[cfg(feature = "layout-horizontal")]
+        if s.eq_ignore_ascii_case("LR") {
+            return Ok(Direction::LeftRight);
+        }
+        #[cfg(feature = "layout-horizontal")]
+        if s.eq_ignore_ascii_case("RL") {
+            return Ok(Direction::RightLeft);
+        }
+        Err(ParseDirectionError)
     }
 }
 
@@ -486,6 +583,8 @@ impl<'a> Graph<'a> {
     /// use ascii_dag::graph::{Direction, Graph};
     ///
     /// let mut dag = Graph::new();
+    /// dag.set_direction(Direction::DEFAULT);
+    /// # #[cfg(feature = "layout-vertical")]
     /// dag.set_direction(Direction::BottomUp);
     /// ```
     pub fn set_direction(&mut self, direction: Direction) {
@@ -1084,11 +1183,16 @@ impl<'a> Graph<'a> {
     /// everything else through `Vertical`. `RightLeft` is `LeftRight`
     /// mirrored on x, applied inside the pipeline.
     fn layout_with(&self, config: &LayoutConfig<'_>) -> crate::ir::LayoutIR<'a> {
-        use crate::algorithms::sugiyama::geometry::{Horizontal, Vertical};
+        #[cfg(feature = "layout-horizontal")]
+        use crate::algorithms::sugiyama::geometry::Horizontal;
+        #[cfg(feature = "layout-vertical")]
+        use crate::algorithms::sugiyama::geometry::Vertical;
         match config.direction {
+            #[cfg(feature = "layout-horizontal")]
             Direction::LeftRight | Direction::RightLeft => {
                 crate::algorithms::sugiyama::heap::compute_layout_cfg::<Horizontal>(self, config)
             }
+            #[cfg(feature = "layout-vertical")]
             _ => crate::algorithms::sugiyama::heap::compute_layout_cfg::<Vertical>(self, config),
         }
     }
@@ -1336,6 +1440,7 @@ mod tests {
     /// `LeftRight`/`RightLeft` lay out natively through the public
     /// entry point: levels become columns, trunks run horizontally,
     /// and RL is the exact x-mirror of LR.
+    #[cfg(all(feature = "layout-vertical", feature = "layout-horizontal"))]
     #[test]
     fn lr_and_rl_lay_out_horizontally() {
         let build = || {
@@ -1398,6 +1503,7 @@ mod tests {
     /// hard-coded, so it cannot express any other direction; the rest
     /// go through the layout pipeline. An explicit
     /// `RenderMode::Horizontal` remains a deliberate override.
+    #[cfg(all(feature = "layout-vertical", feature = "layout-horizontal"))]
     #[test]
     fn render_honors_direction_for_simple_chains() {
         let chain = || {
@@ -1998,6 +2104,7 @@ mod tests {
     // ── Spacing config (regression: fields were silently ignored) ──────
 
     /// R fans out to A/B/C (three adjacent nodes on level 1), converging on S.
+    #[cfg(feature = "layout-vertical")]
     fn spacing_test_graph() -> Graph<'static> {
         Graph::from_edges(
             &[(1, "R"), (2, "A"), (3, "B"), (4, "C"), (5, "S")],
@@ -2005,6 +2112,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn node_spacing_config_is_applied() {
         let g = spacing_test_graph();
@@ -2030,6 +2138,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn level_spacing_config_is_applied() {
         let g = spacing_test_graph();
@@ -2088,6 +2197,7 @@ mod tests {
         assert_externals_clear(&g.compute_layout(), &["E", "E2"]);
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn levels_tighten_after_sibling_cluster_shifts() {
         // Tier-2 pattern from examples/subgraph_stress.rs: crossing
@@ -2287,6 +2397,7 @@ mod tests {
     /// Tier-5 pattern from examples/subgraph_stress.rs (80 nodes, 24
     /// clusters, depth 4): the only known reproducer for stale dummy
     /// waypoints crossing node text after inter-cluster compaction.
+    #[cfg(feature = "layout-vertical")]
     fn tier5_like_graph() -> Graph<'static> {
         let mut g = Graph::new();
         let mut id = 0usize;
@@ -2627,6 +2738,7 @@ mod tests {
     }
 
     /// Assert no edge's vertical segment runs through node text.
+    #[cfg(feature = "layout-vertical")]
     fn assert_no_edge_crosses_nodes(ir: &crate::ir::LayoutIR<'_>) {
         use crate::ir::EdgePath;
         for edge in ir.edges() {
@@ -2675,6 +2787,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn edge_verticals_never_cross_nodes() {
         // The coordinate passes (overlap repair, tightening, compaction)

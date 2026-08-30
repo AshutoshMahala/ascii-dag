@@ -153,6 +153,31 @@ Stage figures come from subtraction, and LTO shares code across
 stages, so read them as apportionment rather than as independent
 modules.
 
+### Layout-axis selection (0.11)
+
+The `layout-vertical` / `layout-horizontal` features gate the two
+monomorphized layout profiles (and their `Direction` variants; both are
+default features, at least one is required). Measured on the same
+layout-only chain consumer and pipeline as above (`wasm-opt -Oz`,
+`gzip -9`), `std` + `generic`:
+
+| Configuration | wasm-opt | gzip -9 |
+| :--- | ---: | ---: |
+| both axes (default) | 200,180 B | 81,346 B |
+| `layout-vertical` only | **150,760 B (−24.7%)** | **60,499 B (−25.6%)** |
+| `layout-horizontal` only | **152,136 B (−24.0%)** | **61,087 B (−24.9%)** |
+
+The axes cost nearly the same; the horizontal profile is ~1.4 KB
+larger (its extra cross-axis envelope and label-extent handling).
+Native (`aarch64-apple-darwin` cdylib, same profile): 468,928 →
+418,608 B either axis (−10.7%; Mach-O page alignment makes the raw
+sizes identical — gzipped they differ by ~1 KB, 199,284 vertical vs
+200,222 horizontal), clean-build time −22%. The pre-implementation stub
+measurement (dispatch hard-wired to one profile) predicted 150,537 B /
+60,500 B — the real feature surface reproduces it within 0.15%
+(one byte, gzipped), so the feature carries no measurable plumbing
+overhead.
+
 ## Embedded: RP2040 Pico (Cortex-M0+, 125 MHz, 264 KB SRAM)
 
 `examples/rp2040_pico` runs the same chain benchmark through both

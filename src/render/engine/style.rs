@@ -234,6 +234,7 @@ pub struct SubgraphStyleCtx<'a> {
 /// let mut options = RenderOptions::plain();
 /// options.edge_style_fn = style;
 /// let text = g.compute_layout().render_string(&options);
+/// # #[cfg(feature = "layout-vertical")] // arrow glyph is axis-specific
 /// assert!(text.contains('↓'));
 /// ```
 pub type EdgeStyleFn = fn(EdgeStyleCtx<'_>) -> EdgeStyle;

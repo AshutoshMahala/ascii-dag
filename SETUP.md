@@ -131,3 +131,21 @@ cargo clippy --all-features
 # Auto-fix what can be fixed
 cargo clippy --fix --allow-dirty
 ```
+
+## Feature power set (layout axes, 0.11+)
+
+Release validation runs every supported axis combination — the axis
+features gate `Direction` variants and whole layout profiles, so each
+must build and test independently (plus the standing caution:
+`--all-features` unions `arena-idx-u8`, which gates off >255-node arena
+tests — always run `--features arena` separately):
+
+```bash
+cargo test --features arena                                             # both axes (default)
+cargo test --no-default-features --features std,generic,layout-vertical,arena
+cargo test --no-default-features --features std,generic,layout-horizontal,arena
+cargo check --no-default-features --features arena,layout-vertical      # no-std corners
+cargo check --no-default-features --features arena,layout-horizontal
+cargo check --no-default-features --features alloc,layout-vertical
+cargo test --all-features
+```

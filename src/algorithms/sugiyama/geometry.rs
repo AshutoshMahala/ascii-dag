@@ -11,29 +11,36 @@
 
 /// Horizontal padding between a subgraph border and its member nodes
 /// (chars on each side).
+#[cfg(feature = "layout-vertical")]
 pub(crate) const SUBGRAPH_H_PAD: usize = 2;
 
 /// Vertical padding above the first node row: border + label + blank.
+#[cfg(feature = "layout-vertical")]
 pub(crate) const SUBGRAPH_V_PAD_TOP: usize = 3; // ╔═══╗ + ║ Label ║ + ║     ║
 
 /// Vertical padding below the last node row: blank + border.
+#[cfg(feature = "layout-vertical")]
 pub(crate) const SUBGRAPH_V_PAD_BOTTOM: usize = 2; // ║     ║ + ╚═══════╝
 
 /// Minimum gap between the bounding boxes of sibling subgraphs.
+#[cfg(feature = "layout-vertical")]
 pub(crate) const SIBLING_GAP: usize = 1;
 
 /// Horizontal expansion of a parent cluster's envelope around a child
 /// cluster's box: the child box already includes its own
 /// `SUBGRAPH_H_PAD`, so the parent needs only its border column.
+#[cfg(feature = "layout-vertical")]
 pub(crate) const PARENT_CHILD_H_GAP: usize = 1;
 
 /// Width of a dummy (edge pass-through) vnode in the level packing.
 /// Covers the per-edge draw offset (`edge_idx % 4`) so a dummy's body
 /// extent bounds the column its vertical is actually drawn at.
+#[cfg(feature = "layout-vertical")]
 pub(crate) const DUMMY_WIDTH: usize = 3;
 
 /// Gap kept between a cluster's projected border envelope and an
 /// external node pushed or compacted next to it.
+#[cfg(feature = "layout-vertical")]
 pub(crate) const ENVELOPE_CLEARANCE: usize = 1;
 
 // ── Axis profile (temp/08 D1) ───────────────────────────────────────────
@@ -166,8 +173,10 @@ pub(crate) trait Axis {
 
 /// The TopDown/BottomUp profile: levels are rows, in-level order is
 /// columns.
+#[cfg(feature = "layout-vertical")]
 pub(crate) struct Vertical;
 
+#[cfg(feature = "layout-vertical")]
 impl Axis for Vertical {
     #[inline]
     fn level_extent(_width: usize, height: usize) -> usize {
@@ -233,8 +242,10 @@ impl Axis for Vertical {
 /// node heights. The box label still reads horizontally and stays
 /// physically at the top, so it lives in the cross-axis *leading*
 /// pad (D3) — hence the asymmetric `SG_PAD_CROSS`.
+#[cfg(feature = "layout-horizontal")]
 pub(crate) struct Horizontal;
 
+#[cfg(feature = "layout-horizontal")]
 impl Axis for Horizontal {
     #[inline]
     fn level_extent(width: usize, _height: usize) -> usize {
@@ -689,21 +700,29 @@ mod tests {
     #[test]
     fn profiles_map_roles_to_opposite_axes() {
         // Vertical: level → y, cross → x. Horizontal: level → x, cross → y.
-        assert_eq!(Vertical::materialize(7, 3), (3, 7));
-        assert_eq!(Horizontal::materialize(7, 3), (7, 3));
-        // A 12×5 node: Vertical levels are sized by heights,
-        // Horizontal levels by widths.
-        assert_eq!(Vertical::level_extent(12, 5), 5);
-        assert_eq!(Vertical::cross_extent(12, 5), 12);
-        assert_eq!(Horizontal::level_extent(12, 5), 12);
-        assert_eq!(Horizontal::cross_extent(12, 5), 5);
+        #[cfg(feature = "layout-vertical")]
+        {
+            assert_eq!(Vertical::materialize(7, 3), (3, 7));
+            // A 12×5 node: Vertical levels are sized by heights.
+            assert_eq!(Vertical::level_extent(12, 5), 5);
+            assert_eq!(Vertical::cross_extent(12, 5), 12);
+        }
+        #[cfg(feature = "layout-horizontal")]
+        {
+            assert_eq!(Horizontal::materialize(7, 3), (7, 3));
+            // Horizontal levels are sized by widths.
+            assert_eq!(Horizontal::level_extent(12, 5), 12);
+            assert_eq!(Horizontal::cross_extent(12, 5), 5);
+        }
     }
 
     #[test]
     fn derived_cluster_gap_follows_the_pads() {
+        #[cfg(feature = "layout-vertical")]
         assert_eq!(Vertical::SG_GAP_CROSS, SUBGRAPH_H_PAD * 2 + SIBLING_GAP);
         // Horizontal: trailing (bottom) pad 2 + sibling 1 + leading
         // (top: border + label + blank) pad 3.
+        #[cfg(feature = "layout-horizontal")]
         assert_eq!(Horizontal::SG_GAP_CROSS, 6);
     }
 

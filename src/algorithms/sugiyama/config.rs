@@ -208,7 +208,7 @@ impl<'a> LayoutConfig<'a> {
             node_spacing: 3,
             level_spacing: 0,
             render_mode: RenderMode::Auto,
-            direction: Direction::TopDown,
+            direction: Direction::DEFAULT,
             include_dummy_nodes: false,
             skip_validation: false,
         }
@@ -227,7 +227,7 @@ impl<'a> LayoutConfig<'a> {
             node_spacing: 3,
             level_spacing: 0,
             render_mode: RenderMode::Auto,
-            direction: Direction::TopDown,
+            direction: Direction::DEFAULT,
             include_dummy_nodes: false,
             skip_validation: false,
         }
@@ -246,7 +246,7 @@ impl<'a> LayoutConfig<'a> {
             node_spacing: 3,
             level_spacing: 0,
             render_mode: RenderMode::Auto,
-            direction: Direction::TopDown,
+            direction: Direction::DEFAULT,
             include_dummy_nodes: false,
             skip_validation: false,
         }
@@ -313,20 +313,6 @@ pub(crate) struct SugiyamaConfig {
 #[cfg(feature = "alloc")]
 #[allow(deprecated)]
 impl SugiyamaConfig {
-    /// Fast preset — minimal crossing reduction, maximum speed.
-    /// (Test-only since the public surface's 0.11 removal; the 0.12
-    /// storage rework retires this type entirely.)
-    #[cfg(test)]
-    pub fn fast() -> Self {
-        Self {
-            cycle_breaking: CycleBreaking::DepthFirst,
-            layering: Layering::LongestPath,
-            crossing_pipeline: FAST.to_vec(),
-            positioning: Positioning::Compact,
-            render_mode: RenderMode::default(),
-        }
-    }
-
     /// Standard preset — good balance of quality and speed.
     pub fn standard() -> Self {
         Self {
@@ -394,7 +380,7 @@ impl<'a> From<&'a SugiyamaConfig> for LayoutConfig<'a> {
             node_spacing: 3,
             level_spacing: 0,
             render_mode: sc.render_mode,
-            direction: Direction::TopDown,
+            direction: Direction::DEFAULT,
             include_dummy_nodes: false,
             skip_validation: false,
         }

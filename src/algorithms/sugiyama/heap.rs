@@ -1191,6 +1191,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     builder.set_direction(config.direction);
 
     let mut ir = builder.build();
+    #[cfg(feature = "layout-vertical")]
     if config.direction == crate::graph::Direction::BottomUp {
         // Physical-space contract: IR coordinates match rendered cells.
         ir.flip_vertical();
@@ -1199,6 +1200,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     // on the PROFILE, not just the direction: a `RightLeft` request
     // that somehow reached the `Vertical` profile must not have its
     // vertical layout mirrored, which would be neither direction.
+    #[cfg(feature = "layout-horizontal")]
     if config.direction == crate::graph::Direction::RightLeft
         && matches!(A::FLOW_AXIS, crate::ir::FlowAxis::X)
     {
@@ -2554,7 +2556,7 @@ fn order_virtual_by_median(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "layout-horizontal"))]
 mod horizontal_profile {
     use super::compute_layout_cfg;
     use crate::algorithms::sugiyama::config::LayoutConfig;

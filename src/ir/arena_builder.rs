@@ -387,6 +387,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
     ///
     /// Both backends must apply the identical transform to every path
     /// variant (see `LayoutIR::flip_vertical`) or their IRs can drift.
+    #[cfg(feature = "layout-vertical")]
     pub(crate) fn flip_vertical(&mut self) {
         let h = self.height;
         let flip_row = |y: usize| h.saturating_sub(1).saturating_sub(y);
@@ -459,6 +460,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
     ///
     /// The pair covers the axes their directions produce: `RightLeft`
     /// mirrors horizontal layouts, `BottomUp` vertical ones.
+    #[cfg(feature = "layout-horizontal")]
     pub(crate) fn flip_horizontal(&mut self) {
         let w = self.width;
         let flip_col = |x: usize| w.saturating_sub(1).saturating_sub(x);

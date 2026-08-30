@@ -313,6 +313,7 @@ impl<'a> LayoutIR<'a> {
     ///
     /// Applied once at the end of layout for `Direction::BottomUp` to turn
     /// the top-down logical result into physical coordinates.
+    #[cfg(feature = "layout-vertical")]
     pub(crate) fn flip_vertical(&mut self) {
         let h = self.height;
         let flip_row = |y: usize| h.saturating_sub(1).saturating_sub(y);
@@ -376,6 +377,7 @@ impl<'a> LayoutIR<'a> {
     /// coordinates — the x-axis twin of [`flip_vertical`].
     ///
     /// [`flip_vertical`]: Self::flip_vertical
+    #[cfg(feature = "layout-horizontal")]
     pub(crate) fn flip_horizontal(&mut self) {
         let w = self.width;
         let flip_col = |x: usize| w.saturating_sub(1).saturating_sub(x);

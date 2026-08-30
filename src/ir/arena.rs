@@ -267,7 +267,7 @@ impl<'a> LayoutIRArena<'a> {
             level_count,
             level_offsets,
             level_data,
-            direction: crate::graph::Direction::TopDown,
+            direction: crate::graph::Direction::DEFAULT,
         }
     }
 

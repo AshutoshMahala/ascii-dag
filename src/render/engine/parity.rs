@@ -256,6 +256,7 @@ fn engine_self_parity_across_backends() {
 
 /// Canonical spot checks for the ruled divergence classes: the corrected
 /// glyphs must actually appear in the engine's output.
+#[cfg(feature = "layout-vertical")]
 #[test]
 fn ruled_classes_render_canonically() {
     // Class A: fan-out/fan-in junctions, not overwritten corners.
@@ -350,6 +351,7 @@ fn plain_legend_lists_unplaced_labels() {
 /// LR/RL counterparts of `hero_matches_golden`. Regenerate with:
 ///   cargo run --example hero -- --lr > tests/golden/hero-lr.txt
 ///   cargo run --example hero -- --rl > tests/golden/hero-rl.txt
+#[cfg(feature = "layout-horizontal")]
 #[test]
 fn hero_horizontal_matches_goldens() {
     for (dir, golden) in [
@@ -388,6 +390,7 @@ fn hero_horizontal_matches_goldens() {
 
 /// The hero example against the golden snapshot (regenerated at RW8
 /// when the engine became the output of record).
+#[cfg(feature = "layout-vertical")]
 #[test]
 fn hero_matches_golden() {
     let engine = render_plain(&hero_graph().compute_layout(), &RenderOptions::plain());
@@ -398,6 +401,7 @@ fn hero_matches_golden() {
 // The shared hero fixture refers to the crate by its external name.
 use crate as ascii_dag;
 include!("../../../examples/shared/hero_graph.rs");
+#[cfg(all(feature = "layout-vertical", feature = "layout-horizontal"))]
 // Clustered stress tiers — the corpus's deep-nesting cases (quality scorer).
 include!("../../../examples/shared/stress_graphs.rs");
 
@@ -409,6 +413,7 @@ include!("../../../examples/shared/stress_graphs.rs");
 // BT); the invariants are cross-backend byte-identity, D4 semantics,
 // and render-vs-IR physical consistency.
 
+#[cfg(feature = "layout-vertical")]
 mod bt {
     use super::*;
     use crate::graph::Direction;
@@ -582,6 +587,7 @@ mod bt {
 // the canvas clips. These tests sweep the cap through degenerate and
 // typical values and demand byte-identity with the single-band render.
 
+#[cfg(feature = "layout-vertical")]
 mod bands {
     use super::*;
     use crate::graph::Direction;
@@ -712,6 +718,7 @@ mod bands {
 
 // ── Zero-allocation byte surface (RW6, N2/R4.3) ──────────────────────────
 
+#[cfg(feature = "layout-vertical")]
 mod no_alloc {
     use super::*;
     use crate::GraphError;
@@ -833,6 +840,7 @@ mod no_alloc {
 // nothing is enforced by the whole harness above (every parity test
 // runs the default style fns).
 
+#[cfg(feature = "layout-vertical")]
 mod styles {
     use super::*;
     use crate::graph::Direction;
@@ -1073,6 +1081,7 @@ mod styles {
 
 // ── Review fixes (RF1): estimates + hit-testing pinned ───────────────────
 
+#[cfg(feature = "layout-vertical")]
 mod review_fixes {
     use super::*;
     use crate::render::engine::CellColor;
@@ -1279,6 +1288,7 @@ mod review_fixes {
 
 // ── Node painters (fill the reserved area) ───────────────────────────────
 
+#[cfg(feature = "layout-vertical")]
 mod node_painters {
     use super::*;
     use crate::render::engine::{BoxedNode, CustomNode, NodePaintCtx, NodeRegion};
@@ -1988,6 +1998,7 @@ mod node_painters {
 // corpus in BOTH orientations: geometric invariants on the IR, the
 // glyph⇄hit ink sweep, band cap-invariance, and cross-backend parity
 // at field and byte level.
+#[cfg(feature = "layout-horizontal")]
 mod lr_invariants {
     use super::*;
     use crate::algorithms::sugiyama::geometry::Horizontal;
@@ -3248,6 +3259,7 @@ mod lr_invariants {
 /// ```text
 /// cargo test --lib --all-features quality_table -- --ignored --nocapture
 /// ```
+#[cfg(all(feature = "layout-vertical", feature = "layout-horizontal"))]
 mod quality {
     use super::lr_invariants::corpus;
     use super::*;
@@ -3409,7 +3421,8 @@ mod quality {
         v
     }
 
-    /// R0 (0.10.3): disconnected cluster members — no edges at all, so
+    /// 0.10.3 cluster-overlap fix: disconnected cluster members — no
+    /// edges at all, so
     /// every connected-neighbor pass skips them and compaction's clamp
     /// artifacts survive unless repaired. Equal widths are the minimal
     /// overlap trigger.
@@ -3423,7 +3436,8 @@ mod quality {
         g
     }
 
-    /// R0 (0.10.3): the mixed-width variant of [`disc_equal_width`].
+    /// The mixed-width variant of [`disc_equal_width`] (same 0.10.3
+    /// cluster-overlap fix).
     fn disc_mixed_width() -> Graph<'static> {
         let mut g = Graph::new();
         g.add_node(1usize, "xxx");
@@ -3435,7 +3449,7 @@ mod quality {
         g
     }
 
-    /// R0 (0.10.3): no two real nodes may ever overlap — any fixture,
+    /// 0.10.3 invariant: no two real nodes may ever overlap — any fixture,
     /// any direction, either backend. `repair_level_overlaps` (and its
     /// CSR twin) is the enforcement; this is the corpus-wide gate that
     /// keeps it honest, including on the disconnected-cluster fixtures

@@ -536,7 +536,11 @@ mod tests {
     /// field-by-field parity tests in tests/layout_output.rs.
     #[test]
     fn views_are_equivalent_across_backends() {
-        for direction in [Direction::TopDown, Direction::BottomUp] {
+        #[cfg(feature = "layout-vertical")]
+        let directions = [Direction::TopDown, Direction::BottomUp];
+        #[cfg(not(feature = "layout-vertical"))]
+        let directions = [Direction::LeftRight, Direction::RightLeft];
+        for direction in directions {
             with_both_views(direction, |heap, csr| {
                 assert_eq!(LayoutView::width(heap), LayoutView::width(csr));
                 assert_eq!(LayoutView::height(heap), LayoutView::height(csr));
@@ -605,7 +609,7 @@ mod tests {
     /// directly accessible in both backends.
     #[test]
     fn view_normalizes_backend_conventions() {
-        with_both_views(Direction::TopDown, |heap, csr| {
+        with_both_views(Direction::DEFAULT, |heap, csr| {
             for view in [heap as &dyn LayoutView, csr as &dyn LayoutView] {
                 for i in 0..view.node_count() {
                     let n = view.node(i);

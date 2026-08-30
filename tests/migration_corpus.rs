@@ -1,8 +1,9 @@
-//! Migration corpus — Phase 2 of the 0.11 plan (temp/0.11-sequencing.md).
+//! Migration corpus — proof that every API removed in 0.11 has a
+//! documented replacement reproducing its 0.10 behavior.
 //!
 //! Step 3 is complete: the legacy APIs are deleted, and what remains here
 //! is the permanent proof that the migration guide's replacements
-//! reproduce 0.10 behavior (the R5/R6 migration proof). Every golden was
+//! reproduce 0.10 behavior. Every golden was
 //! FROZEN from the legacy APIs' own output on 0.10.3, before deletion —
 //! the `render_scanline*` family, the `LayoutIRArena` buffer family, and
 //! the sized-node methods all asserted equal to these exact bytes in the
@@ -11,6 +12,9 @@
 //! Goldens live in tests/golden/migration-*.txt and pin the stage-graph
 //! fixture byte-for-byte, ANSI escapes included. The sized-node goldens
 //! are inline literals frozen the same way.
+
+//! Gated on `layout-vertical`: the frozen goldens are TopDown output.
+#![cfg(feature = "layout-vertical")]
 
 use ascii_dag::LayoutConfig;
 use ascii_dag::graph::Graph;

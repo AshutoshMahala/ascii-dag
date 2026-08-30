@@ -6,6 +6,11 @@
 //! renders a graph and asserts on the text a user actually sees, for
 //! both layout backends.
 
+//! Gated on `layout-vertical`: every golden and spacing expectation
+//! in this file pins TopDown-default output. Single-axis smoke lives
+//! in tests/axis_smoke.rs.
+#![cfg(feature = "layout-vertical")]
+
 use ascii_dag::LayoutConfig;
 use ascii_dag::graph::Graph;
 
@@ -255,16 +260,23 @@ mod direction {
 
     #[test]
     fn parses_conventional_short_forms() {
-        for (s, want) in [
+        #[cfg_attr(not(feature = "layout-horizontal"), allow(unused_mut))]
+        let mut cases: Vec<(&str, Direction)> = vec![
             ("TB", Direction::TopDown),
             ("TD", Direction::TopDown),
             ("tb", Direction::TopDown),
             ("BT", Direction::BottomUp),
             ("bt", Direction::BottomUp),
-            ("LR", Direction::LeftRight),
-            ("RL", Direction::RightLeft),
-        ] {
+        ];
+        #[cfg(feature = "layout-horizontal")]
+        cases.extend([("LR", Direction::LeftRight), ("RL", Direction::RightLeft)]);
+        for (s, want) in cases {
             assert_eq!(s.parse::<Direction>().unwrap(), want, "parsing {s:?}");
+        }
+        // A feature-disabled axis parses like any unknown string.
+        #[cfg(not(feature = "layout-horizontal"))]
+        for s in ["LR", "RL"] {
+            assert!(s.parse::<Direction>().is_err(), "{s:?} axis is disabled");
         }
         assert!("NE".parse::<Direction>().is_err());
         assert!("".parse::<Direction>().is_err());
@@ -1067,7 +1079,7 @@ fn big_cycle_past_lane_cap_fits_exactly_estimated_arena() {
     assert_eq!(dummies, N - 2, "every broken-cycle waypoint emitted");
 }
 
-// ── R0: cluster compaction must never overlap nodes ──────────────────────
+// ── Cluster compaction must never overlap nodes (0.10.3 fix) ─────────────
 
 /// Disconnected cluster members. No edges means every repair pass that
 /// targets connected neighbors skips these nodes, so whatever
@@ -1077,7 +1089,7 @@ fn big_cycle_past_lane_cap_fits_exactly_estimated_arena() {
 /// right; over the compaction rounds the corrupted gaps accumulate
 /// until members overlap.
 fn disconnected_cluster_fixtures() -> Vec<(&'static str, Graph<'static>)> {
-    // Mixed widths (5 / 21 / 5 / 3): the R0 headline shape.
+    // Mixed widths (5 / 21 / 5 / 3): the headline shape of the fix.
     let mut mixed = Graph::new();
     mixed.add_node(1usize, "xxx");
     mixed.add_node(2usize, "xxxxxxxxxxxxxxxxxxx");
@@ -1111,9 +1123,13 @@ fn assert_no_node_overlap(nodes: &[(usize, usize, usize, usize)], context: &str)
     }
 }
 
-fn all_directions() -> [ascii_dag::Direction; 4] {
+fn all_directions() -> Vec<ascii_dag::Direction> {
     use ascii_dag::Direction::*;
-    [TopDown, BottomUp, LeftRight, RightLeft]
+    #[cfg_attr(not(feature = "layout-horizontal"), allow(unused_mut))]
+    let mut dirs = vec![TopDown, BottomUp];
+    #[cfg(feature = "layout-horizontal")]
+    dirs.extend([LeftRight, RightLeft]);
+    dirs
 }
 
 #[test]
@@ -1164,7 +1180,7 @@ fn disconnected_mixed_width_cluster_never_overlaps_csr() {
     }
 }
 
-/// R0: a level larger than any internal scratch bound must still be
+/// A level larger than any internal scratch bound must still be
 /// repaired — the CSR repair twin originally inherited a 1,024-node
 /// sort cap from `tighten_levels_csr` and silently skipped bigger
 /// levels, leaving overlapping nodes on a supported graph size.
@@ -1225,7 +1241,7 @@ fn huge_disconnected_cluster_level_never_overlaps_csr() {
     assert_no_node_overlap(&rects, "csr 1025-node level");
 }
 
-/// R0: the retained overlap sweep — the 4,104 disconnected-cluster
+/// The retained overlap sweep — the 4,104 disconnected-cluster
 /// configurations the fix was validated against (454 overlapped before
 /// it). Families: (A) k disconnected mixed-width members in one
 /// cluster; (B) same plus one member dragged sideways by an external
@@ -1247,12 +1263,7 @@ fn disconnected_cluster_sweep_never_overlaps() {
         }
     }
     fn check(g: &Graph<'_>, desc: &str) {
-        for direction in [
-            ascii_dag::Direction::TopDown,
-            ascii_dag::Direction::BottomUp,
-            ascii_dag::Direction::LeftRight,
-            ascii_dag::Direction::RightLeft,
-        ] {
+        for direction in all_directions() {
             let mut config = LayoutConfig::standard();
             config.direction = direction;
             let ir = g.compute_layout_with_config(&config);

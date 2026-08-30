@@ -66,9 +66,16 @@ impl<'a> Graph<'a> {
         // `RenderMode::Horizontal` still overrides — asking for the
         // chain form is a deliberate choice.
         let is_chain = self.is_simple_chain();
+        #[cfg(feature = "layout-vertical")]
+        let chain_eligible = is_chain && self.direction == crate::graph::Direction::TopDown;
+        // Without the vertical axis there is no TopDown, so `Auto`
+        // never selects the chain shortcut.
+        #[cfg(not(feature = "layout-vertical"))]
+        let chain_eligible = false;
+        let _ = is_chain;
         let mode = match self.render_mode {
             RenderMode::Auto => {
-                if is_chain && self.direction == crate::graph::Direction::TopDown {
+                if chain_eligible {
                     RenderMode::Horizontal
                 } else {
                     RenderMode::Vertical

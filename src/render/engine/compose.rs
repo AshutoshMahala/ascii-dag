@@ -1227,7 +1227,7 @@ fn paint_edge_label<V: LayoutView>(
     canvas.text(x, label.y, '"', paint);
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
 mod tests {
     use super::*;
     use crate::graph::Graph;
@@ -1253,6 +1253,7 @@ mod tests {
     /// incrementally; any other order must restart it and still yield
     /// exactly the band's elements. Reverse order (plus a repeated
     /// band) hits the reset path on every call.
+    #[cfg(feature = "layout-vertical")]
     #[test]
     fn sweep_is_call_order_independent() {
         let mut g = Graph::new();
