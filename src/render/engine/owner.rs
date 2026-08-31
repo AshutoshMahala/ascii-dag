@@ -38,6 +38,14 @@ pub(crate) fn owner_to_hit<V: LayoutView>(
     if owner == OWNER_NONE {
         return super::HitResult::None;
     }
+    // Owners past the element table are self-loop pseudo-slots: the
+    // loop marker cell belongs to the self-loop EDGE, whose scene
+    // index sits after the routed list.
+    let elements = plan.elements().len();
+    if (owner as usize) > elements {
+        let j = owner as usize - elements - 1;
+        return super::HitResult::Edge(view.edge_count() + j);
+    }
     let el = &plan.elements()[(owner - 1) as usize];
     match el.kind {
         ElementKind::Node => {
@@ -334,7 +342,16 @@ pub(crate) fn owner_rasterize_band<V: LayoutView>(
             }
             if let Some((sx, sy)) = n.self_loop_at {
                 if sy == y && sx < width {
-                    plane[base + sx] = owner;
+                    // The marker cell belongs to the self-loop EDGE:
+                    // a pseudo-slot past the element table carries the
+                    // record's position (hand-built markers with no
+                    // record keep the legacy node attribution).
+                    plane[base + sx] = match (0..view.self_loop_count())
+                        .find(|&j| view.self_loop(j).node_id == n.id)
+                    {
+                        Some(j) => (elements.len() + 1 + j) as u32,
+                        None => owner,
+                    };
                 }
             }
         }

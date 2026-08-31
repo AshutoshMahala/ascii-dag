@@ -29,6 +29,7 @@ fn corpus() -> Vec<(&'static str, Graph<'static>)> {
     labeled.add_edge(1usize, 2usize, Some("go"));
     labeled.add_edge(2usize, 3usize, None);
     labeled.add_edge(1usize, 3usize, None); // skip → dummies exist
+    labeled.add_edge(2usize, 2usize, Some("respin")); // preserved self-loop
 
     let mut clusters = Graph::new();
     clusters.add_node(1usize, "a");

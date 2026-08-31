@@ -51,6 +51,16 @@ fn graph() -> Graph<'static> {
     g.add_edge(1usize, 2usize, Some("go"));
     g.add_edge(2usize, 3usize, None);
     g.add_edge(1usize, 3usize, None);
+    g.add_edge(2usize, 2usize, Some("respin")); // labeled self-loop → legend
+    // A label that fits nowhere inline: guarantees the legend is
+    // NON-EMPTY, so the measured window exercises legend emission —
+    // the gate must never pass because the legend path was vacuously
+    // skipped.
+    g.add_edge(
+        3usize,
+        2usize,
+        Some("an-extremely-long-label-that-cannot-possibly-fit-inline-anywhere-at-all"),
+    );
     let sg = g.add_subgraph("Stage");
     g.put_nodes(&[2]).inside(sg).unwrap();
     g
@@ -67,6 +77,10 @@ fn steady_state_repaint_allocates_nothing() {
     let scene = planner.plan(&ir, &plan_options).unwrap();
     let budget = ComposeBudget::new();
     let req = scene.composition_requirements(&budget);
+    assert!(
+        scene.legend().next().is_some(),
+        "fixture must overflow a label — the window has to cover legend emission"
+    );
 
     let emits = [
         RenderOptions::plain().emit,

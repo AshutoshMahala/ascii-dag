@@ -98,6 +98,17 @@ pub(crate) struct EdgeRef<'a> {
     pub path: PathRef<'a>,
 }
 
+/// A preserved self-loop as the engine sees it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SelfLoopRef<'a> {
+    /// The node the loop is on (user id).
+    pub node_id: usize,
+    /// Original graph insertion index (the style-callback convention).
+    pub input_index: usize,
+    /// `None` when unlabeled (arena: empty label storage).
+    pub label: Option<&'a str>,
+}
+
 /// A subgraph (cluster) as the engine sees it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SubgraphRef<'a> {
@@ -132,6 +143,8 @@ pub(crate) trait LayoutView {
     fn edge(&self, index: usize) -> EdgeRef<'_>;
     fn subgraph_count(&self) -> usize;
     fn subgraph(&self, index: usize) -> SubgraphRef<'_>;
+    fn self_loop_count(&self) -> usize;
+    fn self_loop(&self, index: usize) -> SelfLoopRef<'_>;
 }
 
 // ── Heap IR ──────────────────────────────────────────────────────────────
@@ -261,6 +274,19 @@ impl LayoutView for crate::ir::LayoutIR<'_> {
             y: sg.y,
             width: sg.width,
             height: sg.height,
+        }
+    }
+
+    fn self_loop_count(&self) -> usize {
+        self.self_loops().len()
+    }
+
+    fn self_loop(&self, index: usize) -> SelfLoopRef<'_> {
+        let r = &self.self_loops()[index];
+        SelfLoopRef {
+            node_id: r.node_id,
+            input_index: r.edge_index,
+            label: r.label,
         }
     }
 }
@@ -406,6 +432,23 @@ impl LayoutView for crate::ir::arena::LayoutIRArena<'_> {
             y: sg.y,
             width: sg.width,
             height: sg.height,
+        }
+    }
+
+    fn self_loop_count(&self) -> usize {
+        self.self_loops().len()
+    }
+
+    fn self_loop(&self, index: usize) -> SelfLoopRef<'_> {
+        let r = &self.self_loops()[index];
+        SelfLoopRef {
+            node_id: r.node_id,
+            input_index: r.edge_index,
+            label: if r.label_len == 0 {
+                None
+            } else {
+                Some(self.self_loop_label(index))
+            },
         }
     }
 }

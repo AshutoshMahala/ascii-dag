@@ -256,6 +256,25 @@ pub struct SubgraphInfo<'a> {
     pub height: usize,
 }
 
+/// A preserved self-loop (`A → A`). Self-loops are kept OUT of the
+/// routed edge list — routing passes never see them — as parallel
+/// records, so their identity (original insertion index), label, and
+/// style survive to the scene. The marker cell itself lives on the
+/// node ([`LayoutNode::self_loop_at`]); a node with several self-loops
+/// carries several records sharing that one marker.
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelfLoopRecord<'a> {
+    /// The node the loop is on.
+    pub node_id: usize,
+    /// Original graph insertion index (the style-callback convention —
+    /// self-loops COUNT in this numbering, which is why it diverges
+    /// from routed-list positions whenever they exist).
+    pub edge_index: usize,
+    /// Optional label.
+    pub label: Option<&'a str>,
+}
+
 /// Intermediate representation of a laid-out graph.
 ///
 /// This is the output of the layout algorithm and input to renderers.
@@ -265,6 +284,8 @@ pub struct SubgraphInfo<'a> {
 pub struct LayoutIR<'a> {
     /// All nodes with their computed positions
     pub(crate) nodes: Vec<LayoutNode<'a>>,
+    /// Preserved self-loop records, in insertion order.
+    pub(crate) self_loops: Vec<SelfLoopRecord<'a>>,
     /// All edges with routing information
     pub(crate) edges: Vec<LayoutEdge<'a>>,
     /// All subgraph bounding boxes (empty when no subgraphs)
@@ -464,6 +485,13 @@ impl<'a> LayoutIR<'a> {
         &self.nodes
     }
 
+    /// Preserved self-loop records, in insertion order (absent from
+    /// [`edges`](Self::edges) — routing never sees them).
+    #[inline]
+    pub fn self_loops(&self) -> &[SelfLoopRecord<'a>] {
+        &self.self_loops
+    }
+
     /// Get all routed edges.
     #[inline]
     pub fn edges(&self) -> &[LayoutEdge<'a>] {
@@ -621,6 +649,7 @@ impl<'a> LayoutIR<'a> {
 pub struct LayoutIRBuilder<'a> {
     nodes: Vec<LayoutNode<'a>>,
     edges: Vec<LayoutEdge<'a>>,
+    self_loops: Vec<SelfLoopRecord<'a>>,
     subgraphs: Vec<SubgraphInfo<'a>>,
     width: usize,
     height: usize,
@@ -669,6 +698,13 @@ impl<'a> LayoutIRBuilder<'a> {
         }
     }
 
+    /// Record a preserved self-loop. Pair with the node's marker cell
+    /// ([`LayoutNode::self_loop_at`]); records never enter the routed
+    /// edge list.
+    pub fn add_self_loop(&mut self, record: SelfLoopRecord<'a>) {
+        self.self_loops.push(record);
+    }
+
     /// Add an edge to the layout.
     pub fn add_edge(&mut self, edge: LayoutEdge<'a>) {
         self.edges.push(edge);
@@ -706,6 +742,7 @@ impl<'a> LayoutIRBuilder<'a> {
         LayoutIR {
             nodes: self.nodes,
             edges: self.edges,
+            self_loops: self.self_loops,
             subgraphs: self.subgraphs,
             custom_nodes: self.custom_nodes,
             width: self.width,

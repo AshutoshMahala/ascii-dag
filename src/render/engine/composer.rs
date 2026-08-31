@@ -577,7 +577,7 @@ mod tests {
             ("fan-40", || fan(40)),
             ("clusters", clusters_graph),
             ("nested", nested_graph),
-            ("self-loop (legacy node-owned rule)", self_loop_graph),
+            ("self-loop (marker owned by the loop EDGE)", self_loop_graph),
         ];
         #[cfg_attr(not(feature = "layout-horizontal"), allow(unused_mut))]
         let mut directions = vec![
@@ -953,5 +953,19 @@ mod review_tests {
             SceneComposer::new_in(req, &mut ws),
             Err(GraphError::RenderWorkspaceTooSmall { .. })
         ));
+
+        // The output estimator saturates on the same class of input —
+        // usize::MAX means "unfittable", never a wrapped (undersized)
+        // bound and never a debug-build panic.
+        assert_eq!(
+            scene.estimate_output_size(&crate::RenderOptions::plain().emit),
+            usize::MAX
+        );
+        assert_eq!(
+            scene.estimate_output_size(
+                &crate::RenderOptions::colored(crate::render::colors::Palette::Ansi).emit
+            ),
+            usize::MAX
+        );
     }
 }

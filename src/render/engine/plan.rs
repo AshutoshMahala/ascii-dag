@@ -243,8 +243,12 @@ pub struct RenderPlan<'buf> {
     subgraph_plans: PlanBuf<'buf, SubgraphPlan>,
     labels: PlanBuf<'buf, LabelPlan>,
     index: PlanBuf<'buf, PlanElement>,
-    /// Edge indices whose labels go to the legend (colored semantics).
+    /// SCENE indices whose labels go to the legend: routed-list
+    /// positions first, then self-loop records appended after them.
     legend: PlanBuf<'buf, usize>,
+    /// Resolved per-self-loop styles (scene positions after the
+    /// routed list).
+    self_loop_plans: PlanBuf<'buf, EdgePlan>,
     /// Exact count of h-run interiors across all edge paths — sizes the
     /// compositor's run scratch.
     run_capacity: usize,
@@ -342,6 +346,48 @@ impl<'buf> RenderPlan<'buf> {
             });
         }
 
+        // Self-loop plans: style callbacks run for preserved loop
+        // records too (a documented 0.11 behavior addition). Palette
+        // defaults continue at the loops' SCENE positions — appended
+        // after the routed list — so routed-list palette indices never
+        // shift (0.10 parity).
+        let mut self_loop_plans: PlanBuf<'buf, EdgePlan> =
+            mem.buf(view.self_loop_count(), oom())?;
+        for j in 0..view.self_loop_count() {
+            let r = view.self_loop(j);
+            let ctx = EdgeStyleCtx {
+                edge_index: r.input_index,
+                from_id: r.node_id,
+                to_id: r.node_id,
+                label: r.label,
+                directed: true,
+                reversed: false,
+                total_edges: view.edge_count(),
+            };
+            let style: EdgeStyle = (options.edge_style_fn)(ctx);
+            let color = if style.color.is_set() {
+                style.color
+            } else if !palette.is_empty() {
+                CellColor::ansi256(colors::get_custom(palette, view.edge_count() + j))
+            } else {
+                CellColor::DEFAULT
+            };
+            let weight = style.weight.unwrap_or(LineWeight::Light);
+            let label_style = (options.edge_label_style_fn)(ctx);
+            let label_color = if label_style.color.is_set() {
+                label_style.color
+            } else {
+                color
+            };
+            self_loop_plans.push(EdgePlan {
+                color,
+                weight,
+                label_color,
+                marker_end: style.marker_end,
+                marker_start: style.marker_start,
+            });
+        }
+
         let mut subgraph_plans: PlanBuf<'buf, SubgraphPlan> =
             mem.buf(view.subgraph_count(), oom())?;
         for i in 0..view.subgraph_count() {
@@ -411,8 +457,11 @@ impl<'buf> RenderPlan<'buf> {
         let labeled = (0..view.edge_count())
             .filter(|&i| view.edge(i).label.is_some())
             .count();
+        let labeled_loops = (0..view.self_loop_count())
+            .filter(|&j| view.self_loop(j).label.is_some())
+            .count();
         let mut labels: PlanBuf<'buf, LabelPlan> = mem.buf(labeled, oom())?;
-        let mut legend: PlanBuf<'buf, usize> = mem.buf(labeled, oom())?;
+        let mut legend: PlanBuf<'buf, usize> = mem.buf(labeled + labeled_loops, oom())?;
         // Spans already claimed by earlier labels, per row.
         // ── Edge-ink source (temp/11 §3.99/§3.101): on HEAP-backed
         // plans past the work threshold, every painted run is
@@ -959,6 +1008,36 @@ impl<'buf> RenderPlan<'buf> {
             labels.push(plan);
         }
 
+        // Self-loop labels never enter inline placement (they have no
+        // placement host yet) — but they are no longer silently lost:
+        // they reach the legend, or the diagnostics channel, exactly
+        // like any other unplaced label. Legend entries for loops use
+        // their SCENE indices (appended after the routed list, so the
+        // whole list stays ascending).
+        for j in 0..view.self_loop_count() {
+            let r = view.self_loop(j);
+            if r.label.is_none() {
+                continue;
+            }
+            match label_policy.overflow {
+                super::config::LabelOverflow::Legend => {
+                    legend.push(view.edge_count() + j);
+                }
+                super::config::LabelOverflow::Omit => {
+                    #[cfg(feature = "warnings")]
+                    crate::errors::emit_warning(
+                        crate::errors::WARN_LABEL_INVISIBLE,
+                        format_args!(
+                            "the label of self-loop {} (node {}) has no inline position and \
+                             overflow is set to omit - it will not be rendered. Set \
+                             LabelOverflow::Legend to list it below the graph.",
+                            r.input_index, r.node_id
+                        ),
+                    );
+                }
+            }
+        }
+
         // ── Level tops (band-partition geometry) ───────────────────────
         // The plan stores only the sorted, deduped node top rows; the
         // level-aligned partition itself is a COMPOSITION decision,
@@ -986,6 +1065,7 @@ impl<'buf> RenderPlan<'buf> {
             labels,
             index,
             legend,
+            self_loop_plans,
             run_capacity,
             show_dummy_nodes: options.show_dummy_nodes,
             label_placement: label_policy.placement,
@@ -1085,13 +1165,21 @@ impl<'buf> RenderPlan<'buf> {
                         continue;
                     }
                     // The node owns its full reserved area (painters
-                    // may fill any of it); the self-loop marker (`↺`)
-                    // adds its IR cell (right of the top row for
-                    // vertical flows, below the leading column for
-                    // horizontal ones).
+                    // may fill any of it). The self-loop marker (`↺`)
+                    // cell belongs to the self-loop EDGE — the records
+                    // carry its identity, and its scene index sits
+                    // after the routed list. A hand-built marker with
+                    // no record keeps the legacy node attribution.
+                    if n.self_loop_at == Some((x, y)) {
+                        if let Some(j) =
+                            (0..view.self_loop_count()).find(|&j| view.self_loop(j).node_id == n.id)
+                        {
+                            return HitResult::Edge(view.edge_count() + j);
+                        }
+                        return HitResult::Node(n.id);
+                    }
                     let in_rows = y >= n.y && y < n.y + n.height.max(1);
-                    if (in_rows && x >= n.x && x < n.x + n.width) || n.self_loop_at == Some((x, y))
-                    {
+                    if in_rows && x >= n.x && x < n.x + n.width {
                         return HitResult::Node(n.id);
                     }
                 }
@@ -1163,6 +1251,17 @@ impl<'buf> RenderPlan<'buf> {
 
     pub(crate) fn edge_plan(&self, edge_index: usize) -> &EdgePlan {
         &self.edge_plans.as_slice()[edge_index]
+    }
+
+    /// Resolved style by SCENE index: routed edges first, then
+    /// self-loop records.
+    pub(crate) fn scene_edge_plan(&self, scene_index: usize) -> &EdgePlan {
+        let routed = self.edge_plans.as_slice().len();
+        if scene_index < routed {
+            &self.edge_plans.as_slice()[scene_index]
+        } else {
+            &self.self_loop_plans.as_slice()[scene_index - routed]
+        }
     }
 
     pub(crate) fn subgraph_plan(&self, index: usize) -> &SubgraphPlan {
@@ -1369,7 +1468,12 @@ pub(crate) fn plan_storage_bytes<V: LayoutView>(view: &V) -> usize {
     let e = view.edge_count();
     let s = view.subgraph_count();
     let labeled = (0..e).filter(|&i| view.edge(i).label.is_some()).count();
-    e * size_of::<EdgePlan>()
+    let loops = view.self_loop_count();
+    let labeled_loops = (0..loops)
+        .filter(|&j| view.self_loop(j).label.is_some())
+        .count();
+    (e + loops) * size_of::<EdgePlan>()
+        + labeled_loops * size_of::<usize>() // loop legend slots
         + s * size_of::<SubgraphPlan>()
         + (n + e + s) * size_of::<PlanElement>()
         + labeled

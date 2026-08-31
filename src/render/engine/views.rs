@@ -158,6 +158,11 @@ pub enum EdgePathView<'s> {
         /// Level-axis offset of the first bend past the source.
         start_offset: usize,
     },
+    /// A preserved self-loop: no routed path, one marker cell.
+    SelfLoop {
+        /// The `↺` marker cell.
+        at: (usize, usize),
+    },
 }
 
 /// An edge label, resolved: text, color, and where it landed.
@@ -252,16 +257,20 @@ impl Scene<'_, '_> {
             .find(|n| n.id == Some(id))
     }
 
-    /// The scene's edges, in scene order.
+    /// The scene's edges, in scene order: routed edges first, then
+    /// preserved self-loops (identity, label, and resolved style
+    /// intact — style callbacks ran for them at plan time).
     pub fn edges(&self) -> impl Iterator<Item = EdgeView<'_>> + '_ {
-        let count = with_view!(self, v => LayoutView::edge_count(v));
-        (0..count).map(move |i| self.edge_view_at(i))
+        (0..self.scene_edge_count()).map(move |i| self.edge_view_at(i))
     }
 
-    /// One edge by scene index.
+    /// One edge by scene index (self-loops sit after the routed list).
     pub fn edge(&self, scene_index: usize) -> Option<EdgeView<'_>> {
-        let count = with_view!(self, v => LayoutView::edge_count(v));
-        (scene_index < count).then(|| self.edge_view_at(scene_index))
+        (scene_index < self.scene_edge_count()).then(|| self.edge_view_at(scene_index))
+    }
+
+    fn scene_edge_count(&self) -> usize {
+        with_view!(self, v => LayoutView::edge_count(v) + LayoutView::self_loop_count(v))
     }
 
     /// The scene's clusters, in declaration order.
@@ -272,7 +281,9 @@ impl Scene<'_, '_> {
 
     /// Edges whose labels overflowed to the legend, in emission order
     /// (the same list [`legend_entries`](Self::legend_entries)
-    /// indexes).
+    /// indexes) — self-loop labels included: they have no inline
+    /// placement host, so a labeled loop always lands here (or is
+    /// omitted, per the overflow policy).
     pub fn legend(&self) -> impl Iterator<Item = EdgeView<'_>> + '_ {
         self.legend_entries()
             .iter()
@@ -321,6 +332,10 @@ impl Scene<'_, '_> {
 
     fn edge_view_at(&self, index: usize) -> EdgeView<'_> {
         let plan = self.plan();
+        let routed = with_view!(self, v => LayoutView::edge_count(v));
+        if index >= routed {
+            return self.self_loop_view_at(index, index - routed);
+        }
         with_view!(self, v => {
             let e = LayoutView::edge(v, index);
             let ep = plan.edge_plan(index);
@@ -371,6 +386,49 @@ impl Scene<'_, '_> {
         })
     }
 
+    /// Synthesize the view of preserved self-loop `j` (scene index
+    /// `scene_index`). The marker cell anchors both endpoints; the
+    /// label — which has no inline placement host — reports where it
+    /// actually went (legend or omitted).
+    fn self_loop_view_at(&self, scene_index: usize, j: usize) -> EdgeView<'_> {
+        let plan = self.plan();
+        with_view!(self, v => {
+            let r = LayoutView::self_loop(v, j);
+            let at = (0..LayoutView::node_count(v))
+                .map(|i| LayoutView::node(v, i))
+                .find(|n| n.id == r.node_id)
+                .and_then(|n| n.self_loop_at)
+                .unwrap_or((0, 0));
+            let ep = plan.scene_edge_plan(scene_index);
+            let flow_axis = flow_axis_of(LayoutView::direction(v));
+            EdgeView {
+                scene_index,
+                input_index: r.input_index,
+                from_id: r.node_id,
+                to_id: r.node_id,
+                directed: true,
+                reversed: false,
+                color: ep.color,
+                weight: ep.weight,
+                marker_source: ep.marker_start,
+                marker_target: ep.marker_end,
+                from: at,
+                to: at,
+                path: EdgePathView::SelfLoop { at },
+                flow_axis,
+                label: r.label.map(|text| LabelView {
+                    text,
+                    color: ep.label_color,
+                    slot: if plan.legend_entries().binary_search(&scene_index).is_ok() {
+                        LabelSlot::Legend
+                    } else {
+                        LabelSlot::Omitted
+                    },
+                }),
+            }
+        })
+    }
+
     fn subgraph_view_at(&self, index: usize) -> SubgraphView<'_> {
         let plan = self.plan();
         with_view!(self, v => {
@@ -390,6 +448,21 @@ impl Scene<'_, '_> {
             }
         })
     }
+}
+
+/// The physical trunk axis for a given rank direction (an `if`
+/// rather than a `match` so each single-axis build sees only the
+/// variants it has).
+fn flow_axis_of(direction: crate::graph::Direction) -> FlowAxis {
+    #[cfg(feature = "layout-horizontal")]
+    if matches!(
+        direction,
+        crate::graph::Direction::LeftRight | crate::graph::Direction::RightLeft
+    ) {
+        return FlowAxis::X;
+    }
+    let _ = direction;
+    FlowAxis::Y
 }
 
 /// Where edge `index`'s label landed under this plan. Both plan lists
@@ -448,6 +521,7 @@ mod tests {
         g.add_edge(3usize, 4usize, None);
         g.add_edge(4usize, 5usize, Some("ships")); // 5 auto-created
         g.add_edge(1usize, 5usize, None); // skips levels → waypoints
+        g.add_edge(4usize, 4usize, Some("retry")); // preserved self-loop
         let sg = g.add_subgraph("grp");
         g.put_nodes(&[2, 3]).inside(sg).unwrap();
         g
@@ -545,6 +619,7 @@ mod tests {
             assert!(all.contains("\"ships\""), "edge label missing:\n{all}");
             assert!(all.contains("\"row1;row2\""), "payload missing:\n{all}");
             assert!(all.contains("Dummy"), "no dummy views:\n{all}");
+            assert!(all.contains("SelfLoop"), "no self-loop view:\n{all}");
         }
     }
 
@@ -747,5 +822,109 @@ mod tests {
         assert_eq!(omitted, legend.len(), "unplaced labels become Omitted");
         assert!(scene.legend_entries().is_empty());
         assert_eq!(scene.legend().count(), 0);
+    }
+}
+
+#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+mod self_loop_tests {
+    use super::super::config::{LabelOverflow, LabelPolicy, PlanOptions};
+    use super::super::plan::HitResult;
+    use super::super::scene::ScenePlanner;
+    use super::*;
+    use crate::graph::Graph;
+
+    /// Loop FIRST, so input and scene indices diverge: input 0 is the
+    /// loop, inputs 1..3 are routed edges at scene 0..2, and the loop's
+    /// scene index is 3 (after the routed list).
+    fn divergent_graph() -> Graph<'static> {
+        let mut g = Graph::new();
+        g.add_node(1usize, "Gate");
+        g.add_node(2usize, "Mid");
+        g.add_node(3usize, "End");
+        g.add_edge(1usize, 1usize, Some("retry")); // input 0: self-loop
+        g.add_edge(1usize, 2usize, None); // input 1 → scene 0
+        g.add_edge(2usize, 3usize, None); // input 2 → scene 1
+        g.add_edge(1usize, 3usize, None); // input 3 → scene 2
+        g
+    }
+
+    /// The preserved loop is a full scene edge: both index conventions
+    /// named, label carried, marker as its path — and the `↺` cell
+    /// hit-tests as the loop EDGE, not the node.
+    #[test]
+    fn self_loop_identity_survives_to_the_scene() {
+        let ir = divergent_graph().compute_layout();
+        let mut planner = ScenePlanner::new();
+        let options = PlanOptions::new()
+            .with_label_policy(LabelPolicy::new().with_overflow(LabelOverflow::Legend));
+        let scene = planner.plan(&ir, &options).unwrap();
+
+        assert_eq!(scene.edges().count(), 4, "3 routed + 1 loop");
+        let luup = scene.edge(3).expect("loop sits after the routed list");
+        assert_eq!(luup.scene_index, 3);
+        assert_eq!(luup.input_index, 0, "original insertion index");
+        assert_eq!((luup.from_id, luup.to_id), (1, 1));
+        let EdgePathView::SelfLoop { at } = luup.path else {
+            panic!("loop path is the marker cell");
+        };
+        assert_eq!(luup.from, at);
+        let label = luup.label.expect("label preserved");
+        assert_eq!(label.text, "retry");
+        assert_eq!(label.slot, LabelSlot::Legend);
+        assert_eq!(scene.legend().map(|e| e.scene_index).next(), Some(3));
+
+        // The marker cell belongs to the loop EDGE now.
+        assert_eq!(scene.hit_test(at.0, at.1), HitResult::Edge(3));
+    }
+
+    /// Style callbacks run for preserved loops — with the loop's own
+    /// input identity — and their answers land in the view.
+    #[test]
+    fn style_callbacks_run_for_self_loops() {
+        fn styled(ctx: super::super::style::EdgeStyleCtx<'_>) -> super::super::style::EdgeStyle {
+            if ctx.from_id == ctx.to_id {
+                assert_eq!(ctx.edge_index, 0, "loop keeps its input index");
+                assert_eq!(ctx.label, Some("retry"));
+                super::super::style::EdgeStyle {
+                    color: CellColor::ansi256(199),
+                    ..Default::default()
+                }
+            } else {
+                super::super::style::EdgeStyle::default()
+            }
+        }
+        let ir = divergent_graph().compute_layout();
+        let mut planner = ScenePlanner::new();
+        let scene = planner
+            .plan(&ir, &PlanOptions::new().with_edge_style_fn(styled))
+            .unwrap();
+        assert_eq!(scene.edge(3).unwrap().color, CellColor::ansi256(199));
+    }
+
+    /// Acceptance: routed-list palette indices NEVER shift — inserting
+    /// a self-loop (even first) leaves every routed edge's default
+    /// color exactly as the loop-free graph resolves it.
+    #[test]
+    fn routed_palette_never_shifts() {
+        let mut without = Graph::new();
+        without.add_node(1usize, "Gate");
+        without.add_node(2usize, "Mid");
+        without.add_node(3usize, "End");
+        without.add_edge(1usize, 2usize, None);
+        without.add_edge(2usize, 3usize, None);
+        without.add_edge(1usize, 3usize, None);
+
+        let ir_without = without.compute_layout();
+        let ir_with = divergent_graph().compute_layout();
+        let mut planner = ScenePlanner::new();
+        let options = PlanOptions::new();
+
+        let colors_without: Vec<CellColor> = {
+            let scene = planner.plan(&ir_without, &options).unwrap();
+            (0..3).map(|i| scene.edge(i).unwrap().color).collect()
+        };
+        let scene = planner.plan(&ir_with, &options).unwrap();
+        let colors_with: Vec<CellColor> = (0..3).map(|i| scene.edge(i).unwrap().color).collect();
+        assert_eq!(colors_without, colors_with, "routed palette must not shift");
     }
 }

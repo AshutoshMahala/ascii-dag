@@ -279,6 +279,9 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             total_label_bytes += graph.edge_label(i).len();
         }
     }
+    // Self-loops leave the routed list but survive as records; count
+    // them once so the builder carves exactly that many.
+    let self_loop_count = graph.edges_iter().filter(|&(from, to)| from == to).count();
 
     // Step 1: Cycle breaking — allocate back_edges and run DFS before other temps
     let back_edges = {
@@ -1135,6 +1138,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         max_level as usize + 1,
         sg_count,
         graph.custom_nodes().len(),
+        self_loop_count,
     )
     .ok_or(GraphError::BuilderFailed)?;
 
@@ -1274,6 +1278,20 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         // node on the cross axis, at its level-leading line (matches
         // heap; Vertical: the legacy right-of-top-row cell).
         if from_idx == to_idx {
+            // Preserve the loop as a record: identity (input index),
+            // label, and the owning node — the routed list never sees
+            // it, but the scene will.
+            builder
+                .add_self_loop(
+                    graph.node_id(from_idx),
+                    edge_idx,
+                    if has_labeled_edges {
+                        graph.edge_label(edge_idx)
+                    } else {
+                        ""
+                    },
+                )
+                .ok_or(GraphError::BuilderFailed)?;
             let (lvl, _, cross, _) = temps.real_coords[from_idx];
             builder.set_self_loop_at(
                 from_idx,

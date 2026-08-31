@@ -260,7 +260,9 @@ The semantics are deliberately hybrid, because that is what feels
 right under a cursor:
 
 - **Nodes** hit as their full reserved rectangle, so a custom painter's
-  whole area belongs to the node — plus the self-loop marker cell.
+  whole area belongs to the node.
+- **Self-loops** own their `↺` marker cell — clicking it selects the
+  loop edge (`HitResult::Edge` of its scene index), not the node.
 - **Edges** hit as *painted ink* — the exact cells the compositor drew,
   not a bounding box, so two crossing edges resolve correctly. A
   painted edge label belongs to its edge.
