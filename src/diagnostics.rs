@@ -55,14 +55,6 @@ pub enum DiagnosticKind {
         /// The auto-created node's id.
         node: usize,
     },
-    /// A node was replaced by a duplicate-id `add_node` in which AUTO
-    /// numbering was involved on either side — replace-on-duplicate is
-    /// the standing semantic; AUTO involvement makes it worth a
-    /// diagnostic.
-    NodeReplaced {
-        /// The replaced node's id.
-        node: usize,
-    },
     /// An edge label found no inline position and the overflow policy
     /// says omit — the label appears nowhere in the output.
     LabelOmitted {
@@ -128,10 +120,9 @@ impl Diagnostic {
     pub fn code(&self) -> &'static str {
         match self.kind {
             DiagnosticKind::PlaceholderCreated { .. } => crate::errors::WARN_NODE_AUTO_CREATED,
-            DiagnosticKind::NodeReplaced { .. } => crate::errors::WARN_AUTO_REPLACED,
             DiagnosticKind::LabelOmitted { .. } => crate::errors::WARN_LABEL_INVISIBLE,
-            DiagnosticKind::CrossingPassesClamped { .. }
-            | DiagnosticKind::CrossingPassesExcessive { .. } => crate::errors::WARN_CONFIG_CLAMPED,
+            DiagnosticKind::CrossingPassesClamped { .. } => crate::errors::WARN_CONFIG_CLAMPED,
+            DiagnosticKind::CrossingPassesExcessive { .. } => crate::errors::WARN_CONFIG_EXCESSIVE,
         }
     }
 
@@ -139,7 +130,6 @@ impl Diagnostic {
     pub fn severity(&self) -> Severity {
         match self.kind {
             DiagnosticKind::PlaceholderCreated { .. }
-            | DiagnosticKind::NodeReplaced { .. }
             | DiagnosticKind::LabelOmitted { .. }
             | DiagnosticKind::CrossingPassesClamped { .. }
             | DiagnosticKind::CrossingPassesExcessive { .. } => Severity::Warning,
@@ -153,9 +143,7 @@ impl Diagnostic {
     /// added after they were written.
     pub fn subject(&self) -> DiagnosticSubject {
         match self.kind {
-            DiagnosticKind::PlaceholderCreated { node } | DiagnosticKind::NodeReplaced { node } => {
-                DiagnosticSubject::Node(node)
-            }
+            DiagnosticKind::PlaceholderCreated { node } => DiagnosticSubject::Node(node),
             DiagnosticKind::LabelOmitted { edge } => DiagnosticSubject::Edge(edge),
             DiagnosticKind::CrossingPassesClamped { .. }
             | DiagnosticKind::CrossingPassesExcessive { .. } => DiagnosticSubject::Configuration,
@@ -168,10 +156,6 @@ impl Diagnostic {
             DiagnosticKind::PlaceholderCreated { .. } => {
                 "Call add_node(id, \"label\") before add_edge(), or declare the \
                  missing-node policy explicitly with set_missing_node_policy()"
-            }
-            DiagnosticKind::NodeReplaced { .. } => {
-                "Replace-on-duplicate is the standing semantic; use distinct ids \
-                 if replacement was not intended"
             }
             DiagnosticKind::LabelOmitted { .. } => {
                 "Set LabelOverflow::Legend to list unplaced labels below the graph"
@@ -193,9 +177,6 @@ impl core::fmt::Display for Diagnostic {
         match self.kind {
             DiagnosticKind::PlaceholderCreated { node } => {
                 write!(f, "node {node} auto-created as a placeholder")
-            }
-            DiagnosticKind::NodeReplaced { node } => {
-                write!(f, "node {node} replaced (AUTO numbering involved)")
             }
             DiagnosticKind::LabelOmitted { edge } => {
                 write!(f, "the label of edge {edge} will not be rendered")

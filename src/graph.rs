@@ -342,6 +342,62 @@ pub enum MissingNodePolicy {
     AutoCreate,
 }
 
+/// Receipt for one [`Graph::add_node`] call — always returned,
+/// uniform in shape: the node's handle (`AUTO` callers read their
+/// assigned id here) plus whether the call replaced an existing node.
+/// Deliberately NOT `#[must_use]` (statement-position calls compile
+/// unchanged), and it converts into [`NodeId`], so handles keep
+/// flowing into `add_edge`/`put_nodes` exactly as before.
+///
+/// Replace-on-duplicate is the standing semantic;
+/// `replaced_involving_auto` marks the variant worth attention — an
+/// explicit id overwriting an auto-numbered node, or a saturated
+/// `AUTO` overwriting an existing one. That condition is delivered
+/// here, at the call site, because a replacement is a point EVENT:
+/// it is not derivable from later graph state, and the graph stores
+/// no diagnostic history (0.10's `W.Graph.Node.007` stderr warning
+/// is this receipt's predecessor).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeInsertion {
+    /// The inserted node's handle (the assigned id for `AUTO`).
+    pub node: NodeId,
+    /// Whether an existing node with this id was replaced.
+    pub replaced: bool,
+    /// Whether the replacement involved `AUTO` numbering on either
+    /// side — the variant worth attention.
+    pub replaced_involving_auto: bool,
+}
+
+impl From<NodeInsertion> for NodeId {
+    #[inline]
+    fn from(receipt: NodeInsertion) -> NodeId {
+        receipt.node
+    }
+}
+
+impl From<NodeInsertion> for IdOrAuto {
+    #[inline]
+    fn from(receipt: NodeInsertion) -> IdOrAuto {
+        IdOrAuto::Id(receipt.node.0)
+    }
+}
+
+impl From<NodeInsertion> for usize {
+    #[inline]
+    fn from(receipt: NodeInsertion) -> usize {
+        receipt.node.0
+    }
+}
+
+impl NodeInsertion {
+    /// The raw id (mirrors [`NodeId::id`]) — AUTO callers read their
+    /// assignment here.
+    pub fn id(&self) -> usize {
+        self.node.0
+    }
+}
+
 /// A pending layout run — see [`Graph::layout`]. Configure with
 /// [`with_config`](Self::with_config), then finish with exactly one
 /// terminal.
@@ -366,13 +422,23 @@ impl<'g, 'a> LayoutRun<'g, 'a> {
         self,
         diagnostics: &mut crate::diagnostics::DiagnosticContext<'_>,
     ) -> crate::ir::LayoutIR<'a> {
-        // One delivery: the graph's outstanding mutation diagnostics
-        // move into this run and are gone — a later run reports only
-        // what happened after this one (run-scoped, no permanent
-        // graph history). A quiet terminal consumes them too: quiet
-        // explicitly discards, it does not defer.
-        for d in self.graph.pending_diagnostics.take() {
-            diagnostics.emit_diagnostic(d);
+        // Standing conditions, re-derived from the graph per run —
+        // nothing is stored and nothing is consumed (like compiler
+        // warnings, a condition reports on every run until it is
+        // fixed). Deterministic order: implicit placeholders in node
+        // insertion order, then the crossing-passes note. Point
+        // events (an AUTO-involved replacement, a placeholder's
+        // creation moment) belong to their receipts at the call site.
+        if self.graph.missing_node_policy.is_none() {
+            for &(id, _) in &self.graph.nodes {
+                if self.graph.auto_created.contains(&id) {
+                    diagnostics
+                        .emit(crate::diagnostics::DiagnosticKind::PlaceholderCreated { node: id });
+                }
+            }
+        }
+        if let Some(note) = self.graph.passes_note {
+            diagnostics.emit(note);
         }
         match self.config {
             Some(config) => self.graph.compute_layout_with_config(config),
@@ -498,12 +564,15 @@ pub struct Graph<'a> {
     /// Missing-node policy; `None` = never set (the implicit 0.10
     /// default, which makes placeholder creation diagnostic-worthy).
     missing_node_policy: Option<MissingNodePolicy>,
-    /// Mutation-time diagnostics, delivered ONCE to the first layout
-    /// run terminal and consumed by it (mutations have no context of
-    /// their own; the receipt serves the call site, this serves the
-    /// run). `RefCell` because delivery drains through the run's
-    /// `&Graph`; borrows are transient and never overlap.
-    pending_diagnostics: core::cell::RefCell<Vec<crate::diagnostics::Diagnostic>>,
+    /// The current crossing-passes condition (clamped or excessive),
+    /// if any — a CONDITION SLOT reflecting the live configuration,
+    /// never an event log: each setter call overwrites it, a sane
+    /// value or a direct pipeline clears it, and every
+    /// diagnostic-aware layout run emits it (without consuming — the
+    /// condition holds until fixed). Plain `Copy` state: no interior
+    /// mutability, so `Graph` stays `Send + Sync` and mutation never
+    /// allocates for diagnostics.
+    passes_note: Option<crate::diagnostics::DiagnosticKind>,
 }
 
 #[cfg(feature = "alloc")]
@@ -557,7 +626,7 @@ impl<'a> Graph<'a> {
             node_kind_tag: Vec::new(),
             node_custom: Vec::new(),
             missing_node_policy: None,
-            pending_diagnostics: core::cell::RefCell::new(Vec::new()),
+            passes_note: None,
         };
 
         // Build id_to_index map, widths cache, and heights cache; seed
@@ -622,7 +691,7 @@ impl<'a> Graph<'a> {
             node_kind_tag: Vec::new(),
             node_custom: Vec::new(),
             missing_node_policy: None,
-            pending_diagnostics: core::cell::RefCell::new(Vec::new()),
+            passes_note: None,
         };
 
         // Build id_to_index map, widths cache, and heights cache; seed
@@ -715,11 +784,11 @@ impl<'a> Graph<'a> {
     /// Values > 20 trigger a warning.  Values > 1000 are clamped to 0.
     pub fn set_crossing_reduction_passes(&mut self, passes: usize) {
         let (p, note) = Self::validate_passes(passes);
-        if let Some(kind) = note {
-            self.pending_diagnostics
-                .get_mut()
-                .push(crate::diagnostics::Diagnostic::new(kind));
-        }
+        // A condition slot, not a log: the note describes the CURRENT
+        // value, so each call overwrites it (a sane value clears it),
+        // and every diagnostic-aware layout run reports it until the
+        // configuration is fixed.
+        self.passes_note = note;
         self.sugiyama_config.crossing_pipeline = if p == 0 {
             Vec::new()
         } else {
@@ -745,6 +814,10 @@ impl<'a> Graph<'a> {
     /// dag.set_crossing_pipeline(QUALITY);
     /// ```
     pub fn set_crossing_pipeline(&mut self, pipeline: &[CrossingReducer]) {
+        // Replaces the compatibility shim's value wholesale — any
+        // standing passes note describes a configuration that no
+        // longer exists.
+        self.passes_note = None;
         self.sugiyama_config.crossing_pipeline = pipeline.to_vec();
     }
 
@@ -898,11 +971,11 @@ impl<'a> Graph<'a> {
     ///
     /// If the node already exists (auto-created by `add_edge`, or added
     /// earlier), this replaces its label — promoting auto-created
-    /// placeholders to explicit nodes. A replacement involving `AUTO`
-    /// on either side (an explicit id overwriting an auto-numbered
-    /// node, or a saturated `AUTO` overwriting anything) records a
-    /// [`NodeReplaced`](crate::DiagnosticKind::NodeReplaced)
-    /// diagnostic, delivered to the next layout run.
+    /// placeholders to explicit nodes. The returned [`NodeInsertion`]
+    /// receipt records the replacement, and flags the variant worth
+    /// attention: `AUTO` numbering involved on either side (an
+    /// explicit id overwriting an auto-numbered node, or a saturated
+    /// `AUTO` overwriting anything).
     ///
     /// # Examples
     ///
@@ -914,7 +987,11 @@ impl<'a> Graph<'a> {
     /// let n = dag.add_node(AUTO, "Auto");   // graph-assigned id
     /// dag.add_edge(1, n, None);             // handles flow into edges
     /// ```
-    pub fn add_node(&mut self, id: impl Into<IdOrAuto>, node: impl NodeContent<'a>) -> NodeId {
+    pub fn add_node(
+        &mut self,
+        id: impl Into<IdOrAuto>,
+        node: impl NodeContent<'a>,
+    ) -> NodeInsertion {
         let (id, incoming_auto) = match id.into() {
             IdOrAuto::Id(id) => (id, false),
             IdOrAuto::Auto => (self.next_auto, true),
@@ -933,20 +1010,14 @@ impl<'a> Graph<'a> {
         let payload = node.payload();
         let size_is_implicit = node.size_is_implicit();
         self.bump_next_auto(id);
-        if self.id_to_index.contains_key(&id) {
-            // D5/D7: a duplicate involving AUTO on either side is worth
-            // a diagnostic — an explicit id silently overwriting an
-            // auto-numbered node, or a saturated AUTO overwriting an
-            // existing node.
-            let existing_auto = self.auto_numbered.contains(&id);
-            if incoming_auto || existing_auto {
-                self.pending_diagnostics
-                    .get_mut()
-                    .push(crate::diagnostics::Diagnostic::new(
-                        crate::diagnostics::DiagnosticKind::NodeReplaced { node: id },
-                    ));
-            }
-        }
+        // Replacement is a point event, so the receipt is its record:
+        // a duplicate involving AUTO on either side (an explicit id
+        // silently overwriting an auto-numbered node, or a saturated
+        // AUTO overwriting an existing node) is the variant worth the
+        // caller's attention.
+        let replaced = self.id_to_index.contains_key(&id);
+        let replaced_involving_auto =
+            replaced && (incoming_auto || self.auto_numbered.contains(&id));
         {
             // Track how this id was assigned (auto or explicit) so the
             // check above can see the existing side next time.
@@ -990,7 +1061,11 @@ impl<'a> Graph<'a> {
             self.parents.push(Vec::new());
             self.set_custom_entry(idx, painter, payload);
         }
-        NodeId(id)
+        NodeInsertion {
+            node: NodeId(id),
+            replaced,
+            replaced_involving_auto,
+        }
     }
 
     /// Add an edge from one node to another with an optional label.
@@ -1062,18 +1137,12 @@ impl<'a> Graph<'a> {
     fn ensure_node_exists(&mut self, id: usize) -> bool {
         // O(1) lookup with HashMap
         if !self.id_to_index.contains_key(&id) {
-            // Under the IMPLICIT default policy the caller may not
-            // know auto-create is happening — record a diagnostic for
-            // the next diagnostic-aware run. An EXPLICITLY declared
-            // policy is chosen behavior and stays silent (the receipt
-            // is the record).
-            if self.missing_node_policy.is_none() {
-                self.pending_diagnostics
-                    .get_mut()
-                    .push(crate::diagnostics::Diagnostic::new(
-                        crate::diagnostics::DiagnosticKind::PlaceholderCreated { node: id },
-                    ));
-            }
+            // No diagnostic is recorded here: an implicit placeholder
+            // is a standing CONDITION (`auto_created` + undeclared
+            // policy), re-derived by each diagnostic-aware layout run
+            // — nothing is stored, and the receipt serves the call
+            // site. An explicitly declared policy silences the
+            // condition, whenever it is declared.
 
             // Create node with empty label. An id-creating site: the
             // AUTO counter must clear implicitly created ids too.
@@ -1318,16 +1387,20 @@ impl<'a> Graph<'a> {
     /// - [`quiet()`](LayoutRun::quiet) — explicitly discards
     ///   diagnostics.
     ///
-    /// Mutation-time diagnostics recorded on this graph (implicit
-    /// placeholder creation, AUTO-involved replacement, clamped
-    /// configuration) are DELIVERED into the run in insertion order
-    /// before the layout runs, and consumed by that delivery —
-    /// mutations have no context of their own, so the first run
-    /// terminal after a mutation is where its diagnostic surfaces,
-    /// exactly once. That includes `quiet()`: quiet explicitly
-    /// discards the outstanding events rather than deferring them to
-    /// a later run. `compute_layout`/`compute_layout_with_config`
-    /// predate the channel and neither deliver nor consume.
+    /// Mutation-context diagnostics are standing CONDITIONS,
+    /// re-derived from the graph at each diagnostic-aware run and
+    /// emitted before the layout computes — the graph stores no
+    /// diagnostic state: implicit auto-created placeholders (in node
+    /// insertion order, while the missing-node policy stays
+    /// undeclared) and the current crossing-passes note. Like a
+    /// compiler warning, a condition reports on every run until it is
+    /// fixed — declare the policy, promote the placeholder, set a
+    /// sane pass count. Point events belong to receipts at the call
+    /// site ([`EdgeInsertion`], [`NodeInsertion`]). Quiet paths
+    /// ([`quiet()`](LayoutRun::quiet), `compute_layout`,
+    /// `compute_layout_with_config`) are exactly equivalent: with no
+    /// stored diagnostics there is nothing to consume, leak, or
+    /// deliver late.
     pub fn layout<'g>(&'g self) -> LayoutRun<'g, 'a> {
         LayoutRun {
             graph: self,
@@ -1688,7 +1761,7 @@ mod tests {
         let a = g.add_node(1, "A");
         let b = g.add_node(2, "B");
         assert_eq!(usize::from(a), 1);
-        assert_eq!(a, NodeId::from(1));
+        assert_eq!(a.node, NodeId::from(1));
         assert_eq!(a.id(), 1);
         g.add_edge(a, b, None); // handles as edge endpoints
         let sg = g.add_subgraph("S");
@@ -1800,11 +1873,11 @@ mod tests {
         }
     }
 
-    /// The state machine behind the D5/D7 replace diagnostics: ids
-    /// gain the auto mark when AUTO assigns them, lose it when an
-    /// explicit id overwrites them (the transition that fires the
-    /// `W.Graph.Node.007` diagnostic), and a saturated AUTO re-marks.
-    /// The set drives every emission decision, so it is the pin.
+    /// The state machine behind the D5/D7 replace flags: ids gain
+    /// the auto mark when AUTO assigns them, lose it when an explicit
+    /// id overwrites them (the transition that sets the receipt's
+    /// `replaced_involving_auto`), and a saturated AUTO re-marks. The
+    /// set drives every flag decision, so it is the pin.
     #[test]
     #[allow(deprecated)] // with_size's explicit path is part of the pin
     fn auto_numbered_tracking_powers_replace_diagnostics() {

@@ -312,12 +312,25 @@ impl<'a> LayoutIRArena<'a> {
         let sg_labels: usize = (0..self.subgraph_count())
             .map(|i| self.subgraph_label(i).len().saturating_mul(6))
             .fold(0usize, |a, b| a.saturating_add(b));
-        // Each self-loop record: fixed fields (~40 bytes) plus its
-        // label at worst-case escaping.
-        let loops = self.self_loops().len().saturating_mul(40);
+        // Each self-loop record, worst case, PROVABLE: separator (1)
+        // + `{"node":` (8) + 20 decimal digits (usize::MAX) +
+        // `,"edge":` (8) + 20 digits + `}` (1) = 58 → 60. A label
+        // adds its `,"label":""` syntax (11 → 12) plus escaped bytes
+        // (≤ 6 per input byte). The array wrapper
+        // `,"self_loops":[` + `]` is 16 → 20, charged whenever any
+        // loop exists.
+        let loops = self.self_loops().len().saturating_mul(60);
         let loop_labels: usize = (0..self.self_loops().len())
-            .map(|i| self.self_loop_label(i).len().saturating_mul(6))
+            .map(|i| {
+                let len = self.self_loop_label(i).len();
+                if len == 0 {
+                    0
+                } else {
+                    len.saturating_mul(6).saturating_add(12)
+                }
+            })
             .fold(0usize, |a, b| a.saturating_add(b));
+        let loop_wrapper = if self.self_loops().is_empty() { 0 } else { 20 };
         // Waypoints: ~20 bytes each
         let wps: usize = self
             .edges()
@@ -336,6 +349,7 @@ impl<'a> LayoutIRArena<'a> {
             .saturating_add(edge_labels)
             .saturating_add(loops)
             .saturating_add(loop_labels)
+            .saturating_add(loop_wrapper)
             .saturating_add(sgs)
             .saturating_add(sg_labels)
             .saturating_add(wps)
@@ -736,16 +750,25 @@ mod heap_json {
         }
 
         fn estimate_json_size(&self) -> usize {
+            // Loop terms mirror the arena estimator's provable bound:
+            // 60 per record (two 20-digit ids + keys + separators),
+            // 12 + 6·len per label (`,"label":""` syntax + worst-case
+            // escaping), 20 for the array wrapper.
             let loop_labels: usize = self
                 .self_loops()
                 .iter()
-                .map(|r| r.label.map_or(0, |l| l.len().saturating_mul(6)))
+                .map(|r| {
+                    r.label
+                        .map_or(0, |l| l.len().saturating_mul(6).saturating_add(12))
+                })
                 .fold(0usize, |a, b| a.saturating_add(b));
+            let loop_wrapper = if self.self_loops().is_empty() { 0 } else { 20 };
             100usize
                 .saturating_add(self.nodes().len().saturating_mul(180))
                 .saturating_add(self.edges().len().saturating_mul(220))
-                .saturating_add(self.self_loops().len().saturating_mul(40))
+                .saturating_add(self.self_loops().len().saturating_mul(60))
                 .saturating_add(loop_labels)
+                .saturating_add(loop_wrapper)
                 .saturating_add(self.subgraphs().len().saturating_mul(120))
         }
     }
@@ -1118,6 +1141,43 @@ mod tests {
 mod loop_record_tests {
     use crate::Graph;
     use crate::graph::arena::Arena;
+
+    /// The estimator's per-loop bound is provable, not slack-funded:
+    /// hand-built records with BOTH ids at `usize::MAX` (20 decimal
+    /// digits each), mostly unlabeled — the shape whose real cost
+    /// most exceeds any too-small fixed guess — plus a few short
+    /// labels for the `,"label":""` syntax, times enough loops to
+    /// exhaust the fixed base, still serialize from an exactly
+    /// estimated buffer.
+    #[test]
+    fn many_max_id_loops_fit_the_exact_estimate() {
+        use crate::graph::arena::Arena;
+        use crate::ir::arena::LayoutIRArenaBuilder;
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut arena = Arena::new(&mut buf);
+        let mut b = LayoutIRArenaBuilder::new(&mut arena, 1, 50, 0, 64, 1).expect("builder");
+        b.set_dimensions(0, 0);
+        for _ in 0..40 {
+            b.add_self_loop(usize::MAX, usize::MAX, usize::MAX, "")
+                .expect("record");
+        }
+        for _ in 0..10 {
+            b.add_self_loop(usize::MAX, usize::MAX, usize::MAX, "x")
+                .expect("record");
+        }
+        let ir = b.build();
+        let estimate = ir.estimate_json_size();
+        let mut out = vec![0u8; estimate];
+        let len = ir
+            .serialize_json(&mut out)
+            .expect("an exactly estimated buffer must fit max-id loop records");
+        let json = core::str::from_utf8(&out[..len]).unwrap();
+        assert_eq!(
+            json.matches("18446744073709551615").count(),
+            100,
+            "50 records x 2 max ids"
+        );
+    }
 
     /// Multiple labeled self-loops — including two on ONE node — reach
     /// the JSON identically on both backends: the input identity,

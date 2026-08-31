@@ -253,10 +253,14 @@ writes to stderr:
 
 | Code | Fires when | Channel |
 |---|---|---|
-| `W.Graph.Node.021` | an edge referenced a node that was never added (placeholder auto-created under the implicit policy) | diagnostics channel |
-| `W.Graph.Node.007` | a duplicate `add_node` replaced a node with `AUTO` numbering involved | diagnostics channel |
-| `W.Graph.Dag.003` | a layout-config value was clamped (e.g. absurd `crossing_reduction_passes`) | diagnostics channel |
+| `W.Graph.Node.021` | the graph still holds implicit auto-created placeholders (a standing condition, reported per run until fixed) | diagnostics channel |
+| `W.Graph.Dag.003` | the current `crossing_reduction_passes` value was clamped (condition — cleared by a sane value) | diagnostics channel |
+| `W.Graph.Dag.033` | the current `crossing_reduction_passes` value is kept but past useful range | diagnostics channel |
 | `W.Render.Label.031` | an edge label fits nowhere inline and the legend is off — it will not be rendered | diagnostics channel |
+
+Point events are receipts at the call site instead: `add_edge` returns
+`EdgeInsertion` (did an endpoint get auto-created?), `add_node` returns
+`NodeInsertion` (did this replace a node — with `AUTO` involved?).
 
 ## Documentation
 

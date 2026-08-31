@@ -30,6 +30,7 @@
 //! | 021 | NOT_FOUND | Referenced element not found | `NodeNotFound`, `SubgraphNotFound` |
 //! | 026 | EXHAUSTED | Resource exhausted | `ArenaOom`, `BuilderFailed` |
 //! | 031 | INVISIBLE | Output element will not be rendered | `WARN_LABEL_INVISIBLE` (crate extension) |
+//! | 033 | EXCESSIVE | Value kept but past its useful range | `WARN_CONFIG_EXCESSIVE` (crate extension) |
 //!
 //! All codes are composed from named macro building blocks at compile time via
 //! `wdp!`. Any unrecognised token causes a compile error.
@@ -192,6 +193,9 @@ macro_rules! sequence {
     (FAILED) => {
         "032"
     };
+    (EXCESSIVE) => {
+        "033"
+    };
 }
 
 /// Compose a WDP Level 0 error code from four named tokens.
@@ -322,21 +326,26 @@ pub const RENDER_SINK_FAILED: &str = wdp!(E.Render.Sink.FAILED);
 /// the implicit missing-node policy.
 pub const WARN_NODE_AUTO_CREATED: &str = wdp!(W.Graph.Node.NOT_FOUND);
 
-/// A duplicate `add_node` replaced an existing node with `AUTO`
-/// numbering involved on either side — an explicit id overwrote an
-/// auto-numbered node, or a saturated `AUTO` overwrote an existing one.
+/// A layout-configuration value was outside its valid range and was
+/// CLAMPED (e.g. an absurd `crossing_reduction_passes`, likely a
+/// negative value cast to `usize`).
 ///
-/// `W.Graph.Node.007` — Sequence 007 = DUPLICATE. Emitted under the
-/// diagnostics channel.
-pub const WARN_AUTO_REPLACED: &str = wdp!(W.Graph.Node.DUPLICATE);
-
-/// A layout-configuration value is outside its useful range and was
-/// clamped or will behave poorly (e.g. `crossing_reduction_passes`).
-///
-/// `W.Graph.Dag.003` — Sequence 003 = INVALID. Emitted into the
-/// diagnostics channel (recorded at the setter, replayed into the
-/// next diagnostic-aware layout run).
+/// `W.Graph.Dag.003` — Sequence 003 = INVALID. A condition code: the
+/// setter records the note against the current configuration, and
+/// every diagnostic-aware layout run reports it until the value is
+/// fixed. (The 0.10 `W.Graph.Node.007` duplicate-replacement stderr
+/// warning has no diagnostic successor — that point event is
+/// delivered by the `NodeInsertion` receipt at the call site.)
 pub const WARN_CONFIG_CLAMPED: &str = wdp!(W.Graph.Dag.INVALID);
+
+/// A layout-configuration value is unreasonably high but was KEPT
+/// (e.g. `crossing_reduction_passes` past diminishing returns) — a
+/// distinct condition from a clamp, under a distinct code, so the
+/// `(code, subject)` identity never collapses the two.
+///
+/// `W.Graph.Dag.033` — Sequence 033 = EXCESSIVE (crate extension,
+/// like 031/032). A condition code, reported per run until fixed.
+pub const WARN_CONFIG_EXCESSIVE: &str = wdp!(W.Graph.Dag.EXCESSIVE);
 
 /// An edge label will not paint AND the legend is disabled (the
 /// default) — the label appears nowhere in the output. With

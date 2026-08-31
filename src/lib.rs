@@ -174,7 +174,7 @@ pub use errors::GraphError;
 pub use graph::RenderMode;
 pub use graph::{AUTO, Auto, IdOrAuto, NodeId};
 #[cfg(feature = "alloc")]
-pub use graph::{Direction, EdgeInsertion, Graph, MissingNodePolicy, Subgraph};
+pub use graph::{Direction, EdgeInsertion, Graph, MissingNodePolicy, NodeInsertion, Subgraph};
 #[cfg(feature = "alloc")]
 pub use ir::{EdgePath, FlowAxis, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};
 pub use render::colors::Palette;

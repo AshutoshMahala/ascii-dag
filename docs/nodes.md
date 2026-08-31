@@ -73,8 +73,9 @@ ids, task numbers): edges can then be added straight from external
 pairs, and `add_edge` auto-creates missing endpoints. Mixing is safe
 in the natural order (explicit first, `AUTO` after — the counter stays
 above every id it has seen); re-adding an existing id replaces that
-node, and AUTO-related replacements surface as typed diagnostics
-(`DiagnosticKind::NodeReplaced`) in a diagnostic run.
+node, and the `NodeInsertion` receipt every `add_node` returns
+records the replacement — flagging AUTO involvement on either side,
+the variant worth attention.
 
 ## Both backends, JSON
 

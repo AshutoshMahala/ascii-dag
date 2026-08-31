@@ -284,40 +284,86 @@ fn layout_reported_owns_the_run() {
     );
 }
 
-/// Mutation diagnostics are delivered to the FIRST layout-run
-/// terminal and consumed by it: later runs report only later
-/// mutations, and a quiet run visibly discards rather than defers.
+/// Mutation-context diagnostics are standing CONDITIONS re-derived
+/// per run — never stored, never consumed: like a compiler warning,
+/// each reports on every diagnostic-aware run until the condition is
+/// FIXED, and quiet paths (`.quiet()`, `compute_layout`) neither
+/// leak state nor change what a later run sees.
 #[test]
-fn mutation_diagnostics_deliver_exactly_once() {
+fn mutation_diagnostics_reflect_current_conditions() {
     let mut g = Graph::new();
     g.add_node(1usize, "A");
-    g.set_crossing_reduction_passes(25); // high → advice
+    g.set_crossing_reduction_passes(25); // high → advice condition
 
     let report = g.layout().reported();
     assert_eq!(report.warnings().count(), 1);
     let report = g.layout().reported();
     assert_eq!(
         report.warnings().count(),
-        0,
-        "one delivery — no permanent graph history"
+        1,
+        "the condition still holds, so it reports again"
     );
 
-    g.set_crossing_reduction_passes(30);
+    // Quiet paths have no diagnostic state to consume or leave stale.
     let _ = g.layout().quiet();
-    let report = g.layout().reported();
-    assert_eq!(
-        report.warnings().count(),
-        0,
-        "quiet explicitly discards outstanding events, it does not defer them"
-    );
-
-    g.set_crossing_reduction_passes(40);
+    let _ = g.compute_layout();
     let report = g.layout().reported();
     assert_eq!(
         report.warnings().count(),
         1,
-        "new mutations surface on the next run"
+        "quiet runs change nothing — there is nothing to consume"
     );
+
+    // Fixing the configuration clears the condition...
+    g.set_crossing_reduction_passes(3);
+    assert_eq!(g.layout().reported().warnings().count(), 0);
+
+    // ...and each setter call describes the CURRENT value only.
+    g.set_crossing_reduction_passes(50_000); // absurd → clamped
+    g.set_crossing_reduction_passes(25); // replaced by the advice note
+    let report = g.layout().reported();
+    let kinds: Vec<DiagnosticKind> = report.warnings().map(|d| *d.kind()).collect();
+    assert_eq!(
+        kinds,
+        vec![DiagnosticKind::CrossingPassesExcessive { requested: 25 }],
+        "a condition slot, not an event log"
+    );
+
+    // A direct pipeline replaces the shim value wholesale.
+    g.set_crossing_reduction_passes(50_000);
+    g.set_crossing_pipeline(ascii_dag::STANDARD);
+    assert_eq!(g.layout().reported().warnings().count(), 0);
+}
+
+/// The two crossing-passes conditions carry DISTINCT stable codes —
+/// a `(code, subject)` dedup key never collapses them.
+#[test]
+fn clamped_and_excessive_have_distinct_identities() {
+    let mut g = Graph::new();
+    g.add_node(1usize, "A");
+    g.set_crossing_reduction_passes(50_000);
+    let clamped = g.layout().reported();
+    let clamped_code = clamped.warnings().next().expect("clamp condition").code();
+
+    g.set_crossing_reduction_passes(25);
+    let excessive = g.layout().reported();
+    let excessive_code = excessive
+        .warnings()
+        .next()
+        .expect("advice condition")
+        .code();
+
+    assert_eq!(clamped_code, "W.Graph.Dag.003");
+    assert_eq!(excessive_code, "W.Graph.Dag.033");
+    assert_ne!(clamped_code, excessive_code);
+}
+
+/// `Graph` keeps its auto traits: diagnostics never put interior
+/// mutability (or any storage) on the graph.
+#[test]
+fn graph_stays_send_and_sync() {
+    fn assert_auto<T: Send + Sync>() {}
+    assert_auto::<Graph<'static>>();
 }
 
 /// `(code, subject)` is the generic identity: subjects normalize
@@ -346,29 +392,69 @@ fn subjects_normalize_without_kind_matching() {
     assert!(subjects.contains(&DiagnosticSubject::Edge(0)));
 }
 
-/// Configuration clamps and AUTO-involved replacement are typed
-/// diagnostics on the graph, delivered to the next diagnostic-aware
-/// layout run.
+/// The placeholder condition is derived from live graph state, in
+/// deterministic node-insertion order — fixing the condition (either
+/// way) silences it, whenever the fix happens.
 #[test]
-fn mutation_diagnostics_replay_at_layout() {
+fn placeholder_condition_clears_when_fixed() {
     let mut g = Graph::new();
     g.add_node(1usize, "A");
-    g.add_node(1usize, "A2"); // replace, no AUTO involved → silent
-    g.set_crossing_reduction_passes(50_000); // absurd → clamped
-    g.set_crossing_reduction_passes(25); // high → advice
-
-    let mut run = DiagnosticRun::new(VecDiagnostics::default());
-    let _ir = g.layout().compute(&mut run.context());
-    let (_, sink) = run.finish::<(), ()>(Ok(())).into_parts();
-    let kinds: Vec<DiagnosticKind> = sink.entries().iter().map(|d| *d.kind()).collect();
+    g.add_edge(1usize, 9usize, None); // implicit placeholder
+    g.add_edge(1usize, 7usize, None); // another
+    let kinds: Vec<DiagnosticKind> = g
+        .layout()
+        .reported()
+        .warnings()
+        .map(|d| *d.kind())
+        .collect();
     assert_eq!(
         kinds,
         vec![
-            DiagnosticKind::CrossingPassesClamped {
-                requested: 50_000,
-                clamped_to: 0,
-            },
-            DiagnosticKind::CrossingPassesExcessive { requested: 25 },
-        ]
+            DiagnosticKind::PlaceholderCreated { node: 9 },
+            DiagnosticKind::PlaceholderCreated { node: 7 },
+        ],
+        "node insertion order, deterministic"
     );
+
+    // Fix one by promotion: the receipt records the replacement, and
+    // the condition narrows to the remaining placeholder.
+    let receipt = g.add_node(9usize, "Nine");
+    assert!(receipt.replaced);
+    assert!(!receipt.replaced_involving_auto);
+    let kinds: Vec<DiagnosticKind> = g
+        .layout()
+        .reported()
+        .warnings()
+        .map(|d| *d.kind())
+        .collect();
+    assert_eq!(kinds, vec![DiagnosticKind::PlaceholderCreated { node: 7 }]);
+
+    // Fix the rest by declaring the policy — even AFTER creation:
+    // declared intent silences, whenever it is declared.
+    g.set_missing_node_policy(MissingNodePolicy::AutoCreate);
+    assert_eq!(g.layout().reported().warnings().count(), 0);
+}
+
+/// AUTO-involved replacement is a point EVENT, not a condition — its
+/// record is the `NodeInsertion` receipt at the call site.
+#[test]
+fn auto_replacement_is_the_receipts_business() {
+    use ascii_dag::AUTO;
+    let mut g = Graph::new();
+    let auto = g.add_node(AUTO, "first"); // graph assigns an id
+    let receipt = g.add_node(auto.id(), "usurper"); // explicit id hits it
+    assert!(receipt.replaced);
+    assert!(
+        receipt.replaced_involving_auto,
+        "explicit id overwrote an auto-numbered node"
+    );
+
+    // No AUTO involved → an ordinary, unflagged replacement.
+    g.add_node(5usize, "five");
+    let receipt = g.add_node(5usize, "five-again");
+    assert!(receipt.replaced);
+    assert!(!receipt.replaced_involving_auto);
+
+    // Nothing reaches the run: the graph stores no event history.
+    assert_eq!(g.layout().reported().warnings().count(), 0);
 }
