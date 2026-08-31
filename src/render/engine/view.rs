@@ -103,6 +103,9 @@ pub(crate) struct EdgeRef<'a> {
 pub(crate) struct SelfLoopRef<'a> {
     /// The node the loop is on (user id).
     pub node_id: usize,
+    /// The node's position in the view's node table (O(1) join;
+    /// resolved at layout — hand-built IRs own its bounds).
+    pub node_index: usize,
     /// Original graph insertion index (the style-callback convention).
     pub input_index: usize,
     /// `None` when unlabeled (arena: empty label storage).
@@ -285,6 +288,7 @@ impl LayoutView for crate::ir::LayoutIR<'_> {
         let r = &self.self_loops()[index];
         SelfLoopRef {
             node_id: r.node_id,
+            node_index: r.node_index,
             input_index: r.edge_index,
             label: r.label,
         }
@@ -443,6 +447,7 @@ impl LayoutView for crate::ir::arena::LayoutIRArena<'_> {
         let r = &self.self_loops()[index];
         SelfLoopRef {
             node_id: r.node_id,
+            node_index: r.node_index,
             input_index: r.edge_index,
             label: if r.label_len == 0 {
                 None

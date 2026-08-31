@@ -394,11 +394,13 @@ impl Scene<'_, '_> {
         let plan = self.plan();
         with_view!(self, v => {
             let r = LayoutView::self_loop(v, j);
-            let at = (0..LayoutView::node_count(v))
-                .map(|i| LayoutView::node(v, i))
-                .find(|n| n.id == r.node_id)
-                .and_then(|n| n.self_loop_at)
-                .unwrap_or((0, 0));
+            // O(1) record→node join through the record's stored index.
+            let at = if r.node_index < LayoutView::node_count(v) {
+                LayoutView::node(v, r.node_index).self_loop_at
+            } else {
+                None
+            }
+            .unwrap_or((0, 0));
             let ep = plan.scene_edge_plan(scene_index);
             let flow_axis = flow_axis_of(LayoutView::direction(v));
             EdgeView {

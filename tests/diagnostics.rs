@@ -6,8 +6,9 @@
 #![cfg(feature = "layout-vertical")]
 
 use ascii_dag::{
-    CountingDiagnostics, Diagnostic, DiagnosticKind, DiagnosticRun, Graph, MissingNodePolicy,
-    PlanOptions, ScenePlanner, Severity, SliceDiagnostics, VecDiagnostics,
+    CountingDiagnostics, Diagnostic, DiagnosticKind, DiagnosticRef, DiagnosticRun,
+    DiagnosticSubject, Graph, MissingNodePolicy, PlanOptions, ScenePlanner, Severity,
+    SliceDiagnostics, VecDiagnostics,
 };
 
 /// A short label that places plus one that fits nowhere — under the
@@ -61,10 +62,23 @@ fn run_survives_successful_and_failed_planning() {
 
     let report = run.finish::<(), _>(Err(err));
     assert!(report.outcome().is_err());
-    let kinds: Vec<&DiagnosticKind> = report.diagnostics().map(|d| d.kind()).collect();
+    // The unified stream: retained events first, then the primary
+    // failure projected from the outcome — a presenter iterating
+    // `diagnostics()` alone misses nothing, while storage never
+    // holds the error twice.
+    let stream: Vec<DiagnosticRef<'_, _>> = report.diagnostics().collect();
     assert!(
-        matches!(kinds.as_slice(), [DiagnosticKind::LabelOmitted { .. }]),
-        "pre-failure events intact, error not duplicated: {kinds:?}"
+        matches!(
+            stream.as_slice(),
+            [DiagnosticRef::Retained(d), DiagnosticRef::Failure(_)]
+                if matches!(d.kind(), DiagnosticKind::LabelOmitted { .. })
+        ),
+        "pre-failure events intact, failure projected once: {stream:?}"
+    );
+    assert_eq!(
+        report.retained_diagnostics().count(),
+        1,
+        "the error is never copied into storage"
     );
     assert_eq!(report.dropped_diagnostics(), 0);
 }
@@ -179,18 +193,32 @@ fn sinks_and_envelope() {
     let g = omitting_graph();
     let ir = g.compute_layout();
 
-    // Slice sink with room for nothing: everything drops, nothing fails.
-    let mut storage: [Diagnostic; 0] = [];
+    // Bounded slice sink, positive capacity: retains the
+    // deterministic prefix, counts the overflow, never fails the
+    // operation. (`MaybeUninit` storage: a `Diagnostic` has no
+    // vacuous public constructor to fill an array with.)
+    let two = {
+        let mut g = omitting_graph();
+        g.add_edge(3usize, 3usize, Some("loop labels never place inline"));
+        g
+    };
+    let ir2 = two.compute_layout();
+    let mut storage = [core::mem::MaybeUninit::<Diagnostic>::uninit(); 1];
     let mut run = DiagnosticRun::new(SliceDiagnostics::new(&mut storage));
     let mut planner = ScenePlanner::new();
     planner
-        .plan(&ir, &PlanOptions::new())
+        .plan(&ir2, &PlanOptions::new())
         .compute(&mut run.context())
         .unwrap();
-    assert_eq!(run.counts().warnings(), 1, "counts are run-owned");
+    assert_eq!(run.counts().warnings(), 2, "counts are run-owned");
     let report = run.finish::<(), ()>(Ok(()));
     assert_eq!(report.dropped_diagnostics(), 1);
-    assert_eq!(report.diagnostics().count(), 0);
+    let retained: Vec<&Diagnostic> = report.retained_diagnostics().collect();
+    assert_eq!(retained.len(), 1, "capacity-1 slice keeps the prefix");
+    assert!(
+        matches!(retained[0].kind(), DiagnosticKind::LabelOmitted { edge: 0 }),
+        "the FIRST event is the retained one"
+    );
 
     // Counting sink.
     let mut run = DiagnosticRun::new(CountingDiagnostics::default());
@@ -256,8 +284,70 @@ fn layout_reported_owns_the_run() {
     );
 }
 
+/// Mutation diagnostics are delivered to the FIRST layout-run
+/// terminal and consumed by it: later runs report only later
+/// mutations, and a quiet run visibly discards rather than defers.
+#[test]
+fn mutation_diagnostics_deliver_exactly_once() {
+    let mut g = Graph::new();
+    g.add_node(1usize, "A");
+    g.set_crossing_reduction_passes(25); // high → advice
+
+    let report = g.layout().reported();
+    assert_eq!(report.warnings().count(), 1);
+    let report = g.layout().reported();
+    assert_eq!(
+        report.warnings().count(),
+        0,
+        "one delivery — no permanent graph history"
+    );
+
+    g.set_crossing_reduction_passes(30);
+    let _ = g.layout().quiet();
+    let report = g.layout().reported();
+    assert_eq!(
+        report.warnings().count(),
+        0,
+        "quiet explicitly discards outstanding events, it does not defer them"
+    );
+
+    g.set_crossing_reduction_passes(40);
+    let report = g.layout().reported();
+    assert_eq!(
+        report.warnings().count(),
+        1,
+        "new mutations surface on the next run"
+    );
+}
+
+/// `(code, subject)` is the generic identity: subjects normalize
+/// across kinds, so consumers group and dedup without matching every
+/// (non-exhaustive) variant.
+#[test]
+fn subjects_normalize_without_kind_matching() {
+    let mut g = Graph::new();
+    g.add_node(1usize, "A");
+    g.add_edge(1usize, 9usize, None); // implicit placeholder → Node(9)
+    g.set_crossing_reduction_passes(50_000); // clamp → Configuration
+
+    let mut run = DiagnosticRun::new(VecDiagnostics::default());
+    let ir = g.layout().compute(&mut run.context());
+    let mut planner = ScenePlanner::new();
+    let omitting = omitting_graph().compute_layout();
+    drop(ir);
+    planner
+        .plan(&omitting, &PlanOptions::new())
+        .compute(&mut run.context())
+        .unwrap(); // omitted label → Edge(0)
+    let (_, sink) = run.finish::<(), ()>(Ok(())).into_parts();
+    let subjects: Vec<DiagnosticSubject> = sink.entries().iter().map(|d| d.subject()).collect();
+    assert!(subjects.contains(&DiagnosticSubject::Node(9)));
+    assert!(subjects.contains(&DiagnosticSubject::Configuration));
+    assert!(subjects.contains(&DiagnosticSubject::Edge(0)));
+}
+
 /// Configuration clamps and AUTO-involved replacement are typed
-/// diagnostics on the graph, replayed into the next diagnostic-aware
+/// diagnostics on the graph, delivered to the next diagnostic-aware
 /// layout run.
 #[test]
 fn mutation_diagnostics_replay_at_layout() {

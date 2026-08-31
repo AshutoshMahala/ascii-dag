@@ -116,8 +116,14 @@ pub(crate) struct PlanElement {
 pub enum HitResult {
     /// A node (by id).
     Node(usize),
-    /// An edge, by its IR-list index (the position in the layout's
-    /// edge list — the same convention as `legend_entries`).
+    /// An edge, by its SCENE index — the same convention as
+    /// `legend_entries` and [`Scene::edge`](super::scene::Scene):
+    /// positions `0..edge_count` are the routed layout list (list
+    /// order), and positions past it are preserved self-loops. A
+    /// self-loop hit is therefore NOT an index into the layout's
+    /// routed edge list; resolve any scene index through
+    /// `Scene::edge`, which answers for both ranges (an `EdgeView`
+    /// carries the input index too).
     Edge(usize),
     /// A subgraph box (by subgraph id).
     Subgraph(usize),
@@ -1010,9 +1016,10 @@ impl<'buf> RenderPlan<'buf> {
                 // diagnostic.
                 match label_policy.overflow {
                     super::config::LabelOverflow::Legend => legend.push(i),
-                    // Omitted entirely → the label appears NOWHERE.
-                    // Never silent under the `warnings` feature
-                    // (emitted per plan build — plans are stateless).
+                    // Omitted entirely → the label appears NOWHERE
+                    // in the output, but never silently: a
+                    // LabelOmitted diagnostic is emitted per plan
+                    // build (plans are stateless).
                     // The label TEXT is deliberately not printed:
                     // labels are caller data and may hold secrets or
                     // control characters (terminal/log injection) —
@@ -1097,10 +1104,12 @@ impl<'buf> RenderPlan<'buf> {
         self.height
     }
 
-    /// Edge indices (IR-list order) whose labels go to the legend under
-    /// the options this plan was built with: the labels that did not
+    /// SCENE indices of edges whose labels go to the legend under the
+    /// options this plan was built with: the labels that did not
     /// paint under the active placement policy (`AvoidNodeRows`: the
-    /// row-veto rule; `Geometric`: pure geometric placement). Empty
+    /// row-veto rule; `Geometric`: pure geometric placement). Routed
+    /// entries coincide with layout-list positions; self-loop entries
+    /// sit past the routed list (the list stays ascending). Empty
     /// unless `LabelOverflow::Legend` was set — matching what actually
     /// renders.
     pub fn legend_entries(&self) -> &[usize] {
@@ -1134,9 +1143,9 @@ impl<'buf> RenderPlan<'buf> {
     /// interior) — clicking inside a box selects it even on a blank
     /// cell. Edge labels, box labels, and self-loop markers are part of
     /// their owning element's region, not separate hit targets.
-    /// Edges are reported by their **IR-list index** (the position in
-    /// the layout's edge list — the same convention as
-    /// [`RenderPlan::legend_entries`]).
+    /// Edges are reported by their **scene index** (routed edges at
+    /// their layout-list positions, self-loops past them — the same
+    /// convention as [`RenderPlan::legend_entries`]).
     pub(crate) fn element_at<V: LayoutView>(&self, view: &V, x: usize, y: usize) -> HitResult {
         // A plan answers only for the layout it was built from; a query
         // outside this plan's canvas (including any query against a
@@ -1184,8 +1193,8 @@ impl<'buf> RenderPlan<'buf> {
                     // after the routed list. A hand-built marker with
                     // no record keeps the legacy node attribution.
                     if n.self_loop_at == Some((x, y)) {
-                        if let Some(j) =
-                            (0..view.self_loop_count()).find(|&j| view.self_loop(j).node_id == n.id)
+                        if let Some(j) = (0..view.self_loop_count())
+                            .find(|&j| view.self_loop(j).node_index == el.index)
                         {
                             return HitResult::Edge(view.edge_count() + j);
                         }

@@ -327,8 +327,8 @@ fn plain_legend_lists_unplaced_labels() {
         out.contains(" → "),
         "legend lines present (colliding_labels always overflows):\n{out}"
     );
-    // And the default stays legend-free (a 0.11 candidate to flip —
-    // for now, the `warnings` feature is the silent-drop guard).
+    // And the default stays legend-free (the diagnostics channel
+    // is the silent-drop guard: omitted labels emit LabelOmitted).
     let mut plain = String::new();
     ir.render_with(&RenderOptions::plain(), &mut plain)
         .expect("render");
@@ -1280,16 +1280,18 @@ mod review_fixes {
         );
     }
 
-    /// Hit-test and legend share one index convention: the IR-list index.
+    /// Hit-test and legend share one index convention: the scene
+    /// index — and for a loop-free graph every scene index is a
+    /// routed-list position.
     #[test]
-    fn edge_indices_are_ir_list_indices() {
+    fn edge_indices_are_scene_indices() {
         let ir = colliding_labels().compute_layout();
         let options = RenderOptions::colored(Palette::Ansi);
         let plan = crate::render::engine::plan::RenderPlan::build(&ir, &options.plan);
         for &ei in plan.legend_entries() {
-            assert!(ei < ir.edges().len(), "legend index {ei} is a list index");
+            assert!(ei < ir.edges().len(), "no loops: {ei} is a routed position");
         }
-        // A hit on an edge's own vertical resolves to its list index.
+        // A hit on an edge's own vertical resolves to its routed index.
         let e = &ir.edges()[0];
         let probe_y = e.from_y + 1;
         if let HitResult::Edge(idx) = plan.element_at(&ir, e.from_x, probe_y) {

@@ -1,17 +1,22 @@
-//! JSON serialization for Layout IR (schema v1.3).
+//! JSON serialization for Layout IR (schema v1.4).
 //!
-//! Produces JSON output extending zigraph's JSON IR schema: v1.3 adds
+//! Produces JSON output extending zigraph's JSON IR schema: v1.3 added
 //! the per-edge `flow_axis` tag, the per-node `self_loop_at` cell, and
-//! renames the path fields axis-neutrally (`bend_at`, `channel_at`,
+//! renamed the path fields axis-neutrally (`bend_at`, `channel_at`,
 //! `span_start`/`span_end` — a v1.2 `horizontal_y` is a v1.3 `bend_at`
-//! on a `flow_axis: "y"` edge).
+//! on a `flow_axis: "y"` edge). v1.4 adds the `self_loops[]` records:
+//! self-loops never enter the routed `edges[]` list, so their input
+//! identity, label, and multiplicity travel here.
 //!
 //! # Schema
 //!
-//! - `version`: always `"1.3"`
+//! - `version`: always `"1.4"`
 //! - `width`, `height`, `level_count`: top-level dimensions
 //! - `nodes[]`: positioned node objects with `id`, `label`, `x`, `y`, etc.
 //! - `edges[]`: routed edge objects with `from`, `to`, path info, etc.
+//! - `self_loops[]`: preserved self-loop records — `node` (user id),
+//!   `edge` (input index; loops count in that numbering), optional
+//!   `label` (omitted when empty)
 //! - `subgraphs[]`: bounding boxes (omitted when empty)
 //!
 //! # Features
@@ -19,8 +24,9 @@
 //! - **`alloc`**: Enables `LayoutIR::to_json() -> String`
 //! - **Always available**: `serialize_json_to_buffer()` for `LayoutIRArena`
 
-/// JSON schema version (zigraph v1.2 + the direction extensions).
-pub(crate) const VERSION: &str = "1.3";
+/// JSON schema version (zigraph v1.2 + the direction and self-loop
+/// extensions).
+pub(crate) const VERSION: &str = "1.4";
 
 // ── Minimal no-alloc JSON writer ─────────────────────────────────────────
 
@@ -150,8 +156,9 @@ use super::arena::{
 };
 
 impl<'a> LayoutIRArena<'a> {
-    /// Serialize the layout IR to JSON (schema v1.3 — zigraph v1.2
-    /// plus the direction extensions; see the module docs).
+    /// Serialize the layout IR to JSON (schema v1.4 — zigraph v1.2
+    /// plus the direction and self-loop extensions; see the module
+    /// docs).
     ///
     /// Writes into `buffer` and returns the number of bytes written,
     /// or `None` if the buffer is too small.
@@ -229,6 +236,33 @@ impl<'a> LayoutIRArena<'a> {
         }
         w.write_byte(b']')?;
 
+        // v1.4: preserved self-loop records (omitted when empty) —
+        // input identity, label, and multiplicity that the routed
+        // edge list never carries.
+        if !self.self_loops().is_empty() {
+            w.write_byte(b',')?;
+            w.write_key("self_loops")?;
+            w.write_byte(b'[')?;
+            for (i, r) in self.self_loops().iter().enumerate() {
+                if i > 0 {
+                    w.write_byte(b',')?;
+                }
+                w.write_byte(b'{')?;
+                w.write_key("node")?;
+                w.write_usize(r.node_id)?;
+                w.write_byte(b',')?;
+                w.write_key("edge")?;
+                w.write_usize(r.edge_index)?;
+                if r.label_len > 0 {
+                    w.write_byte(b',')?;
+                    w.write_key("label")?;
+                    w.write_str(self.self_loop_label(i))?;
+                }
+                w.write_byte(b'}')?;
+            }
+            w.write_byte(b']')?;
+        }
+
         // subgraphs (omit when empty, per v1.2 spec)
         if self.subgraph_count() > 0 {
             w.write_byte(b',')?;
@@ -251,7 +285,7 @@ impl<'a> LayoutIRArena<'a> {
     ///
     /// Returns a conservative upper bound. The actual output is usually smaller.
     pub fn estimate_json_size(&self) -> usize {
-        // Base: {"version":"1.3","width":N,"height":N,"level_count":N,"nodes":[...],"edges":[...]}
+        // Base: {"version":"1.4","width":N,"height":N,"level_count":N,"nodes":[...],"edges":[...]}
         let base: usize = 100;
         // Each node: fixed fields incl. `content_kind` and the v1.3
         // `self_loop_at` cell (~210 bytes) plus its label at
@@ -278,6 +312,12 @@ impl<'a> LayoutIRArena<'a> {
         let sg_labels: usize = (0..self.subgraph_count())
             .map(|i| self.subgraph_label(i).len().saturating_mul(6))
             .fold(0usize, |a, b| a.saturating_add(b));
+        // Each self-loop record: fixed fields (~40 bytes) plus its
+        // label at worst-case escaping.
+        let loops = self.self_loops().len().saturating_mul(40);
+        let loop_labels: usize = (0..self.self_loops().len())
+            .map(|i| self.self_loop_label(i).len().saturating_mul(6))
+            .fold(0usize, |a, b| a.saturating_add(b));
         // Waypoints: ~20 bytes each
         let wps: usize = self
             .edges()
@@ -294,6 +334,8 @@ impl<'a> LayoutIRArena<'a> {
             .saturating_add(payloads)
             .saturating_add(edges)
             .saturating_add(edge_labels)
+            .saturating_add(loops)
+            .saturating_add(loop_labels)
             .saturating_add(sgs)
             .saturating_add(sg_labels)
             .saturating_add(wps)
@@ -575,8 +617,8 @@ mod heap_json {
     use alloc::string::String;
 
     impl<'a> LayoutIR<'a> {
-        /// Serialize the layout IR to a JSON string (schema v1.3 —
-        /// zigraph v1.2 plus the direction extensions).
+        /// Serialize the layout IR to a JSON string (schema v1.4 —
+        /// zigraph v1.2 plus the direction and self-loop extensions).
         ///
         /// # Example
         ///
@@ -589,7 +631,7 @@ mod heap_json {
         /// );
         /// let ir = dag.compute_layout();
         /// let json = ir.to_json();
-        /// assert!(json.contains("\"version\":\"1.3\""));
+        /// assert!(json.contains("\"version\":\"1.4\""));
         /// assert!(json.contains("\"nodes\":["));
         /// ```
         pub fn to_json(&self) -> String {
@@ -649,6 +691,33 @@ mod heap_json {
             }
             out.push(']');
 
+            // v1.4: preserved self-loop records (omitted when empty) —
+            // input identity, label, and multiplicity that the routed
+            // edge list never carries.
+            if !self.self_loops().is_empty() {
+                out.push(',');
+                push_key(out, "self_loops");
+                out.push('[');
+                for (i, r) in self.self_loops().iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push('{');
+                    push_key(out, "node");
+                    push_usize(out, r.node_id);
+                    out.push(',');
+                    push_key(out, "edge");
+                    push_usize(out, r.edge_index);
+                    if let Some(label) = r.label {
+                        out.push(',');
+                        push_key(out, "label");
+                        push_json_str(out, label);
+                    }
+                    out.push('}');
+                }
+                out.push(']');
+            }
+
             // subgraphs
             if !self.subgraphs().is_empty() {
                 out.push(',');
@@ -667,9 +736,16 @@ mod heap_json {
         }
 
         fn estimate_json_size(&self) -> usize {
+            let loop_labels: usize = self
+                .self_loops()
+                .iter()
+                .map(|r| r.label.map_or(0, |l| l.len().saturating_mul(6)))
+                .fold(0usize, |a, b| a.saturating_add(b));
             100usize
                 .saturating_add(self.nodes().len().saturating_mul(180))
                 .saturating_add(self.edges().len().saturating_mul(220))
+                .saturating_add(self.self_loops().len().saturating_mul(40))
+                .saturating_add(loop_labels)
                 .saturating_add(self.subgraphs().len().saturating_mul(120))
         }
     }
@@ -963,7 +1039,7 @@ mod tests {
         // Validate structure
         assert!(json.starts_with('{'));
         assert!(json.ends_with('}'));
-        assert!(json.contains("\"version\":\"1.3\""));
+        assert!(json.contains("\"version\":\"1.4\""));
         assert!(json.contains("\"nodes\":["));
         assert!(json.contains("\"edges\":["));
 
@@ -1038,6 +1114,56 @@ mod tests {
 }
 
 #[cfg(test)]
+#[cfg(all(feature = "arena", feature = "std"))]
+mod loop_record_tests {
+    use crate::Graph;
+    use crate::graph::arena::Arena;
+
+    /// Multiple labeled self-loops — including two on ONE node — reach
+    /// the JSON identically on both backends: the input identity,
+    /// label, and multiplicity that the routed `edges[]` list never
+    /// carries. The estimate-sized buffer fits, loops included.
+    #[test]
+    fn self_loop_records_serialize_with_backend_parity() {
+        let mut g = Graph::new();
+        g.add_node(1usize, "A");
+        g.add_node(2usize, "B");
+        g.add_edge(1usize, 1usize, Some("retry")); // input 0
+        g.add_edge(1usize, 1usize, Some("again")); // input 1: multiplicity
+        g.add_edge(2usize, 2usize, None); // input 2: unlabeled
+        g.add_edge(1usize, 2usize, Some("go")); // input 3: routed
+
+        let expected = "\"self_loops\":[\
+            {\"node\":1,\"edge\":0,\"label\":\"retry\"},\
+            {\"node\":1,\"edge\":1,\"label\":\"again\"},\
+            {\"node\":2,\"edge\":2}]";
+        let expected = expected.replace(" ", "");
+        let heap_json = g.compute_layout().to_json();
+        assert!(heap_json.contains(&expected), "heap: {heap_json}");
+
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).unwrap();
+        let size = (g.estimate_layout_arena_size() * 2).max(256 * 1024);
+        let mut temp_buf = vec![0u8; size];
+        let mut out_buf = vec![0u8; size];
+        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut out_arena = Arena::new(&mut out_buf);
+        let ir = csr
+            .compute_layout_arena(
+                &crate::LayoutConfig::standard(),
+                &mut temp_arena,
+                &mut out_arena,
+            )
+            .unwrap();
+        let mut buf = vec![0u8; ir.estimate_json_size()];
+        let len = ir.serialize_json(&mut buf).unwrap();
+        let arena_json = core::str::from_utf8(&buf[..len]).unwrap();
+        assert!(arena_json.contains(&expected), "arena: {arena_json}");
+    }
+}
+
+#[cfg(test)]
 #[cfg(feature = "arena")]
 mod arena_tests {
     use crate::algorithms::sugiyama::config::LayoutConfig;
@@ -1075,7 +1201,7 @@ mod arena_tests {
 
         assert!(json.starts_with('{'));
         assert!(json.ends_with('}'));
-        assert!(json.contains("\"version\":\"1.3\""));
+        assert!(json.contains("\"version\":\"1.4\""));
         assert!(json.contains("\"nodes\":["));
         assert!(json.contains("\"edges\":["));
         assert!(json.contains("\"label\":\"A\""));

@@ -178,7 +178,7 @@ impl CompositionRequirements {
             self.width,
             self.band_rows,
         )?;
-        let extra_terms: [(Option<usize>, usize); 10] = [
+        let extra_terms: [(Option<usize>, usize); 11] = [
             (area.checked_mul(size_of::<Cell>()), align_of::<Cell>()),
             (
                 area.checked_mul(size_of::<CellColor>()),
@@ -192,6 +192,7 @@ impl CompositionRequirements {
             u32_term(self.band_rows.checked_add(1)?), // row offsets
             u32_term(self.band_rows),                 // row cursors
             u32_term(self.incidence),                 // row incidence
+            u32_term(self.nodes),                     // node→loop-record map
         ];
 
         let mut cursor = 0usize;
@@ -395,9 +396,10 @@ where
         row_off: carve_u32(req.band_rows + 1)?,
         row_cur: carve_u32(req.band_rows)?,
         row_inc: carve_u32(req.incidence)?,
+        node_loop_slot: carve_u32(req.nodes)?,
     };
     let mut sweep = OwnerSweep::default();
-    owner_prepare(plan, &mut owner_scratch, &mut sweep);
+    owner_prepare(plan, view, &mut owner_scratch, &mut sweep);
 
     if plan.height() == 0 {
         return Ok(ControlFlow::Continue(()));

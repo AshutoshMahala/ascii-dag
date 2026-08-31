@@ -147,6 +147,10 @@ pub enum EdgePathArena {
 pub struct SelfLoopArena {
     /// The node the loop is on (user id).
     pub node_id: usize,
+    /// The node's position in the IR node table — resolved once at
+    /// layout so consumers join record→node in O(1) instead of
+    /// scanning by id.
+    pub node_index: usize,
     /// Original graph insertion index (the style-callback convention).
     pub edge_index: usize,
     /// Offset of the label bytes in label storage (0 when unlabeled).

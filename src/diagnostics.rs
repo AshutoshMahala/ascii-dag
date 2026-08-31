@@ -87,10 +87,26 @@ pub enum DiagnosticKind {
     },
 }
 
+/// What a diagnostic is about, normalized across kinds: the stable
+/// half of the `(code, subject)` identity. Always USER-FACING
+/// identity — node ids and input edge indices, never scene positions
+/// or backend-internal slots.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticSubject {
+    /// A node, by its user-facing id.
+    Node(usize),
+    /// An edge, by its input index (insertion order — self-loops
+    /// count in this numbering).
+    Edge(usize),
+    /// Graph-wide configuration rather than a single element.
+    Configuration,
+}
+
 /// One diagnostic event: an owned, lifetime-free record. Construction
 /// is crate-internal; consumers read [`kind`](Self::kind),
-/// [`code`](Self::code), [`severity`](Self::severity), and
-/// [`hint`](Self::hint).
+/// [`code`](Self::code), [`severity`](Self::severity),
+/// [`subject`](Self::subject), and [`hint`](Self::hint).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Diagnostic {
     kind: DiagnosticKind,
@@ -127,6 +143,22 @@ impl Diagnostic {
             | DiagnosticKind::LabelOmitted { .. }
             | DiagnosticKind::CrossingPassesClamped { .. }
             | DiagnosticKind::CrossingPassesExcessive { .. } => Severity::Warning,
+        }
+    }
+
+    /// The user-facing subject this diagnostic is about — the stable
+    /// half of the `(code, subject)` identity, normalized so generic
+    /// consumers (dedup keys, grouping, suppression lists) need not
+    /// understand every [`DiagnosticKind`] variant, including ones
+    /// added after they were written.
+    pub fn subject(&self) -> DiagnosticSubject {
+        match self.kind {
+            DiagnosticKind::PlaceholderCreated { node } | DiagnosticKind::NodeReplaced { node } => {
+                DiagnosticSubject::Node(node)
+            }
+            DiagnosticKind::LabelOmitted { edge } => DiagnosticSubject::Edge(edge),
+            DiagnosticKind::CrossingPassesClamped { .. }
+            | DiagnosticKind::CrossingPassesExcessive { .. } => DiagnosticSubject::Configuration,
         }
     }
 
@@ -243,16 +275,30 @@ impl DiagnosticSink for CountingDiagnostics {
 
 /// Writes into caller-provided storage; when full, keeps the
 /// deterministic prefix and counts the rest as dropped.
+///
+/// Storage is `MaybeUninit` because a [`Diagnostic`] cannot be
+/// constructed by callers (there is no vacuous "nothing happened"
+/// record to fill an array with) — and `Diagnostic` is `Copy`, so a
+/// buffer is one array literal away:
+///
+/// ```
+/// use core::mem::MaybeUninit;
+/// use ascii_dag::{Diagnostic, SliceDiagnostics};
+///
+/// let mut storage = [MaybeUninit::<Diagnostic>::uninit(); 8];
+/// let sink = SliceDiagnostics::new(&mut storage);
+/// assert!(sink.entries().is_empty());
+/// ```
 #[derive(Debug)]
 pub struct SliceDiagnostics<'a> {
-    storage: &'a mut [Diagnostic],
+    storage: &'a mut [core::mem::MaybeUninit<Diagnostic>],
     len: usize,
     dropped: usize,
 }
 
 impl<'a> SliceDiagnostics<'a> {
     /// Collect into `storage` (capacity = its length).
-    pub fn new(storage: &'a mut [Diagnostic]) -> Self {
+    pub fn new(storage: &'a mut [core::mem::MaybeUninit<Diagnostic>]) -> Self {
         Self {
             storage,
             len: 0,
@@ -264,14 +310,18 @@ impl<'a> SliceDiagnostics<'a> {
 impl SliceDiagnostics<'_> {
     /// The retained diagnostics (the deterministic prefix when full).
     pub fn entries(&self) -> &[Diagnostic] {
-        &self.storage[..self.len]
+        // SAFETY: `emit` wrote `storage[i]` before ever growing `len`
+        // past `i`, `len` never shrinks, and `MaybeUninit<Diagnostic>`
+        // has the same layout as `Diagnostic` — so the first `len`
+        // slots are initialized.
+        unsafe { core::slice::from_raw_parts(self.storage.as_ptr().cast::<Diagnostic>(), self.len) }
     }
 }
 
 impl DiagnosticSink for SliceDiagnostics<'_> {
     fn emit(&mut self, diagnostic: Diagnostic) {
         if self.len < self.storage.len() {
-            self.storage[self.len] = diagnostic;
+            self.storage[self.len].write(diagnostic);
             self.len += 1;
         } else {
             self.dropped += 1;
@@ -281,7 +331,7 @@ impl DiagnosticSink for SliceDiagnostics<'_> {
         self.dropped
     }
     fn entries(&self) -> &[Diagnostic] {
-        &self.storage[..self.len]
+        SliceDiagnostics::entries(self)
     }
 }
 
@@ -425,20 +475,97 @@ pub type OwnedReport<T, E> = Report<T, E, VecDiagnostics>;
 /// Report borrowing caller storage (no-alloc).
 pub type BorrowedReport<'a, T, E> = Report<T, E, SliceDiagnostics<'a>>;
 
+/// A failure type the unified [`Report::diagnostics`] stream can
+/// project: the authoritative primary error, plus a walkable causal
+/// chain when the type carries one. Implemented for the crate's error
+/// types; external `E` types opt in by implementing it (the default
+/// `cause` reports no chain).
+pub trait ProjectedFailure {
+    /// The next cause beneath this failure, if any.
+    fn cause(&self) -> Option<&Self> {
+        None
+    }
+}
+
+impl ProjectedFailure for crate::GraphError {}
+
+#[cfg(feature = "alloc")]
+impl ProjectedFailure for crate::errors::ErrorChain {
+    fn cause(&self) -> Option<&Self> {
+        self.cause()
+    }
+}
+
+impl ProjectedFailure for core::convert::Infallible {}
+
+/// One item in the unified presentation stream of
+/// [`Report::diagnostics`]: retained sidecar records first (discovery
+/// order), then the authoritative primary failure — projected, never
+/// copied into storage — then its causes, marked as causes.
+#[derive(Debug, Clone, Copy)]
+pub enum DiagnosticRef<'a, E> {
+    /// A retained sidecar diagnostic.
+    Retained(&'a Diagnostic),
+    /// The primary failure from the outcome (authoritative — this is
+    /// a projection of the `Err`, which remains in the outcome).
+    Failure(&'a E),
+    /// A cause beneath the primary failure.
+    Cause(&'a E),
+}
+
+/// Walks a [`ProjectedFailure`] cause chain.
+struct Causes<'a, E> {
+    next: Option<&'a E>,
+}
+
+impl<'a, E: ProjectedFailure> Iterator for Causes<'a, E> {
+    type Item = &'a E;
+    fn next(&mut self) -> Option<&'a E> {
+        let current = self.next?;
+        self.next = current.cause();
+        Some(current)
+    }
+}
+
 impl<T, E, D: DiagnosticSink> Report<T, E, D> {
     /// The operation's outcome.
     pub fn outcome(&self) -> Result<&T, &E> {
         self.outcome.as_ref()
     }
 
-    /// Every retained diagnostic, in deterministic discovery order.
-    pub fn diagnostics(&self) -> impl Iterator<Item = &Diagnostic> {
+    /// One logical stream for presenters: every retained diagnostic
+    /// (deterministic discovery order), then the primary failure
+    /// projected from the outcome, then its causal chain — so a
+    /// presenter iterating this method alone misses nothing. The
+    /// failure is a projection: it stays authoritative in
+    /// [`outcome`](Self::outcome) and is never copied into storage.
+    pub fn diagnostics(&self) -> impl Iterator<Item = DiagnosticRef<'_, E>>
+    where
+        E: ProjectedFailure,
+    {
+        let failure = self.outcome.as_ref().err();
+        self.retained_diagnostics()
+            .map(DiagnosticRef::Retained)
+            .chain(failure.map(DiagnosticRef::Failure))
+            .chain(
+                Causes {
+                    next: failure.and_then(ProjectedFailure::cause),
+                }
+                .map(DiagnosticRef::Cause),
+            )
+    }
+
+    /// Only what the sink retained, in deterministic discovery order —
+    /// the storage view (tests, tooling). The primary failure is never
+    /// among these; [`diagnostics`](Self::diagnostics) is the complete
+    /// presentation stream.
+    pub fn retained_diagnostics(&self) -> impl Iterator<Item = &Diagnostic> {
         self.diagnostics.entries().iter()
     }
 
     /// Retained warnings only.
     pub fn warnings(&self) -> impl Iterator<Item = &Diagnostic> {
-        self.diagnostics()
+        self.retained_diagnostics()
             .filter(|d| matches!(d.severity(), Severity::Warning))
     }
 

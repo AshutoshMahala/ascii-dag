@@ -230,7 +230,7 @@ variants for hand-built IRs. The level-axis scalars (`bend_at`,
 `channel_at`, `span_start`/`span_end`) live on the axis the edge's
 `flow_axis` names — a row for `Y` trunks, a column for `X`.
 
-Export it as JSON (schema v1.3) for a renderer in another language:
+Export it as JSON (schema v1.4) for a renderer in another language:
 
 ```rust
 let json = ir.to_json();

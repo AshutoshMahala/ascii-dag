@@ -50,7 +50,23 @@ fn corpus() -> Vec<(&'static str, Graph<'static>)> {
         fan.add_edge(0usize, i, None);
     }
 
-    vec![("labeled", labeled), ("clusters", clusters), ("fan", fan)]
+    // One short node, one very long labeled self-loop, NO routed
+    // edges: the loop's legend line dominates the output, so no
+    // routed-edge slack can hide an estimator that forgets loops.
+    let mut loop_only = Graph::new();
+    loop_only.add_node(1usize, "N");
+    loop_only.add_edge(
+        1usize,
+        1usize,
+        Some("a-self-loop-legend-line-long-enough-that-no-per-edge-slack-could-ever-absorb-it"),
+    );
+
+    vec![
+        ("labeled", labeled),
+        ("clusters", clusters),
+        ("fan", fan),
+        ("loop-only", loop_only),
+    ]
 }
 
 #[test]

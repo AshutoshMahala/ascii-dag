@@ -267,6 +267,10 @@ pub struct SubgraphInfo<'a> {
 pub struct SelfLoopRecord<'a> {
     /// The node the loop is on.
     pub node_id: usize,
+    /// The node's position in [`LayoutIR::nodes`] — resolved once at
+    /// layout so consumers join record→node in O(1) instead of
+    /// scanning by id. Hand-built IRs own its consistency.
+    pub node_index: usize,
     /// Original graph insertion index (the style-callback convention —
     /// self-loops COUNT in this numbering, which is why it diverges
     /// from routed-list positions whenever they exist).

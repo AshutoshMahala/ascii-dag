@@ -311,8 +311,11 @@ impl Scene<'_, '_> {
         }
     }
 
-    /// Edge indices (IR-list order) whose labels go to the legend
-    /// under the options this scene was planned with. Empty unless
+    /// SCENE indices of edges whose labels go to the legend under the
+    /// options this scene was planned with — resolve them through
+    /// [`edge`](Self::edge) (routed entries coincide with layout-list
+    /// positions; self-loop entries sit past the routed list). Empty
+    /// unless
     /// [`LabelOverflow::Legend`](super::config::LabelOverflow::Legend)
     /// was set.
     pub fn legend_entries(&self) -> &[usize] {

@@ -248,8 +248,8 @@ diagnostic code via `.code()` and an actionable `.hint()`:
 Non-fatal events are typed diagnostics: collect them with a
 `DiagnosticRun` through the diagnostic-aware entry points
 (`graph.layout().compute(&mut cx)` / `.reported()`,
-`planner.plan(&ir, &opts, &mut cx)`) — the library never writes to
-stderr:
+`planner.plan(&ir, &opts).compute(&mut cx)`) — the library never
+writes to stderr:
 
 | Code | Fires when | Channel |
 |---|---|---|

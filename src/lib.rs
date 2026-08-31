@@ -28,7 +28,10 @@
 //! - `alloc`: Heap-based `Graph` API without `std`
 //! - `arena` (+ `arena-idx-u8`/`u16`/`u32`): No-alloc CSR layout and
 //!   rendering on caller-provided arenas
-//! - `warnings`: Debug warnings for auto-created nodes
+//!
+//! Non-fatal conditions (auto-created placeholders, omitted labels)
+//! travel through the [`diagnostics`] channel as typed data — there
+//! is no logging feature and the library never writes to stderr.
 //!
 //! To minimize bundle size, disable `generic`:
 //! ```toml
@@ -160,8 +163,8 @@ pub mod validation;
 
 pub use diagnostics::{
     BorrowedReport, CountingDiagnostics, Diagnostic, DiagnosticContext, DiagnosticCounts,
-    DiagnosticKind, DiagnosticRun, DiagnosticSink, FnDiagnostics, IgnoreDiagnostics, Report,
-    Severity, SliceDiagnostics,
+    DiagnosticKind, DiagnosticRef, DiagnosticRun, DiagnosticSink, DiagnosticSubject, FnDiagnostics,
+    IgnoreDiagnostics, ProjectedFailure, Report, Severity, SliceDiagnostics,
 };
 #[cfg(feature = "alloc")]
 pub use diagnostics::{OwnedReport, VecDiagnostics};

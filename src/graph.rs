@@ -366,8 +366,13 @@ impl<'g, 'a> LayoutRun<'g, 'a> {
         self,
         diagnostics: &mut crate::diagnostics::DiagnosticContext<'_>,
     ) -> crate::ir::LayoutIR<'a> {
-        for d in &self.graph.pending_diagnostics {
-            diagnostics.emit_diagnostic(*d);
+        // One delivery: the graph's outstanding mutation diagnostics
+        // move into this run and are gone — a later run reports only
+        // what happened after this one (run-scoped, no permanent
+        // graph history). A quiet terminal consumes them too: quiet
+        // explicitly discards, it does not defer.
+        for d in self.graph.pending_diagnostics.take() {
+            diagnostics.emit_diagnostic(d);
         }
         match self.config {
             Some(config) => self.graph.compute_layout_with_config(config),
@@ -493,11 +498,12 @@ pub struct Graph<'a> {
     /// Missing-node policy; `None` = never set (the implicit 0.10
     /// default, which makes placeholder creation diagnostic-worthy).
     missing_node_policy: Option<MissingNodePolicy>,
-    /// Mutation-time diagnostics, replayed into the context of the
-    /// next diagnostic-aware layout run (mutations have no context of
+    /// Mutation-time diagnostics, delivered ONCE to the first layout
+    /// run terminal and consumed by it (mutations have no context of
     /// their own; the receipt serves the call site, this serves the
-    /// run — one for running, one for logging).
-    pending_diagnostics: Vec<crate::diagnostics::Diagnostic>,
+    /// run). `RefCell` because delivery drains through the run's
+    /// `&Graph`; borrows are transient and never overlap.
+    pending_diagnostics: core::cell::RefCell<Vec<crate::diagnostics::Diagnostic>>,
 }
 
 #[cfg(feature = "alloc")]
@@ -551,7 +557,7 @@ impl<'a> Graph<'a> {
             node_kind_tag: Vec::new(),
             node_custom: Vec::new(),
             missing_node_policy: None,
-            pending_diagnostics: Vec::new(),
+            pending_diagnostics: core::cell::RefCell::new(Vec::new()),
         };
 
         // Build id_to_index map, widths cache, and heights cache; seed
@@ -616,7 +622,7 @@ impl<'a> Graph<'a> {
             node_kind_tag: Vec::new(),
             node_custom: Vec::new(),
             missing_node_policy: None,
-            pending_diagnostics: Vec::new(),
+            pending_diagnostics: core::cell::RefCell::new(Vec::new()),
         };
 
         // Build id_to_index map, widths cache, and heights cache; seed
@@ -711,6 +717,7 @@ impl<'a> Graph<'a> {
         let (p, note) = Self::validate_passes(passes);
         if let Some(kind) = note {
             self.pending_diagnostics
+                .get_mut()
                 .push(crate::diagnostics::Diagnostic::new(kind));
         }
         self.sugiyama_config.crossing_pipeline = if p == 0 {
@@ -887,16 +894,15 @@ impl<'a> Graph<'a> {
     /// `AUTO` extras stay collision-free until the counter saturates
     /// at `usize::MAX` (only reachable by explicitly parking ids
     /// there); a saturated `AUTO`, like any duplicate id, falls
-    /// through to the replace semantics below and emits a diagnostic
-    /// under the `warnings` feature.
+    /// through to the replace semantics below.
     ///
     /// If the node already exists (auto-created by `add_edge`, or added
     /// earlier), this replaces its label — promoting auto-created
-    /// placeholders to explicit nodes. Under the `warnings` feature, a
-    /// replacement involving `AUTO` on either side (an explicit id
-    /// overwriting an auto-numbered node, or a saturated `AUTO`
-    /// overwriting anything) prints a diagnostic, mirroring the
-    /// auto-created-placeholder warning.
+    /// placeholders to explicit nodes. A replacement involving `AUTO`
+    /// on either side (an explicit id overwriting an auto-numbered
+    /// node, or a saturated `AUTO` overwriting anything) records a
+    /// [`NodeReplaced`](crate::DiagnosticKind::NodeReplaced)
+    /// diagnostic, delivered to the next layout run.
     ///
     /// # Examples
     ///
@@ -935,6 +941,7 @@ impl<'a> Graph<'a> {
             let existing_auto = self.auto_numbered.contains(&id);
             if incoming_auto || existing_auto {
                 self.pending_diagnostics
+                    .get_mut()
                     .push(crate::diagnostics::Diagnostic::new(
                         crate::diagnostics::DiagnosticKind::NodeReplaced { node: id },
                     ));
@@ -1062,6 +1069,7 @@ impl<'a> Graph<'a> {
             // is the record).
             if self.missing_node_policy.is_none() {
                 self.pending_diagnostics
+                    .get_mut()
                     .push(crate::diagnostics::Diagnostic::new(
                         crate::diagnostics::DiagnosticKind::PlaceholderCreated { node: id },
                     ));
@@ -1312,12 +1320,14 @@ impl<'a> Graph<'a> {
     ///
     /// Mutation-time diagnostics recorded on this graph (implicit
     /// placeholder creation, AUTO-involved replacement, clamped
-    /// configuration) are REPLAYED into the run in insertion order
-    /// before the layout runs — mutations have no context of their
-    /// own, so this is where run-level observability begins; each new
-    /// run replays the graph's outstanding events (one run = one
-    /// diagnostic set). `compute_layout`/`compute_layout_with_config`
-    /// remain the documented diagnostics-discarding one-shots.
+    /// configuration) are DELIVERED into the run in insertion order
+    /// before the layout runs, and consumed by that delivery —
+    /// mutations have no context of their own, so the first run
+    /// terminal after a mutation is where its diagnostic surfaces,
+    /// exactly once. That includes `quiet()`: quiet explicitly
+    /// discards the outstanding events rather than deferring them to
+    /// a later run. `compute_layout`/`compute_layout_with_config`
+    /// predate the channel and neither deliver nor consume.
     pub fn layout<'g>(&'g self) -> LayoutRun<'g, 'a> {
         LayoutRun {
             graph: self,

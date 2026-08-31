@@ -114,7 +114,8 @@ pub(crate) fn emit_legend<V: LayoutView, W: core::fmt::Write>(
 /// plan. Right-trimming only shrinks rows, so `width + 1` per row
 /// bounds plain output; colored rows add at most one escape per cell
 /// (worst case truecolor, 19 bytes) plus a reset. The legend bound
-/// assumes every labeled edge lands in the legend.
+/// assumes every labeled edge — routed AND self-loop — lands in the
+/// legend.
 pub(crate) fn estimate_output_size<V: LayoutView>(view: &V, colored: bool, legend: bool) -> usize {
     let per_cell = if colored { 4 + 19 } else { 4 };
     let mut size = view
@@ -136,6 +137,16 @@ pub(crate) fn estimate_output_size<V: LayoutView>(view: &V, colored: bool, legen
             // absurd dimensions, and an estimate must saturate to
             // usize::MAX (unfittable), never wrap into an UNDERSIZED
             // buffer bound or panic in debug.
+            size = size.saturating_add(
+                label_len
+                    .saturating_add(max_node_label.saturating_mul(2))
+                    .saturating_add(40),
+            );
+        }
+        // Self-loop legend lines ("A → A: \"retry\"") — same per-line
+        // bound, same saturation discipline.
+        for j in 0..view.self_loop_count() {
+            let label_len = view.self_loop(j).label.map_or(0, |l| l.len());
             size = size.saturating_add(
                 label_len
                     .saturating_add(max_node_label.saturating_mul(2))

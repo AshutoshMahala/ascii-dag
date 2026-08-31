@@ -245,7 +245,13 @@ impl<'a> LayoutIRArenaBuilder<'a> {
     /// shared label pool — `max_label_bytes` must cover them, which
     /// the layout's label sum already does since loops live in the
     /// input edge list).
-    pub fn add_self_loop(&mut self, node_id: usize, edge_index: usize, label: &str) -> Option<()> {
+    pub fn add_self_loop(
+        &mut self,
+        node_id: usize,
+        node_index: usize,
+        edge_index: usize,
+        label: &str,
+    ) -> Option<()> {
         if self.self_loop_count >= self.self_loops.len() {
             return None;
         }
@@ -256,6 +262,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         self.labels[self.label_offset..self.label_offset + bytes.len()].copy_from_slice(bytes);
         self.self_loops[self.self_loop_count] = SelfLoopArena {
             node_id,
+            node_index,
             edge_index,
             label_offset: self.label_offset,
             label_len: bytes.len(),

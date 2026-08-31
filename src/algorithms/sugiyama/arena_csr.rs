@@ -1284,6 +1284,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             builder
                 .add_self_loop(
                     graph.node_id(from_idx),
+                    from_idx,
                     edge_idx,
                     if has_labeled_edges {
                         graph.edge_label(edge_idx)

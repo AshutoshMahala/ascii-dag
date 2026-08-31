@@ -87,6 +87,10 @@ pub(crate) struct OwnerScratch<'a> {
     pub row_cur: &'a mut [u32],
     /// Flat row-incidence entries (`slot + 1` per element per row).
     pub row_inc: &'a mut [u32],
+    /// `node index → self-loop record index + 1` (`0` = no record),
+    /// built once per plan — the O(1) marker→pseudo-slot join that
+    /// keeps the node pass linear when many nodes carry loops.
+    pub node_loop_slot: &'a mut [u32],
 }
 
 /// Rolling-sweep position, owned by the caller across one ascending
@@ -109,11 +113,21 @@ pub(crate) fn owner_incidence_capacity(plan: &RenderPlan<'_>, band_rows: usize) 
 
 /// Fill the per-plan tables and reset the sweep. Call once before a
 /// (re)pass of ascending bands.
-pub(crate) fn owner_prepare(
+pub(crate) fn owner_prepare<V: LayoutView>(
     plan: &RenderPlan<'_>,
+    view: &V,
     scratch: &mut OwnerScratch<'_>,
     sweep: &mut OwnerSweep,
 ) {
+    // Reverse order so the FIRST record on a node wins — the same
+    // rule hit-testing applies to multi-loop nodes.
+    scratch.node_loop_slot.fill(0);
+    for j in (0..view.self_loop_count()).rev() {
+        let r = view.self_loop(j);
+        if r.node_index < scratch.node_loop_slot.len() {
+            scratch.node_loop_slot[r.node_index] = j as u32 + 1;
+        }
+    }
     scratch.edge_slot.fill(OWNER_NONE);
     for (slot, el) in plan.elements().iter().enumerate() {
         if matches!(el.kind, ElementKind::Edge) {
@@ -156,6 +170,7 @@ pub(crate) fn owner_rasterize_band<V: LayoutView>(
         row_off,
         row_cur,
         row_inc,
+        node_loop_slot,
     } = &mut *scratch;
     plane.fill(OWNER_NONE);
     let rows = y1 - y0;
@@ -342,15 +357,14 @@ pub(crate) fn owner_rasterize_band<V: LayoutView>(
             }
             if let Some((sx, sy)) = n.self_loop_at {
                 if sy == y && sx < width {
-                    // The marker cell belongs to the self-loop EDGE:
-                    // a pseudo-slot past the element table carries the
-                    // record's position (hand-built markers with no
-                    // record keep the legacy node attribution).
-                    plane[base + sx] = match (0..view.self_loop_count())
-                        .find(|&j| view.self_loop(j).node_id == n.id)
-                    {
-                        Some(j) => (elements.len() + 1 + j) as u32,
-                        None => owner,
+                    // The marker cell belongs to the self-loop EDGE: a
+                    // pseudo-slot past the element table carries the
+                    // record's position, joined O(1) through the table
+                    // `owner_prepare` built (hand-built markers with
+                    // no record keep the legacy node attribution).
+                    plane[base + sx] = match node_loop_slot.get(el.index).copied().unwrap_or(0) {
+                        0 => owner,
+                        j1 => (elements.len() + j1 as usize) as u32,
                     };
                 }
             }
@@ -428,6 +442,7 @@ mod tests {
             let mut row_off = vec![0u32; band_rows + 1];
             let mut row_cur = vec![0u32; band_rows];
             let mut row_inc = vec![0u32; owner_incidence_capacity(&plan, band_rows).unwrap()];
+            let mut node_loop_slot = vec![0u32; ir.nodes().len()];
             let mut scratch = OwnerScratch {
                 claim_next: &mut claim,
                 edge_slot: &mut edge_slot,
@@ -436,9 +451,10 @@ mod tests {
                 row_off: &mut row_off,
                 row_cur: &mut row_cur,
                 row_inc: &mut row_inc,
+                node_loop_slot: &mut node_loop_slot,
             };
             let mut sweep = OwnerSweep::default();
-            owner_prepare(&plan, &mut scratch, &mut sweep);
+            owner_prepare(&plan, &ir, &mut scratch, &mut sweep);
 
             let t = std::time::Instant::now();
             let mut y0 = 0;
