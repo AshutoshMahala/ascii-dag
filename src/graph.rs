@@ -309,6 +309,95 @@ impl From<NodeId> for usize {
 #[derive(Debug, Clone, Copy)]
 pub struct Auto;
 
+/// Receipt for one [`Graph::add_edge`] call — always returned, uniform
+/// in shape: an edge was always inserted, and the booleans answer the
+/// one question the caller cannot already answer (did an endpoint get
+/// auto-created?). Deliberately NOT `#[must_use]`: a receipt is
+/// branchable domain data, not a warning — ignoring it is legitimate,
+/// and statement-position calls compile unchanged.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EdgeInsertion {
+    /// The new edge's input index (insertion order) — the same
+    /// identity style callbacks, diagnostics, and
+    /// `EdgeView::input_index` use.
+    pub edge: usize,
+    /// Whether the source endpoint was auto-created as a placeholder.
+    pub created_source: bool,
+    /// Whether the target endpoint was auto-created as a placeholder.
+    pub created_target: bool,
+}
+
+/// How [`Graph::add_edge`] treats an edge endpoint that was never
+/// declared. Declaring the policy — even the default — is intent:
+/// placeholder creation then stops warning (the [`EdgeInsertion`]
+/// receipt remains the record). A rejecting policy is an additive
+/// future variant.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MissingNodePolicy {
+    /// The 0.10-compatible behavior: auto-create a placeholder
+    /// (`NodeOrigin::EdgeInferred`), recorded in the receipt.
+    #[default]
+    AutoCreate,
+}
+
+/// A pending layout run — see [`Graph::layout`]. Configure with
+/// [`with_config`](Self::with_config), then finish with exactly one
+/// terminal.
+#[cfg(feature = "alloc")]
+#[must_use = "a layout run does nothing until a terminal (.compute / .reported / .quiet) runs it"]
+pub struct LayoutRun<'g, 'a> {
+    graph: &'g Graph<'a>,
+    config: Option<&'g LayoutConfig<'g>>,
+}
+
+#[cfg(feature = "alloc")]
+impl<'g, 'a> LayoutRun<'g, 'a> {
+    /// Use `config` instead of the standard layout configuration.
+    pub fn with_config(mut self, config: &'g LayoutConfig<'g>) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// Canonical terminal: replay the graph's mutation diagnostics
+    /// into `diagnostics`, then compute the layout.
+    pub fn compute(
+        self,
+        diagnostics: &mut crate::diagnostics::DiagnosticContext<'_>,
+    ) -> crate::ir::LayoutIR<'a> {
+        for d in &self.graph.pending_diagnostics {
+            diagnostics.emit_diagnostic(*d);
+        }
+        match self.config {
+            Some(config) => self.graph.compute_layout_with_config(config),
+            None => self.graph.compute_layout(),
+        }
+    }
+
+    /// Report terminal: run with an owned collector and package the
+    /// (infallible) outcome with everything collected.
+    pub fn reported(
+        self,
+    ) -> crate::diagnostics::OwnedReport<crate::ir::LayoutIR<'a>, core::convert::Infallible> {
+        let mut run =
+            crate::diagnostics::DiagnosticRun::new(crate::diagnostics::VecDiagnostics::default());
+        let ir = {
+            let mut cx = run.context();
+            self.compute(&mut cx)
+        };
+        run.finish(Ok(ir))
+    }
+
+    /// Quiet terminal: explicitly discard diagnostics
+    /// (constructs [`IgnoreDiagnostics`](crate::IgnoreDiagnostics)).
+    pub fn quiet(self) -> crate::ir::LayoutIR<'a> {
+        let mut run = crate::diagnostics::DiagnosticRun::new(crate::diagnostics::IgnoreDiagnostics);
+        let mut cx = run.context();
+        self.compute(&mut cx)
+    }
+}
+
 /// Auto-numbering sentinel for `Graph::add_node`'s id slot:
 /// `g.add_node(AUTO, "label")` lets the graph pick the next id above
 /// every id it has seen. `Auto` does not convert to [`NodeId`], so the
@@ -395,13 +484,20 @@ pub struct Graph<'a> {
     pub(crate) node_subgraph: HashMap<usize, usize>, // node_id → subgraph_id
     pub(crate) next_subgraph_id: usize,      // Monotonic ID counter
     pub(crate) next_auto: usize,             // AUTO id source: 1 above every id seen (saturating)
-    #[cfg(feature = "warnings")]
-    pub(crate) auto_numbered: HashSet<usize>, // Ids assigned via AUTO (D5 replace diagnostics)
+    pub(crate) auto_numbered: HashSet<usize>, // Ids assigned via AUTO (replace diagnostics)
     // D6 sparse+packed content storage: 1 B/node kind tag; painter +
     // payload only for nodes that have them, keyed by node index
     // (sorted — appends are naturally ordered, replaces upsert).
     pub(crate) node_kind_tag: Vec<u8>,
     pub(crate) node_custom: Vec<(usize, Option<NodePaintFn>, &'a str)>,
+    /// Missing-node policy; `None` = never set (the implicit 0.10
+    /// default, which makes placeholder creation diagnostic-worthy).
+    missing_node_policy: Option<MissingNodePolicy>,
+    /// Mutation-time diagnostics, replayed into the context of the
+    /// next diagnostic-aware layout run (mutations have no context of
+    /// their own; the receipt serves the call site, this serves the
+    /// run — one for running, one for logging).
+    pending_diagnostics: Vec<crate::diagnostics::Diagnostic>,
 }
 
 #[cfg(feature = "alloc")]
@@ -451,10 +547,11 @@ impl<'a> Graph<'a> {
             node_subgraph: HashMap::new(),
             next_subgraph_id: 0,
             next_auto: 0,
-            #[cfg(feature = "warnings")]
             auto_numbered: HashSet::new(),
             node_kind_tag: Vec::new(),
             node_custom: Vec::new(),
+            missing_node_policy: None,
+            pending_diagnostics: Vec::new(),
         };
 
         // Build id_to_index map, widths cache, and heights cache; seed
@@ -515,10 +612,11 @@ impl<'a> Graph<'a> {
             node_subgraph: HashMap::new(),
             next_subgraph_id: 0,
             next_auto: 0,
-            #[cfg(feature = "warnings")]
             auto_numbered: HashSet::new(),
             node_kind_tag: Vec::new(),
             node_custom: Vec::new(),
+            missing_node_policy: None,
+            pending_diagnostics: Vec::new(),
         };
 
         // Build id_to_index map, widths cache, and heights cache; seed
@@ -610,7 +708,11 @@ impl<'a> Graph<'a> {
     ///
     /// Values > 20 trigger a warning.  Values > 1000 are clamped to 0.
     pub fn set_crossing_reduction_passes(&mut self, passes: usize) {
-        let p = Self::validate_passes(passes);
+        let (p, note) = Self::validate_passes(passes);
+        if let Some(kind) = note {
+            self.pending_diagnostics
+                .push(crate::diagnostics::Diagnostic::new(kind));
+        }
         self.sugiyama_config.crossing_pipeline = if p == 0 {
             Vec::new()
         } else {
@@ -643,31 +745,26 @@ impl<'a> Graph<'a> {
     /// - Values > 1000 are treated as accidental (e.g., -1i32 as usize) and clamped to 0
     /// - Values > 20 trigger a warning about diminishing returns
     #[inline]
-    fn validate_passes(passes: usize) -> usize {
+    fn validate_passes(passes: usize) -> (usize, Option<crate::diagnostics::DiagnosticKind>) {
         if passes > 1000 {
-            #[cfg(feature = "std")]
-            crate::errors::emit_warning(
-                crate::errors::WARN_CONFIG_CLAMPED,
-                format_args!(
-                    "crossing_reduction_passes={} is unreasonably large (possibly \
-                     from negative value). Clamping to 0.",
-                    passes
-                ),
-            );
-            0
+            (
+                0,
+                Some(crate::diagnostics::DiagnosticKind::CrossingPassesClamped {
+                    requested: passes,
+                    clamped_to: 0,
+                }),
+            )
         } else if passes > 20 {
-            #[cfg(feature = "std")]
-            crate::errors::emit_warning(
-                crate::errors::WARN_CONFIG_CLAMPED,
-                format_args!(
-                    "crossing_reduction_passes={} is high. Values >20 have \
-                     diminishing returns and may be slow.",
-                    passes
+            (
+                passes,
+                Some(
+                    crate::diagnostics::DiagnosticKind::CrossingPassesExcessive {
+                        requested: passes,
+                    },
                 ),
-            );
-            passes
+            )
         } else {
-            passes
+            (passes, None)
         }
     }
 
@@ -816,8 +913,6 @@ impl<'a> Graph<'a> {
             IdOrAuto::Id(id) => (id, false),
             IdOrAuto::Auto => (self.next_auto, true),
         };
-        #[cfg(not(feature = "warnings"))]
-        let _ = incoming_auto;
         // Resolve the content BEFORE any graph state mutates: the
         // accessors are user code and may panic — a caught panic must
         // not leave the AUTO counter or diagnostics state advanced for
@@ -832,7 +927,6 @@ impl<'a> Graph<'a> {
         let payload = node.payload();
         let size_is_implicit = node.size_is_implicit();
         self.bump_next_auto(id);
-        #[cfg(feature = "warnings")]
         if self.id_to_index.contains_key(&id) {
             // D5/D7: a duplicate involving AUTO on either side is worth
             // a diagnostic — an explicit id silently overwriting an
@@ -840,24 +934,12 @@ impl<'a> Graph<'a> {
             // existing node.
             let existing_auto = self.auto_numbered.contains(&id);
             if incoming_auto || existing_auto {
-                crate::errors::emit_warning(
-                    crate::errors::WARN_AUTO_REPLACED,
-                    format_args!(
-                        "node {} replaced ({}). Replace-on-duplicate is the standing \
-                         semantic; this diagnostic fires because AUTO numbering was \
-                         involved.",
-                        id,
-                        if incoming_auto {
-                            "AUTO resolved to an id that is already taken — the counter \
-                             only saturates when explicit ids sit near usize::MAX"
-                        } else {
-                            "an explicit id overwrote an auto-numbered node"
-                        },
-                    ),
-                );
+                self.pending_diagnostics
+                    .push(crate::diagnostics::Diagnostic::new(
+                        crate::diagnostics::DiagnosticKind::NodeReplaced { node: id },
+                    ));
             }
         }
-        #[cfg(feature = "warnings")]
         {
             // Track how this id was assigned (auto or explicit) so the
             // check above can see the existing side next time.
@@ -930,10 +1012,11 @@ impl<'a> Graph<'a> {
         from: impl Into<NodeId>,
         to: impl Into<NodeId>,
         label: Option<&'a str>,
-    ) {
+    ) -> EdgeInsertion {
         let (from, to) = (from.into().id(), to.into().id());
-        self.ensure_node_exists(from);
-        self.ensure_node_exists(to);
+        let created_source = self.ensure_node_exists(from);
+        let created_target = self.ensure_node_exists(to);
+        let edge = self.edges.len();
         self.edges.push((from, to, label));
 
         // Update adjacency lists (O(1) lookups)
@@ -943,6 +1026,20 @@ impl<'a> Graph<'a> {
             self.children[from_idx].push(to_idx);
             self.parents[to_idx].push(from_idx);
         }
+        EdgeInsertion {
+            edge,
+            created_source,
+            created_target,
+        }
+    }
+
+    /// Declare how [`add_edge`](Self::add_edge) treats an undeclared
+    /// endpoint. Setting the policy — even to the default — is
+    /// declared intent: placeholder creation then stops emitting the
+    /// placeholder diagnostic (the [`EdgeInsertion`] receipt remains
+    /// the record either way).
+    pub fn set_missing_node_policy(&mut self, policy: MissingNodePolicy) {
+        self.missing_node_policy = Some(policy);
     }
 
     /// Get the label for an edge, if any.
@@ -954,18 +1051,21 @@ impl<'a> Graph<'a> {
     /// Ensure a node exists, auto-creating if missing.
     /// Auto-created nodes will be visually distinct (rendered with ⟨⟩ instead of [])
     /// until explicitly defined with add_node.
-    fn ensure_node_exists(&mut self, id: usize) {
+    /// Returns whether a placeholder was created.
+    fn ensure_node_exists(&mut self, id: usize) -> bool {
         // O(1) lookup with HashMap
         if !self.id_to_index.contains_key(&id) {
-            #[cfg(feature = "warnings")]
-            crate::errors::emit_warning(
-                crate::errors::WARN_NODE_AUTO_CREATED,
-                format_args!(
-                    "node {} missing - auto-creating as placeholder. Call \
-                     add_node({}, \"label\") before add_edge() to provide a label.",
-                    id, id
-                ),
-            );
+            // Under the IMPLICIT default policy the caller may not
+            // know auto-create is happening — record a diagnostic for
+            // the next diagnostic-aware run. An EXPLICITLY declared
+            // policy is chosen behavior and stays silent (the receipt
+            // is the record).
+            if self.missing_node_policy.is_none() {
+                self.pending_diagnostics
+                    .push(crate::diagnostics::Diagnostic::new(
+                        crate::diagnostics::DiagnosticKind::PlaceholderCreated { node: id },
+                    ));
+            }
 
             // Create node with empty label. An id-creating site: the
             // AUTO counter must clear implicitly created ids too.
@@ -981,7 +1081,9 @@ impl<'a> Graph<'a> {
             // Extend adjacency lists
             self.children.push(Vec::new());
             self.parents.push(Vec::new());
+            return true;
         }
+        false
     }
 
     /// Check if a node was auto-created (for visual distinction)
@@ -1194,6 +1296,32 @@ impl<'a> Graph<'a> {
             }
             #[cfg(feature = "layout-vertical")]
             _ => crate::algorithms::sugiyama::heap::compute_layout_cfg::<Vertical>(self, config),
+        }
+    }
+
+    /// Begin a layout run — the diagnostic-aware entry point, as a
+    /// builder because its inputs are optional. Finish with one of
+    /// three terminals:
+    ///
+    /// - [`compute(&mut cx)`](LayoutRun::compute) — canonical: emits
+    ///   into your run's context and composes across phases;
+    /// - [`reported()`](LayoutRun::reported) — owns a complete
+    ///   [`OwnedReport`](crate::OwnedReport) for this operation;
+    /// - [`quiet()`](LayoutRun::quiet) — explicitly discards
+    ///   diagnostics.
+    ///
+    /// Mutation-time diagnostics recorded on this graph (implicit
+    /// placeholder creation, AUTO-involved replacement, clamped
+    /// configuration) are REPLAYED into the run in insertion order
+    /// before the layout runs — mutations have no context of their
+    /// own, so this is where run-level observability begins; each new
+    /// run replays the graph's outstanding events (one run = one
+    /// diagnostic set). `compute_layout`/`compute_layout_with_config`
+    /// remain the documented diagnostics-discarding one-shots.
+    pub fn layout<'g>(&'g self) -> LayoutRun<'g, 'a> {
+        LayoutRun {
+            graph: self,
+            config: None,
         }
     }
 
@@ -1665,10 +1793,8 @@ mod tests {
     /// The state machine behind the D5/D7 replace diagnostics: ids
     /// gain the auto mark when AUTO assigns them, lose it when an
     /// explicit id overwrites them (the transition that fires the
-    /// `W.Graph.Node.007` warning), and a saturated AUTO re-marks.
-    /// The emitted text goes to stderr (not capturable portably);
-    /// the set drives every emission decision, so it is the pin.
-    #[cfg(feature = "warnings")]
+    /// `W.Graph.Node.007` diagnostic), and a saturated AUTO re-marks.
+    /// The set drives every emission decision, so it is the pin.
     #[test]
     #[allow(deprecated)] // with_size's explicit path is part of the pin
     fn auto_numbered_tracking_powers_replace_diagnostics() {

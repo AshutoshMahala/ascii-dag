@@ -96,6 +96,7 @@ macro_rules! concrete_check {
             let mut planner = ScenePlanner::new_in(&mut scene_ws);
             let scene = planner
                 .plan(ir, &plan_options)
+                .quiet()
                 .unwrap_or_else(|e| panic!("{what}: exact scene storage failed: {e}"));
             let req = scene.composition_requirements(&budget);
 

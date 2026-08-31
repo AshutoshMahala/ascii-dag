@@ -1,4 +1,4 @@
-//! Structured error codes and diagnostics following the Waddling Diagnostic
+//! Structured error codes and diagnostics following the Waddling ErrorChain
 //! Protocol (WDP) Level 0.
 //!
 //! Error codes follow the format `Severity.Component.Primary.Sequence`:
@@ -318,7 +318,8 @@ pub const RENDER_SINK_FAILED: &str = wdp!(E.Render.Sink.FAILED);
 /// auto-created (rendered as `⟨⟩` until explicitly defined).
 ///
 /// `W.Graph.Node.021` — Sequence 021 = NOT_FOUND, severity W =
-/// non-blocking warning. Emitted under the opt-in `warnings` feature.
+/// non-blocking warning, emitted into the diagnostics channel under
+/// the implicit missing-node policy.
 pub const WARN_NODE_AUTO_CREATED: &str = wdp!(W.Graph.Node.NOT_FOUND);
 
 /// A duplicate `add_node` replaced an existing node with `AUTO`
@@ -326,16 +327,15 @@ pub const WARN_NODE_AUTO_CREATED: &str = wdp!(W.Graph.Node.NOT_FOUND);
 /// auto-numbered node, or a saturated `AUTO` overwrote an existing one.
 ///
 /// `W.Graph.Node.007` — Sequence 007 = DUPLICATE. Emitted under the
-/// opt-in `warnings` feature.
+/// diagnostics channel.
 pub const WARN_AUTO_REPLACED: &str = wdp!(W.Graph.Node.DUPLICATE);
 
 /// A layout-configuration value is outside its useful range and was
 /// clamped or will behave poorly (e.g. `crossing_reduction_passes`).
 ///
-/// `W.Graph.Dag.003` — Sequence 003 = INVALID. Emitted in any `std`
-/// build: this diagnostic predates the `warnings` feature and keeps
-/// its historical gate — moving it behind `warnings` would silence it
-/// for existing users.
+/// `W.Graph.Dag.003` — Sequence 003 = INVALID. Emitted into the
+/// diagnostics channel (recorded at the setter, replayed into the
+/// next diagnostic-aware layout run).
 pub const WARN_CONFIG_CLAMPED: &str = wdp!(W.Graph.Dag.INVALID);
 
 /// An edge label will not paint AND the legend is disabled (the
@@ -348,22 +348,10 @@ pub const WARN_CONFIG_CLAMPED: &str = wdp!(W.Graph.Dag.INVALID);
 ///
 /// `W.Render.Label.031` — Sequence 031 = INVISIBLE (Ash's ruling: the
 /// warning names the outcome the user must act on, not the cause —
-/// 026 EXHAUSTED fit only the out-of-space case). Emitted under the
-/// opt-in `warnings` feature, once per affected label per PLAN BUILD:
-/// plans are stateless, so re-rendering the same layout re-emits.
+/// 026 EXHAUSTED fit only the out-of-space case). Emitted into the
+/// diagnostic context, once per affected label per PLAN BUILD: plans
+/// are stateless, so planning the same layout again re-emits.
 pub const WARN_LABEL_INVISIBLE: &str = wdp!(W.Render.Label.INVISIBLE);
-
-/// Emit a WDP-coded warning to stderr — best-effort, never panicking.
-///
-/// `eprintln!` panics if writing to stderr fails (e.g. fd 2 closed in a
-/// daemonized process), which would violate the crate's no-panic
-/// discipline for a *diagnostic*. Write failures are deliberately
-/// discarded: when no console exists, warnings degrade to silence.
-#[cfg(feature = "std")]
-pub(crate) fn emit_warning(code: &str, message: core::fmt::Arguments<'_>) {
-    use std::io::Write;
-    let _ = writeln!(std::io::stderr(), "[ascii-dag] {code}: {message}");
-}
 
 // ── GraphError ──────────────────────────────────────────────────────────
 
@@ -616,7 +604,7 @@ impl fmt::Display for GraphError {
 #[cfg(feature = "std")]
 impl std::error::Error for GraphError {}
 
-// ── Diagnostic (error + causal chain) ───────────────────────────────────
+// ── ErrorChain (error + causal chain) ───────────────────────────────────
 
 #[cfg(feature = "alloc")]
 /// A diagnostic pairs a [`GraphError`] with an optional causal chain.
@@ -632,15 +620,15 @@ impl std::error::Error for GraphError {}
 /// # Construction
 ///
 /// ```
-/// use ascii_dag::errors::{GraphError, Diagnostic};
+/// use ascii_dag::errors::{GraphError, ErrorChain};
 ///
 /// // Leaf diagnostic (no cause)
-/// let d = Diagnostic::from(GraphError::ArenaOom);
+/// let d = ErrorChain::from(GraphError::ArenaOom);
 /// assert_eq!(d.code(), "E.ArenaLayout.Alloc.026");
 /// assert!(d.cause().is_none());
 ///
 /// // Chained diagnostic
-/// let d = Diagnostic::from(GraphError::BuilderFailed)
+/// let d = ErrorChain::from(GraphError::BuilderFailed)
 ///     .caused_by(GraphError::ArenaOom);
 /// assert_eq!(d.code(), "E.ArenaLayout.Builder.026");
 /// assert_eq!(d.cause().unwrap().code(), "E.ArenaLayout.Alloc.026");
@@ -651,23 +639,23 @@ impl std::error::Error for GraphError {}
 /// `Display` renders the full chain, indenting each cause level:
 ///
 /// ```
-/// use ascii_dag::errors::{GraphError, Diagnostic};
+/// use ascii_dag::errors::{GraphError, ErrorChain};
 ///
-/// let d = Diagnostic::from(GraphError::BuilderFailed)
+/// let d = ErrorChain::from(GraphError::BuilderFailed)
 ///     .caused_by(GraphError::ArenaOom);
 /// let msg = d.to_string();
 /// assert!(msg.contains("caused by:"));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Diagnostic {
+pub struct ErrorChain {
     /// The error at this level.
     error: GraphError,
-    /// Optional inner cause (each cause is itself a full `Diagnostic`).
-    cause: Option<Box<Diagnostic>>,
+    /// Optional inner cause (each cause is itself a full `ErrorChain`).
+    cause: Option<Box<ErrorChain>>,
 }
 
 #[cfg(feature = "alloc")]
-impl Diagnostic {
+impl ErrorChain {
     /// Create a leaf diagnostic (no cause).
     #[inline]
     pub fn new(error: GraphError) -> Self {
@@ -676,16 +664,16 @@ impl Diagnostic {
 
     /// Attach a cause to this diagnostic (builder pattern).
     ///
-    /// The cause is wrapped in its own `Diagnostic` with no further inner
-    /// cause.  For deeper chains, use [`caused_by_diagnostic`](Self::caused_by_diagnostic).
+    /// The cause is wrapped in its own `ErrorChain` with no further inner
+    /// cause.  For deeper chains, use [`caused_by_chain`](Self::caused_by_chain).
     #[inline]
     pub fn caused_by(self, cause: GraphError) -> Self {
-        self.caused_by_diagnostic(Diagnostic::new(cause))
+        self.caused_by_chain(ErrorChain::new(cause))
     }
 
-    /// Attach an existing `Diagnostic` as the cause.
+    /// Attach an existing `ErrorChain` as the cause.
     #[inline]
-    pub fn caused_by_diagnostic(mut self, cause: Diagnostic) -> Self {
+    pub fn caused_by_chain(mut self, cause: ErrorChain) -> Self {
         self.cause = Some(Box::new(cause));
         self
     }
@@ -710,7 +698,7 @@ impl Diagnostic {
 
     /// The inner cause, if any.
     #[inline]
-    pub fn cause(&self) -> Option<&Diagnostic> {
+    pub fn cause(&self) -> Option<&ErrorChain> {
         self.cause.as_deref()
     }
 
@@ -723,7 +711,7 @@ impl Diagnostic {
 }
 
 #[cfg(feature = "alloc")]
-impl From<GraphError> for Diagnostic {
+impl From<GraphError> for ErrorChain {
     #[inline]
     fn from(error: GraphError) -> Self {
         Self::new(error)
@@ -731,7 +719,7 @@ impl From<GraphError> for Diagnostic {
 }
 
 #[cfg(feature = "alloc")]
-impl fmt::Display for Diagnostic {
+impl fmt::Display for ErrorChain {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Outer error
         fmt::Display::fmt(&self.error, f)?;
@@ -753,21 +741,21 @@ impl fmt::Display for Diagnostic {
 }
 
 #[cfg(all(feature = "alloc", feature = "std"))]
-impl std::error::Error for Diagnostic {
+impl std::error::Error for ErrorChain {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.cause.as_deref().map(|d| d as &dyn std::error::Error)
     }
 }
 
-/// Iterator over the [`Diagnostic`] chain (outer → innermost cause).
+/// Iterator over the [`ErrorChain`] chain (outer → innermost cause).
 #[cfg(feature = "alloc")]
 pub struct DiagnosticChain<'a> {
-    current: Option<&'a Diagnostic>,
+    current: Option<&'a ErrorChain>,
 }
 
 #[cfg(feature = "alloc")]
 impl<'a> Iterator for DiagnosticChain<'a> {
-    type Item = &'a Diagnostic;
+    type Item = &'a ErrorChain;
 
     fn next(&mut self) -> Option<Self::Item> {
         let diag = self.current?;

@@ -546,7 +546,7 @@ mod tests {
         let g = corpus_graph();
         let heap_ir = g.compute_layout_with_config(&cfg);
         let mut planner = ScenePlanner::new();
-        check(&planner.plan(&heap_ir, options).unwrap());
+        check(&planner.plan(&heap_ir, options).quiet().unwrap());
 
         let g = corpus_graph();
         let mut csr_buf = vec![0u8; g.estimate_csr_arena_size() * 2];
@@ -560,7 +560,7 @@ mod tests {
         let arena_ir = csr
             .compute_layout_arena(&cfg, &mut temp_arena, &mut out_arena)
             .unwrap();
-        check(&planner.plan(&arena_ir, options).unwrap());
+        check(&planner.plan(&arena_ir, options).quiet().unwrap());
     }
 
     /// No owning type can be a view field — `Vec`, `String`, and every
@@ -715,7 +715,7 @@ mod tests {
         b.set_dimensions(8, 3);
         let ir = b.build();
         let mut planner = ScenePlanner::new();
-        let scene = planner.plan(&ir, &PlanOptions::new()).unwrap();
+        let scene = planner.plan(&ir, &PlanOptions::new()).quiet().unwrap();
         assert_eq!(scene.edge(0).unwrap().path, EdgePathView::Direct);
         assert!(scene.edge(1).is_none(), "one edge only");
     }
@@ -729,7 +729,7 @@ mod tests {
         let ir = g.compute_layout_with_config(&layout_config(crate::graph::Direction::TopDown));
         let mut planner = ScenePlanner::new();
 
-        let hidden = planner.plan(&ir, &PlanOptions::new()).unwrap();
+        let hidden = planner.plan(&ir, &PlanOptions::new()).quiet().unwrap();
         assert!(
             hidden.nodes().all(|n| !matches!(n.kind, NodeKind::Dummy)),
             "dummies hidden by default"
@@ -738,6 +738,7 @@ mod tests {
 
         let shown = planner
             .plan(&ir, &PlanOptions::new().with_show_dummy_nodes(true))
+            .quiet()
             .unwrap();
         let dummies: Vec<NodeView<'_>> = shown
             .nodes()
@@ -791,7 +792,7 @@ mod tests {
 
         let overflow_legend = PlanOptions::new()
             .with_label_policy(LabelPolicy::new().with_overflow(LabelOverflow::Legend));
-        let scene = planner.plan(&ir, &overflow_legend).unwrap();
+        let scene = planner.plan(&ir, &overflow_legend).quiet().unwrap();
         let mut inline = 0usize;
         let mut legend = Vec::new();
         for e in scene.edges() {
@@ -814,7 +815,7 @@ mod tests {
 
         // Same placement, Omit overflow: the same unplaced labels are
         // now Omitted and the legend is empty.
-        let scene = planner.plan(&ir, &PlanOptions::new()).unwrap();
+        let scene = planner.plan(&ir, &PlanOptions::new()).quiet().unwrap();
         let omitted = scene
             .edges()
             .filter(|e| matches!(e.label.map(|l| l.slot), Some(LabelSlot::Omitted)))
@@ -857,7 +858,7 @@ mod self_loop_tests {
         let mut planner = ScenePlanner::new();
         let options = PlanOptions::new()
             .with_label_policy(LabelPolicy::new().with_overflow(LabelOverflow::Legend));
-        let scene = planner.plan(&ir, &options).unwrap();
+        let scene = planner.plan(&ir, &options).quiet().unwrap();
 
         assert_eq!(scene.edges().count(), 4, "3 routed + 1 loop");
         let luup = scene.edge(3).expect("loop sits after the routed list");
@@ -897,6 +898,7 @@ mod self_loop_tests {
         let mut planner = ScenePlanner::new();
         let scene = planner
             .plan(&ir, &PlanOptions::new().with_edge_style_fn(styled))
+            .quiet()
             .unwrap();
         assert_eq!(scene.edge(3).unwrap().color, CellColor::ansi256(199));
     }
@@ -920,10 +922,10 @@ mod self_loop_tests {
         let options = PlanOptions::new();
 
         let colors_without: Vec<CellColor> = {
-            let scene = planner.plan(&ir_without, &options).unwrap();
+            let scene = planner.plan(&ir_without, &options).quiet().unwrap();
             (0..3).map(|i| scene.edge(i).unwrap().color).collect()
         };
-        let scene = planner.plan(&ir_with, &options).unwrap();
+        let scene = planner.plan(&ir_with, &options).quiet().unwrap();
         let colors_with: Vec<CellColor> = (0..3).map(|i| scene.edge(i).unwrap().color).collect();
         assert_eq!(colors_without, colors_with, "routed palette must not shift");
     }

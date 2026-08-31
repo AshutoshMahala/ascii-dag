@@ -67,7 +67,7 @@ fn main() {
         ($ir:expr) => {{
             let ir = $ir;
             let mut planner = ScenePlanner::new();
-            let scene = planner.plan(ir, &options.plan).expect("plan");
+            let scene = planner.plan(ir, &options.plan).quiet().expect("plan");
             let rendered = ir.render_string(&options);
             if let Some(i) = args.iter().position(|a| a == "--probe") {
                 let x: usize = args[i + 1].parse().expect("--probe X Y");

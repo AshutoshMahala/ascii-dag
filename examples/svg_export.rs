@@ -49,6 +49,7 @@ fn main() {
     let mut planner = ScenePlanner::new();
     let scene = planner
         .plan(&ir, &RenderOptions::colored(Palette::Ansi).plan)
+        .quiet()
         .expect("plan");
 
     let mut svg = String::new();

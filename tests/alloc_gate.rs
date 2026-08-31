@@ -74,7 +74,7 @@ fn steady_state_repaint_allocates_nothing() {
     // ── Construction: everything allocates HERE, before the window ──
     let plan_options = RenderOptions::colored(Palette::Ansi).plan;
     let mut planner = ScenePlanner::new();
-    let scene = planner.plan(&ir, &plan_options).unwrap();
+    let scene = planner.plan(&ir, &plan_options).quiet().unwrap();
     let budget = ComposeBudget::new();
     let req = scene.composition_requirements(&budget);
     assert!(

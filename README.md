@@ -216,7 +216,6 @@ reference: [docs.rs/ascii-dag](https://docs.rs/ascii-dag).
 | `generic` | ✓ | cycle detection / toposort / impact analysis over your own types |
 | `arena` | | CSR + arena layout pipeline (no-alloc capable) |
 | `arena-idx-u8` / `-u16` / `-u32` | | index width: 255 / 65,535 / 4B nodes (RAM tradeoff) |
-| `warnings` | | stderr diagnostics (see below) |
 
 Typical configurations: default (`ascii-dag = "0.10"`) for the heap
 API; `default-features = false, features = ["arena"]` for no-alloc
@@ -246,15 +245,18 @@ diagnostic code via `.code()` and an actionable `.hint()`:
 | `ExceedsMaxNodes` / `ExceedsMaxLevels` | `E.ArenaLayout.Node.004` / `…Level.004` | index-type capacity exceeded |
 | `RenderPlanOom` / `RenderCanvasTooSmall` / `RenderOutputTooSmall` | `E.Render.{Plan,Canvas,Sink}.026` | render buffer too small — size with `estimate_render_*` |
 
-Warnings are best-effort stderr diagnostics (they never panic, even
-with stderr closed):
+Non-fatal events are typed diagnostics: collect them with a
+`DiagnosticRun` through the diagnostic-aware entry points
+(`graph.layout().compute(&mut cx)` / `.reported()`,
+`planner.plan(&ir, &opts, &mut cx)`) — the library never writes to
+stderr:
 
-| Code | Fires when | Gate |
+| Code | Fires when | Channel |
 |---|---|---|
-| `W.Graph.Node.021` | an edge referenced a node that was never added (placeholder auto-created) | `warnings` feature |
-| `W.Graph.Node.007` | a duplicate `add_node` replaced a node with `AUTO` numbering involved | `warnings` feature |
-| `W.Graph.Dag.003` | a layout-config value was clamped (e.g. absurd `crossing_reduction_passes`) | any `std` build |
-| `W.Render.Label.031` | an edge label fits nowhere inline and the legend is off — it will not be rendered | `warnings` feature |
+| `W.Graph.Node.021` | an edge referenced a node that was never added (placeholder auto-created under the implicit policy) | diagnostics channel |
+| `W.Graph.Node.007` | a duplicate `add_node` replaced a node with `AUTO` numbering involved | diagnostics channel |
+| `W.Graph.Dag.003` | a layout-config value was clamped (e.g. absurd `crossing_reduction_passes`) | diagnostics channel |
+| `W.Render.Label.031` | an edge label fits nowhere inline and the legend is off — it will not be rendered | diagnostics channel |
 
 ## Documentation
 

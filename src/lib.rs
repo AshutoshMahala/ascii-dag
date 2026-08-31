@@ -149,6 +149,7 @@ compile_error!(
 );
 
 pub mod algorithms;
+pub mod diagnostics;
 pub mod errors;
 pub mod graph;
 pub mod ir;
@@ -157,13 +158,20 @@ pub mod validation;
 
 // ── Convenience re-exports (alloc-dependent) ────────────────────────────
 
+pub use diagnostics::{
+    BorrowedReport, CountingDiagnostics, Diagnostic, DiagnosticContext, DiagnosticCounts,
+    DiagnosticKind, DiagnosticRun, DiagnosticSink, FnDiagnostics, IgnoreDiagnostics, Report,
+    Severity, SliceDiagnostics,
+};
 #[cfg(feature = "alloc")]
-pub use errors::Diagnostic;
+pub use diagnostics::{OwnedReport, VecDiagnostics};
+#[cfg(feature = "alloc")]
+pub use errors::ErrorChain;
 pub use errors::GraphError;
 pub use graph::RenderMode;
 pub use graph::{AUTO, Auto, IdOrAuto, NodeId};
 #[cfg(feature = "alloc")]
-pub use graph::{Direction, Graph, Subgraph};
+pub use graph::{Direction, EdgeInsertion, Graph, MissingNodePolicy, Subgraph};
 #[cfg(feature = "alloc")]
 pub use ir::{EdgePath, FlowAxis, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};
 pub use render::colors::Palette;
@@ -175,7 +183,7 @@ pub use render::engine::{BoxedNode, CustomNode, NodeContent, SimpleNode};
 pub use render::engine::{CellColor, HitResult};
 pub use render::engine::{
     Charset, ColorMode, ComposeBudget, EmitOptions, LabelOverflow, LabelPlacementPolicy,
-    LabelPolicy, LayoutSource, PlanOptions, RenderOptions, Scene, ScenePlanner,
+    LabelPolicy, LayoutSource, PlanOptions, PlanRun, RenderOptions, Scene, ScenePlanner,
 };
 pub use render::engine::{
     EdgePathView, EdgeView, LabelSlot, LabelView, NodeKind, NodeOrigin, NodeView, SubgraphView,

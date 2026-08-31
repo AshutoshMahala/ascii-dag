@@ -18,7 +18,7 @@ feature: the convenience surfaces need somewhere to put their result.
 | A `String` | `render_string(&options)` | yes |
 | To write into something | `render_with(&options, &mut writer)` | yes |
 | Bytes, into your buffer | `render_to_bytes(&options, &arena, &mut buf)` | no |
-| To inspect, not paint | `ScenePlanner::new().plan(&ir, &options.plan)` | yes |
+| To inspect, not paint | `ScenePlanner::new().plan(&ir, &options.plan).quiet()` | yes |
 | …the same, no-alloc | `ScenePlanner::new_in(&mut workspace)` | no |
 | What is at this cell | `scene.hit_test(x, y)` | no |
 | Repeated renders of one scene | `TerminalRenderer::new(&emit, req)` + `render(&scene, &mut out)` | no (`new_in`) |
@@ -242,7 +242,7 @@ use ascii_dag::render::engine::HitResult;
 use ascii_dag::ScenePlanner;
 
 let mut planner = ScenePlanner::new();
-let scene = planner.plan(&ir, &options.plan)?;
+let scene = planner.plan(&ir, &options.plan).quiet()?;
 match scene.hit_test(x, y) {
     HitResult::Node(id) => println!("node {id}"),
     HitResult::Edge(index) => println!("edge #{index}"),

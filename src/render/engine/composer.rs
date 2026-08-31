@@ -623,7 +623,7 @@ mod tests {
         what: &str,
     ) {
         let mut planner = ScenePlanner::new();
-        let scene = planner.plan(ir, options).unwrap();
+        let scene = planner.plan(ir, options).quiet().unwrap();
         for cap in [usize::MAX, 3] {
             let req = scene.composition_requirements(&budget(cap));
             let mut composer = SceneComposer::new(req);
@@ -658,7 +658,7 @@ mod tests {
         // source the same way the planner does.
         use super::super::scene::ViewRef;
         let mut planner = ScenePlanner::new();
-        let scene = planner.plan(ir, &opts.plan).unwrap();
+        let scene = planner.plan(ir, &opts.plan).quiet().unwrap();
         match *scene.view() {
             ViewRef::Heap(v) => v.render_string(opts),
             ViewRef::Arena(v) => {
@@ -677,7 +677,7 @@ mod tests {
     fn steady_state_repaint_allocates_nothing() {
         let ir = clusters_graph().compute_layout();
         let mut planner = ScenePlanner::new();
-        let scene = planner.plan(&ir, &PlanOptions::new()).unwrap();
+        let scene = planner.plan(&ir, &PlanOptions::new()).quiet().unwrap();
         let mut composer = SceneComposer::new(scene.composition_requirements(&budget(64)));
         let mut acc = 0u64;
         composer.visit_cells(&scene, |_, _, _| {}).unwrap(); // warm-up
@@ -712,14 +712,14 @@ mod tests {
         let mut planner = ScenePlanner::new();
 
         let mut composer = {
-            let scene = planner.plan(&small_ir, &options).unwrap();
+            let scene = planner.plan(&small_ir, &options).quiet().unwrap();
             let mut c = SceneComposer::new(scene.composition_requirements(&budget(64)));
             c.visit_cells(&scene, |_, _, _| {}).unwrap(); // warm-up
             c
         };
 
         // Repaints of the fitting scene: zero allocations.
-        let scene = planner.plan(&small_ir, &options).unwrap();
+        let scene = planner.plan(&small_ir, &options).quiet().unwrap();
         let before = allocations_on_this_thread();
         for _ in 0..10 {
             composer.visit_cells(&scene, |_, _, _| {}).unwrap();
@@ -728,7 +728,7 @@ mod tests {
         drop(scene);
 
         // Larger scene grows the chunk; repaints hold the gate again.
-        let scene = planner.plan(&big_ir, &options).unwrap();
+        let scene = planner.plan(&big_ir, &options).quiet().unwrap();
         composer.visit_cells(&scene, |_, _, _| {}).unwrap(); // grow
         let before = allocations_on_this_thread();
         for _ in 0..10 {
@@ -751,14 +751,14 @@ mod tests {
         let mut planner = ScenePlanner::new();
 
         let small_req = {
-            let scene = planner.plan(&small_ir, &options).unwrap();
+            let scene = planner.plan(&small_ir, &options).quiet().unwrap();
             scene.composition_requirements(&budget(64))
         };
         let mut ws = vec![0u8; small_req.workspace_bytes().unwrap()];
         let ws_len = ws.len();
         let mut composer = SceneComposer::new_in(small_req, &mut ws).unwrap();
 
-        let scene = planner.plan(&big_ir, &options).unwrap();
+        let scene = planner.plan(&big_ir, &options).quiet().unwrap();
         match composer.visit_cells(&scene, |_, _, _| panic!("must not visit")) {
             Err(GraphError::RenderWorkspaceTooSmall {
                 needed_bytes,
@@ -771,7 +771,7 @@ mod tests {
         }
         drop(scene);
 
-        let scene = planner.plan(&small_ir, &options).unwrap();
+        let scene = planner.plan(&small_ir, &options).quiet().unwrap();
         let mut cells = 0usize;
         composer.visit_cells(&scene, |_, _, _| cells += 1).unwrap();
         assert_eq!(cells, scene.width() * scene.height());
@@ -783,7 +783,7 @@ mod tests {
     fn band_budget_never_affects_the_stream() {
         let ir = hero_graph().compute_layout();
         let mut planner = ScenePlanner::new();
-        let scene = planner.plan(&ir, &PlanOptions::new()).unwrap();
+        let scene = planner.plan(&ir, &PlanOptions::new()).quiet().unwrap();
 
         type CellRecord = (usize, usize, String, CellColor, HitResult);
         let mut streams: Vec<Vec<CellRecord>> = Vec::new();
@@ -806,7 +806,7 @@ mod tests {
     fn try_visit_cells_breaks_early() {
         let ir = stage_graph().compute_layout();
         let mut planner = ScenePlanner::new();
-        let scene = planner.plan(&ir, &PlanOptions::new()).unwrap();
+        let scene = planner.plan(&ir, &PlanOptions::new()).quiet().unwrap();
         let mut composer = SceneComposer::new(scene.composition_requirements(&budget(64)));
 
         let mut seen = 0usize;
@@ -891,7 +891,7 @@ mod review_tests {
         );
 
         let mut planner = ScenePlanner::new();
-        let scene = planner.plan(&ir, &options).unwrap();
+        let scene = planner.plan(&ir, &options).quiet().unwrap();
         let mut composer = SceneComposer::new(scene.composition_requirements(&budget(64)));
         let mut dummy_owners = Vec::new();
         composer
@@ -936,7 +936,7 @@ mod review_tests {
         b.set_dimensions(usize::MAX, 1);
         let ir = b.build();
         let mut planner = ScenePlanner::new();
-        let scene = planner.plan(&ir, &PlanOptions::new()).unwrap();
+        let scene = planner.plan(&ir, &PlanOptions::new()).quiet().unwrap();
         let req = scene.composition_requirements(&budget(64));
         assert_eq!(req.workspace_bytes(), None, "requirement must overflow");
 

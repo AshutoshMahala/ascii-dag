@@ -273,7 +273,7 @@ mod tests {
         let ir = g.compute_layout();
         let plan_options = RenderOptions::colored(Palette::Ansi).plan;
         let mut planner = ScenePlanner::new();
-        let scene = planner.plan(&ir, &plan_options).unwrap();
+        let scene = planner.plan(&ir, &plan_options).quiet().unwrap();
         let req = scene.composition_requirements(&ComposeBudget::new());
 
         let emits = [
@@ -312,7 +312,7 @@ mod tests {
         let g = graph();
         let ir = g.compute_layout();
         let mut planner = ScenePlanner::new();
-        let scene = planner.plan(&ir, &PlanOptions::new()).unwrap();
+        let scene = planner.plan(&ir, &PlanOptions::new()).quiet().unwrap();
         let req = scene.composition_requirements(&ComposeBudget::new());
         let emit = RenderOptions::plain().emit;
 
@@ -348,7 +348,7 @@ mod tests {
         let g = graph();
         let ir = g.compute_layout();
         let mut planner = ScenePlanner::new();
-        let scene = planner.plan(&ir, &PlanOptions::new()).unwrap();
+        let scene = planner.plan(&ir, &PlanOptions::new()).quiet().unwrap();
         let req = scene.composition_requirements(&ComposeBudget::new());
         let mut renderer = TerminalRenderer::new(&RenderOptions::plain().emit, req);
 

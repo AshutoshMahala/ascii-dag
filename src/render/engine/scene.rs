@@ -106,8 +106,8 @@ enum Workspace<'ws> {
 /// let g = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
 /// let ir = g.compute_layout();
 /// let mut planner = ScenePlanner::new();
-/// let scene = planner.plan(&ir, &PlanOptions::new()).unwrap();
-/// let second = planner.plan(&ir, &PlanOptions::new()); // ERROR: `scene` is still live
+/// let scene = planner.plan(&ir, &PlanOptions::new()).quiet().unwrap();
+/// let second = planner.plan(&ir, &PlanOptions::new()).quiet(); // ERROR: `scene` is still live
 /// scene.hit_test(0, 0);
 /// ```
 ///
@@ -122,10 +122,10 @@ enum Workspace<'ws> {
 /// let ir = g.compute_layout();
 /// let mut planner = ScenePlanner::new();
 /// {
-///     let scene = planner.plan(&ir, &PlanOptions::new()).unwrap();
+///     let scene = planner.plan(&ir, &PlanOptions::new()).quiet().unwrap();
 ///     assert!(scene.width() > 0);
 /// } // scene drops…
-/// let again = planner.plan(&ir, &PlanOptions::new()).unwrap(); // …planner is free
+/// let again = planner.plan(&ir, &PlanOptions::new()).quiet().unwrap(); // …planner is free
 /// assert!(again.height() > 0);
 /// ```
 pub struct ScenePlanner<'ws> {
@@ -161,37 +161,33 @@ impl<'ws> ScenePlanner<'ws> {
         }
     }
 
-    /// Resolve one layout into a [`Scene`] under `options`. Style
-    /// callbacks run here, once per element, never again; the scene
-    /// borrows this planner (`'p`) and the layout (`'ir`).
+    /// Begin planning `layout` into a [`Scene`] under `options` — the
+    /// CANONICAL planning entry point, finished by exactly one
+    /// terminal on the returned [`PlanRun`]:
     ///
-    /// **Provisional signature (pre-release):** 0.11's diagnostics
-    /// integration adds the context-aware terminal from the accepted
-    /// diagnostics design (planning warnings flow into a caller's
-    /// diagnostic run, never to stderr). This exact signature is not
-    /// frozen until that lands, together with the proof that a
-    /// diagnostic run survives both successful and failed planning.
-    pub fn plan<'p, 'ir, L: LayoutSource>(
+    /// - [`compute(&mut cx)`](PlanRun::compute) — canonical: planning
+    ///   diagnostics (an edge label with nowhere to go) become typed
+    ///   data in the caller's run, never a log.
+    /// - [`reported()`](PlanRun::reported) — owns a complete
+    ///   operation report (outcome + diagnostics).
+    /// - [`quiet()`](PlanRun::quiet) — explicitly discards
+    ///   diagnostics.
+    ///
+    /// Style callbacks run at the terminal, once per element, never
+    /// again; the scene borrows this planner (`'p`) and the layout
+    /// (`'ir`). A caller's diagnostic run outlives any scene: it
+    /// stays collectable across any number of plans and finishes into
+    /// a [`Report`](crate::Report) whether planning succeeded or
+    /// failed (pinned by test).
+    pub fn plan<'p, 'ir, 'o, L: LayoutSource>(
         &'p mut self,
         layout: &'ir L,
-        options: &PlanOptions,
-    ) -> Result<Scene<'p, 'ir>, GraphError> {
-        match sealed::Sealed::source_ref(layout) {
-            #[cfg(feature = "alloc")]
-            ViewRef::Heap(v) => {
-                let plan = Self::plan_core(&mut self.ws, v, options)?;
-                Ok(Scene {
-                    plan,
-                    view: ViewRef::Heap(v),
-                })
-            }
-            ViewRef::Arena(v) => {
-                let plan = Self::plan_core(&mut self.ws, v, options)?;
-                Ok(Scene {
-                    plan,
-                    view: ViewRef::Arena(v),
-                })
-            }
+        options: &'o PlanOptions,
+    ) -> PlanRun<'p, 'ws, 'ir, 'o> {
+        PlanRun {
+            planner: self,
+            view: sealed::Sealed::source_ref(layout),
+            options,
         }
     }
 
@@ -202,6 +198,7 @@ impl<'ws> ScenePlanner<'ws> {
         ws: &'p mut Workspace<'ws>,
         view: &V,
         options: &PlanOptions,
+        diagnostics: &mut crate::diagnostics::DiagnosticContext<'_>,
     ) -> Result<RenderPlan<'p>, GraphError> {
         let needed = plan_storage_bytes(view);
         let chunk: &'p mut [u8] = match ws {
@@ -224,7 +221,61 @@ impl<'ws> ScenePlanner<'ws> {
         // can outlive the scene and no reset (or `unsafe`) exists to
         // get wrong.
         let arena = Arena::new(chunk);
-        RenderPlan::build_in(view, options, &arena)
+        RenderPlan::build_in_with(view, options, &arena, diagnostics)
+    }
+}
+
+/// A pending plan — see [`ScenePlanner::plan`]. Finish with exactly
+/// one terminal; the workspace is touched, and style callbacks run,
+/// only there.
+#[must_use = "a plan run does nothing until a terminal (.compute / .reported / .quiet) runs it"]
+pub struct PlanRun<'p, 'ws, 'ir, 'o> {
+    planner: &'p mut ScenePlanner<'ws>,
+    view: ViewRef<'ir>,
+    options: &'o PlanOptions,
+}
+
+impl<'p, 'ir> PlanRun<'p, '_, 'ir, '_> {
+    /// Canonical terminal: resolve the layout into a [`Scene`],
+    /// emitting planning diagnostics into `diagnostics` — typed data
+    /// in the caller's run, never a log.
+    pub fn compute(
+        self,
+        diagnostics: &mut crate::diagnostics::DiagnosticContext<'_>,
+    ) -> Result<Scene<'p, 'ir>, GraphError> {
+        let PlanRun {
+            planner,
+            view,
+            options,
+        } = self;
+        let plan = match view {
+            #[cfg(feature = "alloc")]
+            ViewRef::Heap(v) => ScenePlanner::plan_core(&mut planner.ws, v, options, diagnostics)?,
+            ViewRef::Arena(v) => ScenePlanner::plan_core(&mut planner.ws, v, options, diagnostics)?,
+        };
+        Ok(Scene { plan, view })
+    }
+
+    /// Report terminal: run with an owned collector and package the
+    /// outcome — success or failure — with everything collected.
+    #[cfg(feature = "alloc")]
+    pub fn reported(self) -> crate::diagnostics::OwnedReport<Scene<'p, 'ir>, GraphError> {
+        let mut run =
+            crate::diagnostics::DiagnosticRun::new(crate::diagnostics::VecDiagnostics::default());
+        let outcome = {
+            let mut cx = run.context();
+            self.compute(&mut cx)
+        };
+        run.finish(outcome)
+    }
+
+    /// Quiet terminal: explicitly discard diagnostics (constructs
+    /// [`IgnoreDiagnostics`](crate::IgnoreDiagnostics) — no API falls
+    /// back to a log).
+    pub fn quiet(self) -> Result<Scene<'p, 'ir>, GraphError> {
+        let mut run = crate::diagnostics::DiagnosticRun::new(crate::diagnostics::IgnoreDiagnostics);
+        let mut cx = run.context();
+        self.compute(&mut cx)
     }
 }
 
@@ -325,11 +376,11 @@ mod tests {
         let options = PlanOptions::new();
 
         let (hw, hh, hits_heap): (usize, usize, Vec<HitResult>) = {
-            let scene = planner.plan(&heap_ir, &options).unwrap();
+            let scene = planner.plan(&heap_ir, &options).quiet().unwrap();
             let hits = (0..scene.width()).map(|x| scene.hit_test(x, 0)).collect();
             (scene.width(), scene.height(), hits)
         };
-        let scene = planner.plan(&arena_ir, &options).unwrap();
+        let scene = planner.plan(&arena_ir, &options).quiet().unwrap();
         assert_eq!((scene.width(), scene.height()), (hw, hh));
         let hits_arena: Vec<HitResult> = (0..scene.width()).map(|x| scene.hit_test(x, 0)).collect();
         assert_eq!(hits_heap, hits_arena);
@@ -344,11 +395,11 @@ mod tests {
         let ir = g.compute_layout();
         let options = PlanOptions::new();
         let mut planner = ScenePlanner::new();
-        drop(planner.plan(&ir, &options).unwrap()); // warm-up sizes the chunk
+        drop(planner.plan(&ir, &options).quiet().unwrap()); // warm-up sizes the chunk
 
         let before = allocations_on_this_thread();
         for _ in 0..50 {
-            let scene = planner.plan(&ir, &options).unwrap();
+            let scene = planner.plan(&ir, &options).quiet().unwrap();
             std::hint::black_box(scene.hit_test(0, 0));
         }
         assert_eq!(
@@ -379,10 +430,10 @@ mod tests {
         let options = PlanOptions::new();
 
         assert!(matches!(
-            planner.plan(&big_ir, &options),
+            planner.plan(&big_ir, &options).quiet(),
             Err(GraphError::RenderPlanOom)
         ));
-        let scene = planner.plan(&ir, &options).unwrap();
+        let scene = planner.plan(&ir, &options).quiet().unwrap();
         assert!(scene.width() > 0);
     }
 
@@ -397,7 +448,11 @@ mod tests {
         }
         impl Widget {
             fn draw(&mut self) -> usize {
-                let scene = self.planner.plan(&self.ir, &PlanOptions::new()).unwrap();
+                let scene = self
+                    .planner
+                    .plan(&self.ir, &PlanOptions::new())
+                    .quiet()
+                    .unwrap();
                 scene.width() * scene.height()
             }
         }
@@ -418,7 +473,7 @@ mod tests {
         let ir = g.compute_layout();
         let mut planner = ScenePlanner::new();
         let options = PlanOptions::new();
-        let scene = planner.plan(&ir, &options).unwrap();
+        let scene = planner.plan(&ir, &options).quiet().unwrap();
         let plan = RenderPlan::build(&ir, &options);
         assert_eq!(scene.width(), plan.width());
         assert_eq!(scene.height(), plan.height());

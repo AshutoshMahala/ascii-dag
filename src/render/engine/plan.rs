@@ -97,7 +97,7 @@ pub(crate) struct PlanElement {
 /// let ir = g.compute_layout();
 /// let options = RenderOptions::plain();
 /// let mut planner = ScenePlanner::new();
-/// let scene = planner.plan(&ir, &options.plan).unwrap();
+/// let scene = planner.plan(&ir, &options.plan).quiet().unwrap();
 ///
 /// // Find where "Alpha" was painted, then ask what is there.
 /// let text = ir.render_string(&options);
@@ -263,8 +263,23 @@ impl<'buf> RenderPlan<'buf> {
     /// Build a heap-backed plan (std/alloc convenience). Heap pushes
     /// cannot fail, so this surface stays infallible.
     #[cfg(feature = "alloc")]
+    /// Quiet convenience over [`build_with`](Self::build_with):
+    /// explicitly discards diagnostics (`IgnoreDiagnostics`).
+    #[cfg(feature = "alloc")]
     pub(crate) fn build<V: LayoutView>(view: &V, options: &PlanOptions) -> RenderPlan<'static> {
-        match RenderPlan::<'static>::build_impl(view, options, PlanMem::Heap) {
+        let mut run = crate::diagnostics::DiagnosticRun::new(crate::diagnostics::IgnoreDiagnostics);
+        Self::build_with(view, options, &mut run.context())
+    }
+
+    /// Build with a diagnostic context: planning warnings (omitted
+    /// labels) are emitted into it.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn build_with<V: LayoutView>(
+        view: &V,
+        options: &PlanOptions,
+        diagnostics: &mut crate::diagnostics::DiagnosticContext<'_>,
+    ) -> RenderPlan<'static> {
+        match RenderPlan::<'static>::build_impl(view, options, PlanMem::Heap, diagnostics) {
             Ok(plan) => plan,
             // Heap-backed building has no failing carve.
             Err(_) => unreachable!(),
@@ -279,7 +294,18 @@ impl<'buf> RenderPlan<'buf> {
         options: &PlanOptions,
         arena: &Arena<'buf>,
     ) -> Result<RenderPlan<'buf>, GraphError> {
-        Self::build_impl(view, options, PlanMem::Arena(arena))
+        let mut run = crate::diagnostics::DiagnosticRun::new(crate::diagnostics::IgnoreDiagnostics);
+        Self::build_impl(view, options, PlanMem::Arena(arena), &mut run.context())
+    }
+
+    /// Arena-carved build with a diagnostic context.
+    pub(crate) fn build_in_with<V: LayoutView>(
+        view: &V,
+        options: &PlanOptions,
+        arena: &Arena<'buf>,
+        diagnostics: &mut crate::diagnostics::DiagnosticContext<'_>,
+    ) -> Result<RenderPlan<'buf>, GraphError> {
+        Self::build_impl(view, options, PlanMem::Arena(arena), diagnostics)
     }
 
     /// The one build path. O(N + E + S) plus the label-occupancy checks
@@ -291,6 +317,7 @@ impl<'buf> RenderPlan<'buf> {
         view: &V,
         options: &PlanOptions,
         mem: PlanMem<'_, 'buf>,
+        diagnostics: &mut crate::diagnostics::DiagnosticContext<'_>,
     ) -> Result<RenderPlan<'buf>, GraphError> {
         let width = view.width();
         let height = view.height();
@@ -992,16 +1019,9 @@ impl<'buf> RenderPlan<'buf> {
                     // the edge is identified by index and endpoint
                     // ids instead.
                     super::config::LabelOverflow::Omit => {
-                        #[cfg(feature = "warnings")]
-                        crate::errors::emit_warning(
-                            crate::errors::WARN_LABEL_INVISIBLE,
-                            format_args!(
-                                "the label of edge {} ({} -> {}) has no inline position and \
-                                 overflow is set to omit - it will not be rendered. Set \
-                                 LabelOverflow::Legend to list it below the graph.",
-                                i, e.from_id, e.to_id
-                            ),
-                        );
+                        diagnostics.emit(crate::diagnostics::DiagnosticKind::LabelOmitted {
+                            edge: e.edge_index,
+                        });
                     }
                 }
             }
@@ -1024,16 +1044,9 @@ impl<'buf> RenderPlan<'buf> {
                     legend.push(view.edge_count() + j);
                 }
                 super::config::LabelOverflow::Omit => {
-                    #[cfg(feature = "warnings")]
-                    crate::errors::emit_warning(
-                        crate::errors::WARN_LABEL_INVISIBLE,
-                        format_args!(
-                            "the label of self-loop {} (node {}) has no inline position and \
-                             overflow is set to omit - it will not be rendered. Set \
-                             LabelOverflow::Legend to list it below the graph.",
-                            r.input_index, r.node_id
-                        ),
-                    );
+                    diagnostics.emit(crate::diagnostics::DiagnosticKind::LabelOmitted {
+                        edge: r.input_index,
+                    });
                 }
             }
         }
