@@ -437,8 +437,15 @@ impl<'g, 'a> LayoutRun<'g, 'a> {
                 }
             }
         }
-        if let Some(note) = self.graph.passes_note {
-            diagnostics.emit(note);
+        // The passes note describes the GRAPH-OWNED configuration; a
+        // `.with_config(...)` override replaces that configuration
+        // for this run, so the note would describe a config the run
+        // never uses — it applies only when the graph's own config
+        // is the one selected.
+        if self.config.is_none() {
+            if let Some(note) = self.graph.passes_note {
+                diagnostics.emit(note);
+            }
         }
         match self.config {
             Some(config) => self.graph.compute_layout_with_config(config),
@@ -899,7 +906,10 @@ impl<'a> Graph<'a> {
     ///     .with_crossing_pipeline(QUALITY);
     /// ```
     pub fn with_crossing_pipeline(mut self, pipeline: &[CrossingReducer]) -> Self {
-        self.sugiyama_config.crossing_pipeline = pipeline.to_vec();
+        // Delegate so the condition slot stays consistent: replacing
+        // the pipeline clears any standing passes note, in the
+        // builder chain exactly as in the setter.
+        self.set_crossing_pipeline(pipeline);
         self
     }
 

@@ -335,6 +335,49 @@ fn mutation_diagnostics_reflect_current_conditions() {
     assert_eq!(g.layout().reported().warnings().count(), 0);
 }
 
+/// The passes note describes the graph-owned configuration — a
+/// `.with_config(...)` override replaces that configuration for the
+/// run, so the note must not fire against a config the run never
+/// uses.
+#[test]
+fn config_override_suppresses_graph_passes_note() {
+    use ascii_dag::LayoutConfig;
+    let mut g = Graph::new();
+    g.add_node(1usize, "A");
+    g.set_crossing_reduction_passes(50_000);
+
+    assert_eq!(
+        g.layout().reported().warnings().count(),
+        1,
+        "graph-owned config selected: the condition applies"
+    );
+    let standard = LayoutConfig::standard();
+    assert_eq!(
+        g.layout()
+            .with_config(&standard)
+            .reported()
+            .warnings()
+            .count(),
+        0,
+        "an override replaces the configuration the note describes"
+    );
+}
+
+/// The builder chain maintains the condition slot exactly like the
+/// setters: a direct pipeline replaces the shim value wholesale.
+#[test]
+fn builder_chain_clears_stale_pass_condition() {
+    let mut g = Graph::new()
+        .with_crossing_reduction_passes(50_000)
+        .with_crossing_pipeline(ascii_dag::STANDARD);
+    g.add_node(1usize, "A");
+    assert_eq!(
+        g.layout().reported().warnings().count(),
+        0,
+        "the clamped shim value no longer exists"
+    );
+}
+
 /// The two crossing-passes conditions carry DISTINCT stable codes —
 /// a `(code, subject)` dedup key never collapses them.
 #[test]

@@ -722,7 +722,10 @@ mod heap_json {
                     out.push(',');
                     push_key(out, "edge");
                     push_usize(out, r.edge_index);
-                    if let Some(label) = r.label {
+                    // Omitted when empty — the schema rule, and the
+                    // arena serializer's len-0 behavior (guarded here
+                    // too for hand-built records).
+                    if let Some(label) = r.label.filter(|l| !l.is_empty()) {
                         out.push(',');
                         push_key(out, "label");
                         push_json_str(out, label);
@@ -1191,12 +1194,14 @@ mod loop_record_tests {
         g.add_edge(1usize, 1usize, Some("retry")); // input 0
         g.add_edge(1usize, 1usize, Some("again")); // input 1: multiplicity
         g.add_edge(2usize, 2usize, None); // input 2: unlabeled
-        g.add_edge(1usize, 2usize, Some("go")); // input 3: routed
+        g.add_edge(2usize, 2usize, Some("")); // input 3: empty = omitted, BOTH backends
+        g.add_edge(1usize, 2usize, Some("go")); // input 4: routed
 
         let expected = "\"self_loops\":[\
             {\"node\":1,\"edge\":0,\"label\":\"retry\"},\
             {\"node\":1,\"edge\":1,\"label\":\"again\"},\
-            {\"node\":2,\"edge\":2}]";
+            {\"node\":2,\"edge\":2},\
+            {\"node\":2,\"edge\":3}]";
         let expected = expected.replace(" ", "");
         let heap_json = g.compute_layout().to_json();
         assert!(heap_json.contains(&expected), "heap: {heap_json}");

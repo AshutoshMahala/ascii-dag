@@ -290,7 +290,9 @@ impl LayoutView for crate::ir::LayoutIR<'_> {
             node_id: r.node_id,
             node_index: r.node_index,
             input_index: r.edge_index,
-            label: r.label,
+            // Empty = none, even for hand-built records (the arena
+            // twin's len-0 storage cannot say Some("")).
+            label: r.label.filter(|l| !l.is_empty()),
         }
     }
 }

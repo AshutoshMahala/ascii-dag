@@ -1207,7 +1207,11 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                     .get(&f)
                     .map_or(usize::MAX, |&di| ir_index_of[di]),
                 edge_index: i,
-                label,
+                // An empty label is no label — normalized at the
+                // record's birth, matching the arena pool's len-0
+                // convention, so both backends agree everywhere
+                // downstream (views, diagnostics, JSON).
+                label: label.filter(|l| !l.is_empty()),
             });
         }
     }
