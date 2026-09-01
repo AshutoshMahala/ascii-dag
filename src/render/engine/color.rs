@@ -90,8 +90,9 @@ impl CellColor {
     }
 
     /// This color as an ANSI-256 index, quantizing RGB if needed.
-    /// Returns `None` for [`CellColor::DEFAULT`].
-    pub(crate) fn as_ansi256(self) -> Option<u8> {
+    /// Returns `None` for [`CellColor::DEFAULT`] (the consumer's
+    /// "no color set" — use its own default ink).
+    pub fn as_ansi256(self) -> Option<u8> {
         if self.is_ansi() {
             Some(self.ansi_index())
         } else if self.is_rgb() {
@@ -103,8 +104,10 @@ impl CellColor {
     }
 
     /// This color as RGB, expanding an ANSI index if needed.
-    /// Returns `None` for [`CellColor::DEFAULT`].
-    pub(crate) fn as_rgb(self) -> Option<(u8, u8, u8)> {
+    /// Returns `None` for [`CellColor::DEFAULT`] (the consumer's
+    /// "no color set" — use its own default ink). This is what an
+    /// SVG/TUI consumer feeds its own color model.
+    pub fn as_rgb(self) -> Option<(u8, u8, u8)> {
         if self.is_rgb() {
             Some(self.rgb_parts())
         } else if self.is_ansi() {

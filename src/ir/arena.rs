@@ -140,6 +140,25 @@ pub enum EdgePathArena {
     },
 }
 
+/// A preserved self-loop (`A → A`) — arena mirror of
+/// [`SelfLoopRecord`](crate::ir::SelfLoopRecord): kept out of the
+/// routed edge list, label bytes in the shared label pool.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SelfLoopArena {
+    /// The node the loop is on (user id).
+    pub node_id: usize,
+    /// The node's position in the IR node table — resolved once at
+    /// layout so consumers join record→node in O(1) instead of
+    /// scanning by id.
+    pub node_index: usize,
+    /// Original graph insertion index (the style-callback convention).
+    pub edge_index: usize,
+    /// Offset of the label bytes in label storage (0 when unlabeled).
+    pub label_offset: usize,
+    /// Length of the label in bytes (0 = no label).
+    pub label_len: usize,
+}
+
 /// Edge data stored as flat struct.
 #[derive(Debug, Clone, Copy)]
 pub struct LayoutEdgeArena {
@@ -222,6 +241,8 @@ pub struct LayoutIRArena<'a> {
     labels: &'a [u8],
     /// Sparse custom-content entries, sorted by node index
     custom_nodes: &'a [CustomNodeArena],
+    /// Preserved self-loop records, in insertion order.
+    self_loops: &'a [SelfLoopArena],
     /// Subgraph bounding boxes
     subgraphs: &'a [SubgraphInfoArena],
     /// Total width in character cells
@@ -254,6 +275,7 @@ impl<'a> LayoutIRArena<'a> {
         level_offsets: &'a [usize],
         level_data: &'a [usize],
         custom_nodes: &'a [CustomNodeArena],
+        self_loops: &'a [SelfLoopArena],
     ) -> Self {
         Self {
             nodes,
@@ -261,6 +283,7 @@ impl<'a> LayoutIRArena<'a> {
             waypoints,
             labels,
             custom_nodes,
+            self_loops,
             subgraphs,
             width,
             height,
@@ -370,6 +393,24 @@ impl<'a> LayoutIRArena<'a> {
     /// unreachable for builder-written payloads).
     pub(crate) fn custom_payload(&self, entry: &CustomNodeArena) -> &str {
         let bytes = &self.labels[entry.payload_offset..entry.payload_offset + entry.payload_len];
+        core::str::from_utf8(bytes).unwrap_or("")
+    }
+
+    /// Preserved self-loop records, in insertion order (absent from
+    /// the routed edge list — routing never sees them).
+    #[inline]
+    pub fn self_loops(&self) -> &[SelfLoopArena] {
+        self.self_loops
+    }
+
+    /// A self-loop's label (empty string when unlabeled).
+    #[inline]
+    pub fn self_loop_label(&self, index: usize) -> &str {
+        let r = &self.self_loops[index];
+        if r.label_len == 0 {
+            return "";
+        }
+        let bytes = &self.labels[r.label_offset..r.label_offset + r.label_len];
         core::str::from_utf8(bytes).unwrap_or("")
     }
 
@@ -571,9 +612,13 @@ pub fn estimate_layout_arena_size_with_subgraphs(
     let level_offsets_size = (node_count + 2) * size_of::<usize>(); // Generous estimate
     let level_data_size = node_count * size_of::<usize>();
     let subgraphs_size = subgraph_count * size_of::<SubgraphInfoArena>();
+    // Self-loop records are bounded by the edge count (loops are a
+    // subset of the input edge list); their labels are already inside
+    // `label_bytes`.
+    let self_loops_size = edge_count * size_of::<SelfLoopArena>();
 
     // Add alignment padding and extra buffer
-    let num_allocs = 8 + if subgraph_count > 0 { 1 } else { 0 };
+    let num_allocs = 9 + if subgraph_count > 0 { 1 } else { 0 };
     let padding = num_allocs * 8;
 
     nodes_size
@@ -582,6 +627,7 @@ pub fn estimate_layout_arena_size_with_subgraphs(
         + level_offsets_size
         + level_data_size
         + subgraphs_size
+        + self_loops_size
         + label_bytes
         + padding
         + 512

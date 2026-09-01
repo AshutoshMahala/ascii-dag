@@ -68,7 +68,7 @@ migrate-from-0.10.md for the current equivalents:
 | `ir.render_scanline_colored(p)` | `ir.render_string(&RenderOptions::colored(p))` (set `legend = false` to match) |
 | `ir.render_to_buffer(…)` (arena) | `ir.render_to_bytes(&options, &arena, &mut buf)` |
 | `estimate_render_size` | `estimate_render_arena_size` + `estimate_render_output_size` |
-| `ir.y_index()` / `items_at_line` | `ir.render_plan(&options)` + `ir.hit_test(&plan, x, y)` |
+| `ir.y_index()` / `items_at_line` | `ScenePlanner::new().plan(&ir, &options.plan).quiet()` + `scene.hit_test(x, y)` |
 
 **Output note:** the engine canonicalizes a few cases the two 0.9
 renderers disagreed on with each other — overlapping edge corners

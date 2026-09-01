@@ -3,7 +3,7 @@
 //! Renders a graph, enables xterm SGR mouse reporting with a raw ANSI
 //! escape (`\x1b[?1006h`), switches the terminal to raw mode via
 //! `stty` (std::process — no crate), and feeds every click through
-//! `RenderPlan::hit_test`. Unix terminals only; anywhere else use
+//! `Scene::hit_test`. Unix terminals only; anywhere else use
 //! probe mode:
 //!
 //!   cargo run --example hit_test                     # interactive
@@ -14,7 +14,7 @@
 //! border. `q` quits.
 
 use ascii_dag::render::engine::{NodePaintCtx, NodeRegion};
-use ascii_dag::{AUTO, BoxedNode, CustomNode, Graph, RenderOptions};
+use ascii_dag::{AUTO, BoxedNode, CustomNode, Graph, RenderOptions, ScenePlanner};
 use std::io::{Read, Write};
 
 #[path = "support/csr.rs"]
@@ -22,9 +22,7 @@ mod csr;
 
 fn card(region: &mut NodeRegion<'_, '_>, ctx: NodePaintCtx<'_>) {
     region.write_str(1, 0, ctx.label);
-    for x in 0..region.width() {
-        region.set(x, 1, '─');
-    }
+    region.hrule(0, region.width() - 1, 1); // semantic: `-` under --ascii
     for (i, line) in ctx.payload.lines().enumerate() {
         region.write_str(1, 2 + i, line);
     }
@@ -53,7 +51,7 @@ fn graph() -> Graph<'static> {
     g
 }
 
-/// One (x, y) lookup against the plan, formatted for humans.
+/// One (x, y) lookup against the scene, formatted for humans.
 fn describe(hit: ascii_dag::render::engine::HitResult) -> String {
     format!("{hit:?}")
 }
@@ -63,21 +61,22 @@ fn main() {
     let options = RenderOptions::plain();
     let g = graph();
 
-    // Both pipelines expose the same introspection surface; pick per
-    // the example convention (--csr = arena).
+    // One planner serves both pipelines — the scene type is the same
+    // whichever backend produced the layout (--csr = arena).
     macro_rules! with_ir {
         ($ir:expr) => {{
             let ir = $ir;
-            let plan = ir.render_plan(&options);
+            let mut planner = ScenePlanner::new();
+            let scene = planner.plan(ir, &options.plan).quiet().expect("plan");
             let rendered = ir.render_string(&options);
             if let Some(i) = args.iter().position(|a| a == "--probe") {
                 let x: usize = args[i + 1].parse().expect("--probe X Y");
                 let y: usize = args[i + 2].parse().expect("--probe X Y");
                 println!("{rendered}");
-                println!("({x}, {y}) → {}", describe(ir.hit_test(&plan, x, y)));
+                println!("({x}, {y}) → {}", describe(scene.hit_test(x, y)));
                 return;
             }
-            interactive(&rendered, |x, y| describe(ir.hit_test(&plan, x, y)));
+            interactive(&rendered, |x, y| describe(scene.hit_test(x, y)));
         }};
     }
 

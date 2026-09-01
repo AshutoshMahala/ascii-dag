@@ -1074,7 +1074,7 @@ fn big_cycle_past_lane_cap_fits_exactly_estimated_arena() {
     let dummies = ir
         .nodes()
         .iter()
-        .filter(|nd| nd.kind == ascii_dag::NodeKind::Dummy)
+        .filter(|nd| nd.kind == ascii_dag::ir::NodeKind::Dummy)
         .count();
     assert_eq!(dummies, N - 2, "every broken-cycle waypoint emitted");
 }

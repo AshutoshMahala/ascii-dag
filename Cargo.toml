@@ -20,7 +20,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["std", "generic", "layout-vertical", "layout-horizontal"]
 std = ["alloc"]
 alloc = []            # Use heap allocation (Vec, String, HashMap)
-warnings = ["std"]
 # Optional modules for bundle size reduction
 # Generic cycle detection, topological sort, impact analysis, metrics.
 # Requires std, not just alloc: these algorithms track visited sets keyed by

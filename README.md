@@ -146,21 +146,25 @@ Both modules need the `generic` feature, on by default.
 
 ### Render settings (`RenderOptions`)
 
+Options live in three homes by what they affect: `plan` (resolved
+semantics), `emit` (how they are written), `compose` (memory only).
+
 | Field | Values | Default |
 |---|---|---|
-| `charset` | `Unicode` / `Ascii` (equal projections of one canvas) | `Unicode` |
-| `color_mode` | `None` / `Ansi256` / `TrueColor` | `None` |
-| `palette` | ANSI palette for edge coloring | `Ansi` |
-| `legend` | list labels that could not be placed inline | off |
-| `band_rows_cap` | banded rendering: canvas memory = `width × cap` | 64 |
-| `show_dummy_nodes` | draw `◍` at routing waypoints | off |
-| `edge_style_fn` / `subgraph_style_fn` / `edge_label_style_fn` | per-element style callbacks (plain `fn`) | legacy look |
+| `emit.charset` | `Unicode` / `Ascii` (equal projections of one canvas) | `Unicode` |
+| `emit.color_mode` | `None` / `Ansi256` / `TrueColor` | `None` |
+| `emit.render_legend` | print the legend block after the diagram | off |
+| `plan.palette` | ANSI palette for edge coloring | `Ansi` |
+| `plan.label_policy` | `placement`: `Geometric` / `AvoidNodeRows`; `overflow`: `Omit` / `Legend` | geometric, omit |
+| `plan.show_dummy_nodes` | draw `◍` at routing waypoints | off |
+| `plan.edge_style_fn` / `.subgraph_style_fn` / `.edge_label_style_fn` | per-element style callbacks (plain `fn`) | legacy look |
+| `compose.band_rows_cap` | banded rendering: canvas memory = `width × cap` | 64 |
 
 Presets: `RenderOptions::plain()`, `::colored(palette)`, `::ascii()`,
 `::ascii_colored()`. Render surfaces on both IR types:
 `render_string`, `render_with(&options, &mut impl fmt::Write)`
-(streaming), `render_to_bytes` (no-alloc), `render_plan` + `hit_test`
-(introspection).
+(streaming), `render_to_bytes` (no-alloc). Introspection lives on
+`Scene` (`ScenePlanner::plan` + `scene.hit_test(x, y)`).
 
 ### Layout settings
 
@@ -212,7 +216,6 @@ reference: [docs.rs/ascii-dag](https://docs.rs/ascii-dag).
 | `generic` | ✓ | cycle detection / toposort / impact analysis over your own types |
 | `arena` | | CSR + arena layout pipeline (no-alloc capable) |
 | `arena-idx-u8` / `-u16` / `-u32` | | index width: 255 / 65,535 / 4B nodes (RAM tradeoff) |
-| `warnings` | | stderr diagnostics (see below) |
 
 Typical configurations: default (`ascii-dag = "0.10"`) for the heap
 API; `default-features = false, features = ["arena"]` for no-alloc
@@ -242,15 +245,22 @@ diagnostic code via `.code()` and an actionable `.hint()`:
 | `ExceedsMaxNodes` / `ExceedsMaxLevels` | `E.ArenaLayout.Node.004` / `…Level.004` | index-type capacity exceeded |
 | `RenderPlanOom` / `RenderCanvasTooSmall` / `RenderOutputTooSmall` | `E.Render.{Plan,Canvas,Sink}.026` | render buffer too small — size with `estimate_render_*` |
 
-Warnings are best-effort stderr diagnostics (they never panic, even
-with stderr closed):
+Non-fatal events are typed diagnostics: collect them with a
+`DiagnosticRun` through the diagnostic-aware entry points
+(`graph.layout().compute(&mut cx)` / `.reported()`,
+`planner.plan(&ir, &opts).compute(&mut cx)`) — the library never
+writes to stderr:
 
-| Code | Fires when | Gate |
+| Code | Fires when | Channel |
 |---|---|---|
-| `W.Graph.Node.021` | an edge referenced a node that was never added (placeholder auto-created) | `warnings` feature |
-| `W.Graph.Node.007` | a duplicate `add_node` replaced a node with `AUTO` numbering involved | `warnings` feature |
-| `W.Graph.Dag.003` | a layout-config value was clamped (e.g. absurd `crossing_reduction_passes`) | any `std` build |
-| `W.Render.Label.031` | an edge label fits nowhere inline and the legend is off — it will not be rendered | `warnings` feature |
+| `W.Graph.Node.021` | the graph still holds implicit auto-created placeholders (a standing condition, reported per run until fixed) | diagnostics channel |
+| `W.Graph.Dag.003` | the current `crossing_reduction_passes` value was clamped (condition — cleared by a sane value) | diagnostics channel |
+| `W.Graph.Dag.033` | the current `crossing_reduction_passes` value is kept but past useful range | diagnostics channel |
+| `W.Render.Label.031` | an edge label fits nowhere inline and the legend is off — it will not be rendered | diagnostics channel |
+
+Point events are receipts at the call site instead: `add_edge` returns
+`EdgeInsertion` (did an endpoint get auto-created?), `add_node` returns
+`NodeInsertion` (did this replace a node — with `AUTO` involved?).
 
 ## Documentation
 

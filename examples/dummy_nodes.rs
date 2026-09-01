@@ -55,7 +55,7 @@ fn main() {
     println!("{plain}");
 
     println!("2) show_dummy_nodes: every waypoint marked\n");
-    options.show_dummy_nodes = true;
+    options.plan.show_dummy_nodes = true;
     let marked = if csr::requested() {
         csr::render_with(&graph(), &options, &config)
     } else {

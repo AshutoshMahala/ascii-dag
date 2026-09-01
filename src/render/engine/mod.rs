@@ -20,30 +20,39 @@
 //! The streaming writer is primary: `render_with` on both IR types
 //! feeds any `core::fmt::Write`; `render_string` is the owned
 //! convenience; `render_to_bytes` is the zero-allocation byte surface
-//! with a caller arena + buffer. `RenderPlan` is the public
-//! introspection type (dimensions, bands, legend, hit-testing).
+//! with a caller arena + buffer. `ScenePlanner`/`Scene` are the
+//! public introspection surface (dimensions, legend, hit-testing).
 
 pub(crate) mod api;
+
 pub(crate) mod cell;
+pub(crate) mod cells;
 pub(crate) mod charset;
 pub(crate) mod color;
 pub(crate) mod compose;
+pub(crate) mod composer;
 pub(crate) mod config;
 pub(crate) mod emit;
 pub(crate) mod mem;
 pub(crate) mod node_content;
+pub(crate) mod owner;
 #[cfg(all(test, feature = "std", feature = "arena"))]
 mod parity;
 pub(crate) mod plan;
 pub(crate) mod presets;
 pub(crate) mod region;
+pub(crate) mod scene;
 pub(crate) mod style;
+pub(crate) mod terminal;
+#[cfg(all(test, feature = "std", feature = "layout-vertical"))]
+mod test_alloc;
 pub(crate) mod view;
+pub(crate) mod views;
 
 /// Stream a rendered view into any writer — the one alloc-backed
-/// band loop behind every std entry point. `options` decides the mode:
-/// colors when `color_mode != None` (plus the legend when `legend`),
-/// plain glyphs otherwise. One band-sized buffer set is reused across
+/// band loop behind every std entry point. `options.emit` decides the
+/// mode: colors when `color_mode != None` (plus the legend block when
+/// `render_legend`), plain glyphs otherwise. One band-sized buffer set is reused across
 /// bands (N3.4): memory is `width × min(band_cap, height)` cells
 /// regardless of graph height.
 #[cfg(feature = "alloc")]
@@ -52,9 +61,10 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
     options: &config::RenderOptions,
     out: &mut W,
 ) -> core::fmt::Result {
-    let colored = !matches!(options.color_mode, color::ColorMode::None);
-    let plan = plan::RenderPlan::build(view_ref, options);
-    let band_rows = plan.max_band_rows().max(1);
+    let colored = !matches!(options.emit.color_mode, color::ColorMode::None);
+    let plan = plan::RenderPlan::build(view_ref, &options.plan);
+    let cap = options.compose.cap();
+    let band_rows = plan.max_band_rows(cap).max(1);
     let area = plan.width() * band_rows;
     let mut scratch = compose::PaintScratch::heap_backed(view_ref, &plan, colored, band_rows);
     let mut cells = alloc::vec![cell::Cell::EMPTY; area];
@@ -63,23 +73,56 @@ pub(crate) fn render_into<V: view::LayoutView, W: core::fmt::Write>(
     } else {
         alloc::vec::Vec::new()
     };
-    for &(y0, rows) in plan.band_ranges() {
-        let plane = colored.then(|| &mut colors_plane[..]);
-        let mut canvas = compose::BandCanvas::new(&mut cells, plane, plan.width(), y0, rows);
-        compose::composite_band(view_ref, &plan, options, &mut canvas, &mut scratch);
+    emit_bands(
+        view_ref,
+        &plan,
+        &options.emit,
+        cap,
+        &mut scratch,
+        &mut cells,
+        colored.then(|| &mut colors_plane[..]),
+        out,
+    )
+}
+
+/// The ONE band-emission loop behind every terminal surface — the
+/// one-step wrappers and [`TerminalRenderer`](terminal::TerminalRenderer)
+/// compose and emit through exactly this path (plan → compose → emit).
+///
+/// D4 (temp/08): the legend works in plain mode too — labels that
+/// don't fit go to the legend regardless of color mode; a plain
+/// legend is self-keying (`from -> to: label`). `ColorMode::None`
+/// emits no escapes.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_bands<V: view::LayoutView, W: core::fmt::Write>(
+    view_ref: &V,
+    plan: &plan::RenderPlan<'_>,
+    emit_options: &config::EmitOptions,
+    cap: usize,
+    scratch: &mut compose::PaintScratch<'_>,
+    cells: &mut [cell::Cell],
+    mut colors: Option<&mut [color::CellColor]>,
+    out: &mut W,
+) -> core::fmt::Result {
+    let colored = !matches!(emit_options.color_mode, color::ColorMode::None);
+    for (y0, rows) in plan.bands(cap) {
+        let plane = if colored { colors.as_deref_mut() } else { None };
+        let mut canvas = compose::BandCanvas::new(cells, plane, plan.width(), y0, rows);
+        compose::composite_band(view_ref, plan, &mut canvas, scratch);
         if colored {
-            emit::emit_colored_band(&canvas, options.charset, options.color_mode, out)?;
+            emit::emit_colored_band(&canvas, emit_options.charset, emit_options.color_mode, out)?;
         } else {
-            emit::emit_plain_band(&canvas, options.charset, out)?;
+            emit::emit_plain_band(&canvas, emit_options.charset, out)?;
         }
     }
-    // D4 (temp/08): the legend works in plain mode too — labels that
-    // don't fit go to the legend regardless of color mode; a plain
-    // legend is self-keying (`from -> to: label`). `ColorMode::None`
-    // emits no escapes. Default plain options keep `legend = false`,
-    // so default output is unchanged.
-    if options.legend {
-        emit::emit_legend(view_ref, &plan, options.charset, options.color_mode, out)?;
+    if emit_options.render_legend {
+        emit::emit_legend(
+            view_ref,
+            plan,
+            emit_options.charset,
+            emit_options.color_mode,
+            out,
+        )?;
     }
     Ok(())
 }
@@ -98,7 +141,7 @@ pub(crate) fn render_plain<V: view::LayoutView>(
 
 /// Owned-`String` render of colored-mode `options` (parity-suite
 /// helper; the 0.9 `render_scanline_colored_with_legend` shape when
-/// `options.legend` is set).
+/// `options.emit.render_legend` is set).
 #[cfg(all(test, feature = "std"))]
 pub(crate) fn render_colored<V: view::LayoutView>(
     view_ref: &V,
@@ -122,9 +165,10 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
     arena: &crate::graph::arena::Arena<'_>,
     out: &mut [u8],
 ) -> Result<usize, crate::GraphError> {
-    let colored = !matches!(options.color_mode, color::ColorMode::None);
-    let plan = plan::RenderPlan::build_in(view_ref, options, arena)?;
-    let band_rows = plan.max_band_rows().max(1);
+    let colored = !matches!(options.emit.color_mode, color::ColorMode::None);
+    let plan = plan::RenderPlan::build_in(view_ref, &options.plan, arena)?;
+    let cap = options.compose.cap();
+    let band_rows = plan.max_band_rows(cap).max(1);
     let area = plan.width() * band_rows;
     let canvas_oom = || crate::GraphError::RenderCanvasTooSmall {
         needed: area,
@@ -143,33 +187,19 @@ pub(crate) fn render_to_bytes<V: view::LayoutView>(
     } else {
         None
     };
-    let mut colors = colors;
 
     let mut sink = emit::ByteSink::new(out);
-    let mut write = || -> core::fmt::Result {
-        for &(y0, rows) in plan.band_ranges() {
-            let mut canvas =
-                compose::BandCanvas::new(cells, colors.as_deref_mut(), plan.width(), y0, rows);
-            compose::composite_band(view_ref, &plan, options, &mut canvas, &mut scratch);
-            if colored {
-                emit::emit_colored_band(&canvas, options.charset, options.color_mode, &mut sink)?;
-            } else {
-                emit::emit_plain_band(&canvas, options.charset, &mut sink)?;
-            }
-        }
-        // D4: plain legends too — the same gate the alloc path uses.
-        if options.legend {
-            emit::emit_legend(
-                view_ref,
-                &plan,
-                options.charset,
-                options.color_mode,
-                &mut sink,
-            )?;
-        }
-        Ok(())
-    };
-    match write() {
+    let write = emit_bands(
+        view_ref,
+        &plan,
+        &options.emit,
+        cap,
+        &mut scratch,
+        cells,
+        colors,
+        &mut sink,
+    );
+    match write {
         Ok(()) => Ok(sink.written()),
         // The sink is the only fallible writer here; a fmt error that
         // isn't the sink overflowing would be an engine bug.
@@ -196,17 +226,27 @@ pub(crate) fn estimate_render_output_size<V: view::LayoutView>(
     view_ref: &V,
     options: &config::RenderOptions,
 ) -> usize {
-    let colored = !matches!(options.color_mode, color::ColorMode::None);
-    emit::estimate_output_size(view_ref, colored, options.legend)
+    let colored = !matches!(options.emit.color_mode, color::ColorMode::None);
+    emit::estimate_output_size(view_ref, colored, options.emit.render_legend)
 }
 
+pub use cells::{ArmWeight, ArmWeights, CellKind, CellMarker, CellView, MarkerDirection};
 pub use charset::Charset;
 pub use color::{CellColor, ColorMode};
-pub use config::{DEFAULT_BAND_ROWS, RenderOptions};
+pub use composer::{CompositionRequirements, SceneComposer};
+pub use config::{
+    ComposeBudget, DEFAULT_BAND_ROWS, EmitOptions, LabelOverflow, LabelPlacementPolicy,
+    LabelPolicy, PlanOptions, RenderOptions,
+};
 pub use node_content::{BoxedNode, CustomNode, NodeContent, NodeKindTag, SimpleNode};
-pub use plan::{HitResult, RenderPlan};
+pub use plan::HitResult;
 pub use region::{NodePaintCtx, NodeRegion};
+pub use scene::{LayoutSource, PlanRun, Scene, ScenePlanner};
 pub use style::{
     EdgeLabelStyle, EdgeStyle, EdgeStyleCtx, LabelPlacement, LabelPosition, LineWeight,
     MarkerShape, NodePaintFn, SubgraphBorder, SubgraphStyle, SubgraphStyleCtx,
+};
+pub use terminal::TerminalRenderer;
+pub use views::{
+    EdgePathView, EdgeView, LabelSlot, LabelView, NodeKind, NodeOrigin, NodeView, SubgraphView,
 };

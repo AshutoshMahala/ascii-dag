@@ -7,12 +7,16 @@
 //! the same methods — the engine underneath is one paint path, so the
 //! render layer has no "backends" (N1).
 //!
+//! Introspection (dimensions, legend, hit-testing) lives on
+//! [`Scene`](super::scene::Scene), planned by
+//! [`ScenePlanner`](super::scene::ScenePlanner) — the 0.10
+//! `render_plan`/`hit_test` surface moved there.
+//!
 //! An external-backend trait (the design's M8 "Renderer" seam) is
 //! deliberately not part of 0.10: it returns when a real consumer
 //! defines its shape.
 
 use super::config::RenderOptions;
-use super::plan::{HitResult, RenderPlan};
 use crate::GraphError;
 use crate::graph::arena::Arena;
 use crate::ir::arena::LayoutIRArena;
@@ -73,29 +77,20 @@ macro_rules! render_surface {
                 super::estimate_render_output_size(self, options)
             }
 
-            /// Build the introspectable [`RenderPlan`] for this layout
-            /// (resolved styles, label placement, band partition). The
-            /// plan is reusable across renders of the same layout.
-            #[cfg(feature = "alloc")]
-            pub fn render_plan(&self, options: &RenderOptions) -> RenderPlan<'static> {
-                RenderPlan::build(self, options)
-            }
-
-            /// Arena-backed `render_plan` for no-alloc callers;
-            /// exhaustion reports `E.Render.Plan.026`.
-            pub fn render_plan_in<'buf>(
-                &self,
-                options: &RenderOptions,
-                arena: &Arena<'buf>,
-            ) -> Result<RenderPlan<'buf>, GraphError> {
-                RenderPlan::build_in(self, options, arena)
-            }
-
-            /// What occupies the rendered cell at `(x, y)` under `plan`?
-            /// Nodes win over edges, edges over subgraph boxes,
-            /// matching the visual z-order.
-            pub fn hit_test(&self, plan: &RenderPlan<'_>, x: usize, y: usize) -> HitResult {
-                plan.element_at(self, x, y)
+            /// Bytes of workspace a
+            /// [`ScenePlanner::new_in`](super::scene::ScenePlanner::new_in)
+            /// needs to plan this layout — the scene-pipeline third of
+            /// the sizing split (workspace:
+            /// [`CompositionRequirements::workspace_bytes`](super::composer::CompositionRequirements::workspace_bytes);
+            /// output:
+            /// [`Scene::estimate_output_size`](super::scene::Scene::estimate_output_size)).
+            /// Today's plan storage depends only on the layout's
+            /// cardinalities; `options` is part of the contract so a
+            /// future planning option that grows storage cannot change
+            /// this signature.
+            pub fn estimate_scene_size(&self, options: &super::config::PlanOptions) -> usize {
+                let _ = options;
+                super::plan::plan_storage_bytes(self)
             }
         }
     };

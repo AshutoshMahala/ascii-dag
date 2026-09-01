@@ -28,7 +28,10 @@
 //! - `alloc`: Heap-based `Graph` API without `std`
 //! - `arena` (+ `arena-idx-u8`/`u16`/`u32`): No-alloc CSR layout and
 //!   rendering on caller-provided arenas
-//! - `warnings`: Debug warnings for auto-created nodes
+//!
+//! Non-fatal conditions (auto-created placeholders, omitted labels)
+//! travel through the [`diagnostics`] channel as typed data — there
+//! is no logging feature and the library never writes to stderr.
 //!
 //! To minimize bundle size, disable `generic`:
 //! ```toml
@@ -149,6 +152,7 @@ compile_error!(
 );
 
 pub mod algorithms;
+pub mod diagnostics;
 pub mod errors;
 pub mod graph;
 pub mod ir;
@@ -157,19 +161,37 @@ pub mod validation;
 
 // ── Convenience re-exports (alloc-dependent) ────────────────────────────
 
+pub use diagnostics::{
+    BorrowedReport, CountingDiagnostics, Diagnostic, DiagnosticContext, DiagnosticCounts,
+    DiagnosticKind, DiagnosticRef, DiagnosticRun, DiagnosticSink, DiagnosticSubject, FnDiagnostics,
+    IgnoreDiagnostics, ProjectedFailure, Report, Severity, SliceDiagnostics,
+};
 #[cfg(feature = "alloc")]
-pub use errors::Diagnostic;
+pub use diagnostics::{OwnedReport, VecDiagnostics};
+#[cfg(feature = "alloc")]
+pub use errors::ErrorChain;
 pub use errors::GraphError;
 pub use graph::RenderMode;
 pub use graph::{AUTO, Auto, IdOrAuto, NodeId};
 #[cfg(feature = "alloc")]
-pub use graph::{Direction, Graph, Subgraph};
-pub use ir::NodeKind;
+pub use graph::{Direction, EdgeInsertion, Graph, MissingNodePolicy, NodeInsertion, Subgraph};
 #[cfg(feature = "alloc")]
 pub use ir::{EdgePath, FlowAxis, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, SubgraphInfo};
 pub use render::colors::Palette;
+pub use render::engine::{
+    ArmWeight, ArmWeights, CellKind, CellMarker, CellView, CompositionRequirements,
+    MarkerDirection, SceneComposer, TerminalRenderer,
+};
 pub use render::engine::{BoxedNode, CustomNode, NodeContent, SimpleNode};
-pub use render::engine::{Charset, ColorMode, RenderOptions};
+pub use render::engine::{CellColor, HitResult};
+pub use render::engine::{
+    Charset, ColorMode, ComposeBudget, EmitOptions, LabelOverflow, LabelPlacementPolicy,
+    LabelPolicy, LayoutSource, PlanOptions, PlanRun, RenderOptions, Scene, ScenePlanner,
+};
+pub use render::engine::{
+    EdgePathView, EdgeView, LabelSlot, LabelView, NodeKind, NodeOrigin, NodeView, SubgraphView,
+};
+pub use render::engine::{LabelPosition, LineWeight, MarkerShape, SubgraphBorder};
 pub use validation::Requirements;
 // Primary config types (always available, no alloc needed)
 pub use algorithms::sugiyama::config::{

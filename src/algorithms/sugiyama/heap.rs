@@ -737,10 +737,16 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         (level_offsets, total_height)
     };
 
-    // Add real nodes to IR
+    // Add real nodes to IR, remembering each graph node's IR position
+    // (level-order emission) so self-loop records can carry it — the
+    // O(1) record→node join every consumer relies on.
+    let mut ir_index_of = vec![usize::MAX; dag.nodes.len()];
+    let mut next_ir_index = 0usize;
     for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
         for vnode in level_vnodes {
             if let VNode::Real(idx) = vnode {
+                ir_index_of[*idx] = next_ir_index;
+                next_ir_index += 1;
                 let (level, pos, cross, _) = real_node_coords[*idx];
                 let (x, y) = A::materialize(level_offsets[level], cross);
 
@@ -1190,6 +1196,25 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     builder.set_dimensions(canvas_width, canvas_height);
     builder.set_direction(config.direction);
 
+    // Preserve self-loops as records: identity (input index), label,
+    // owning node — absent from the routed list, visible to the scene.
+    for (i, &(f, t, label)) in dag.edges.iter().enumerate() {
+        if f == t {
+            builder.add_self_loop(crate::ir::SelfLoopRecord {
+                node_id: f,
+                node_index: dag
+                    .id_to_index
+                    .get(&f)
+                    .map_or(usize::MAX, |&di| ir_index_of[di]),
+                edge_index: i,
+                // An empty label is no label — normalized at the
+                // record's birth, matching the arena pool's len-0
+                // convention, so both backends agree everywhere
+                // downstream (views, diagnostics, JSON).
+                label: label.filter(|l| !l.is_empty()),
+            });
+        }
+    }
     let mut ir = builder.build();
     #[cfg(feature = "layout-vertical")]
     if config.direction == crate::graph::Direction::BottomUp {

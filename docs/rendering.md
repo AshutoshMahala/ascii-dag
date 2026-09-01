@@ -18,13 +18,14 @@ feature: the convenience surfaces need somewhere to put their result.
 | A `String` | `render_string(&options)` | yes |
 | To write into something | `render_with(&options, &mut writer)` | yes |
 | Bytes, into your buffer | `render_to_bytes(&options, &arena, &mut buf)` | no |
-| To inspect, not paint | `render_plan(&options)` | yes |
-| …the same, into your arena | `render_plan_in(&options, &arena)` | no |
-| What is at this cell | `hit_test(&plan, x, y)` | no |
+| To inspect, not paint | `ScenePlanner::new().plan(&ir, &options.plan).quiet()` | yes |
+| …the same, no-alloc | `ScenePlanner::new_in(&mut workspace)` | no |
+| What is at this cell | `scene.hit_test(x, y)` | no |
+| Repeated renders of one scene | `TerminalRenderer::new(&emit, req)` + `render(&scene, &mut out)` | no (`new_in`) |
 
-On a build with `default-features = false, features = ["arena"]` the
-right-hand three are what you have — which is the whole no-allocation
-story, just spelled explicitly.
+On a build with `default-features = false, features = ["arena"]`,
+`render_to_bytes` and the `new_in` planner are what you have — which
+is the whole no-allocation story, just spelled explicitly.
 
 ```rust
 use ascii_dag::{Graph, RenderOptions};
@@ -36,22 +37,30 @@ print!("{}", ir.render_string(&RenderOptions::plain()));
 
 ## Options
 
+Options live in three homes by what they affect: `plan` holds
+everything that changes resolved semantics, `emit` holds how those
+semantics are written, and `compose` holds memory knobs that never
+affect output.
+
 ```rust
 let mut options = RenderOptions::plain();
-options.charset = ascii_dag::Charset::Ascii;
-options.legend = true;
-options.band_rows_cap = 32;
+options.emit.charset = ascii_dag::Charset::Ascii;
+options.plan.label_policy.overflow = ascii_dag::LabelOverflow::Legend;
+options.emit.render_legend = true;
+options.compose.band_rows_cap = 32;
 ```
 
 | Field | Values | Default | What it does |
 |---|---|---|---|
-| `charset` | `Unicode` / `Ascii` | `Unicode` | Equal projections of one canvas — `Ascii` swaps `┌─│→` for `+-\|>` |
-| `color_mode` | `None` / `Ansi256` / `TrueColor` | `None` | ANSI escapes for edge coloring |
-| `palette` | `Palette::*` | `Ansi` | Which colors the edge coloring draws from |
-| `legend` | `bool` | `false` | List labels that could not be placed inline |
-| `show_dummy_nodes` | `bool` | `false` | Draw `◍` at routing waypoints (see [layout.md](layout.md#routing-waypoints)) |
-| `band_rows_cap` | `usize` | `64` | Canvas memory ceiling — see [banding](#banding-and-memory) |
-| `edge_style_fn` etc. | `fn` pointers | legacy look | Per-element styling, below |
+| `emit.charset` | `Unicode` / `Ascii` | `Unicode` | Equal projections of one canvas — `Ascii` swaps `┌─│→` for `+-\|>` |
+| `emit.color_mode` | `None` / `Ansi256` / `TrueColor` | `None` | ANSI escapes for edge coloring |
+| `emit.render_legend` | `bool` | `false` | Print the legend block after the diagram |
+| `plan.palette` | `Palette::*` | `Ansi` | Which colors the edge coloring draws from |
+| `plan.label_policy.placement` | `Geometric` / `AvoidNodeRows` | `Geometric` | Whether inline labels may sit on rows hosting nodes |
+| `plan.label_policy.overflow` | `Omit` / `Legend` | `Omit` | Where labels that found no inline position go |
+| `plan.show_dummy_nodes` | `bool` | `false` | Draw `◍` at routing waypoints (see [layout.md](layout.md#routing-waypoints)) |
+| `plan.edge_style_fn` etc. | `fn` pointers | legacy look | Per-element styling, below |
+| `compose.band_rows_cap` | `usize` | `64` | Canvas memory ceiling — see [banding](#banding-and-memory) |
 
 Four `const` presets cover the common combinations:
 `RenderOptions::plain()`, `::colored(palette)`, `::ascii()`,
@@ -74,7 +83,8 @@ dropped:
 
 ```rust
 let mut options = RenderOptions::plain();
-options.legend = true;
+options.plan.label_policy.overflow = ascii_dag::LabelOverflow::Legend;
+options.emit.render_legend = true;
 ```
 
 ```text
@@ -108,7 +118,7 @@ fn dashed_back_edges(ctx: EdgeStyleCtx<'_>) -> EdgeStyle {
 }
 
 let mut options = RenderOptions::plain();
-options.edge_style_fn = dashed_back_edges;
+options.plan.edge_style_fn = dashed_back_edges;
 ```
 
 `EdgeStyleCtx` carries the edge index, both endpoint ids, the label,
@@ -221,14 +231,19 @@ balance. Lower it on memory-constrained targets.
 
 ## Hit-testing (interactive and IDE consumers)
 
-`render_plan` gives you the renderer's own geometry without painting
-anything, and `hit_test` answers what occupies a cell:
+A `Scene` gives you the renderer's own geometry without painting
+anything: a `ScenePlanner` resolves the layout once (styles run
+exactly once), and `hit_test` answers what occupies a cell. The scene
+borrows both the planner and the layout, so a stale plan/layout
+pairing is a compile error:
 
 ```rust
 use ascii_dag::render::engine::HitResult;
+use ascii_dag::ScenePlanner;
 
-let plan = ir.render_plan(&options);
-match ir.hit_test(&plan, x, y) {
+let mut planner = ScenePlanner::new();
+let scene = planner.plan(&ir, &options.plan).quiet()?;
+match scene.hit_test(x, y) {
     HitResult::Node(id) => println!("node {id}"),
     HitResult::Edge(index) => println!("edge #{index}"),
     HitResult::Subgraph(id) => println!("cluster {id}"),
@@ -239,27 +254,76 @@ match ir.hit_test(&plan, x, y) {
 
 This is what an editor plugin, TUI, or web terminal needs to make a
 rendered graph clickable: translate a click to a cell (subtract your
-own origin, account for scroll), then ask the plan.
+own origin, account for scroll), then ask the scene.
 
 The semantics are deliberately hybrid, because that is what feels
 right under a cursor:
 
 - **Nodes** hit as their full reserved rectangle, so a custom painter's
-  whole area belongs to the node — plus the self-loop marker cell.
+  whole area belongs to the node.
+- **Self-loops** own their `↺` marker cell — clicking it selects the
+  loop edge (`HitResult::Edge` of its scene index), not the node.
 - **Edges** hit as *painted ink* — the exact cells the compositor drew,
   not a bounding box, so two crossing edges resolve correctly. A
   painted edge label belongs to its edge.
-- **Clusters** hit on their border, or on their label when the border
-  is `None`.
+- **Bordered clusters** own their complete rectangle — border, label,
+  and blank interior alike (clicking inside a box selects it); a
+  borderless cluster (`SubgraphBorder::None`) has only its label cells
+  to hit.
 
 Nodes win over edges, edges over clusters — the visual z-order.
 
-A plan answers only for the layout it was built from; a query outside
-its canvas returns `HitResult::None` rather than panicking. Rebuild
-the plan when the layout changes; it is a snapshot, not a live view.
+A scene is bound to the layout it was planned from — it borrows both
+its planner and the layout, so a stale pairing is a compile error
+rather than a runtime surprise. A query outside its canvas returns
+`HitResult::None` rather than panicking. Re-plan when the layout
+changes; a scene is a snapshot, not a live view.
 
-`RenderPlan` also exposes `width`, `height`, `band_count`, and
-`legend_entries` for laying out a viewport around the graph.
+`Scene` also exposes `width`, `height`, and `legend_entries` for
+laying out a viewport around the graph.
+
+## Beyond the terminal (`SceneComposer`)
+
+Terminal strings are one projection of the composed canvas. A
+`SceneComposer` hands you the canvas itself — one `CellView` per cell,
+row-major — for SVG writers, TUI buffers, or interactive pickers:
+
+```rust
+use ascii_dag::SceneComposer;
+
+let req = scene.composition_requirements(&options.compose);
+let mut composer = SceneComposer::new(req);
+composer.visit_cells(&scene, |x, y, cell| {
+    // cell.kind:  Empty / Text / Stroke { per-arm weights } / Marker
+    // cell.color: resolved color, whatever the emission mode
+    // cell.owner: what hit_test reports for this cell
+})?;
+```
+
+Stroke cells carry per-arm weights instead of pre-picked glyphs —
+Unicode and ASCII terminal output are two projections of this same
+vocabulary, and an SVG consumer can draw real vector strokes from it.
+`try_visit_cells` is the early-exit form for fallible sinks. The
+composer retains its workspace: steady-state repaint allocates
+nothing, and `SceneComposer::new_in` composes out of a caller-provided
+byte slice for no-alloc targets.
+
+### No-alloc sizing (three contracts)
+
+Every retained buffer in the scene pipeline has its own estimator, and
+each is pinned by exact-size tests — a buffer of precisely the
+estimated size always suffices:
+
+| Buffer | Sized by | Handed to |
+|---|---|---|
+| Scene storage | `ir.estimate_scene_size(&plan_options)` | `ScenePlanner::new_in` |
+| Composition workspace | `req.workspace_bytes()` (semantic) / `req.terminal_workspace_bytes(&emit)` (terminal) | `SceneComposer::new_in` / `TerminalRenderer::new_in` |
+| Output bytes | `scene.estimate_output_size(&emit)` | your buffer |
+
+(`req` is `scene.composition_requirements(&budget)`. The one-shot
+`render_to_bytes` keeps its combined
+`estimate_render_arena_size`/`estimate_render_output_size` pair — it
+plans and composes in a single arena.)
 
 See `examples/hit_test.rs` for a working terminal program — it enables
 xterm mouse reporting with raw escape sequences and no dependencies,

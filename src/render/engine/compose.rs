@@ -22,8 +22,7 @@
 //! canonical for 0.10.0).
 
 use super::cell::{Cell, Dir, MarkerKind, Weight};
-use super::color::{CellColor, ColorMode};
-use super::config::RenderOptions;
+use super::color::CellColor;
 use super::mem::{PlanBuf, SliceHeap};
 use super::plan::{LabelPlan, PlanElement, RenderPlan};
 use super::view::{LayoutView, PathRef};
@@ -255,6 +254,54 @@ impl<'a> PaintScratch<'a> {
             sweep_cursor: 0,
             sweep_next_y0: 0,
         })
+    }
+
+    /// The exact `carve` sequence as `(bytes, align)` pairs, in carve
+    /// order — `CompositionRequirements` folds its workspace layout
+    /// through this instead of guessing alignment slop, so the sizing
+    /// and the carves can never drift apart. Checked: `None` when any
+    /// term overflows (the requirement then reports unfittable instead
+    /// of panicking — hand-built IRs can declare absurd dimensions).
+    pub(crate) fn carve_layout(
+        run_capacity: usize,
+        subgraphs: usize,
+        edges: usize,
+        nodes: usize,
+        colored: bool,
+        width: usize,
+        band_rows: usize,
+    ) -> Option<[(usize, usize); 7]> {
+        use core::mem::{align_of, size_of};
+        let seq = if colored {
+            width.checked_mul(band_rows)?
+        } else {
+            0
+        };
+        type HeapEntry = (u32, usize, u32);
+        Some([
+            (
+                run_capacity.checked_mul(size_of::<Run>())?,
+                align_of::<Run>(),
+            ),
+            (
+                run_capacity.checked_mul(size_of::<HeapEntry>())?,
+                align_of::<HeapEntry>(),
+            ),
+            (seq.checked_mul(size_of::<u32>())?, align_of::<u32>()),
+            (
+                subgraphs.checked_mul(size_of::<usize>())?,
+                align_of::<usize>(),
+            ),
+            (edges.checked_mul(size_of::<usize>())?, align_of::<usize>()),
+            (nodes.checked_mul(size_of::<usize>())?, align_of::<usize>()),
+            (
+                subgraphs
+                    .checked_add(edges)?
+                    .checked_add(nodes)?
+                    .checked_mul(size_of::<u32>())?,
+                align_of::<u32>(),
+            ),
+        ])
     }
 
     /// Bytes an arena needs for this scratch (estimate companion).
@@ -492,7 +539,6 @@ fn flush_row(
 pub(crate) fn composite_band<V: LayoutView>(
     view: &V,
     plan: &RenderPlan<'_>,
-    options: &RenderOptions,
     canvas: &mut BandCanvas<'_>,
     scratch: &mut PaintScratch<'_>,
 ) {
@@ -532,22 +578,23 @@ pub(crate) fn composite_band<V: LayoutView>(
         paint_edge(view, plan, i, &mut painter);
     }
     painter.flush();
-    // Z2: edge labels. Placement gate mirrors the three legacy paths:
-    // plain and colored-without-legend place geometrically; only the
-    // colored-with-legend path additionally vetoes rows hosting nodes.
-    let colored = !matches!(options.color_mode, ColorMode::None);
+    // Z2: edge labels. The placement policy is plan state (resolved
+    // from `PlanOptions.label_policy` at build): `Geometric` places
+    // purely geometrically, `AvoidNodeRows` additionally vetoes rows
+    // hosting nodes — the presets map the three legacy paths onto
+    // these explicitly.
     let band_has = |y: usize| y >= y0 && y < y0 + rows;
     for label in plan.labels() {
         if !band_has(label.y) {
             continue;
         }
-        if label.paints(colored, options.legend) {
+        if label.paints_under(plan.label_placement()) {
             paint_edge_label(view, plan, label, canvas);
         }
     }
     // Z3: nodes.
     for i in 0..scratch.nodes.len() {
-        paint_node(view, scratch.nodes.as_slice()[i], options, canvas);
+        paint_node(view, plan, scratch.nodes.as_slice()[i], canvas);
     }
     // Z4: subgraph labels (always readable; colors untouched).
     for i in 0..scratch.sgs.len() {
@@ -1055,14 +1102,14 @@ fn paint_subgraph_label<V: LayoutView>(
 
 fn paint_node<V: LayoutView>(
     view: &V,
+    plan: &RenderPlan<'_>,
     index: usize,
-    options: &RenderOptions,
     canvas: &mut BandCanvas<'_>,
 ) {
     use super::node_content::NodeKindTag;
     let n = view.node(index);
     if matches!(n.kind, NodeKind::Dummy) {
-        if options.show_dummy_nodes {
+        if plan.show_dummy_nodes() {
             let default = Paint::Color(CellColor::DEFAULT);
             canvas.marker(n.x, n.y, MarkerKind::Dummy, Dir::Up, false, default);
         }
@@ -1112,7 +1159,6 @@ fn paint_node<V: LayoutView>(
                         label: n.label,
                         width: n.width,
                         height,
-                        charset: options.charset,
                         visible_rows,
                         payload,
                     },
@@ -1231,6 +1277,7 @@ fn paint_edge_label<V: LayoutView>(
 mod tests {
     use super::*;
     use crate::graph::Graph;
+    use crate::render::engine::config::RenderOptions;
 
     /// Composite one band and return its emitted text.
     fn band_text<V: LayoutView>(
@@ -1243,9 +1290,9 @@ mod tests {
         rows: usize,
     ) -> alloc::string::String {
         let mut canvas = BandCanvas::new(cells, None, plan.width(), y0, rows);
-        composite_band(view, plan, options, &mut canvas, scratch);
+        composite_band(view, plan, &mut canvas, scratch);
         let mut out = alloc::string::String::new();
-        super::super::emit::emit_plain_band(&canvas, options.charset, &mut out).unwrap();
+        super::super::emit::emit_plain_band(&canvas, options.emit.charset, &mut out).unwrap();
         out
     }
 
@@ -1265,20 +1312,22 @@ mod tests {
         }
         let ir = g.compute_layout();
         let mut options = RenderOptions::plain();
-        options.band_rows_cap = 3;
-        let plan = RenderPlan::build(&ir, &options);
-        assert!(plan.band_count() > 2, "corpus must actually band");
-        let mut cells = alloc::vec![Cell::EMPTY; plan.width() * plan.max_band_rows()];
+        options.compose.band_rows_cap = 3;
+        let plan = RenderPlan::build(&ir, &options.plan);
+        let cap = options.compose.cap();
+        let bands: alloc::vec::Vec<_> = plan.bands(cap).collect();
+        assert!(bands.len() > 2, "corpus must actually band");
+        let band_rows = plan.max_band_rows(cap);
+        let mut cells = alloc::vec![Cell::EMPTY; plan.width() * band_rows];
 
-        let mut fwd = PaintScratch::heap_backed(&ir, &plan, false, plan.max_band_rows());
-        let ascending: alloc::vec::Vec<_> = plan
-            .band_ranges()
+        let mut fwd = PaintScratch::heap_backed(&ir, &plan, false, band_rows);
+        let ascending: alloc::vec::Vec<_> = bands
             .iter()
             .map(|&(y0, rows)| band_text(&ir, &plan, &options, &mut fwd, &mut cells, y0, rows))
             .collect();
 
-        let mut rev = PaintScratch::heap_backed(&ir, &plan, false, plan.max_band_rows());
-        for (i, &(y0, rows)) in plan.band_ranges().iter().enumerate().rev() {
+        let mut rev = PaintScratch::heap_backed(&ir, &plan, false, band_rows);
+        for (i, &(y0, rows)) in bands.iter().enumerate().rev() {
             let got = band_text(&ir, &plan, &options, &mut rev, &mut cells, y0, rows);
             assert_eq!(got, ascending[i], "band {i} (y0={y0}) reverse order");
             let again = band_text(&ir, &plan, &options, &mut rev, &mut cells, y0, rows);

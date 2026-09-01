@@ -67,9 +67,9 @@ fn main() {
         RenderOptions::plain()
     };
     if ascii {
-        opts.charset = Charset::Ascii;
+        opts.emit.charset = Charset::Ascii;
     }
-    opts.show_dummy_nodes = dummy;
+    opts.plan.show_dummy_nodes = dummy;
 
     if csr::requested() {
         // Same graph, arena pipeline — byte-identical output.

@@ -69,46 +69,36 @@ pub(crate) fn emit_legend<V: LayoutView, W: core::fmt::Write>(
     }
     out.write_str("\nEdge labels:\n")?;
 
-    // Endpoint labels resolve by node id. Under alloc, one pass builds
-    // a sorted id→label table so the legend is O((N + E) log N) instead
-    // of scanning every node per entry; the no-alloc byte path keeps
-    // the linear scan (legends are small and memory is the constraint).
-    #[cfg(feature = "alloc")]
-    let table: alloc::vec::Vec<(usize, &str)> = {
-        let mut t: alloc::vec::Vec<(usize, &str)> = (0..view.node_count())
-            .map(|i| view.node(i))
-            .filter(|n| !matches!(n.kind, crate::ir::NodeKind::Dummy))
-            .map(|n| (n.id, n.label))
-            .collect();
-        t.sort_unstable_by_key(|&(id, _)| id);
-        t
-    };
+    // Endpoint labels resolve by node id through a plain linear scan
+    // on EVERY build: the legend is bounded by labeled edges (small),
+    // and the steady-state repaint contract is zero allocations — a
+    // per-render sorted table would trade that contract for a big-O
+    // win the legend's size never justifies.
     let find_label = |id: usize| -> Option<&str> {
-        #[cfg(feature = "alloc")]
-        {
-            table
-                .binary_search_by_key(&id, |&(nid, _)| nid)
-                .ok()
-                .map(|i| table[i].1)
-        }
-        #[cfg(not(feature = "alloc"))]
-        {
-            (0..view.node_count())
-                .map(|i| view.node(i))
-                .find(|n| n.id == id && !matches!(n.kind, crate::ir::NodeKind::Dummy))
-                .map(|n| n.label)
-        }
+        (0..view.node_count())
+            .map(|i| view.node(i))
+            .find(|n| n.id == id && !matches!(n.kind, crate::ir::NodeKind::Dummy))
+            .map(|n| n.label)
     };
 
+    let routed = view.edge_count();
     for &ei in plan.legend_entries() {
-        let e = view.edge(ei);
-        let Some(label) = e.label else { continue };
+        // Scene indices: routed edges first, then self-loop records.
+        let (from_id, to_id, label) = if ei < routed {
+            let e = view.edge(ei);
+            let Some(label) = e.label else { continue };
+            (e.from_id, e.to_id, label)
+        } else {
+            let r = view.self_loop(ei - routed);
+            let Some(label) = r.label else { continue };
+            (r.node_id, r.node_id, label)
+        };
         // Legacy lists an entry only when both endpoints resolve.
-        let (Some(from), Some(to)) = (find_label(e.from_id), find_label(e.to_id)) else {
+        let (Some(from), Some(to)) = (find_label(from_id), find_label(to_id)) else {
             continue;
         };
         let arrow = charset.legend_arrow();
-        write_fg(out, plan.edge_plan(ei).color, mode)?;
+        write_fg(out, plan.scene_edge_plan(ei).color, mode)?;
         write!(out, "{from} {arrow} {to}: \"{label}\"")?;
         // Plain legends emit no escapes at all (D4) — the reset only
         // closes a color that was actually opened.
@@ -124,7 +114,8 @@ pub(crate) fn emit_legend<V: LayoutView, W: core::fmt::Write>(
 /// plan. Right-trimming only shrinks rows, so `width + 1` per row
 /// bounds plain output; colored rows add at most one escape per cell
 /// (worst case truecolor, 19 bytes) plus a reset. The legend bound
-/// assumes every labeled edge lands in the legend.
+/// assumes every labeled edge — routed AND self-loop — lands in the
+/// legend.
 pub(crate) fn estimate_output_size<V: LayoutView>(view: &V, colored: bool, legend: bool) -> usize {
     let per_cell = if colored { 4 + 19 } else { 4 };
     let mut size = view
@@ -142,9 +133,27 @@ pub(crate) fn estimate_output_size<V: LayoutView>(view: &V, colored: bool, legen
             // Worst-case per-line overhead: truecolor escape (19) +
             // indent/spacing/colon (6) + arrow (≤3) + quotes (2) +
             // reset (4) + newline (1) = 35; rounded up for headroom.
-            size += label_len + 2 * max_node_label + 40;
+            // Saturating throughout: a hand-built IR can declare
+            // absurd dimensions, and an estimate must saturate to
+            // usize::MAX (unfittable), never wrap into an UNDERSIZED
+            // buffer bound or panic in debug.
+            size = size.saturating_add(
+                label_len
+                    .saturating_add(max_node_label.saturating_mul(2))
+                    .saturating_add(40),
+            );
         }
-        size += 16; // header
+        // Self-loop legend lines ("A → A: \"retry\"") — same per-line
+        // bound, same saturation discipline.
+        for j in 0..view.self_loop_count() {
+            let label_len = view.self_loop(j).label.map_or(0, |l| l.len());
+            size = size.saturating_add(
+                label_len
+                    .saturating_add(max_node_label.saturating_mul(2))
+                    .saturating_add(40),
+            );
+        }
+        size = size.saturating_add(16); // header
     }
     size
 }

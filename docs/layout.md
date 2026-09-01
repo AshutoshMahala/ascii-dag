@@ -190,12 +190,13 @@ config.include_dummy_nodes = true;   // layout: emit them into the IR
 let ir = g.compute_layout_with_config(&config);
 
 let mut options = RenderOptions::plain();
-options.show_dummy_nodes = true;     // render: draw the marker
+options.plan.show_dummy_nodes = true; // render: draw the marker
 ```
 
 Both are required — the render switch has nothing to draw unless the
 layout emitted them. With `include_dummy_nodes` on they appear in the
-IR as nodes with `kind == NodeKind::Dummy` and an `edge_index`
+IR as nodes with `kind == ascii_dag::ir::NodeKind::Dummy` (the IR
+enum — crate-root `NodeKind` is the scene vocabulary) and an `edge_index`
 back-link to the edge they belong to, which is how you attribute a
 routing cell to its edge.
 
@@ -229,7 +230,7 @@ variants for hand-built IRs. The level-axis scalars (`bend_at`,
 `channel_at`, `span_start`/`span_end`) live on the axis the edge's
 `flow_axis` names — a row for `Y` trunks, a column for `X`.
 
-Export it as JSON (schema v1.3) for a renderer in another language:
+Export it as JSON (schema v1.4) for a renderer in another language:
 
 ```rust
 let json = ir.to_json();

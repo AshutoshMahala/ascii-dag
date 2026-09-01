@@ -1,7 +1,7 @@
 //! Builder for constructing [`LayoutIRArena`] from arena memory.
 
 use super::arena::{
-    CustomNodeArena, EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena,
+    CustomNodeArena, EdgePathArena, LayoutEdgeArena, LayoutIRArena, LayoutNodeArena, SelfLoopArena,
     SubgraphInfoArena,
 };
 use crate::graph::arena::Arena;
@@ -26,6 +26,8 @@ pub struct LayoutIRArenaBuilder<'a> {
     subgraph_count: usize,
     custom_nodes: &'a mut [CustomNodeArena],
     custom_count: usize,
+    self_loops: &'a mut [SelfLoopArena],
+    self_loop_count: usize,
     width: usize,
     height: usize,
     level_count: usize,
@@ -50,6 +52,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             max_levels,
             0,
             0,
+            max_edges, // self-loops are a subset of the edge list
         )
     }
 
@@ -68,12 +71,14 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         max_levels: usize,
         max_subgraphs: usize,
         max_custom: usize,
+        max_self_loops: usize,
     ) -> Option<Self> {
         // Allocate all buffers upfront
         let (nodes_ptr, _) = arena.alloc_raw::<LayoutNodeArena>(max_nodes)?;
         let (edges_ptr, _) = arena.alloc_raw::<LayoutEdgeArena>(max_edges)?;
         let (waypoints_ptr, _) = arena.alloc_raw::<(usize, usize)>(max_waypoints)?;
         let (labels_ptr, _) = arena.alloc_raw::<u8>(max_label_bytes)?;
+        let (self_loops_ptr, _) = arena.alloc_raw::<SelfLoopArena>(max_self_loops)?;
         let (level_offsets_ptr, _) = arena.alloc_raw::<usize>(max_levels + 1)?;
         let (level_data_ptr, _) = arena.alloc_raw::<usize>(max_nodes)?;
         let sg_ptr = if max_subgraphs > 0 {
@@ -104,6 +109,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             } else {
                 &mut []
             };
+            let self_loops = core::slice::from_raw_parts_mut(self_loops_ptr, max_self_loops);
 
             // Initialize level_offsets to zero
             for offset in level_offsets.iter_mut() {
@@ -127,6 +133,8 @@ impl<'a> LayoutIRArenaBuilder<'a> {
                 subgraph_count: 0,
                 custom_nodes,
                 custom_count: 0,
+                self_loops,
+                self_loop_count: 0,
                 width: 0,
                 height: 0,
                 level_count: 0,
@@ -230,6 +238,37 @@ impl<'a> LayoutIRArenaBuilder<'a> {
         };
         self.label_offset += bytes.len();
         self.custom_count += 1;
+        Some(())
+    }
+
+    /// Record a preserved self-loop (label bytes are copied into the
+    /// shared label pool — `max_label_bytes` must cover them, which
+    /// the layout's label sum already does since loops live in the
+    /// input edge list).
+    pub fn add_self_loop(
+        &mut self,
+        node_id: usize,
+        node_index: usize,
+        edge_index: usize,
+        label: &str,
+    ) -> Option<()> {
+        if self.self_loop_count >= self.self_loops.len() {
+            return None;
+        }
+        let bytes = label.as_bytes();
+        if self.label_offset + bytes.len() > self.labels.len() {
+            return None;
+        }
+        self.labels[self.label_offset..self.label_offset + bytes.len()].copy_from_slice(bytes);
+        self.self_loops[self.self_loop_count] = SelfLoopArena {
+            node_id,
+            node_index,
+            edge_index,
+            label_offset: self.label_offset,
+            label_len: bytes.len(),
+        };
+        self.label_offset += bytes.len();
+        self.self_loop_count += 1;
         Some(())
     }
 
@@ -557,6 +596,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             &self.level_offsets[..self.level_count + 1],
             &self.level_data[..self.level_data_offset],
             &self.custom_nodes[..self.custom_count],
+            &self.self_loops[..self.self_loop_count],
         )
     }
 }

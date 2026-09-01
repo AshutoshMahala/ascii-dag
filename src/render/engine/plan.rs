@@ -21,7 +21,7 @@
 //! mirroring the compositor (M4).
 
 use super::color::CellColor;
-use super::config::RenderOptions;
+use super::config::{PlanOptions, RenderOptions};
 use super::mem::PlanBuf;
 use super::style::{
     EdgeStyle, EdgeStyleCtx, LabelPosition, LineWeight, MarkerShape, SubgraphBorder,
@@ -87,16 +87,17 @@ pub(crate) struct PlanElement {
     pub y_max: usize,
 }
 
-/// Result of a hit-test query.
+/// Result of a hit-test query ([`Scene::hit_test`](super::scene::Scene::hit_test)).
 ///
 /// ```
-/// use ascii_dag::{Graph, RenderOptions};
+/// use ascii_dag::{Graph, RenderOptions, ScenePlanner};
 /// use ascii_dag::render::engine::HitResult;
 ///
 /// let g = Graph::from_edges(&[(1, "Alpha"), (2, "Beta")], &[(1, 2)]);
 /// let ir = g.compute_layout();
 /// let options = RenderOptions::plain();
-/// let plan = ir.render_plan(&options);
+/// let mut planner = ScenePlanner::new();
+/// let scene = planner.plan(&ir, &options.plan).quiet().unwrap();
 ///
 /// // Find where "Alpha" was painted, then ask what is there.
 /// let text = ir.render_string(&options);
@@ -105,21 +106,39 @@ pub(crate) struct PlanElement {
 ///     .enumerate()
 ///     .find_map(|(r, l)| l.find("Alpha").map(|c| (r, c)))
 ///     .unwrap();
-/// assert_eq!(ir.hit_test(&plan, col, row), HitResult::Node(1));
+/// assert_eq!(scene.hit_test(col, row), HitResult::Node(1));
 ///
 /// // Off the canvas is `None`, never a panic.
-/// assert_eq!(ir.hit_test(&plan, 9999, 9999), HitResult::None);
+/// assert_eq!(scene.hit_test(9999, 9999), HitResult::None);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HitResult {
     /// A node (by id).
     Node(usize),
-    /// An edge, by its IR-list index (the position in the layout's
-    /// edge list — the same convention as `legend_entries`).
+    /// An edge, by its SCENE index — the same convention as
+    /// `legend_entries` and [`Scene::edge`](super::scene::Scene):
+    /// positions `0..edge_count` are the routed layout list (list
+    /// order), and positions past it are preserved self-loops. A
+    /// self-loop hit is therefore NOT an index into the layout's
+    /// routed edge list; resolve any scene index through
+    /// `Scene::edge`, which answers for both ranges (an `EdgeView`
+    /// carries the input index too).
     Edge(usize),
     /// A subgraph box (by subgraph id).
     Subgraph(usize),
+    /// A shown dummy node (routing waypoint), by its SEMANTIC
+    /// identity — dummies never expose their synthetic backend ids
+    /// (the same rule as
+    /// [`NodeView::dummy_of`](super::views::NodeView::dummy_of), and
+    /// the same pair of values).
+    Dummy {
+        /// Input index of the edge this waypoint belongs to (the
+        /// style-callback / `EdgeView::input_index` convention).
+        edge: usize,
+        /// Level the waypoint occupies.
+        level: usize,
+    },
     /// Nothing here.
     None,
 }
@@ -162,21 +181,22 @@ pub(crate) struct LabelPlan {
 }
 
 impl LabelPlan {
-    /// Placement under the colored path's stricter semantics.
+    /// Placement under the node-row-avoiding policy's stricter
+    /// semantics (the legacy colored-with-legend path).
     pub(crate) fn placed_colored(&self) -> bool {
         self.placeable && !self.row_has_node
     }
 
-    /// Does this label PAINT under the given options? The colored
-    /// row-veto applies only when color AND the legend are BOTH on —
-    /// the compositor's exact gate. Every consumer must go through
-    /// this one predicate: a divergent copy once made colored-without-
-    /// legend renders warn about labels they actually painted.
-    pub(crate) fn paints(&self, colored: bool, legend: bool) -> bool {
-        if colored && legend {
-            self.placed_colored()
-        } else {
-            self.placeable
+    /// Does this label PAINT under the given placement policy? Every
+    /// consumer must go through this one predicate: a divergent copy
+    /// once made renders warn about labels they actually painted.
+    pub(crate) fn paints_under(&self, placement: super::config::LabelPlacementPolicy) -> bool {
+        // Exhaustive on purpose (in-crate matches on the
+        // `#[non_exhaustive]` enum still are): a future policy must
+        // decide its veto behavior here, never inherit one silently.
+        match placement {
+            super::config::LabelPlacementPolicy::Geometric => self.placeable,
+            super::config::LabelPlacementPolicy::AvoidNodeRows => self.placed_colored(),
         }
     }
 }
@@ -210,33 +230,31 @@ impl EdgePlan {
 /// Storage is heap- or arena-backed behind `PlanBuf` — one build
 /// path serves std and no-alloc callers alike.
 ///
-/// A plan is a snapshot for **introspection** (dimensions, bands,
-/// legend, hit-testing) of the layout and options it was built from;
-/// the render entry points build their own plan internally. Queries
-/// must be paired with the same layout the plan was built from —
-/// out-of-canvas queries return `HitResult::None`.
-///
-/// ```
-/// use ascii_dag::{Graph, RenderOptions};
-///
-/// let g = Graph::from_edges(&[(1, "A"), (2, "B")], &[(1, 2)]);
-/// let ir = g.compute_layout();
-/// let plan = ir.render_plan(&RenderOptions::plain());
-///
-/// // Size a viewport without painting anything.
-/// assert!(plan.width() > 0 && plan.height() > 0);
-/// assert!(plan.band_count() >= 1);
-/// ```
+/// A plan is a snapshot of one layout resolved under one
+/// [`PlanOptions`]; the render entry points build their own plan
+/// internally, and [`Scene`](super::scene::Scene) is the public
+/// carrier (plan + layout view bound together, so queries can never
+/// be paired with the wrong layout). Out-of-canvas queries return
+/// `HitResult::None`.
 pub struct RenderPlan<'buf> {
     width: usize,
     height: usize,
-    band_ranges: PlanBuf<'buf, (usize, usize)>,
+    /// Sorted, deduped node top rows — the geometry the band
+    /// partition aligns to. Budget-independent plan state; the
+    /// partition itself is computed per composition from
+    /// [`ComposeBudget`](super::config::ComposeBudget) via
+    /// [`bands`](Self::bands).
+    level_tops: PlanBuf<'buf, usize>,
     edge_plans: PlanBuf<'buf, EdgePlan>,
     subgraph_plans: PlanBuf<'buf, SubgraphPlan>,
     labels: PlanBuf<'buf, LabelPlan>,
     index: PlanBuf<'buf, PlanElement>,
-    /// Edge indices whose labels go to the legend (colored semantics).
+    /// SCENE indices whose labels go to the legend: routed-list
+    /// positions first, then self-loop records appended after them.
     legend: PlanBuf<'buf, usize>,
+    /// Resolved per-self-loop styles (scene positions after the
+    /// routed list).
+    self_loop_plans: PlanBuf<'buf, EdgePlan>,
     /// Exact count of h-run interiors across all edge paths — sizes the
     /// compositor's run scratch.
     run_capacity: usize,
@@ -244,15 +262,30 @@ pub struct RenderPlan<'buf> {
     show_dummy_nodes: bool,
     /// Whether label placement uses the colored-with-legend gate
     /// (hit-testing must agree with the compositor).
-    labels_colored_gate: bool,
+    label_placement: super::config::LabelPlacementPolicy,
 }
 
 impl<'buf> RenderPlan<'buf> {
     /// Build a heap-backed plan (std/alloc convenience). Heap pushes
     /// cannot fail, so this surface stays infallible.
     #[cfg(feature = "alloc")]
-    pub(crate) fn build<V: LayoutView>(view: &V, options: &RenderOptions) -> RenderPlan<'static> {
-        match RenderPlan::<'static>::build_impl(view, options, PlanMem::Heap) {
+    /// Quiet convenience over [`build_with`](Self::build_with):
+    /// explicitly discards diagnostics (`IgnoreDiagnostics`).
+    #[cfg(feature = "alloc")]
+    pub(crate) fn build<V: LayoutView>(view: &V, options: &PlanOptions) -> RenderPlan<'static> {
+        let mut run = crate::diagnostics::DiagnosticRun::new(crate::diagnostics::IgnoreDiagnostics);
+        Self::build_with(view, options, &mut run.context())
+    }
+
+    /// Build with a diagnostic context: planning warnings (omitted
+    /// labels) are emitted into it.
+    #[cfg(feature = "alloc")]
+    pub(crate) fn build_with<V: LayoutView>(
+        view: &V,
+        options: &PlanOptions,
+        diagnostics: &mut crate::diagnostics::DiagnosticContext<'_>,
+    ) -> RenderPlan<'static> {
+        match RenderPlan::<'static>::build_impl(view, options, PlanMem::Heap, diagnostics) {
             Ok(plan) => plan,
             // Heap-backed building has no failing carve.
             Err(_) => unreachable!(),
@@ -264,10 +297,21 @@ impl<'buf> RenderPlan<'buf> {
     /// arena with `estimate_render_arena_size`.
     pub(crate) fn build_in<V: LayoutView>(
         view: &V,
-        options: &RenderOptions,
+        options: &PlanOptions,
         arena: &Arena<'buf>,
     ) -> Result<RenderPlan<'buf>, GraphError> {
-        Self::build_impl(view, options, PlanMem::Arena(arena))
+        let mut run = crate::diagnostics::DiagnosticRun::new(crate::diagnostics::IgnoreDiagnostics);
+        Self::build_impl(view, options, PlanMem::Arena(arena), &mut run.context())
+    }
+
+    /// Arena-carved build with a diagnostic context.
+    pub(crate) fn build_in_with<V: LayoutView>(
+        view: &V,
+        options: &PlanOptions,
+        arena: &Arena<'buf>,
+        diagnostics: &mut crate::diagnostics::DiagnosticContext<'_>,
+    ) -> Result<RenderPlan<'buf>, GraphError> {
+        Self::build_impl(view, options, PlanMem::Arena(arena), diagnostics)
     }
 
     /// The one build path. O(N + E + S) plus the label-occupancy checks
@@ -277,8 +321,9 @@ impl<'buf> RenderPlan<'buf> {
     /// it is created.
     fn build_impl<V: LayoutView>(
         view: &V,
-        options: &RenderOptions,
+        options: &PlanOptions,
         mem: PlanMem<'_, 'buf>,
+        diagnostics: &mut crate::diagnostics::DiagnosticContext<'_>,
     ) -> Result<RenderPlan<'buf>, GraphError> {
         let width = view.width();
         let height = view.height();
@@ -286,7 +331,7 @@ impl<'buf> RenderPlan<'buf> {
 
         // ── Resolved styles (the only place style fns run — Q4) ────────
         let palette = options.palette.colors();
-        let use_color = !matches!(options.color_mode, super::color::ColorMode::None);
+        let label_policy = options.label_policy;
         let mut edge_plans: PlanBuf<'buf, EdgePlan> = mem.buf(view.edge_count(), oom())?;
         for i in 0..view.edge_count() {
             let e = view.edge(i);
@@ -302,7 +347,10 @@ impl<'buf> RenderPlan<'buf> {
             let style: EdgeStyle = (options.edge_style_fn)(ctx);
             let color = if style.color.is_set() {
                 style.color
-            } else if use_color && !palette.is_empty() {
+            } else if !palette.is_empty() {
+                // Colors are ALWAYS resolved at plan time — plain
+                // emission ignores them, which is what lets one plan
+                // serve colored and plain output alike.
                 // Legacy default: palette modulo by the IR edge-list
                 // index (NOT the original edge_index — self-loops are
                 // absent from the list, so positions shift; the legacy
@@ -323,6 +371,48 @@ impl<'buf> RenderPlan<'buf> {
                 color
             };
             edge_plans.push(EdgePlan {
+                color,
+                weight,
+                label_color,
+                marker_end: style.marker_end,
+                marker_start: style.marker_start,
+            });
+        }
+
+        // Self-loop plans: style callbacks run for preserved loop
+        // records too (a documented 0.11 behavior addition). Palette
+        // defaults continue at the loops' SCENE positions — appended
+        // after the routed list — so routed-list palette indices never
+        // shift (0.10 parity).
+        let mut self_loop_plans: PlanBuf<'buf, EdgePlan> =
+            mem.buf(view.self_loop_count(), oom())?;
+        for j in 0..view.self_loop_count() {
+            let r = view.self_loop(j);
+            let ctx = EdgeStyleCtx {
+                edge_index: r.input_index,
+                from_id: r.node_id,
+                to_id: r.node_id,
+                label: r.label,
+                directed: true,
+                reversed: false,
+                total_edges: view.edge_count(),
+            };
+            let style: EdgeStyle = (options.edge_style_fn)(ctx);
+            let color = if style.color.is_set() {
+                style.color
+            } else if !palette.is_empty() {
+                CellColor::ansi256(colors::get_custom(palette, view.edge_count() + j))
+            } else {
+                CellColor::DEFAULT
+            };
+            let weight = style.weight.unwrap_or(LineWeight::Light);
+            let label_style = (options.edge_label_style_fn)(ctx);
+            let label_color = if label_style.color.is_set() {
+                label_style.color
+            } else {
+                color
+            };
+            self_loop_plans.push(EdgePlan {
                 color,
                 weight,
                 label_color,
@@ -400,8 +490,11 @@ impl<'buf> RenderPlan<'buf> {
         let labeled = (0..view.edge_count())
             .filter(|&i| view.edge(i).label.is_some())
             .count();
+        let labeled_loops = (0..view.self_loop_count())
+            .filter(|&j| view.self_loop(j).label.is_some())
+            .count();
         let mut labels: PlanBuf<'buf, LabelPlan> = mem.buf(labeled, oom())?;
-        let mut legend: PlanBuf<'buf, usize> = mem.buf(labeled, oom())?;
+        let mut legend: PlanBuf<'buf, usize> = mem.buf(labeled + labeled_loops, oom())?;
         // Spans already claimed by earlier labels, per row.
         // ── Edge-ink source (temp/11 §3.99/§3.101): on HEAP-backed
         // plans past the work threshold, every painted run is
@@ -914,63 +1007,88 @@ impl<'buf> RenderPlan<'buf> {
             // under the compositor's own gate (`LabelPlan::paints`) —
             // `legend_entries` reflects the options this plan was
             // built with.
-            let painted = plan.paints(use_color, options.legend);
-            if options.legend && !painted {
-                legend.push(i);
-            }
-            // No inline position AND no legend → the label appears
-            // NOWHERE. Never silent under the `warnings` feature
-            // (emitted per plan build — plans are stateless). The
-            // label TEXT is deliberately not printed: labels are
-            // caller data and may hold secrets or control characters
-            // (terminal/log injection) — the edge is identified by
-            // index and endpoint ids instead.
-            #[cfg(feature = "warnings")]
-            if !painted && !options.legend {
-                crate::errors::emit_warning(
-                    crate::errors::WARN_LABEL_INVISIBLE,
-                    format_args!(
-                        "the label of edge {} ({} -> {}) has no inline position and \
-                         the legend is disabled - it will not be rendered. Enable \
-                         RenderOptions.legend to list it below the graph.",
-                        i, e.from_id, e.to_id
-                    ),
-                );
+            let painted = plan.paints_under(label_policy.placement);
+            if !painted {
+                // Exhaustive on purpose: every overflow variant —
+                // future ones included — must decide what happens to
+                // an unplaced label right here; a silently inherited
+                // behavior would either lose the label or lose the
+                // diagnostic.
+                match label_policy.overflow {
+                    super::config::LabelOverflow::Legend => legend.push(i),
+                    // Omitted entirely → the label appears NOWHERE
+                    // in the output, but never silently: a
+                    // LabelOmitted diagnostic is emitted per plan
+                    // build (plans are stateless).
+                    // The label TEXT is deliberately not printed:
+                    // labels are caller data and may hold secrets or
+                    // control characters (terminal/log injection) —
+                    // the edge is identified by index and endpoint
+                    // ids instead.
+                    super::config::LabelOverflow::Omit => {
+                        diagnostics.emit(crate::diagnostics::DiagnosticKind::LabelOmitted {
+                            edge: e.edge_index,
+                        });
+                    }
+                }
             }
             labels.push(plan);
         }
 
-        // ── Band partition (Q1: level-aligned, capped) ─────────────────
-        // Boundaries prefer level tops (distinct node rows) so bands
-        // don't split levels; a level chunk taller than the cap is
-        // hard-cut at the cap. Elements spanning a boundary are simply
-        // replayed in every band they intersect — canvas clipping makes
-        // out-of-band writes no-ops. The partition runs twice: a count
-        // pass sizes the buffer exactly, then a fill pass stores it.
-        let cap = options.band_cap();
-        let mut tops: PlanBuf<'buf, usize> = mem.buf(view.node_count(), oom())?;
-        for i in 0..view.node_count() {
-            tops.push(view.node(i).y);
+        // Self-loop labels never enter inline placement (they have no
+        // placement host yet) — but they are no longer silently lost:
+        // they reach the legend, or the diagnostics channel, exactly
+        // like any other unplaced label. Legend entries for loops use
+        // their SCENE indices (appended after the routed list, so the
+        // whole list stays ascending).
+        for j in 0..view.self_loop_count() {
+            let r = view.self_loop(j);
+            if r.label.is_none() {
+                continue;
+            }
+            match label_policy.overflow {
+                super::config::LabelOverflow::Legend => {
+                    legend.push(view.edge_count() + j);
+                }
+                super::config::LabelOverflow::Omit => {
+                    diagnostics.emit(crate::diagnostics::DiagnosticKind::LabelOmitted {
+                        edge: r.input_index,
+                    });
+                }
+            }
         }
-        tops.as_mut_slice().sort_unstable();
-        let tops = dedup_in_place(&mut tops);
-        let mut band_count = 0usize;
-        partition_bands(height, cap, tops, |_, _| band_count += 1);
-        let mut band_ranges: PlanBuf<'buf, (usize, usize)> = mem.buf(band_count, oom())?;
-        partition_bands(height, cap, tops, |y0, rows| band_ranges.push((y0, rows)));
+
+        // ── Level tops (band-partition geometry) ───────────────────────
+        // The plan stores only the sorted, deduped node top rows; the
+        // level-aligned partition itself is a COMPOSITION decision,
+        // computed per render from the caller's `ComposeBudget` cap
+        // (see [`Bands`]). Plan identity stays free of workspace-shaped
+        // state — the same plan serves every band budget.
+        let mut level_tops: PlanBuf<'buf, usize> = mem.buf(view.node_count(), oom())?;
+        for i in 0..view.node_count() {
+            level_tops.push(view.node(i).y);
+        }
+        level_tops.as_mut_slice().sort_unstable();
+        let mut last = None;
+        level_tops.retain(|&t| {
+            let keep = last != Some(t);
+            last = Some(t);
+            keep
+        });
 
         Ok(RenderPlan {
             width,
             height,
-            band_ranges,
+            level_tops,
             edge_plans,
             subgraph_plans,
             labels,
             index,
             legend,
+            self_loop_plans,
             run_capacity,
             show_dummy_nodes: options.show_dummy_nodes,
-            labels_colored_gate: use_color && options.legend,
+            label_placement: label_policy.placement,
         })
     }
 
@@ -986,18 +1104,31 @@ impl<'buf> RenderPlan<'buf> {
         self.height
     }
 
-    /// Number of composite bands.
-    pub fn band_count(&self) -> usize {
-        self.band_ranges.len()
-    }
-
-    /// Edge indices (IR-list order) whose labels go to the legend under
-    /// the options this plan was built with: the labels that did not
-    /// paint under the active placement gate (colored: the row-veto
-    /// rule; plain: geometric placement). Empty unless the options
-    /// enable the legend — matching what actually renders.
+    /// SCENE indices of edges whose labels go to the legend under the
+    /// options this plan was built with: the labels that did not
+    /// paint under the active placement policy (`AvoidNodeRows`: the
+    /// row-veto rule; `Geometric`: pure geometric placement). Routed
+    /// entries coincide with layout-list positions; self-loop entries
+    /// sit past the routed list (the list stays ascending). Empty
+    /// unless `LabelOverflow::Legend` was set — matching what actually
+    /// renders.
     pub fn legend_entries(&self) -> &[usize] {
         self.legend.as_slice()
+    }
+
+    /// The label placement policy this plan resolved under (plan
+    /// state — the compositor and hit-testing read it from here, never
+    /// from options).
+    pub(crate) fn label_placement(&self) -> super::config::LabelPlacementPolicy {
+        self.label_placement
+    }
+
+    /// Whether this plan shows dummy nodes (plan state, same rule as
+    /// [`label_placement`](Self::label_placement): planning options
+    /// are read back from the plan, never re-read from options — two
+    /// sources of truth would let a scene/composer pair disagree).
+    pub(crate) fn show_dummy_nodes(&self) -> bool {
+        self.show_dummy_nodes
     }
 
     /// What occupies the cell at (x, y)? Nodes win over edges, edges
@@ -1012,9 +1143,9 @@ impl<'buf> RenderPlan<'buf> {
     /// interior) — clicking inside a box selects it even on a blank
     /// cell. Edge labels, box labels, and self-loop markers are part of
     /// their owning element's region, not separate hit targets.
-    /// Edges are reported by their **IR-list index** (the position in
-    /// the layout's edge list — the same convention as
-    /// [`RenderPlan::legend_entries`]).
+    /// Edges are reported by their **scene index** (routed edges at
+    /// their layout-list positions, self-loops past them — the same
+    /// convention as [`RenderPlan::legend_entries`]).
     pub(crate) fn element_at<V: LayoutView>(&self, view: &V, x: usize, y: usize) -> HitResult {
         // A plan answers only for the layout it was built from; a query
         // outside this plan's canvas (including any query against a
@@ -1025,11 +1156,10 @@ impl<'buf> RenderPlan<'buf> {
         let mut hit_subgraph = HitResult::None;
         let mut hit_edge = HitResult::None;
         // Painted edge labels belong to their edge (they render above
-        // edge ink). `labels_colored_gate` stores the compositor's
-        // combined color&&legend gate, which `paints` collapses — so
-        // passing it as both arms is the exact same predicate.
+        // edge ink). The placement policy is plan state, so this is
+        // exactly the compositor's paint predicate.
         for label in self.labels.as_slice() {
-            let placed = label.paints(self.labels_colored_gate, self.labels_colored_gate);
+            let placed = label.paints_under(self.label_placement);
             if placed && y == label.y && x >= label.x && x < label.x + label.len {
                 return HitResult::Edge(label.edge_index);
             }
@@ -1045,20 +1175,33 @@ impl<'buf> RenderPlan<'buf> {
                     let n = view.node(el.index);
                     if matches!(n.kind, crate::ir::NodeKind::Dummy) {
                         // A dummy is a single marker cell, and only
-                        // when the render shows it.
+                        // when the render shows it. Its identity is
+                        // semantic (input edge + level) — synthetic
+                        // backend ids never leak.
                         if self.show_dummy_nodes && x == n.x && y == n.y {
-                            return HitResult::Node(n.id);
+                            return HitResult::Dummy {
+                                edge: n.edge_index.unwrap_or(usize::MAX),
+                                level: n.level,
+                            };
                         }
                         continue;
                     }
                     // The node owns its full reserved area (painters
-                    // may fill any of it); the self-loop marker (`↺`)
-                    // adds its IR cell (right of the top row for
-                    // vertical flows, below the leading column for
-                    // horizontal ones).
+                    // may fill any of it). The self-loop marker (`↺`)
+                    // cell belongs to the self-loop EDGE — the records
+                    // carry its identity, and its scene index sits
+                    // after the routed list. A hand-built marker with
+                    // no record keeps the legacy node attribution.
+                    if n.self_loop_at == Some((x, y)) {
+                        if let Some(j) = (0..view.self_loop_count())
+                            .find(|&j| view.self_loop(j).node_index == el.index)
+                        {
+                            return HitResult::Edge(view.edge_count() + j);
+                        }
+                        return HitResult::Node(n.id);
+                    }
                     let in_rows = y >= n.y && y < n.y + n.height.max(1);
-                    if (in_rows && x >= n.x && x < n.x + n.width) || n.self_loop_at == Some((x, y))
-                    {
+                    if in_rows && x >= n.x && x < n.x + n.width {
                         return HitResult::Node(n.id);
                     }
                 }
@@ -1132,6 +1275,17 @@ impl<'buf> RenderPlan<'buf> {
         &self.edge_plans.as_slice()[edge_index]
     }
 
+    /// Resolved style by SCENE index: routed edges first, then
+    /// self-loop records.
+    pub(crate) fn scene_edge_plan(&self, scene_index: usize) -> &EdgePlan {
+        let routed = self.edge_plans.as_slice().len();
+        if scene_index < routed {
+            &self.edge_plans.as_slice()[scene_index]
+        } else {
+            &self.self_loop_plans.as_slice()[scene_index - routed]
+        }
+    }
+
     pub(crate) fn subgraph_plan(&self, index: usize) -> &SubgraphPlan {
         &self.subgraph_plans.as_slice()[index]
     }
@@ -1148,19 +1302,24 @@ impl<'buf> RenderPlan<'buf> {
         self.index.as_slice()
     }
 
-    /// Band list as `(first_row, rows)` pairs covering `0..height`.
-    pub(crate) fn band_ranges(&self) -> &[(usize, usize)] {
-        self.band_ranges.as_slice()
+    /// The level-aligned band partition under `cap`, as ascending
+    /// `(first_row, rows)` pairs tiling `0..height`. Pure computation
+    /// over stored geometry — banding is a composition-budget choice,
+    /// never plan state, and band boundaries are unobservable in the
+    /// output (canvas clipping replays boundary-spanning elements).
+    pub(crate) fn bands(&self, cap: usize) -> Bands<'_> {
+        Bands {
+            height: self.height,
+            cap: cap.max(1),
+            tops: self.level_tops.as_slice(),
+            start: 0,
+            next_top: 0,
+        }
     }
 
-    /// Rows of the tallest band — the reusable band buffer's height.
-    pub(crate) fn max_band_rows(&self) -> usize {
-        self.band_ranges
-            .as_slice()
-            .iter()
-            .map(|b| b.1)
-            .max()
-            .unwrap_or(0)
+    /// Rows of the tallest band under `cap` — the band buffer's height.
+    pub(crate) fn max_band_rows(&self, cap: usize) -> usize {
+        self.bands(cap).map(|(_, rows)| rows).max().unwrap_or(0)
     }
 
     /// Exact h-run interior count — sizes the compositor's run scratch.
@@ -1169,42 +1328,52 @@ impl<'buf> RenderPlan<'buf> {
     }
 }
 
-/// Emit the level-aligned band partition as `(y0, rows)` pairs.
-fn partition_bands(height: usize, cap: usize, tops: &[usize], mut emit: impl FnMut(usize, usize)) {
-    if height <= cap {
-        emit(0, height);
-        return;
-    }
-    let mut start = 0usize;
-    while start < height {
-        let cap_end = start + cap;
-        if cap_end >= height {
-            emit(start, height - start);
-            break;
-        }
-        let ub = tops.partition_point(|&t| t <= cap_end);
-        let boundary = tops[..ub]
-            .iter()
-            .rev()
-            .find(|&&t| t > start)
-            .copied()
-            .unwrap_or(cap_end);
-        emit(start, boundary - start);
-        start = boundary;
-    }
+/// The level-aligned band partition (Q1: level-aligned, capped), as
+/// an iterator of `(y0, rows)` pairs. Boundaries prefer level tops
+/// (distinct node rows) so bands don't split levels; a level chunk
+/// taller than the cap is hard-cut at the cap. Elements spanning a
+/// boundary are simply replayed in every band they intersect — canvas
+/// clipping makes out-of-band writes no-ops, which is what makes the
+/// partition (a memory decision) unobservable in the output.
+pub(crate) struct Bands<'a> {
+    height: usize,
+    cap: usize,
+    tops: &'a [usize],
+    start: usize,
+    /// Cursor: index of the first top known to be `> start`. Bands
+    /// advance monotonically, so each top is passed once across the
+    /// whole iteration — O(levels + bands·log levels) total, never
+    /// O(levels × bands) (hard-cut runs through a tall node or sparse
+    /// tail would otherwise rescan every earlier top per band).
+    next_top: usize,
 }
 
-/// Dedup a sorted `PlanBuf` in place, returning the deduped prefix.
-fn dedup_in_place<'a, 'buf>(buf: &'a mut PlanBuf<'buf, usize>) -> &'a [usize] {
-    let s = buf.as_mut_slice();
-    let mut w = 0usize;
-    for r in 0..s.len() {
-        if w == 0 || s[r] != s[w - 1] {
-            s[w] = s[r];
-            w += 1;
+impl Iterator for Bands<'_> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<(usize, usize)> {
+        if self.start >= self.height {
+            return None;
         }
+        let cap_end = self.start + self.cap;
+        if cap_end >= self.height {
+            let band = (self.start, self.height - self.start);
+            self.start = self.height;
+            return Some(band);
+        }
+        while self.next_top < self.tops.len() && self.tops[self.next_top] <= self.start {
+            self.next_top += 1;
+        }
+        let ub = self.next_top + self.tops[self.next_top..].partition_point(|&t| t <= cap_end);
+        let boundary = if self.next_top < ub {
+            self.tops[ub - 1]
+        } else {
+            cap_end
+        };
+        let band = (self.start, boundary - self.start);
+        self.start = boundary;
+        Some(band)
     }
-    &buf.as_slice()[..w]
 }
 
 /// The rows a path can paint, from the same formulas the painter uses
@@ -1267,12 +1436,9 @@ fn edge_row_span(
 
 /// Bytes of arena [`RenderPlan::build_in`] plus the compositor's carve
 /// calls need for this view and options — plan storage, paint scratch,
-/// and the band canvas planes, with alignment slack.
-///
-/// The band-list term uses a proven bound instead of a dry run: a band
-/// shorter than the cap always ends on a level top with no further top
-/// in its window, forcing the next advance toward the cap — so at most
-/// two bands fit per cap window, plus edge slack.
+/// and the band canvas planes, with alignment slack. The plan stores
+/// level tops (one `usize` per node, before dedup) instead of a band
+/// list — the partition is computed per composition.
 pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptions) -> usize {
     use core::mem::size_of;
     let n = view.node_count();
@@ -1280,9 +1446,8 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
     let s = view.subgraph_count();
     let width = view.width();
     let height = view.height();
-    let cap = options.band_cap();
-    let colored = !matches!(options.color_mode, super::color::ColorMode::None);
-    let labeled = (0..e).filter(|&i| view.edge(i).label.is_some()).count();
+    let cap = options.compose.cap();
+    let colored = !matches!(options.emit.color_mode, super::color::ColorMode::None);
     let mut run_capacity = 0usize;
     for i in 0..e {
         let ed = view.edge(i);
@@ -1292,19 +1457,10 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
     // caller-arena surface, where the index never engages
     // (`PlanMem::is_heap` gates it) — arena estimates are
     // byte-identical to pre-index releases.
-    let bands = 2usize
-        .saturating_mul(height.div_ceil(cap))
-        .saturating_add(2);
     let band_rows = cap.min(height).max(1);
     let area = width.saturating_mul(band_rows);
 
-    let plan_bytes = e * size_of::<EdgePlan>()
-        + s * size_of::<SubgraphPlan>()
-        + (n + e + s) * size_of::<PlanElement>()
-        + labeled
-            * (size_of::<LabelPlan>() + size_of::<usize>() + size_of::<(usize, usize, usize)>())
-        + n * size_of::<usize>()
-        + bands * size_of::<(usize, usize)>();
+    let plan_bytes = plan_storage_bytes(view);
     let scratch_bytes = super::compose::PaintScratch::estimate_bytes(
         run_capacity,
         s,
@@ -1320,8 +1476,33 @@ pub(crate) fn estimate_plan_bytes<V: LayoutView>(view: &V, options: &RenderOptio
         } else {
             0
         };
-    // Per-allocation alignment slack (≤ 8 bytes × ~18 carves) + margin.
-    plan_bytes + scratch_bytes + canvas_bytes + 18 * 8 + 64
+    // Alignment slack for the compositor's carves (the plan term
+    // carries its own).
+    plan_bytes + scratch_bytes + canvas_bytes + 10 * 8 + 64
+}
+
+/// Bytes of storage one [`RenderPlan::build_in`] needs for this view —
+/// the plan's OWN buffers only (no compositing scratch, no canvas).
+/// Sizes a [`ScenePlanner`](super::scene::ScenePlanner) workspace.
+pub(crate) fn plan_storage_bytes<V: LayoutView>(view: &V) -> usize {
+    use core::mem::size_of;
+    let n = view.node_count();
+    let e = view.edge_count();
+    let s = view.subgraph_count();
+    let labeled = (0..e).filter(|&i| view.edge(i).label.is_some()).count();
+    let loops = view.self_loop_count();
+    let labeled_loops = (0..loops)
+        .filter(|&j| view.self_loop(j).label.is_some())
+        .count();
+    (e + loops) * size_of::<EdgePlan>()
+        + labeled_loops * size_of::<usize>() // loop legend slots
+        + s * size_of::<SubgraphPlan>()
+        + (n + e + s) * size_of::<PlanElement>()
+        + labeled
+            * (size_of::<LabelPlan>() + size_of::<usize>() + size_of::<(usize, usize, usize)>())
+        + n * size_of::<usize>() // level tops
+        // Per-carve alignment slack (≤ 8 bytes × ~8 plan carves).
+        + 8 * 8
 }
 
 /// Structural count of horizontal-run interiors a path paints — the
@@ -1710,7 +1891,7 @@ pub(super) fn for_each_h_run_all(
 /// path at `row` — the same formulas the painter uses. Visitor-based so
 /// arbitrarily long multi-segment paths lose nothing to fixed caps.
 /// Filters [`for_each_h_run_all`], the single geometry authority.
-fn for_each_h_run(
+pub(super) fn for_each_h_run(
     path: &PathRef<'_>,
     from_x: usize,
     from_y: usize,
@@ -2420,7 +2601,7 @@ pub(super) fn for_each_v_seg_all(
     }
 }
 
-fn for_each_v_col(
+pub(super) fn for_each_v_col(
     path: &PathRef<'_>,
     from_x: usize,
     from_y: usize,
@@ -2492,7 +2673,7 @@ mod tests {
     fn placement_matches_legacy_legend_no_collision() {
         let g = stage_graph();
         let ir = g.compute_layout();
-        let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi));
+        let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi).plan);
         assert_eq!(
             plan.legend_entries().len(),
             legend_line_count(&g),
@@ -2506,7 +2687,7 @@ mod tests {
     fn placement_matches_legacy_legend_with_collision() {
         let g = colliding_graph();
         let ir = g.compute_layout();
-        let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi));
+        let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi).plan);
         let legacy = legend_line_count(&g);
         assert_eq!(
             plan.legend_entries().len(),
@@ -2520,7 +2701,7 @@ mod tests {
     fn edge_styles_match_legacy_palette_assignment() {
         let g = stage_graph();
         let ir = g.compute_layout();
-        let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi));
+        let plan = RenderPlan::build(&ir, &RenderOptions::colored(Palette::Ansi).plan);
         let palette = Palette::Ansi.colors();
         let legacy = ir.compute_edge_colors(palette.len());
         for (i, want_idx) in legacy.iter().enumerate() {
@@ -2530,16 +2711,24 @@ mod tests {
                 "edge {i} palette color"
             );
         }
-        // Plain mode resolves no colors at all.
-        let plain = RenderPlan::build(&ir, &RenderOptions::plain());
-        assert!(!plain.edge_plan(0).color.is_set());
+        // Colors are ALWAYS resolved at plan time — a plain-preset
+        // plan carries the same resolved colors (plain emission just
+        // ignores them). One plan serves colored and plain output.
+        let plain = RenderPlan::build(&ir, &RenderOptions::plain().plan);
+        for i in 0..legacy.len() {
+            assert_eq!(
+                plain.edge_plan(i).color,
+                plan.edge_plan(i).color,
+                "edge {i}: color resolution must not depend on emission mode"
+            );
+        }
     }
 
     #[test]
     fn hit_testing_finds_nodes_boxes_and_nothing() {
         let g = stage_graph();
         let ir = g.compute_layout();
-        let plan = RenderPlan::build(&ir, &RenderOptions::plain());
+        let plan = RenderPlan::build(&ir, &RenderOptions::plain().plan);
 
         let start = ir.node_by_id(1).unwrap();
         assert_eq!(
@@ -2562,10 +2751,12 @@ mod tests {
     fn spatial_index_is_sorted_and_single_band() {
         let g = stage_graph();
         let ir = g.compute_layout();
-        let plan = RenderPlan::build(&ir, &RenderOptions::plain());
+        let plan = RenderPlan::build(&ir, &RenderOptions::plain().plan);
         assert!(plan.elements().windows(2).all(|w| w[0].y_min <= w[1].y_min));
-        assert_eq!(plan.band_count(), 1);
-        assert_eq!(plan.band_ranges()[0], (0, plan.height()));
+        let bands: Vec<(usize, usize)> = plan
+            .bands(super::super::config::DEFAULT_BAND_ROWS)
+            .collect();
+        assert_eq!(bands, vec![(0, plan.height())]);
         assert_eq!(plan.width(), ir.width());
         assert_eq!(plan.height(), ir.height());
     }
@@ -2578,7 +2769,7 @@ mod tests {
         g.add_edge(1, 2, None);
         g.add_edge(2, 1, None); // back edge
         let ir = g.compute_layout();
-        let plan = RenderPlan::build(&ir, &RenderOptions::plain());
+        let plan = RenderPlan::build(&ir, &RenderOptions::plain().plan);
         let reversed: Vec<bool> = ir.edges().iter().map(|e| e.reversed).collect();
         for (i, rev) in reversed.iter().enumerate() {
             let want = if *rev {
@@ -2597,7 +2788,10 @@ mod tests {
         let g = stage_graph();
         let ir = g.compute_layout_with_config(&config);
         // Plan builds fine over an IR containing dummy nodes.
-        let plan = RenderPlan::build(&ir, &RenderOptions::plain());
-        assert_eq!(plan.band_count(), 1);
+        let plan = RenderPlan::build(&ir, &RenderOptions::plain().plan);
+        assert_eq!(
+            plan.bands(super::super::config::DEFAULT_BAND_ROWS).count(),
+            1
+        );
     }
 }
