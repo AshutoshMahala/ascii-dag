@@ -108,6 +108,12 @@ pub(crate) struct LayoutTemps<'a> {
     /// Per-edge flag: this edge has an anti-parallel twin with the
     /// opposite back flag (a 2-node cycle).
     pub(crate) edge_in_two_cycle: &'a mut [bool],
+    /// Explicit port requests on Auto faces — two per edge is the
+    /// bound; EMPTY when the graph declares no port (nothing carved).
+    pub(crate) port_requests: &'a mut [super::ports::FaceRequest],
+    /// Per-edge positioned `(from, to)` cross lines, `usize::MAX` =
+    /// no explicit position; EMPTY when the graph declares no port.
+    pub(crate) port_cross: &'a mut [(usize, usize)],
     pub(crate) waypoint_scratch: &'a mut [(usize, usize)],
     // ── Lane pass (temp/09 P4). All empty when the shared budget
     //    (`geometry::lane_pass_enabled`) disables the pass — the heap
@@ -382,6 +388,13 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     // Step 3: Allocate the remaining layout temporaries, per-level
     // buffers sized to the real depth and exact vnode counts.
     let sg_count = graph.subgraph_count();
+    // Port scratch only for a graph that declared ports: two request
+    // slots per edge (the bound) and one position pair per edge.
+    let (port_request_cap, port_cross_len) = if graph.has_ports() {
+        (edge_count.saturating_mul(2), edge_count)
+    } else {
+        (0, 0)
+    };
     let mut temps = alloc_layout_temps_csr(
         temp_arena,
         node_count,
@@ -391,6 +404,8 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         depth,
         total_dummies,
         max_level_width,
+        port_request_cap,
+        port_cross_len,
     )
     .ok_or(GraphError::ArenaOom)?;
 
@@ -1265,9 +1280,78 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     let level_labeled_src = &temps.level_labeled_src;
     let level_routing_floor = &mut temps.level_routing_floor;
 
-    // Add edges. The direction flip is a per-layout fact — resolved
-    // once here, exactly as the heap backend does.
+    // The direction flip is a per-layout fact — resolved once here,
+    // exactly as the heap backend does.
     let level_flipped = super::ports::level_flipped::<A>(config.direction);
+
+    // Explicit ports on the layout role's own Auto face get POSITIONS
+    // along it — the same slice-based pass as the heap backend, run on
+    // carved scratch; skipped outright (and nothing carved) when the
+    // graph declares no port.
+    #[cfg(feature = "ports")]
+    if graph.has_ports() {
+        use super::ports::{EndRole, Face, FaceRequest, PortSide, assign_level_face_positions};
+        let real_coords: &[(usize, usize, usize, usize)] = &*temps.real_coords;
+        let port_cross: &mut [(usize, usize)] = &mut *temps.port_cross;
+        let port_requests: &mut [FaceRequest] = &mut *temps.port_requests;
+        port_cross.fill((usize::MAX, usize::MAX));
+        let cross_span = |idx: usize| -> (usize, usize) {
+            let (_, _, base, _) = real_coords[idx];
+            (
+                base,
+                A::cross_extent(graph.node_width(idx), graph.node_height(idx)),
+            )
+        };
+        let mut count = 0usize;
+        for (edge_idx, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
+            if from_idx == to_idx {
+                continue;
+            }
+            let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
+            let (src, dst) = if is_back {
+                (to_idx, from_idx)
+            } else {
+                (from_idx, to_idx)
+            };
+            let (src_side, dst_side) = graph.edge_ports(edge_idx);
+            let (src_side, dst_side) = if is_back {
+                (dst_side, src_side)
+            } else {
+                (src_side, dst_side)
+            };
+            for (node, peer, side, end) in [
+                (src, dst, src_side, EndRole::Source),
+                (dst, src, dst_side, EndRole::Target),
+            ] {
+                if matches!(side, PortSide::Auto) {
+                    continue;
+                }
+                let face = Face::of(side, A::FLOW_AXIS, level_flipped, end);
+                if face != end.auto_face() {
+                    continue;
+                }
+                let (peer_base, peer_extent) = cross_span(peer);
+                port_requests[count] = FaceRequest {
+                    node,
+                    face,
+                    key: A::cross_center(peer_base, peer_extent),
+                    edge: edge_idx,
+                    end,
+                };
+                count += 1;
+            }
+        }
+        assign_level_face_positions::<A>(
+            &mut port_requests[..count],
+            cross_span,
+            |edge, end, cross| match end {
+                EndRole::Source => port_cross[edge].0 = cross,
+                EndRole::Target => port_cross[edge].1 = cross,
+            },
+        );
+    }
+
+    // Add edges
     for (edge_idx, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
         // First kept waypoint's x — the label anchor for skip-level
         // paths (mirrors the heap backend's `waypoints[0].0`).
@@ -1331,28 +1415,44 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         } else {
             (src_side, dst_side)
         };
-        let from_x = Attachment::resolve::<A>(
-            layout_src_side,
-            level_flipped,
-            EndRole::Source,
-            src_x_base,
-            A::cross_extent(
-                graph.node_width(layout_src_idx),
-                graph.node_height(layout_src_idx),
-            ),
-        )
-        .cross;
-        let to_x = Attachment::resolve::<A>(
-            layout_dst_side,
-            level_flipped,
-            EndRole::Target,
-            dst_x_base,
-            A::cross_extent(
-                graph.node_width(layout_dst_idx),
-                graph.node_height(layout_dst_idx),
-            ),
-        )
-        .cross;
+        // A positioned request overrides the center line; anything
+        // else (Auto, or a face without routing yet) resolves as
+        // before.
+        let positioned = temps
+            .port_cross
+            .get(edge_idx)
+            .copied()
+            .unwrap_or((usize::MAX, usize::MAX));
+        let from_x = if positioned.0 != usize::MAX {
+            positioned.0
+        } else {
+            Attachment::resolve::<A>(
+                layout_src_side,
+                level_flipped,
+                EndRole::Source,
+                src_x_base,
+                A::cross_extent(
+                    graph.node_width(layout_src_idx),
+                    graph.node_height(layout_src_idx),
+                ),
+            )
+            .cross
+        };
+        let to_x = if positioned.1 != usize::MAX {
+            positioned.1
+        } else {
+            Attachment::resolve::<A>(
+                layout_dst_side,
+                level_flipped,
+                EndRole::Target,
+                dst_x_base,
+                A::cross_extent(
+                    graph.node_width(layout_dst_idx),
+                    graph.node_height(layout_dst_idx),
+                ),
+            )
+            .cross
+        };
         // The routing band starts after the level's FULL extent; the IR
         // endpoint sits on the source's port line (per-axis: Vertical =
         // band-trailing, Horizontal = own face). Matches heap.
@@ -1395,11 +1495,20 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             && matches!(A::FLOW_AXIS, crate::ir::FlowAxis::Y)
             && temps.edge_in_two_cycle[edge_idx];
 
+        // Applied only while BOTH shifted endpoints stay inside their
+        // nodes' declared spans (matches heap): a resolved port on a
+        // narrow custom node keeps its boundary cell.
         let (eff_from_x, eff_to_x) = if in_two_node_cycle {
-            if is_back {
-                (from_x + 1, to_x + 1)
-            } else {
-                (from_x.saturating_sub(1), to_x.saturating_sub(1))
+            let delta: isize = if is_back { 1 } else { -1 };
+            let inside = |x: usize, idx: usize| -> Option<usize> {
+                let (_, _, base, _) = temps.real_coords[idx];
+                let extent = A::cross_extent(graph.node_width(idx), graph.node_height(idx));
+                let shifted = x.checked_add_signed(delta)?;
+                (shifted >= base && shifted < base + extent).then_some(shifted)
+            };
+            match (inside(from_x, layout_src_idx), inside(to_x, layout_dst_idx)) {
+                (Some(f), Some(t)) => (f, t),
+                _ => (from_x, to_x),
             }
         } else {
             (from_x, to_x)
@@ -1703,6 +1812,8 @@ fn alloc_layout_temps_csr<'b>(
     depth: usize,
     total_dummies: usize,
     max_level_width: usize,
+    port_request_cap: usize,
+    port_cross_len: usize,
 ) -> Option<LayoutTemps<'b>> {
     // Per-level buffers hold exactly the graph's real depth (computed
     // by the caller before this allocation) — no fixed cap, no waste.
@@ -1823,6 +1934,19 @@ fn alloc_layout_temps_csr<'b>(
     let (level_labeled_src_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (two_cycle_order_ptr, _) = arena.alloc_raw_uninit::<Idx>(edge_count)?;
     let (edge_in_two_cycle_ptr, _) = arena.alloc_raw::<bool>(edge_count)?;
+    // Port scratch, carved only for a graph that declared ports.
+    // Requests are zero-initialized (all-zero is a valid request:
+    // node 0, the first face, the first role) — never read uninit.
+    let (port_requests_ptr, _) = if port_request_cap > 0 {
+        arena.alloc_raw::<super::ports::FaceRequest>(port_request_cap)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
+    let (port_cross_ptr, _) = if port_cross_len > 0 {
+        arena.alloc_raw_uninit::<(usize, usize)>(port_cross_len)?
+    } else {
+        (core::ptr::null_mut(), 0)
+    };
     let (waypoint_scratch_ptr, _) = arena.alloc_raw_uninit::<(usize, usize)>(max_levels + 1)?;
     let (level_vdummy_counts_ptr, _) = arena.alloc_raw_uninit::<Idx>(max_levels + 1)?;
     let (level_max_extents_ptr, _) = arena.alloc_raw_uninit::<usize>(max_levels + 1)?;
@@ -1885,6 +2009,16 @@ fn alloc_layout_temps_csr<'b>(
             ),
             two_cycle_order: core::slice::from_raw_parts_mut(two_cycle_order_ptr, edge_count),
             edge_in_two_cycle: core::slice::from_raw_parts_mut(edge_in_two_cycle_ptr, edge_count),
+            port_requests: if port_request_cap > 0 {
+                core::slice::from_raw_parts_mut(port_requests_ptr, port_request_cap)
+            } else {
+                &mut []
+            },
+            port_cross: if port_cross_len > 0 {
+                core::slice::from_raw_parts_mut(port_cross_ptr, port_cross_len)
+            } else {
+                &mut []
+            },
             slot_pool: core::slice::from_raw_parts_mut(slot_pool_ptr, slot_pool_size),
             slot_heads: core::slice::from_raw_parts_mut(slot_heads_ptr, slot_list_size),
             slot_tails: core::slice::from_raw_parts_mut(slot_tails_ptr, slot_list_size),
@@ -6001,6 +6135,30 @@ use alloc::vec;
 
 #[cfg(feature = "alloc")]
 impl<'a> Graph<'a> {
+    /// Layout-temp bytes for the port pass — requests (two per edge)
+    /// and per-edge positions — only when a port was declared (and
+    /// only with the `ports` feature at all).
+    fn port_scratch_bytes(&self, edge_count: usize) -> usize {
+        #[cfg(feature = "ports")]
+        {
+            if self.edge_ports.is_empty() {
+                0
+            } else {
+                let item = |count: usize, size: usize| count.saturating_mul(size).saturating_add(8);
+                item(
+                    edge_count.saturating_mul(2),
+                    core::mem::size_of::<crate::algorithms::sugiyama::ports::FaceRequest>(),
+                )
+                .saturating_add(item(edge_count, core::mem::size_of::<(usize, usize)>()))
+            }
+        }
+        #[cfg(not(feature = "ports"))]
+        {
+            let _ = edge_count;
+            0
+        }
+    }
+
     /// Estimate the arena buffer size needed for `compute_layout_arena()`
     /// under [`LayoutConfig::standard()`]. Use
     /// [`Self::estimate_layout_arena_size_with`] when rendering with a
@@ -6233,6 +6391,9 @@ impl<'a> Graph<'a> {
             item(max_levels.saturating_add(1), core::mem::size_of::<Idx>()), // level_labeled_src
             item(edge_count, core::mem::size_of::<Idx>()),         // two_cycle_order
             item(edge_count, core::mem::size_of::<bool>()),        // edge_in_two_cycle
+            // Port scratch — requests (two per edge) and per-edge
+            // positions — exists only when a port was declared.
+            self.port_scratch_bytes(edge_count),
             item(
                 max_levels.saturating_add(1),
                 core::mem::size_of::<(usize, usize)>(),

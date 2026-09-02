@@ -68,6 +68,7 @@ impl PortSide {
     /// so the public `repr` is never load-bearing for stored data.
     /// `0` is `Auto`, which is why zeroed arena memory reads as "no
     /// declaration".
+    #[cfg(feature = "ports")]
     pub(crate) const fn to_u8(self) -> u8 {
         match self {
             PortSide::Auto => 0,
@@ -257,6 +258,160 @@ const _: () = assert!(!level_flipped::<super::geometry::Horizontal>(
     Direction::LeftRight
 ));
 
+/// The boundaries of a face of `capacity` cells split into `n` equal
+/// sub-spans: yields `(start, end)` for k in `0..n`, every boundary
+/// being `floor(k · capacity / n)` — produced by quotient/remainder
+/// accumulation, so there is no multiplication, no wide integer, and
+/// no overflow on ANY target (every value stays `≤ capacity` or
+/// `< 2n`). Requires `n ≤ capacity` for non-empty spans; the callers
+/// switch to round-robin above capacity.
+#[cfg(feature = "ports")]
+#[derive(Debug, Clone)]
+pub(crate) struct SubSpans {
+    quotient: usize,
+    remainder: usize,
+    n: usize,
+    carry: usize,
+    next_start: usize,
+    k: usize,
+}
+
+#[cfg(feature = "ports")]
+impl SubSpans {
+    pub(crate) fn new(n: usize, capacity: usize) -> SubSpans {
+        let n = n.max(1);
+        SubSpans {
+            quotient: capacity / n,
+            remainder: capacity % n,
+            n,
+            carry: 0,
+            next_start: 0,
+            k: 0,
+        }
+    }
+}
+
+#[cfg(feature = "ports")]
+impl Iterator for SubSpans {
+    type Item = (usize, usize);
+    fn next(&mut self) -> Option<(usize, usize)> {
+        if self.k >= self.n {
+            return None;
+        }
+        let start = self.next_start;
+        let mut end = start + self.quotient;
+        self.carry += self.remainder;
+        if self.carry >= self.n {
+            end += 1;
+            self.carry -= self.n;
+        }
+        self.next_start = end;
+        self.k += 1;
+        Some((start, end))
+    }
+}
+
+/// The reference formulation of one request's cell — the assignment
+/// pass walks [`SubSpans`] once instead of calling this per request,
+/// so it exists for the pins that compare the two.
+///
+/// Offset along a LEVEL face of `capacity` cells for request `k` of
+/// `n`, in tangent order. Under capacity: the center — by the
+/// profile's own center rule — of the k-th of `n` equal sub-spans, so
+/// ONE request lands exactly where `Auto` does and `n` requests
+/// spread evenly and centered. Beyond capacity: round-robin
+/// `k mod capacity`, sharing cells evenly. A zero-extent face has only
+/// its center line (offset 0). O(k) through [`SubSpans`] — the
+/// assignment pass walks the iterator once instead.
+#[cfg(all(test, feature = "ports"))]
+pub(crate) fn face_offset<A: Axis>(k: usize, n: usize, capacity: usize) -> usize {
+    if capacity == 0 {
+        return 0;
+    }
+    if n > capacity {
+        return k % capacity;
+    }
+    let (start, end) = SubSpans::new(n, capacity).nth(k).unwrap_or((0, capacity));
+    A::cross_center(start, end - start)
+}
+
+/// One explicit request for a position on a node face.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(feature = "ports"), allow(dead_code))] // the arena temporaries name it; only the ports pass builds it
+pub(crate) struct FaceRequest {
+    /// The node whose face is requested.
+    pub node: usize,
+    /// The requested face (role space).
+    pub face: Face,
+    /// Ordering key along the face's tangent: the peer's position on
+    /// that axis (ties break by `edge`, the input index).
+    pub key: usize,
+    /// The requesting edge's input index.
+    pub edge: usize,
+    /// Which end of that edge this is (layout role).
+    pub end: EndRole,
+}
+
+/// Tangent order: per (node, face), by key, then input index. Not
+/// generic over the axis profile, so the sort is instantiated once.
+#[cfg(feature = "ports")]
+fn sort_requests(requests: &mut [FaceRequest]) {
+    requests.sort_unstable_by_key(|r| (r.node, r.face as u8, r.key, r.edge));
+}
+
+/// Assign every LEVEL-face request its cell: requests are grouped per
+/// (node, face), ordered along the tangent by `key` then input index,
+/// and placed at sub-span centers under capacity or round-robin above
+/// it. `face_span(node)` yields the node's `(base, extent)` along the
+/// CROSS axis — the tangent of a level face; `place(edge, end,
+/// coordinate)` receives each result. O(R log R) over the requests
+/// only — Auto edges never enter. Slice-based, so the arena backend
+/// runs it on carved scratch.
+///
+/// Level faces only: a lateral face's tangent is the LEVEL axis and
+/// its centering is the profile's level rule, neither of which this
+/// helper knows (a debug assertion holds the line until lateral
+/// routing brings its own placement).
+#[cfg(feature = "ports")]
+pub(crate) fn assign_level_face_positions<A: Axis>(
+    requests: &mut [FaceRequest],
+    mut face_span: impl FnMut(usize) -> (usize, usize),
+    mut place: impl FnMut(usize, EndRole, usize),
+) {
+    debug_assert!(
+        requests
+            .iter()
+            .all(|r| matches!(r.face, Face::LevelLeading | Face::LevelTrailing)),
+        "level faces only"
+    );
+    sort_requests(requests);
+    let mut i = 0;
+    while i < requests.len() {
+        let (node, face) = (requests[i].node, requests[i].face);
+        let mut j = i;
+        while j < requests.len() && requests[j].node == node && requests[j].face == face {
+            j += 1;
+        }
+        let (base, capacity) = face_span(node);
+        let group = &requests[i..j];
+        let n = group.len();
+        if capacity == 0 {
+            for r in group {
+                place(r.edge, r.end, base);
+            }
+        } else if n > capacity {
+            for (k, r) in group.iter().enumerate() {
+                place(r.edge, r.end, base + k % capacity);
+            }
+        } else {
+            for (r, (start, end)) in group.iter().zip(SubSpans::new(n, capacity)) {
+                place(r.edge, r.end, base + A::cross_center(start, end - start));
+            }
+        }
+        i = j;
+    }
+}
+
 /// One resolved edge end: the face and the cross-axis line it meets
 /// the node on. The level-axis line is the backend's (it depends on
 /// the level band tables), keyed on the face.
@@ -429,6 +584,90 @@ mod tests {
         );
     }
 
+    /// One request lands exactly on the profile's own center (where
+    /// `Auto` is); several spread evenly and centered; beyond capacity
+    /// they wrap; a zero-extent face has only its center line.
+    #[cfg(feature = "ports")]
+    #[test]
+    fn face_offset_rules() {
+        #[cfg(feature = "layout-vertical")]
+        {
+            use super::super::geometry::Vertical as V;
+            assert_eq!(
+                face_offset::<V>(0, 1, 6),
+                V::cross_center(0, 6),
+                "one = Auto's cell"
+            );
+            assert_eq!(face_offset::<V>(0, 1, 5), 2);
+            assert_eq!(
+                (0..3)
+                    .map(|k| face_offset::<V>(k, 3, 6))
+                    .collect::<Vec<_>>(),
+                vec![1, 3, 5],
+                "three on six: sub-span centers"
+            );
+            assert_eq!(
+                (0..2)
+                    .map(|k| face_offset::<V>(k, 2, 4))
+                    .collect::<Vec<_>>(),
+                vec![1, 3],
+                "two straddle the center"
+            );
+            assert_eq!(
+                (0..5)
+                    .map(|k| face_offset::<V>(k, 5, 3))
+                    .collect::<Vec<_>>(),
+                vec![0, 1, 2, 0, 1],
+                "beyond capacity: round-robin"
+            );
+            assert_eq!(face_offset::<V>(0, 3, 0), 0, "zero extent: the center line");
+        }
+        #[cfg(feature = "layout-horizontal")]
+        {
+            use super::super::geometry::Horizontal as H;
+            assert_eq!(
+                face_offset::<H>(0, 1, 4),
+                H::cross_center(0, 4),
+                "one = Auto's cell"
+            );
+            assert_eq!(
+                face_offset::<H>(0, 1, 4),
+                1,
+                "the horizontal profile's (h-1)/2 rule"
+            );
+        }
+    }
+
+    /// Sub-span boundaries are exactly `floor(k·C/n)` — checked against
+    /// wide arithmetic for small values — and overflow-proof for the
+    /// values that would wrap a wide multiply on 64-bit.
+    #[cfg(feature = "ports")]
+    #[test]
+    fn sub_spans_are_exact_and_overflow_free() {
+        for n in 1..=9usize {
+            for c in n..=40usize {
+                let spans: Vec<(usize, usize)> = SubSpans::new(n, c).collect();
+                assert_eq!(spans.len(), n);
+                for (k, &(start, end)) in spans.iter().enumerate() {
+                    let k128 = k as u128;
+                    assert_eq!(
+                        start as u128,
+                        k128 * c as u128 / n as u128,
+                        "n={n} c={c} k={k}"
+                    );
+                    assert_eq!(end as u128, (k128 + 1) * c as u128 / n as u128);
+                    assert!(end > start, "non-empty under capacity");
+                }
+                assert_eq!(spans.last().unwrap().1, c, "the last span ends at capacity");
+            }
+        }
+        // `(k+1)·capacity` would overflow a 64-bit multiply here.
+        let huge = usize::MAX / 2 + 3;
+        let spans: Vec<(usize, usize)> = SubSpans::new(5, huge).collect();
+        assert_eq!(spans[4].1, huge);
+        assert!(spans.windows(2).all(|w| w[0].1 == w[1].0), "contiguous");
+    }
+
     /// `Auto` is layout-role-defined and flip-independent: a source
     /// always leaves the trailing level face, a target arrives leading.
     #[test]
@@ -455,6 +694,7 @@ mod tests {
 #[cfg(all(
     test,
     feature = "std",
+    feature = "ports",
     any(feature = "layout-vertical", feature = "layout-horizontal")
 ))]
 mod layout_tests {
@@ -462,62 +702,29 @@ mod layout_tests {
     use crate::graph::Graph;
     use crate::render::engine::RenderOptions;
 
-    /// Four forward edges declared through the fluent handle with the
-    /// given sides, plus a reversed cycle edge whose DECLARED source
-    /// is the layout target — so its declared sides are the mirror.
-    fn fixture(leave: PortSide, arrive: PortSide) -> Graph<'static> {
+    /// Four forward edges and a reversed cycle edge, all `Auto`;
+    /// tests declare sides by input index on top of it.
+    fn fixture() -> Graph<'static> {
         let mut g = Graph::new();
         g.add_node(1usize, "Start");
         g.add_node(2usize, "Middle");
         g.add_node(3usize, "Wide node");
         g.add_node(4usize, "End");
-        g.add_edge(1usize, 2usize, Some("go"))
-            .from_port(leave)
-            .to_port(arrive);
-        g.add_edge(1usize, 3usize, None)
-            .from_port(leave)
-            .to_port(arrive);
-        g.add_edge(2usize, 4usize, None)
-            .from_port(leave)
-            .to_port(arrive);
-        g.add_edge(3usize, 4usize, None)
-            .from_port(leave)
-            .to_port(arrive);
+        g.add_edge(1usize, 2usize, Some("go"));
+        g.add_edge(1usize, 3usize, None);
+        g.add_edge(2usize, 4usize, None);
+        g.add_edge(3usize, 4usize, None);
         g.add_edge(4usize, 1usize, Some("again")); // cycle → reversed
-        assert!(g.set_edge_ports(4, arrive, leave));
-        assert!(!g.set_edge_ports(99, leave, arrive), "unknown edge");
         g
     }
 
-    /// A graph that never declares a port stores nothing per edge;
-    /// the first declaration materializes the table — and only then.
-    #[test]
-    fn undeclared_ports_cost_nothing() {
-        let mut g = Graph::new();
-        g.add_node(1usize, "A");
-        g.add_node(2usize, "B");
-        g.add_edge(1usize, 2usize, None);
-        g.add_edge(2usize, 1usize, None);
-        assert!(g.edge_ports.is_empty(), "no declaration, no table");
-        assert_eq!(g.edge_ports.capacity(), 0, "no allocation either");
-
-        g.add_edge(1usize, 2usize, Some("x"))
-            .to_port(PortSide::North);
-        assert_eq!(g.edge_ports.len(), 3, "materialized to the edge count");
-        assert_eq!(g.edge_ports[0], (PortSide::Auto, PortSide::Auto));
-        assert_eq!(g.edge_ports[2].1, PortSide::North);
-        g.add_edge(2usize, 2usize, None);
-        assert_eq!(g.edge_ports.len(), 4, "stays parallel once it exists");
-    }
-
-    #[test]
-    fn explicit_auto_equivalent_sides_render_identically() {
-        // (direction, side a layout-source leaves from, side a
-        // layout-target arrives on) — Auto's faces, named explicitly in
-        // the physical frame AND the flow-relative one, for every
-        // direction this build enables.
+    /// (direction, side a layout-source leaves from, side a
+    /// layout-target arrives on) — Auto's faces named explicitly, in
+    /// the physical frame AND the flow-relative one, for every
+    /// direction this build enables.
+    fn auto_equivalents() -> Vec<(crate::graph::Direction, PortSide, PortSide)> {
         use crate::graph::Direction;
-        let mut cases: Vec<(Direction, PortSide, PortSide)> = Vec::new();
+        let mut cases = Vec::new();
         #[cfg(feature = "layout-vertical")]
         {
             cases.push((Direction::TopDown, PortSide::South, PortSide::North));
@@ -544,21 +751,193 @@ mod layout_tests {
                 PortSide::Upstream,
             ));
         }
-        for (direction, leave, arrive) in cases {
-            let mut auto = fixture(PortSide::Auto, PortSide::Auto);
+        cases
+    }
+
+    /// A graph that never declares a port stores nothing per edge;
+    /// the first non-Auto declaration materializes the table — and
+    /// only then.
+    #[test]
+    fn undeclared_ports_cost_nothing() {
+        let mut g = Graph::new();
+        g.add_node(1usize, "A");
+        g.add_node(2usize, "B");
+        g.add_edge(1usize, 2usize, None);
+        g.add_edge(2usize, 1usize, None);
+        assert!(g.edge_ports.is_empty(), "no declaration, no table");
+        assert_eq!(g.edge_ports.capacity(), 0, "no allocation either");
+        g.add_edge(1usize, 2usize, Some("x"))
+            .to_port(PortSide::Auto);
+        assert!(
+            g.edge_ports.is_empty(),
+            "explicit Auto is what undeclared means"
+        );
+
+        g.add_edge(1usize, 2usize, Some("y"))
+            .to_port(PortSide::North);
+        assert_eq!(g.edge_ports.len(), 4, "materialized to the edge count");
+        assert_eq!(g.edge_ports[0], (PortSide::Auto, PortSide::Auto));
+        assert_eq!(g.edge_ports[3].1, PortSide::North);
+        g.add_edge(2usize, 2usize, None);
+        assert_eq!(g.edge_ports.len(), 5, "stays parallel once it exists");
+        assert!(
+            !g.set_edge_ports(99, PortSide::Auto, PortSide::Auto),
+            "unknown edge"
+        );
+    }
+
+    /// ONE explicit request per face on Auto's own face lands exactly
+    /// where Auto does — so the render is byte-identical — in every
+    /// direction and both frames, declared through the fluent handle.
+    #[test]
+    fn single_explicit_request_equals_auto() {
+        for (direction, leave, arrive) in auto_equivalents() {
+            let mut auto = fixture();
             auto.set_direction(direction);
             let expected = auto.compute_layout().render_string(&RenderOptions::plain());
 
-            let mut explicit = fixture(leave, arrive);
-            explicit.set_direction(direction);
-            let got = explicit
+            let mut declared = Graph::new();
+            declared.set_direction(direction);
+            declared.add_node(1usize, "Start");
+            declared.add_node(2usize, "Middle");
+            declared.add_node(3usize, "Wide node");
+            declared.add_node(4usize, "End");
+            declared
+                .add_edge(1usize, 2usize, Some("go"))
+                .from_port(leave)
+                .to_port(arrive);
+            declared.add_edge(1usize, 3usize, None);
+            declared.add_edge(2usize, 4usize, None);
+            declared.add_edge(3usize, 4usize, None);
+            declared.add_edge(4usize, 1usize, Some("again"));
+            let got = declared
                 .compute_layout()
                 .render_string(&RenderOptions::plain());
-            assert_eq!(
-                got, expected,
-                "{direction:?} {leave:?}/{arrive:?}: Auto-equivalent sides diverged"
+            assert_eq!(got, expected, "{direction:?} {leave:?}/{arrive:?}");
+        }
+    }
+
+    /// The reversed cycle edge: its DECLARED source is the layout
+    /// target, so mirrored declared sides name Auto's faces — and
+    /// render byte-identically. Logical-end binding, end to end.
+    #[test]
+    fn reversed_edge_binds_sides_to_declared_endpoints() {
+        for (direction, leave, arrive) in auto_equivalents() {
+            let mut auto = fixture();
+            auto.set_direction(direction);
+            let expected = auto.compute_layout().render_string(&RenderOptions::plain());
+            let mut declared = fixture();
+            declared.set_direction(direction);
+            assert!(declared.set_edge_ports(4, arrive, leave));
+            let got = declared
+                .compute_layout()
+                .render_string(&RenderOptions::plain());
+            assert_eq!(got, expected, "{direction:?} reversed {arrive:?}/{leave:?}");
+        }
+    }
+
+    /// Several explicit requests on one face spread along it — the
+    /// sub-span centers, in tangent order (the child furthest west
+    /// gets the westmost cell) — and the trunks leave from their own
+    /// columns, so the output differs from Auto by design.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn explicit_requests_spread_along_the_face_in_tangent_order() {
+        use super::super::geometry::Vertical;
+        use super::face_offset;
+        let mut g = Graph::new();
+        g.add_node(0usize, "Root"); // "[Root]" = 6 cells wide
+        for i in 1..=3usize {
+            g.add_node(i, "x");
+            g.add_edge(0usize, i, None).from_port(PortSide::South);
+        }
+        let auto = {
+            let mut a = Graph::new();
+            a.add_node(0usize, "Root");
+            for i in 1..=3usize {
+                a.add_node(i, "x");
+                a.add_edge(0usize, i, None);
+            }
+            a.compute_layout().render_string(&RenderOptions::plain())
+        };
+        let ir = g.compute_layout();
+        let root = ir.node_by_id(0).unwrap();
+        assert_eq!(root.width, 6);
+        // Tangent order: by the child's x.
+        let mut edges: Vec<_> = ir.edges().iter().collect();
+        edges.sort_by_key(|e| ir.node_by_id(e.to_id).unwrap().x);
+        let cells: Vec<usize> = edges.iter().map(|e| e.from_x - root.x).collect();
+        assert_eq!(
+            cells,
+            (0..3)
+                .map(|k| face_offset::<Vertical>(k, 3, 6))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(cells, vec![1, 3, 5]);
+        let rendered = ir.render_string(&RenderOptions::plain());
+        assert_ne!(rendered, auto, "positions change the drawing");
+    }
+
+    /// A resolved port on a one-cell `Fixed` custom node in a two-node
+    /// cycle stays on the node: the cycle separation shift is skipped
+    /// when it would leave either face (and the pair shares the cell).
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn two_node_cycle_shift_never_leaves_a_narrow_face() {
+        use crate::render::engine::CustomNode;
+        let mut g = Graph::new();
+        g.add_node(
+            1usize,
+            CustomNode {
+                label: "n",
+                width: 1,
+                height: 1,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_node(2usize, "B");
+        g.add_edge(1usize, 2usize, None).from_port(PortSide::South);
+        g.add_edge(2usize, 1usize, None).to_port(PortSide::South); // reversed
+        let ir = g.compute_layout();
+        let narrow = ir.node_by_id(1).unwrap();
+        assert_eq!(narrow.width, 1);
+        for e in ir.edges() {
+            let (x, node) = if e.from_id == 1 {
+                (e.from_x, narrow)
+            } else {
+                (e.to_x, narrow)
+            };
+            assert!(
+                x >= node.x && x < node.x + node.width,
+                "edge {}→{} attaches at x={x}, face spans {}..{}",
+                e.from_id,
+                e.to_id,
+                node.x,
+                node.x + node.width
             );
         }
+    }
+
+    /// Beyond a face's capacity the requests wrap round-robin in the
+    /// same tangent order, sharing cells evenly — never spilling to
+    /// another side.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn over_capacity_wraps_round_robin_in_tangent_order() {
+        let mut g = Graph::new();
+        g.add_node(0usize, "A"); // "[A]" = 3 cells
+        for i in 1..=5usize {
+            g.add_node(i, "x");
+            g.add_edge(0usize, i, None).from_port(PortSide::South);
+        }
+        let ir = g.compute_layout();
+        let root = ir.node_by_id(0).unwrap();
+        assert_eq!(root.width, 3);
+        let mut edges: Vec<_> = ir.edges().iter().collect();
+        edges.sort_by_key(|e| ir.node_by_id(e.to_id).unwrap().x);
+        let cells: Vec<usize> = edges.iter().map(|e| e.from_x - root.x).collect();
+        assert_eq!(cells, vec![0, 1, 2, 0, 1]);
     }
 }
 
@@ -569,6 +948,7 @@ mod layout_tests {
 #[cfg(all(
     test,
     feature = "std",
+    feature = "ports",
     any(feature = "layout-vertical", feature = "layout-horizontal")
 ))]
 mod csr_tests {
@@ -590,36 +970,28 @@ mod csr_tests {
         s
     }
 
-    fn heap_fixture(leave: PortSide, arrive: PortSide) -> Graph<'static> {
+    fn heap_fixture() -> Graph<'static> {
         let mut g = Graph::new();
         g.add_node(1usize, "Start");
         g.add_node(2usize, "Middle");
         g.add_node(3usize, "Wide node");
         g.add_node(4usize, "End");
-        g.add_edge(1usize, 2usize, Some("go"))
-            .from_port(leave)
-            .to_port(arrive);
-        g.add_edge(1usize, 3usize, None)
-            .from_port(leave)
-            .to_port(arrive);
-        g.add_edge(2usize, 4usize, None)
-            .from_port(leave)
-            .to_port(arrive);
-        g.add_edge(3usize, 4usize, None)
-            .from_port(leave)
-            .to_port(arrive);
-        g.add_edge(4usize, 1usize, Some("again")); // reversed: sides mirrored
-        assert!(g.set_edge_ports(4, arrive, leave));
+        g.add_edge(1usize, 2usize, Some("go"));
+        g.add_edge(1usize, 3usize, None);
+        g.add_edge(2usize, 4usize, None);
+        g.add_edge(3usize, 4usize, None);
+        g.add_edge(4usize, 1usize, Some("again")); // reversed
         g
     }
 
     /// `to_csr` copies declared sides; the arena layout honors them
-    /// through the same seam; heap and arena stay byte-identical.
+    /// through the same seam; heap and arena stay byte-identical. One
+    /// request per face (positions reach the arena backend with its
+    /// scratch accounting, not here), on a forward edge and — mirrored
+    /// — on the reversed one.
     #[test]
     fn to_csr_carries_declared_sides_with_backend_parity() {
         use crate::graph::Direction;
-        // Every enabled direction, in BOTH frames: the physical sides
-        // Auto resolves to, and the flow-relative spelling of them.
         let mut cases: Vec<(Direction, PortSide, PortSide)> = Vec::new();
         #[cfg(feature = "layout-vertical")]
         {
@@ -650,35 +1022,115 @@ mod csr_tests {
         for (direction, leave, arrive) in cases {
             let mut config = LayoutConfig::standard();
             config.direction = direction;
-
-            let auto = heap_fixture(PortSide::Auto, PortSide::Auto);
-            let expected = auto
+            let expected = heap_fixture()
                 .compute_layout_with_config(&config)
                 .render_string(&RenderOptions::plain());
+            // (edge, declared sides): a forward edge, then the reversed
+            // edge with its declared sides mirrored.
+            for (edge, sides) in [(0usize, (leave, arrive)), (4usize, (arrive, leave))] {
+                let mut declared = heap_fixture();
+                assert!(declared.set_edge_ports(edge, sides.0, sides.1));
+                let heap = declared
+                    .compute_layout_with_config(&config)
+                    .render_string(&RenderOptions::plain());
+                assert_eq!(heap, expected, "{direction:?} edge {edge}: heap");
+                let mut buf = vec![0u8; declared.estimate_csr_arena_size()];
+                let mut arena = Arena::new(&mut buf);
+                let csr = declared
+                    .to_csr(&mut arena)
+                    .expect("exact estimate fits, ports included");
+                assert!(csr.has_ports());
+                assert_eq!(csr.edge_ports(edge), sides, "declared sides survive to_csr");
+                assert_eq!(
+                    render_csr(&csr, &config),
+                    expected,
+                    "{direction:?} edge {edge}: arena"
+                );
+            }
+        }
+    }
 
-            let declared = heap_fixture(leave, arrive);
-            let heap = declared
+    /// Several requests per face — the spread ACTIVE — position
+    /// identically on both backends, from arenas sized EXACTLY by the
+    /// estimates (the port scratch is counted), in every direction
+    /// and both frames; and the drawing differs from Auto by design.
+    #[test]
+    fn positions_reach_the_arena_backend_with_exact_estimates() {
+        use crate::graph::Direction;
+        let mut cases: Vec<(Direction, PortSide, PortSide)> = Vec::new();
+        #[cfg(feature = "layout-vertical")]
+        {
+            cases.push((Direction::TopDown, PortSide::South, PortSide::North));
+            cases.push((
+                Direction::BottomUp,
+                PortSide::Downstream,
+                PortSide::Upstream,
+            ));
+        }
+        #[cfg(feature = "layout-horizontal")]
+        {
+            cases.push((Direction::LeftRight, PortSide::East, PortSide::West));
+            cases.push((
+                Direction::RightLeft,
+                PortSide::Downstream,
+                PortSide::Upstream,
+            ));
+        }
+        for (direction, leave, arrive) in cases {
+            let mut config = LayoutConfig::standard();
+            config.direction = direction;
+            let auto = heap_fixture()
                 .compute_layout_with_config(&config)
                 .render_string(&RenderOptions::plain());
-            assert_eq!(heap, expected, "{direction:?}: heap");
+            let mut declared = heap_fixture();
+            for e in 0..4 {
+                assert!(declared.set_edge_ports(e, leave, arrive));
+            }
+            assert!(declared.set_edge_ports(4, arrive, leave));
+            let ir = declared.compute_layout_with_config(&config);
+            let heap = ir.render_string(&RenderOptions::plain());
+            // Two requests share node 1's leaving face. Where the face has
+            // room (vertical profile: the node's WIDTH) they take distinct
+            // cells and the drawing changes; under the horizontal profile
+            // nodes are one row tall — capacity 1 — so they wrap onto the
+            // single center cell, which is Auto's, by the round-robin rule.
+            let starts: Vec<(usize, usize)> = ir
+                .edges()
+                .iter()
+                .filter(|e| e.from_id == 1)
+                .map(|e| (e.from_x, e.from_y))
+                .collect();
+            assert_eq!(starts.len(), 2);
+            if starts[0] != starts[1] {
+                assert_ne!(
+                    heap, auto,
+                    "{direction:?}: distinct cells change the drawing"
+                );
+            } else {
+                assert_eq!(
+                    heap, auto,
+                    "{direction:?}: a capacity-1 face shares Auto's cell"
+                );
+            }
 
-            let mut buf = vec![0u8; declared.estimate_csr_arena_size()];
-            let mut arena = Arena::new(&mut buf);
-            let csr = declared
-                .to_csr(&mut arena)
-                .expect("exact estimate fits, ports included");
-            assert!(csr.has_ports());
+            let mut csr_buf = vec![0u8; declared.estimate_csr_arena_size()];
+            let mut csr_arena = Arena::new(&mut csr_buf);
+            let csr = declared.to_csr(&mut csr_arena).expect("exact CSR estimate");
+            let bytes = declared.estimate_layout_arena_size_with(&config);
+            let mut temp = vec![0u8; bytes];
+            let mut out = vec![0u8; bytes];
+            let mut ta = Arena::new(&mut temp);
+            let mut oa = Arena::new(&mut out);
+            let ir = csr
+                .compute_layout_arena(&config, &mut ta, &mut oa)
+                .expect("exact layout estimate covers the port scratch");
+            let mut arena_render = String::new();
+            ir.render_with(&RenderOptions::plain(), &mut arena_render)
+                .unwrap();
             assert_eq!(
-                csr.edge_ports(0),
-                (leave, arrive),
-                "declared sides survive to_csr"
+                arena_render, heap,
+                "{direction:?}: arena positions match heap"
             );
-            assert_eq!(
-                csr.edge_ports(4),
-                (arrive, leave),
-                "mirrored pair on the reversed edge"
-            );
-            assert_eq!(render_csr(&csr, &config), expected, "{direction:?}: arena");
         }
     }
 
@@ -686,8 +1138,9 @@ mod csr_tests {
     /// does not grow; a declared one grows by exactly the table.
     #[test]
     fn undeclared_graphs_carry_no_csr_table() {
-        let auto = heap_fixture(PortSide::Auto, PortSide::Auto);
-        let declared = heap_fixture(PortSide::South, PortSide::North);
+        let auto = heap_fixture();
+        let mut declared = heap_fixture();
+        assert!(declared.set_edge_ports(0, PortSide::South, PortSide::North));
         assert_eq!(
             declared.estimate_csr_arena_size(),
             auto.estimate_csr_arena_size() + 5 * 2 + 8,

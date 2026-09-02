@@ -28,6 +28,9 @@
 //! - `alloc`: Heap-based `Graph` API without `std`
 //! - `arena` (+ `arena-idx-u8`/`u16`/`u32`): No-alloc CSR layout and
 //!   rendering on caller-provided arenas
+//! - `ports` (default): declared edge attachment sides and their per-face
+//!   positioning; off, attachment is the port-free rule and nothing of the
+//!   machinery is linked (the embedded examples build without it)
 //!
 //! Non-fatal conditions (auto-created placeholders, omitted labels)
 //! travel through the [`diagnostics`] channel as typed data — there

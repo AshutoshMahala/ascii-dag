@@ -860,8 +860,77 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     // Bottom borders of subgraphs closing at level L must be placed BELOW this floor.
     let mut level_routing_floor: Vec<usize> = vec![0; max_level + 1];
 
-    // Step 6: Add edges with proper routing
     let level_flipped = super::ports::level_flipped::<A>(config.direction);
+
+    // Explicit ports on the layout role's own Auto face get POSITIONS
+    // along it: the centered, tangent-ordered spread, round-robin
+    // beyond capacity. Opposite and lateral faces keep the center line
+    // until their routing exists; Auto edges never take a slot — and a
+    // graph without declarations skips all of this.
+    // Per-edge `(from, to)` cross overrides, `usize::MAX` = none —
+    // EMPTY (no allocation) for a graph that declared no port.
+    #[allow(unused_mut)] // mutated only by the ports pass
+    let mut port_cross: Vec<(usize, usize)> = Vec::new();
+    #[cfg(feature = "ports")]
+    if !dag.edge_ports.is_empty() {
+        use super::ports::{EndRole, Face, FaceRequest, PortSide, assign_level_face_positions};
+        port_cross.resize(dag.edges.len(), (usize::MAX, usize::MAX));
+        let cross_span = |idx: usize| -> (usize, usize) {
+            let (_, _, base, _) = real_node_coords[idx];
+            (
+                base,
+                A::cross_extent(dag.get_node_width(idx), dag.get_node_height(idx)),
+            )
+        };
+        let mut requests: Vec<FaceRequest> = Vec::new();
+        for (edge_idx, &(from_id, to_id, _)) in dag.edges.iter().enumerate() {
+            if from_id == to_id {
+                continue;
+            }
+            let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id))
+            else {
+                continue;
+            };
+            let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
+            let (src, dst) = if is_back {
+                (to_idx, from_idx)
+            } else {
+                (from_idx, to_idx)
+            };
+            let (src_side, dst_side) = dag.edge_ports.get(edge_idx).copied().unwrap_or_default();
+            let (src_side, dst_side) = if is_back {
+                (dst_side, src_side)
+            } else {
+                (src_side, dst_side)
+            };
+            for (node, peer, side, end) in [
+                (src, dst, src_side, EndRole::Source),
+                (dst, src, dst_side, EndRole::Target),
+            ] {
+                if matches!(side, PortSide::Auto) {
+                    continue;
+                }
+                let face = Face::of(side, A::FLOW_AXIS, level_flipped, end);
+                if face != end.auto_face() {
+                    continue;
+                }
+                let (peer_base, peer_extent) = cross_span(peer);
+                requests.push(FaceRequest {
+                    node,
+                    face,
+                    key: A::cross_center(peer_base, peer_extent),
+                    edge: edge_idx,
+                    end,
+                });
+            }
+        }
+        assign_level_face_positions::<A>(&mut requests, cross_span, |edge, end, cross| match end {
+            EndRole::Source => port_cross[edge].0 = cross,
+            EndRole::Target => port_cross[edge].1 = cross,
+        });
+    }
+
+    // Step 6: Add edges with proper routing
     for (edge_idx, &(from_id, to_id, label)) in dag.edges.iter().enumerate() {
         if let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id)) {
             let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
@@ -889,35 +958,53 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             // marker reserve). Declared sides bind to declared
             // endpoints, so a reversal swaps the SIDES onto the layout
             // roles; `Auto` binds to the layout role itself.
+            #[cfg(feature = "ports")]
             let (src_side, dst_side) = dag.edge_ports.get(edge_idx).copied().unwrap_or_default();
+            #[cfg(not(feature = "ports"))]
+            let (src_side, dst_side) = (super::ports::PortSide::Auto, super::ports::PortSide::Auto);
             let (layout_src_side, layout_dst_side) = if is_back {
                 (dst_side, src_side)
             } else {
                 (src_side, dst_side)
             };
             use super::ports::{Attachment, EndRole};
-            let from_x = Attachment::resolve::<A>(
-                layout_src_side,
-                level_flipped,
-                EndRole::Source,
-                src_x_base,
-                A::cross_extent(
-                    dag.get_node_width(layout_src_idx),
-                    dag.get_node_height(layout_src_idx),
-                ),
-            )
-            .cross;
-            let to_x = Attachment::resolve::<A>(
-                layout_dst_side,
-                level_flipped,
-                EndRole::Target,
-                dst_x_base,
-                A::cross_extent(
-                    dag.get_node_width(layout_dst_idx),
-                    dag.get_node_height(layout_dst_idx),
-                ),
-            )
-            .cross;
+            // A positioned request overrides the center line; anything
+            // else (Auto, or a face without routing yet) resolves as
+            // before.
+            let positioned = port_cross
+                .get(edge_idx)
+                .copied()
+                .unwrap_or((usize::MAX, usize::MAX));
+            let from_x = if positioned.0 != usize::MAX {
+                positioned.0
+            } else {
+                Attachment::resolve::<A>(
+                    layout_src_side,
+                    level_flipped,
+                    EndRole::Source,
+                    src_x_base,
+                    A::cross_extent(
+                        dag.get_node_width(layout_src_idx),
+                        dag.get_node_height(layout_src_idx),
+                    ),
+                )
+                .cross
+            };
+            let to_x = if positioned.1 != usize::MAX {
+                positioned.1
+            } else {
+                Attachment::resolve::<A>(
+                    layout_dst_side,
+                    level_flipped,
+                    EndRole::Target,
+                    dst_x_base,
+                    A::cross_extent(
+                        dag.get_node_width(layout_dst_idx),
+                        dag.get_node_height(layout_dst_idx),
+                    ),
+                )
+                .cross
+            };
             // 2-node cycle sharing a column: offset the forward edge left
             // and the back edge right so the anti-parallel pair renders
             // side by side (↓ next to ⇡) instead of overlapping. Matches
@@ -927,15 +1014,26 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             // are typically ONE row tall — shifted endpoints leave the
             // node face, so the pair keeps its shared port and lane
             // separation becomes paint-time work (temp/08 P3).
+            // The shift is applied only while BOTH shifted endpoints stay
+            // inside their nodes' declared spans: a resolved port on a
+            // narrow custom node (0, 1, or 2 cells) keeps its boundary
+            // cell rather than being pushed off the face, and the pair
+            // then shares the port as horizontal pairs do.
             let (from_x, to_x) = if from_x == to_x
                 && from_id != to_id
                 && matches!(A::FLOW_AXIS, crate::ir::FlowAxis::Y)
                 && edge_in_two_cycle.get(edge_idx).copied().unwrap_or(false)
             {
-                if is_back {
-                    (from_x + 1, to_x + 1)
-                } else {
-                    (from_x.saturating_sub(1), to_x.saturating_sub(1))
+                let delta: isize = if is_back { 1 } else { -1 };
+                let inside = |x: usize, idx: usize| -> Option<usize> {
+                    let (_, _, base, _) = real_node_coords[idx];
+                    let extent = A::cross_extent(dag.get_node_width(idx), dag.get_node_height(idx));
+                    let shifted = x.checked_add_signed(delta)?;
+                    (shifted >= base && shifted < base + extent).then_some(shifted)
+                };
+                match (inside(from_x, layout_src_idx), inside(to_x, layout_dst_idx)) {
+                    (Some(f), Some(t)) => (f, t),
+                    _ => (from_x, to_x),
                 }
             } else {
                 (from_x, to_x)

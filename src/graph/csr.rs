@@ -21,7 +21,9 @@
 //! └─────────────────────────────────────────┘
 //! ```
 
-use crate::algorithms::sugiyama::ports::{Port, PortSide};
+#[cfg(feature = "ports")]
+use crate::algorithms::sugiyama::ports::Port;
+use crate::algorithms::sugiyama::ports::PortSide;
 use crate::graph::arena::Arena;
 
 /// Node data stride: fields per node
@@ -134,6 +136,7 @@ impl<'a> CsrGraph<'a> {
     /// Like [`required_arena_size_with_content`](Self::required_arena_size_with_content),
     /// plus the port table a builder constructed with ports carries:
     /// two bytes per edge, plus alignment slack.
+    #[cfg(feature = "ports")]
     pub fn required_arena_size_with_ports(
         node_count: usize,
         edge_count: usize,
@@ -665,6 +668,7 @@ pub struct CsrGraphBuilder<'a> {
     // PREALLOCATED by the with-ports constructor (setters never
     // allocate); empty, with `ports == false`, otherwise.
     edge_ports: &'a mut [u8],
+    #[cfg_attr(not(feature = "ports"), allow(dead_code))] // written only by `new_with_ports`
     ports: bool,
 
     // Tracking current progress
@@ -772,6 +776,7 @@ impl<'a> CsrGraphBuilder<'a> {
     /// this builder's `add_edge` returns can never fail and never
     /// allocate. Size the arena with
     /// [`CsrGraph::required_arena_size_with_ports`].
+    #[cfg(feature = "ports")]
     pub fn new_with_ports(
         arena: &'a mut Arena<'a>,
         max_nodes: usize,
@@ -1034,6 +1039,7 @@ impl<'a> CsrGraphBuilder<'a> {
     /// Declare the sides edge `edge` (by index) attaches to. `None`
     /// when the edge does not exist or the builder was constructed
     /// without a port table — never an allocation.
+    #[cfg(feature = "ports")]
     #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
     pub(crate) fn set_edge_ports(
         &mut self,
@@ -1223,6 +1229,7 @@ impl<'a> CsrGraphBuilder<'a> {
 /// constructed with ports they cannot fail, because the table was
 /// preallocated and no setter ever allocates.
 pub struct CsrEdgeHandle<'b, 'a> {
+    #[cfg_attr(not(feature = "ports"), allow(dead_code))] // read only by the port setters
     builder: &'b mut CsrGraphBuilder<'a>,
     edge: usize,
 }
@@ -1242,6 +1249,7 @@ impl CsrEdgeHandle<'_, '_> {
     }
 
     /// Declare the side the edge leaves its `from` node from.
+    #[cfg(feature = "ports")]
     #[allow(clippy::wrong_self_convention)] // mirrors add_edge(from, to); not a constructor
     #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
     pub(crate) fn from_port(self, port: impl Into<Port>) -> Option<Self> {
@@ -1253,6 +1261,7 @@ impl CsrEdgeHandle<'_, '_> {
     }
 
     /// Declare the side the edge arrives at its `to` node on.
+    #[cfg(feature = "ports")]
     #[allow(clippy::wrong_self_convention)] // mirrors add_edge(from, to); not a conversion
     #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
     pub(crate) fn to_port(self, port: impl Into<Port>) -> Option<Self> {
@@ -1477,6 +1486,9 @@ impl<'a> super::Graph<'a> {
 
         // Port table: only a graph that declared ports carries one
         // (the heap table is empty until the first declaration).
+        #[cfg(not(feature = "ports"))]
+        let edge_ports_slice: &[u8] = &[];
+        #[cfg(feature = "ports")]
         let edge_ports_slice: &[u8] = if self.edge_ports.is_empty() {
             &[]
         } else {
@@ -1629,11 +1641,23 @@ impl<'a> super::Graph<'a> {
                 .saturating_mul(core::mem::size_of::<crate::ir::arena::CustomNodeArena>()),
         )
         .saturating_add(if self.node_custom.is_empty() { 0 } else { 16 })
-        // The port table travels only when something was declared.
-        .saturating_add(if self.edge_ports.is_empty() {
+        .saturating_add(self.csr_port_table_bytes())
+    }
+
+    /// The port table's arena bytes — only when something was declared
+    /// (and only with the `ports` feature at all).
+    fn csr_port_table_bytes(&self) -> usize {
+        #[cfg(feature = "ports")]
+        {
+            if self.edge_ports.is_empty() {
+                0
+            } else {
+                self.edges.len().saturating_mul(2).saturating_add(8)
+            }
+        }
+        #[cfg(not(feature = "ports"))]
+        {
             0
-        } else {
-            self.edges.len().saturating_mul(2).saturating_add(8)
-        })
+        }
     }
 }

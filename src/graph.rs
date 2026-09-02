@@ -206,7 +206,7 @@ use crate::algorithms::sugiyama::config::LayoutConfig;
 use crate::algorithms::sugiyama::config::SugiyamaConfig;
 #[cfg(feature = "alloc")]
 use crate::algorithms::sugiyama::crossing::CrossingReducer;
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "ports"))]
 use crate::algorithms::sugiyama::ports::{Port, PortSide};
 #[cfg(feature = "alloc")]
 use crate::errors::GraphError;
@@ -341,6 +341,7 @@ pub struct EdgeInsertion {
 /// receipt past the graph borrow.
 #[cfg(feature = "alloc")]
 pub struct EdgeHandle<'g, 'a> {
+    #[cfg_attr(not(feature = "ports"), allow(dead_code))] // read only by the port setters
     graph: &'g mut Graph<'a>,
     receipt: EdgeInsertion,
 }
@@ -375,6 +376,7 @@ impl EdgeHandle<'_, '_> {
     ///
     /// The name mirrors `add_edge(from, to)`; clippy's naming
     /// heuristic reads `from_*` as a constructor, which this is not.
+    #[cfg(feature = "ports")]
     #[allow(clippy::wrong_self_convention)]
     #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
     pub(crate) fn from_port(self, port: impl Into<Port>) -> Self {
@@ -388,6 +390,7 @@ impl EdgeHandle<'_, '_> {
     ///
     /// Mirrors `add_edge(from, to)`; clippy's heuristic reads `to_*`
     /// as a borrowing conversion, which this is not.
+    #[cfg(feature = "ports")]
     #[allow(clippy::wrong_self_convention)]
     #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
     pub(crate) fn to_port(self, port: impl Into<Port>) -> Self {
@@ -624,6 +627,7 @@ pub struct Graph<'a> {
     /// first declaration, which materializes it to `edges.len()` with
     /// `Auto`/`Auto`; readers treat a missing entry as `Auto`. A graph
     /// that never declares a port stores nothing per edge.
+    #[cfg(feature = "ports")]
     pub(crate) edge_ports: Vec<(PortSide, PortSide)>,
     pub(crate) render_mode: RenderMode,
     pub(crate) direction: Direction,
@@ -692,6 +696,7 @@ impl<'a> Graph<'a> {
         let mut dag = Self {
             nodes: nodes.to_vec(),
             edges: Vec::new(),
+            #[cfg(feature = "ports")]
             edge_ports: Vec::new(),
             render_mode: RenderMode::default(),
             direction: Direction::default(),
@@ -758,6 +763,7 @@ impl<'a> Graph<'a> {
         let mut dag = Self {
             nodes: nodes.to_vec(),
             edges: Vec::new(),
+            #[cfg(feature = "ports")]
             edge_ports: Vec::new(),
             render_mode: RenderMode::default(),
             direction: Direction::default(),
@@ -1188,6 +1194,7 @@ impl<'a> Graph<'a> {
         let created_target = self.ensure_node_exists(to);
         let edge = self.edges.len();
         self.edges.push((from, to, label));
+        #[cfg(feature = "ports")]
         if !self.edge_ports.is_empty() {
             // Only a graph that already declared ports keeps the table
             // parallel; everyone else pays nothing here.
@@ -1223,6 +1230,7 @@ impl<'a> Graph<'a> {
     /// Declare the physical sides an edge (by input index) attaches
     /// to; `false` for an unknown edge. Crate-internal until the port
     /// API's public shape is decided.
+    #[cfg(feature = "ports")]
     #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
     pub(crate) fn set_edge_ports(
         &mut self,
@@ -1243,6 +1251,7 @@ impl<'a> Graph<'a> {
     /// declaration — the only moment a port-declaring graph pays; an
     /// explicit `Auto` on an empty table is exactly what an undeclared
     /// edge already means, so it costs nothing.
+    #[cfg(feature = "ports")]
     fn declare_port(&mut self, edge: usize, end: usize, side: PortSide) {
         debug_assert!(edge < self.edges.len());
         if self.edge_ports.is_empty() && matches!(side, PortSide::Auto) {
