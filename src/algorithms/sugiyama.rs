@@ -15,6 +15,7 @@ pub mod crossing;
 pub(crate) mod geometry;
 #[cfg(feature = "alloc")]
 pub(crate) mod heap;
+pub(crate) mod ports;
 #[cfg(feature = "alloc")]
 pub(crate) mod subgraph;
 

@@ -1265,7 +1265,9 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     let level_labeled_src = &temps.level_labeled_src;
     let level_routing_floor = &mut temps.level_routing_floor;
 
-    // Add edges
+    // Add edges. The direction flip is a per-layout fact — resolved
+    // once here, exactly as the heap backend does.
+    let level_flipped = super::ports::level_flipped::<A>(config.direction);
     for (edge_idx, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
         // First kept waypoint's x — the label anchor for skip-level
         // paths (mirrors the heap backend's `waypoints[0].0`).
@@ -1317,22 +1319,40 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         let (src_level, _, src_x_base, _) = temps.real_coords[layout_src_idx];
         let (dst_level, _, dst_x_base, _) = temps.real_coords[layout_dst_idx];
 
-        // Ports sit on the node's DECLARED span — the packed tuple
-        // extent may carry the D5(ii) marker reserve (matches heap).
-        let from_x = A::cross_port(
+        // Attachment resolution (ports sit on the node's DECLARED span
+        // — the packed tuple extent may carry the D5(ii) marker
+        // reserve; matches heap). Declared sides bind to declared
+        // endpoints, so a reversal swaps the SIDES onto the layout
+        // roles; `Auto` binds to the layout role itself.
+        use super::ports::{Attachment, EndRole};
+        let (src_side, dst_side) = graph.edge_ports(edge_idx);
+        let (layout_src_side, layout_dst_side) = if is_back {
+            (dst_side, src_side)
+        } else {
+            (src_side, dst_side)
+        };
+        let from_x = Attachment::resolve::<A>(
+            layout_src_side,
+            level_flipped,
+            EndRole::Source,
             src_x_base,
             A::cross_extent(
                 graph.node_width(layout_src_idx),
                 graph.node_height(layout_src_idx),
             ),
-        );
-        let to_x = A::cross_port(
+        )
+        .cross;
+        let to_x = Attachment::resolve::<A>(
+            layout_dst_side,
+            level_flipped,
+            EndRole::Target,
             dst_x_base,
             A::cross_extent(
                 graph.node_width(layout_dst_idx),
                 graph.node_height(layout_dst_idx),
             ),
-        );
+        )
+        .cross;
         // The routing band starts after the level's FULL extent; the IR
         // endpoint sits on the source's port line (per-axis: Vertical =
         // band-trailing, Horizontal = own face). Matches heap.

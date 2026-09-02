@@ -861,6 +861,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     let mut level_routing_floor: Vec<usize> = vec![0; max_level + 1];
 
     // Step 6: Add edges with proper routing
+    let level_flipped = super::ports::level_flipped::<A>(config.direction);
     for (edge_idx, &(from_id, to_id, label)) in dag.edges.iter().enumerate() {
         if let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id)) {
             let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
@@ -883,22 +884,40 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             let (_, _, src_x_base, _) = real_node_coords[layout_src_idx];
             let (_, _, dst_x_base, _) = real_node_coords[layout_dst_idx];
 
-            // Ports sit on the node's DECLARED span — the packed tuple
-            // extent may carry the D5(ii) marker reserve.
-            let from_x = A::cross_port(
+            // Attachment resolution (ports sit on the node's DECLARED
+            // span — the packed tuple extent may carry the D5(ii)
+            // marker reserve). Declared sides bind to declared
+            // endpoints, so a reversal swaps the SIDES onto the layout
+            // roles; `Auto` binds to the layout role itself.
+            let (src_side, dst_side) = dag.edge_ports.get(edge_idx).copied().unwrap_or_default();
+            let (layout_src_side, layout_dst_side) = if is_back {
+                (dst_side, src_side)
+            } else {
+                (src_side, dst_side)
+            };
+            use super::ports::{Attachment, EndRole};
+            let from_x = Attachment::resolve::<A>(
+                layout_src_side,
+                level_flipped,
+                EndRole::Source,
                 src_x_base,
                 A::cross_extent(
                     dag.get_node_width(layout_src_idx),
                     dag.get_node_height(layout_src_idx),
                 ),
-            );
-            let to_x = A::cross_port(
+            )
+            .cross;
+            let to_x = Attachment::resolve::<A>(
+                layout_dst_side,
+                level_flipped,
+                EndRole::Target,
                 dst_x_base,
                 A::cross_extent(
                     dag.get_node_width(layout_dst_idx),
                     dag.get_node_height(layout_dst_idx),
                 ),
-            );
+            )
+            .cross;
             // 2-node cycle sharing a column: offset the forward edge left
             // and the back edge right so the anti-parallel pair renders
             // side by side (↓ next to ⇡) instead of overlapping. Matches

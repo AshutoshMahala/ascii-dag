@@ -207,6 +207,8 @@ use crate::algorithms::sugiyama::config::SugiyamaConfig;
 #[cfg(feature = "alloc")]
 use crate::algorithms::sugiyama::crossing::CrossingReducer;
 #[cfg(feature = "alloc")]
+use crate::algorithms::sugiyama::ports::{Port, PortSide};
+#[cfg(feature = "alloc")]
 use crate::errors::GraphError;
 #[cfg(feature = "alloc")]
 use crate::render::engine::{NodeContent, NodeKindTag, NodePaintFn};
@@ -309,12 +311,13 @@ impl From<NodeId> for usize {
 #[derive(Debug, Clone, Copy)]
 pub struct Auto;
 
-/// Receipt for one [`Graph::add_edge`] call — always returned, uniform
+/// Receipt for one [`Graph::add_edge`] call — always produced, uniform
 /// in shape: an edge was always inserted, and the booleans answer the
 /// one question the caller cannot already answer (did an endpoint get
-/// auto-created?). Deliberately NOT `#[must_use]`: a receipt is
-/// branchable domain data, not a warning — ignoring it is legitimate,
-/// and statement-position calls compile unchanged.
+/// auto-created?). Reached through the [`EdgeHandle`] `add_edge`
+/// returns (which derefs to it). Deliberately NOT `#[must_use]`: a
+/// receipt is branchable domain data, not a warning — ignoring it is
+/// legitimate, and statement-position calls compile unchanged.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EdgeInsertion {
@@ -326,6 +329,72 @@ pub struct EdgeInsertion {
     pub created_source: bool,
     /// Whether the target endpoint was auto-created as a placeholder.
     pub created_target: bool,
+}
+
+/// What [`Graph::add_edge`] returns: the [`EdgeInsertion`] receipt
+/// (through `Deref`, so `.edge` / `.created_*` read directly) plus
+/// eager, chainable layout declarations for the edge just inserted.
+/// Nothing is deferred — the edge exists before this handle does, and
+/// each declaration mutates the graph immediately; the handle is
+/// merely the shortest spelling of "…and about that edge". Bind
+/// `*handle` (or [`receipt`](Self::receipt)) to keep the `Copy`
+/// receipt past the graph borrow.
+#[cfg(feature = "alloc")]
+pub struct EdgeHandle<'g, 'a> {
+    graph: &'g mut Graph<'a>,
+    receipt: EdgeInsertion,
+}
+
+#[cfg(feature = "alloc")]
+impl core::ops::Deref for EdgeHandle<'_, '_> {
+    type Target = EdgeInsertion;
+    #[inline]
+    fn deref(&self) -> &EdgeInsertion {
+        &self.receipt
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl core::fmt::Debug for EdgeHandle<'_, '_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EdgeHandle")
+            .field("receipt", &self.receipt)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl EdgeHandle<'_, '_> {
+    /// The `Copy` receipt, detached from the graph borrow.
+    pub fn receipt(&self) -> EdgeInsertion {
+        self.receipt
+    }
+
+    /// Declare the side the edge leaves its DECLARED `from` node
+    /// from. Crate-internal until side routing exists.
+    ///
+    /// The name mirrors `add_edge(from, to)`; clippy's naming
+    /// heuristic reads `from_*` as a constructor, which this is not.
+    #[allow(clippy::wrong_self_convention)]
+    #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
+    pub(crate) fn from_port(self, port: impl Into<Port>) -> Self {
+        self.graph
+            .declare_port(self.receipt.edge, 0, port.into().side());
+        self
+    }
+
+    /// Declare the side the edge arrives at its DECLARED `to` node
+    /// on. Crate-internal until side routing exists.
+    ///
+    /// Mirrors `add_edge(from, to)`; clippy's heuristic reads `to_*`
+    /// as a borrowing conversion, which this is not.
+    #[allow(clippy::wrong_self_convention)]
+    #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
+    pub(crate) fn to_port(self, port: impl Into<Port>) -> Self {
+        self.graph
+            .declare_port(self.receipt.edge, 1, port.into().side());
+        self
+    }
 }
 
 /// How [`Graph::add_edge`] treats an edge endpoint that was never
@@ -549,6 +618,13 @@ impl From<NodeId> for IdOrAuto {
 pub struct Graph<'a> {
     pub(crate) nodes: Vec<(usize, &'a str)>,
     pub(crate) edges: Vec<(usize, usize, Option<&'a str>)>,
+    /// Declared attachment sides per edge — a layout input, consumed
+    /// by attachment resolution and reported back as resolved
+    /// geometry. PAY-PER-USE: stays empty (no allocation) until the
+    /// first declaration, which materializes it to `edges.len()` with
+    /// `Auto`/`Auto`; readers treat a missing entry as `Auto`. A graph
+    /// that never declares a port stores nothing per edge.
+    pub(crate) edge_ports: Vec<(PortSide, PortSide)>,
     pub(crate) render_mode: RenderMode,
     pub(crate) direction: Direction,
     pub(crate) auto_created: HashSet<usize>, // Track auto-created nodes for visual distinction (O(1) lookups)
@@ -616,6 +692,7 @@ impl<'a> Graph<'a> {
         let mut dag = Self {
             nodes: nodes.to_vec(),
             edges: Vec::new(),
+            edge_ports: Vec::new(),
             render_mode: RenderMode::default(),
             direction: Direction::default(),
             auto_created: HashSet::new(),
@@ -681,6 +758,7 @@ impl<'a> Graph<'a> {
         let mut dag = Self {
             nodes: nodes.to_vec(),
             edges: Vec::new(),
+            edge_ports: Vec::new(),
             render_mode: RenderMode::default(),
             direction: Direction::default(),
             auto_created: HashSet::new(),
@@ -1099,17 +1177,22 @@ impl<'a> Graph<'a> {
     /// Accepts raw ids and [`NodeId`] handles alike. The [`AUTO`]
     /// sentinel is *not* accepted here — an edge references nodes, and
     /// "auto" is meaningless as a reference.
-    pub fn add_edge(
-        &mut self,
+    pub fn add_edge<'g>(
+        &'g mut self,
         from: impl Into<NodeId>,
         to: impl Into<NodeId>,
         label: Option<&'a str>,
-    ) -> EdgeInsertion {
+    ) -> EdgeHandle<'g, 'a> {
         let (from, to) = (from.into().id(), to.into().id());
         let created_source = self.ensure_node_exists(from);
         let created_target = self.ensure_node_exists(to);
         let edge = self.edges.len();
         self.edges.push((from, to, label));
+        if !self.edge_ports.is_empty() {
+            // Only a graph that already declared ports keeps the table
+            // parallel; everyone else pays nothing here.
+            self.edge_ports.push((PortSide::Auto, PortSide::Auto));
+        }
 
         // Update adjacency lists (O(1) lookups)
         if let (Some(&from_idx), Some(&to_idx)) =
@@ -1118,10 +1201,13 @@ impl<'a> Graph<'a> {
             self.children[from_idx].push(to_idx);
             self.parents[to_idx].push(from_idx);
         }
-        EdgeInsertion {
-            edge,
-            created_source,
-            created_target,
+        EdgeHandle {
+            receipt: EdgeInsertion {
+                edge,
+                created_source,
+                created_target,
+            },
+            graph: self,
         }
     }
 
@@ -1132,6 +1218,46 @@ impl<'a> Graph<'a> {
     /// the record either way).
     pub fn set_missing_node_policy(&mut self, policy: MissingNodePolicy) {
         self.missing_node_policy = Some(policy);
+    }
+
+    /// Declare the physical sides an edge (by input index) attaches
+    /// to; `false` for an unknown edge. Crate-internal until the port
+    /// API's public shape is decided.
+    #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
+    pub(crate) fn set_edge_ports(
+        &mut self,
+        edge: usize,
+        source: PortSide,
+        target: PortSide,
+    ) -> bool {
+        if edge >= self.edges.len() {
+            return false;
+        }
+        self.declare_port(edge, 0, source);
+        self.declare_port(edge, 1, target);
+        true
+    }
+
+    /// Record one declared side (`end` 0 = from, 1 = to) of an
+    /// existing edge. The table materializes on the first NON-`Auto`
+    /// declaration — the only moment a port-declaring graph pays; an
+    /// explicit `Auto` on an empty table is exactly what an undeclared
+    /// edge already means, so it costs nothing.
+    fn declare_port(&mut self, edge: usize, end: usize, side: PortSide) {
+        debug_assert!(edge < self.edges.len());
+        if self.edge_ports.is_empty() && matches!(side, PortSide::Auto) {
+            return;
+        }
+        if self.edge_ports.len() < self.edges.len() {
+            self.edge_ports
+                .resize(self.edges.len(), (PortSide::Auto, PortSide::Auto));
+        }
+        let slot = &mut self.edge_ports[edge];
+        if end == 0 {
+            slot.0 = side;
+        } else {
+            slot.1 = side;
+        }
     }
 
     /// Get the label for an edge, if any.
