@@ -699,6 +699,10 @@ pub struct Graph<'a> {
     /// node id, sorted; empty until the first override.
     #[cfg(feature = "ports")]
     pub(crate) node_port_policies: Vec<(usize, PortPolicy)>,
+    /// The one placer every `Custom` policy runs; `None` until
+    /// [`set_port_placer`](Self::set_port_placer).
+    #[cfg(feature = "ports")]
+    pub(crate) port_placer: Option<crate::PortPlacer>,
     pub(crate) render_mode: RenderMode,
     pub(crate) direction: Direction,
     pub(crate) auto_created: HashSet<usize>, // Track auto-created nodes for visual distinction (O(1) lookups)
@@ -772,6 +776,8 @@ impl<'a> Graph<'a> {
             port_policy: PortPolicy::Single,
             #[cfg(feature = "ports")]
             node_port_policies: Vec::new(),
+            #[cfg(feature = "ports")]
+            port_placer: None,
             render_mode: RenderMode::default(),
             direction: Direction::default(),
             auto_created: HashSet::new(),
@@ -843,6 +849,8 @@ impl<'a> Graph<'a> {
             port_policy: PortPolicy::Single,
             #[cfg(feature = "ports")]
             node_port_policies: Vec::new(),
+            #[cfg(feature = "ports")]
+            port_placer: None,
             render_mode: RenderMode::default(),
             direction: Direction::default(),
             auto_created: HashSet::new(),
@@ -1320,14 +1328,12 @@ impl<'a> Graph<'a> {
 
     /// Set the graph-wide port policy: how a node places the ends
     /// declared on each of its faces (`Single` unless set — one shared
-    /// port per face). `false`, and nothing changes, for a `Custom`
-    /// policy whose placer differs from the one this graph already
-    /// runs: a graph carries ONE placer, which every `Custom` policy
-    /// on it shares (it is told the node id), so the graph converts to
-    /// the CSR form exactly.
+    /// port per face). `false`, and nothing changes, for `Custom`
+    /// before a placer is registered
+    /// ([`set_port_placer`](Self::set_port_placer)).
     #[cfg(feature = "ports")]
     pub fn set_port_policy(&mut self, policy: PortPolicy) -> bool {
-        if !self.placer_compatible(policy) {
+        if policy == PortPolicy::Custom && self.port_placer.is_none() {
             return false;
         }
         self.port_policy = policy;
@@ -1340,14 +1346,29 @@ impl<'a> Graph<'a> {
         self.port_policy
     }
 
+    /// Register the placer every `Custom` policy runs — one per graph,
+    /// told the node id, so one function places every node. A later
+    /// registration replaces it for every `Custom` node.
+    #[cfg(feature = "ports")]
+    pub fn set_port_placer(&mut self, placer: crate::PortPlacer) {
+        self.port_placer = Some(placer);
+    }
+
+    /// The registered placer, if any.
+    #[cfg(feature = "ports")]
+    pub fn port_placer(&self) -> Option<crate::PortPlacer> {
+        self.port_placer
+    }
+
     /// Override the port policy for one node; `false` for an unknown
-    /// node or a `Custom` placer other than the graph's (see
-    /// [`set_port_policy`](Self::set_port_policy)). A face with one
-    /// cell holds one port whatever the policy.
+    /// node, or for `Custom` before a placer is registered. A face
+    /// with one cell holds one port whatever the policy.
     #[cfg(feature = "ports")]
     pub fn set_node_port_policy(&mut self, node: impl Into<NodeId>, policy: PortPolicy) -> bool {
         let id = node.into().id();
-        if !self.id_to_index.contains_key(&id) || !self.placer_compatible(policy) {
+        if !self.id_to_index.contains_key(&id)
+            || (policy == PortPolicy::Custom && self.port_placer.is_none())
+        {
             return false;
         }
         match self.node_port_policies.binary_search_by_key(&id, |e| e.0) {
@@ -1380,22 +1401,6 @@ impl<'a> Graph<'a> {
         self.node_port_policies
             .binary_search_by_key(&id, |e| e.0)
             .map_or(self.port_policy, |i| self.node_port_policies[i].1)
-    }
-
-    /// The one placer this graph runs, if any `Custom` policy is set.
-    #[cfg(feature = "ports")]
-    pub(crate) fn port_placer(&self) -> Option<crate::PortPlacer> {
-        self.port_policy
-            .placer()
-            .or_else(|| self.node_port_policies.iter().find_map(|(_, p)| p.placer()))
-    }
-
-    #[cfg(feature = "ports")]
-    fn placer_compatible(&self, policy: PortPolicy) -> bool {
-        match (policy.placer(), self.port_placer()) {
-            (Some(new), Some(current)) => core::ptr::fn_addr_eq(new, current),
-            _ => true,
-        }
     }
 
     /// Record one declared side (`end` 0 = from, 1 = to) of an

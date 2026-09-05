@@ -982,6 +982,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             &mut port_requests[..count],
             cross_span,
             policy,
+            graph.port_placer(),
             level_flipped,
             |edge, end, cross| match end {
                 EndRole::Source => port_cross[edge].0 = cross,
@@ -1038,6 +1039,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                 )
             },
             policy,
+            graph.port_placer(),
             level_flipped,
             |edge, end, along| match end {
                 EndRole::Source => port_cross[edge].0 = along,

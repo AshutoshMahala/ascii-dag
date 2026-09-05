@@ -98,8 +98,8 @@
 //! A face has one port by default, shared by every edge declared on
 //! it; a [`PortPolicy`] — the graph's (`set_port_policy`) or one
 //! node's (`set_node_port_policy`) — chooses `Paired` (an arrival and
-//! a departure port), `Spread` (up to a [`PortBound`]) or `Custom` (a
-//! [`PortPlacer`] of yours) instead. A node is never widened for its
+//! a departure port), `Spread` (up to a [`PortBound`]) or `Custom` (the
+//! [`PortPlacer`] registered with `set_port_placer`) instead. A node is never widened for its
 //! ports, and a face with one cell holds one port whatever the policy.
 //! Ends the layout could not honor are warnings on the run
 //! (`W.Graph.Port.034` for a side on a self-loop, `W.Graph.Port.035`

@@ -144,13 +144,16 @@ fn main() {
         ),
         (
             "Custom",
-            PortPolicy::Custom(ends_apart),
-            "your rule: arrivals on a face's first cell, departures on its last",
+            PortPolicy::Custom,
+            "your rule, the placer registered on the graph: arrivals on a face's first cell, departures on its last",
         ),
     ] {
         println!("── 4. Port policy {name} ──");
         println!("  {what_to_see}");
         let mut g = policy_hub(direction);
+        // `Custom` refers to the graph's one registered placer, which
+        // is told the node id; register it before choosing the policy.
+        g.set_port_placer(ends_apart);
         g.set_port_policy(policy);
         show(&g, &options);
         let ir = g.compute_layout();

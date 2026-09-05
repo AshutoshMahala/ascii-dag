@@ -95,15 +95,16 @@ use ascii_dag::{PortBound, PortPolicy, PortSlot};
 
 g.set_port_policy(PortPolicy::Paired);                              // every node
 g.set_node_port_policy(hub, PortPolicy::Spread(PortBound::Ports(3))); // this node
-g.set_node_port_policy(card, PortPolicy::Custom(my_placer));        // fn(PortSlot) -> usize
+g.set_port_placer(my_placer);                                       // fn(PortSlot) -> usize, one per graph
+g.set_node_port_policy(card, PortPolicy::Custom);                   // runs it
 ```
 
 | Policy | Ports per face | Where |
 |---|---|---|
 | `Single` (default) | one | the center; every arrival and departure declared on the face shares it |
 | `Paired` | two | the face's primary direction at the center — arrivals on the face the flow arrives on, departures on the face it leaves by, arrivals on a side face — and the other direction on the next cell |
-| `Spread(bound)` | up to the bound | spread evenly and centered in tangent order, the peer's position along the face; ends beyond the bound share round-robin. `PortBound::Face` allows as many ports as the face has cells, `Ports(n)` at most `n` |
-| `Custom(placer)` | the placer's | a plain `fn(PortSlot) -> usize` returning the cell offset; the slot names the node, the physical face, its cells, its arrivals and departures, the end's index and direction; the answer is clamped to the face |
+| `Spread(bound)` | up to the bound | spread evenly and centered in tangent order, the peer's position along the face; ends beyond the bound share round-robin. `PortBound::Face` allows as many ports as the face has cells, `Ports(n)` at most `n` (`Ports(0)` is one port; bounds above 251 saturate) |
+| `Custom` | the placer's | the graph's registered placer, a plain `fn(PortSlot) -> usize` returning the cell offset; the slot names the node, the physical face, its cells, its arrivals and departures, the end's index and direction; the answer is clamped to the face |
 
 `Single` is the default because it is the drawing every undeclared
 fan-in and fan-out already has: one cell per face, every edge through
@@ -119,16 +120,18 @@ custom nodes have the rows a `Paired` or `Spread` side face needs.
 Arrival and departure are the declared ends of an edge, its `to` and
 its `from`, which a cycle reversal does not change.
 
-A graph carries one custom placer: a `Custom` policy with a second,
-different function is refused (`false`), so one function places every
-node, told the node id. `clear_node_port_policy` removes a node's
-override so it follows the graph-wide policy again, now and after that
-policy changes.
+A graph registers one placer with `set_port_placer`; `Custom` refers
+to it, is refused (`false`) until one is registered, and a later
+registration replaces it for every `Custom` node. The placer is told
+the node id, so one function places every node.
+`clear_node_port_policy` removes a node's override so it follows the
+graph-wide policy again, now and after that policy changes.
 
 The no-alloc builder has the same setters, `set_port_policy`,
-`set_node_port_policy` and `clear_node_port_policy`, all returning
-`Option`: a policy byte per node rides the port table, and the builder
-carries the one placer. `CsrGraph::compute_layout_arena_reporting`
+`set_port_placer`, `set_node_port_policy` and
+`clear_node_port_policy`, all returning `Option`: a policy byte per
+node rides the port table, and the builder carries the one placer.
+`CsrGraph::compute_layout_arena_reporting`
 is the layout entry that replays the port conditions (below) into a
 diagnostic context, the twin of the heap graph's reporting run; the
 plain `compute_layout_arena` stays quiet.

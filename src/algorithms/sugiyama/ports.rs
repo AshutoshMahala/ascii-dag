@@ -260,7 +260,7 @@ impl PortAttachment {
 /// and departure are the DECLARED ends (`to` and `from`), which a
 /// cycle reversal does not change.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PortPolicy {
     /// One port per face, at its center, shared by every arrival and
     /// departure declared on it — the default, and the drawing every
@@ -277,8 +277,11 @@ pub enum PortPolicy {
     /// centered; ends beyond the bound share round-robin — all in
     /// tangent order, the peer's position along the face.
     Spread(PortBound),
-    /// The caller's placer chooses every end's cell.
-    Custom(PortPlacer),
+    /// The placer registered on the graph (`set_port_placer`) chooses
+    /// every end's cell; it is told the node id, so one function
+    /// places every `Custom` node. Refused until a placer is
+    /// registered.
+    Custom,
 }
 
 #[cfg(feature = "ports")]
@@ -293,46 +296,39 @@ impl PortPolicy {
     /// what larger bounds saturate to on both backends.
     pub const SPREAD_MAX: u8 = Self::CODE_CUSTOM - Self::CODE_SPREAD_FACE - 1;
 
-    /// The one-byte code the CSR port table stores (the placer of a
-    /// `Custom` policy travels separately, one per graph).
+    /// The one-byte code the CSR port table stores (the graph's
+    /// placer travels separately). `Ports(0)` is one port, so it
+    /// shares `Ports(1)`'s code.
     pub(crate) const fn to_code(self) -> u8 {
         match self {
             PortPolicy::Single => Self::CODE_SINGLE,
             PortPolicy::Paired => Self::CODE_PAIRED,
-            PortPolicy::Spread(PortBound::Face) | PortPolicy::Spread(PortBound::Ports(0)) => {
-                Self::CODE_SPREAD_FACE
-            }
+            PortPolicy::Spread(PortBound::Face) => Self::CODE_SPREAD_FACE,
             PortPolicy::Spread(PortBound::Ports(n)) => {
-                Self::CODE_SPREAD_FACE
-                    + if n > Self::SPREAD_MAX {
-                        Self::SPREAD_MAX
-                    } else {
-                        n
-                    }
+                let n = if n == 0 {
+                    1
+                } else if n > Self::SPREAD_MAX {
+                    Self::SPREAD_MAX
+                } else {
+                    n
+                };
+                Self::CODE_SPREAD_FACE + n
             }
-            PortPolicy::Custom(_) => Self::CODE_CUSTOM,
+            PortPolicy::Custom => Self::CODE_CUSTOM,
         }
     }
 
     /// Inverse of [`to_code`](Self::to_code): `None` for the inherit
-    /// code; a `Custom` code without a placer reads as `Single`.
-    pub(crate) fn from_code(code: u8, placer: Option<PortPlacer>) -> Option<PortPolicy> {
+    /// code.
+    pub(crate) fn from_code(code: u8) -> Option<PortPolicy> {
         Some(match code {
             Self::INHERIT => return None,
             Self::CODE_SINGLE => PortPolicy::Single,
             Self::CODE_PAIRED => PortPolicy::Paired,
             Self::CODE_SPREAD_FACE => PortPolicy::Spread(PortBound::Face),
-            Self::CODE_CUSTOM => placer.map_or(PortPolicy::Single, PortPolicy::Custom),
+            Self::CODE_CUSTOM => PortPolicy::Custom,
             n => PortPolicy::Spread(PortBound::Ports(n - Self::CODE_SPREAD_FACE)),
         })
-    }
-
-    /// The placer a `Custom` policy carries.
-    pub(crate) fn placer(self) -> Option<PortPlacer> {
-        match self {
-            PortPolicy::Custom(f) => Some(f),
-            _ => None,
-        }
     }
 }
 
@@ -342,9 +338,10 @@ impl PortPolicy {
 pub enum PortBound {
     /// As many ports as the face has cells.
     Face,
-    /// At most this many ports; `0` means [`Face`](Self::Face). Bounds
-    /// above 251 saturate to 251 on both backends (the CSR table's
-    /// byte code carries that much).
+    /// At most this many ports. `0` is one port (a shared face;
+    /// [`Face`](Self::Face) is the unbounded form); bounds above 251
+    /// saturate to 251 on both backends (the CSR table's byte code
+    /// carries that much).
     Ports(u8),
 }
 
@@ -623,6 +620,7 @@ pub(crate) fn assign_level_face_positions<A: Axis>(
     requests: &mut [FaceRequest],
     face_span: impl FnMut(usize) -> (usize, usize),
     policy: impl FnMut(usize) -> (PortPolicy, usize),
+    placer: Option<PortPlacer>,
     flipped: bool,
     place: impl FnMut(usize, EndRole, usize),
 ) {
@@ -632,7 +630,7 @@ pub(crate) fn assign_level_face_positions<A: Axis>(
             .all(|r| matches!(r.face, Face::LevelLeading | Face::LevelTrailing)),
         "level faces only"
     );
-    assign_face_positions::<A>(requests, face_span, policy, flipped, place, true);
+    assign_face_positions::<A>(requests, face_span, policy, placer, flipped, place, true);
 }
 
 /// The lateral twin of [`assign_level_face_positions`]: requests on a
@@ -645,6 +643,7 @@ pub(crate) fn assign_cross_face_positions<A: Axis>(
     requests: &mut [FaceRequest],
     face_span: impl FnMut(usize) -> (usize, usize),
     policy: impl FnMut(usize) -> (PortPolicy, usize),
+    placer: Option<PortPlacer>,
     flipped: bool,
     place: impl FnMut(usize, EndRole, usize),
 ) {
@@ -654,7 +653,7 @@ pub(crate) fn assign_cross_face_positions<A: Axis>(
             .all(|r| matches!(r.face, Face::CrossLeading | Face::CrossTrailing)),
         "cross faces only"
     );
-    assign_face_positions::<A>(requests, face_span, policy, flipped, place, false);
+    assign_face_positions::<A>(requests, face_span, policy, placer, flipped, place, false);
 }
 
 /// The shared pass: per (node, face) group in tangent order, the
@@ -666,6 +665,7 @@ fn assign_face_positions<A: Axis>(
     requests: &mut [FaceRequest],
     mut face_span: impl FnMut(usize) -> (usize, usize),
     mut policy: impl FnMut(usize) -> (PortPolicy, usize),
+    placer: Option<PortPlacer>,
     flipped: bool,
     mut place: impl FnMut(usize, EndRole, usize),
     level: bool,
@@ -718,16 +718,21 @@ fn assign_face_positions<A: Axis>(
             let offset = match policy {
                 PortPolicy::Single | PortPolicy::Spread(_) => center,
                 PortPolicy::Paired => paired_offset(face, r.arrival, center, capacity),
-                PortPolicy::Custom(placer) => placer(PortSlot {
-                    node: id,
-                    face: face.physical(A::FLOW_AXIS, flipped),
-                    cells: capacity,
-                    arrivals,
-                    departures: n - arrivals,
-                    index: k,
-                    arrival: r.arrival,
-                })
-                .min(capacity - 1),
+                // The setters refuse `Custom` without a registered
+                // placer, so `None` here is unreachable; the center is
+                // the honest answer if it ever were.
+                PortPolicy::Custom => placer.map_or(center, |f| {
+                    f(PortSlot {
+                        node: id,
+                        face: face.physical(A::FLOW_AXIS, flipped),
+                        cells: capacity,
+                        arrivals,
+                        departures: n - arrivals,
+                        index: k,
+                        arrival: r.arrival,
+                    })
+                    .min(capacity - 1)
+                }),
             };
             place(r.edge, r.end, base + offset);
         }
@@ -735,14 +740,14 @@ fn assign_face_positions<A: Axis>(
 }
 
 /// The ports a `Spread` bound allows on a face of `capacity` cells:
-/// the face's cells for `Face` (and `Ports(0)`), else the bound,
+/// the face's cells for `Face`, else the bound, at least one and
 /// saturated at [`PortPolicy::SPREAD_MAX`] — the same number on both
 /// backends, whatever the byte code can carry.
 #[cfg(feature = "ports")]
 pub(crate) fn bound_ports(bound: PortBound, capacity: usize) -> usize {
     match bound {
-        PortBound::Face | PortBound::Ports(0) => capacity,
-        PortBound::Ports(p) => (p.min(PortPolicy::SPREAD_MAX) as usize).min(capacity),
+        PortBound::Face => capacity,
+        PortBound::Ports(p) => (p.clamp(1, PortPolicy::SPREAD_MAX) as usize).min(capacity),
     }
 }
 
@@ -1415,7 +1420,14 @@ mod layout_tests {
         }
         let mut g = Graph::new();
         g.add_node(0usize, BoxedNode("Hub"));
-        g.set_node_port_policy(0usize, PortPolicy::Custom(ends_apart));
+        // `Custom` refers to the graph's registered placer: refused
+        // until one is registered.
+        assert!(!g.set_node_port_policy(0usize, PortPolicy::Custom));
+        assert!(!g.set_port_policy(PortPolicy::Custom));
+        assert!(g.port_placer().is_none());
+        g.set_port_placer(ends_apart);
+        assert!(g.port_placer().is_some());
+        assert!(g.set_node_port_policy(0usize, PortPolicy::Custom));
         g.add_node(1usize, "In");
         g.add_node(2usize, "Out");
         g.add_edge(1usize, 0usize, None).to_port(PortSide::Upstream);
@@ -1427,13 +1439,9 @@ mod layout_tests {
         let departure = ir.edges().iter().find(|e| e.from_id == 0).unwrap();
         assert_eq!(arrival.to_x, hub.x);
         assert_eq!(departure.from_x, hub.x + 6);
-        // A graph runs one placer: a different one is refused.
-        assert!(!g.set_node_port_policy(0usize, PortPolicy::Custom(past_the_face)));
-        let mut g = Graph::new();
-        g.add_node(0usize, BoxedNode("Hub"));
-        g.set_node_port_policy(0usize, PortPolicy::Custom(past_the_face));
-        g.add_node(1usize, "In");
-        g.add_edge(1usize, 0usize, None).to_port(PortSide::Upstream);
+        // Registering another placer replaces it for every `Custom`
+        // node; its answer is clamped to the face.
+        g.set_port_placer(past_the_face);
         let ir = g.compute_layout();
         let hub = ir.node_by_id(0).unwrap();
         let arrival = ir.edges().iter().find(|e| e.to_id == 0).unwrap();
@@ -1503,6 +1511,7 @@ mod layout_tests {
         }
         let build = |policy: PortPolicy| {
             let mut g = Graph::new();
+            g.set_port_placer(expects_an_arrival);
             g.add_node(1usize, BoxedNode("Hub with room")); // 17 wide, center x+8
             g.add_node(2usize, "B");
             g.add_edge(1usize, 2usize, None);
@@ -1510,10 +1519,10 @@ mod layout_tests {
             // target A becomes the layout source, and `Upstream` at A
             // is A's top face.
             g.add_edge(2usize, 1usize, None).to_port(PortSide::Upstream);
-            g.set_node_port_policy(1usize, policy);
+            assert!(g.set_node_port_policy(1usize, policy));
             g
         };
-        let g = build(PortPolicy::Custom(expects_an_arrival));
+        let g = build(PortPolicy::Custom);
         let ir = g.compute_layout();
         let hub = ir.node_by_id(1).unwrap();
         let reversed = ir.edges().iter().find(|e| e.reversed).unwrap();
@@ -1732,21 +1741,18 @@ mod csr_tests {
         fn ends_apart(slot: PortSlot) -> usize {
             if slot.arrival { 0 } else { slot.cells - 1 }
         }
-        fn other(_: PortSlot) -> usize {
-            0
-        }
         let mut g = Graph::new();
         g.set_port_policy(PortPolicy::Spread(PortBound::Ports(2)));
         g.add_node(1usize, BoxedNode("Spread"));
         g.add_node(2usize, BoxedNode("Paired"));
         g.add_node(3usize, BoxedNode("Custom"));
         g.set_node_port_policy(2usize, PortPolicy::Paired);
-        g.set_node_port_policy(3usize, PortPolicy::Custom(ends_apart));
         assert!(
-            !g.set_node_port_policy(1usize, PortPolicy::Custom(other)),
-            "one placer per graph — so the conversion below is exact"
+            !g.set_node_port_policy(3usize, PortPolicy::Custom),
+            "no placer registered yet"
         );
-        assert!(!g.set_port_policy(PortPolicy::Custom(other)));
+        g.set_port_placer(ends_apart);
+        assert!(g.set_node_port_policy(3usize, PortPolicy::Custom));
         // A bound past what the byte code carries saturates on both.
         g.add_node(4usize, BoxedNode("Saturated bound node"));
         g.set_node_port_policy(4usize, PortPolicy::Spread(PortBound::Ports(255)));
@@ -1795,17 +1801,18 @@ mod csr_tests {
                 .is_some()
         );
         assert!(
-            b.set_node_port_policy(index[&3], PortPolicy::Custom(ends_apart))
+            b.set_node_port_policy(index[&3], PortPolicy::Custom)
+                .is_none(),
+            "no placer registered yet"
+        );
+        assert!(b.set_port_placer(ends_apart).is_some());
+        assert!(
+            b.set_node_port_policy(index[&3], PortPolicy::Custom)
                 .is_some()
         );
         assert!(
             b.set_node_port_policy(index[&4], PortPolicy::Spread(PortBound::Ports(255)))
                 .is_some()
-        );
-        assert!(
-            b.set_node_port_policy(index[&1], PortPolicy::Custom(other))
-                .is_none(),
-            "one placer per builder"
         );
         assert!(
             b.set_node_port_policy(index[&1], PortPolicy::Paired)
@@ -1842,6 +1849,7 @@ mod csr_tests {
         plain.add_node(1, "A").unwrap();
         assert!(plain.set_port_policy(PortPolicy::Paired).is_none());
         assert!(plain.set_node_port_policy(0, PortPolicy::Paired).is_none());
+        assert!(plain.set_port_placer(ends_apart).is_none());
     }
 
     /// The no-alloc pipeline reports the same port conditions as the

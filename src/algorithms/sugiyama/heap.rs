@@ -536,6 +536,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             &mut requests,
             cross_span,
             policy,
+            dag.port_placer,
             level_flipped,
             |edge, end, cross| match end {
                 EndRole::Source => port_cross[edge].0 = cross,
@@ -551,6 +552,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 )
             },
             policy,
+            dag.port_placer,
             level_flipped,
             |edge, end, along| match end {
                 EndRole::Source => port_cross[edge].0 = along,

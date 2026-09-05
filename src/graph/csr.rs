@@ -128,9 +128,15 @@ impl<'a> CsrGraph<'a> {
         use crate::PortPolicy;
         self.node_port_policies
             .get(index)
-            .and_then(|&code| PortPolicy::from_code(code, self.port_placer))
-            .or_else(|| PortPolicy::from_code(self.port_policy, self.port_placer))
+            .and_then(|&code| PortPolicy::from_code(code))
+            .or_else(|| PortPolicy::from_code(self.port_policy))
             .unwrap_or(PortPolicy::Single)
+    }
+
+    /// The placer every `Custom` policy runs, if one was registered.
+    #[cfg(feature = "ports")]
+    pub(crate) fn port_placer(&self) -> Option<crate::PortPlacer> {
+        self.port_placer
     }
 
     /// Whether this graph carries a port table (built with ports).
@@ -1173,29 +1179,40 @@ impl<'a> CsrGraphBuilder<'a> {
     }
 
     /// Set the graph-wide port policy. `None` without a port table, or
-    /// for a `Custom` policy whose placer differs from the one this
-    /// builder already carries — a builder holds ONE placer, which
-    /// every `Custom` policy on it runs (it sees the node id).
+    /// for `Custom` before a placer is registered
+    /// ([`set_port_placer`](Self::set_port_placer)).
     #[cfg(feature = "ports")]
     pub fn set_port_policy(&mut self, policy: crate::PortPolicy) -> Option<()> {
-        if !self.ports {
+        if !self.ports || (policy == crate::PortPolicy::Custom && self.port_placer.is_none()) {
             return None;
         }
-        self.adopt_placer(policy)?;
         self.port_policy = policy.to_code();
         Some(())
     }
 
-    /// Override the port policy of node `index`. `None` for an unknown
-    /// node, without a port table, or for a `Custom` policy whose
-    /// placer differs from the builder's (see
-    /// [`set_port_policy`](Self::set_port_policy)).
+    /// Register the placer every `Custom` policy runs — one per
+    /// builder, told the node id. A later registration replaces it.
+    /// `None` without a port table.
     #[cfg(feature = "ports")]
-    pub fn set_node_port_policy(&mut self, index: usize, policy: crate::PortPolicy) -> Option<()> {
-        if !self.ports || index >= self.current_node_count {
+    pub fn set_port_placer(&mut self, placer: crate::PortPlacer) -> Option<()> {
+        if !self.ports {
             return None;
         }
-        self.adopt_placer(policy)?;
+        self.port_placer = Some(placer);
+        Some(())
+    }
+
+    /// Override the port policy of node `index`. `None` for an unknown
+    /// node, without a port table, or for `Custom` before a placer is
+    /// registered.
+    #[cfg(feature = "ports")]
+    pub fn set_node_port_policy(&mut self, index: usize, policy: crate::PortPolicy) -> Option<()> {
+        if !self.ports
+            || index >= self.current_node_count
+            || (policy == crate::PortPolicy::Custom && self.port_placer.is_none())
+        {
+            return None;
+        }
         self.node_port_policies[index] = policy.to_code();
         Some(())
     }
@@ -1209,17 +1226,6 @@ impl<'a> CsrGraphBuilder<'a> {
             return None;
         }
         self.node_port_policies[index] = crate::PortPolicy::INHERIT;
-        Some(())
-    }
-
-    #[cfg(feature = "ports")]
-    fn adopt_placer(&mut self, policy: crate::PortPolicy) -> Option<()> {
-        if let Some(placer) = policy.placer() {
-            match self.port_placer {
-                Some(current) if !core::ptr::fn_addr_eq(current, placer) => return None,
-                _ => self.port_placer = Some(placer),
-            }
-        }
         Some(())
     }
 
@@ -1684,8 +1690,7 @@ impl<'a> super::Graph<'a> {
             table
         };
         // Policies ride the port table: one code per node, the graph's
-        // code, and its ONE placer (a heap graph refuses a second
-        // distinct placer, so the conversion is exact).
+        // code, and its one registered placer.
         #[cfg(feature = "ports")]
         let (node_policy_slice, port_policy_code, port_placer): (
             &[u8],
