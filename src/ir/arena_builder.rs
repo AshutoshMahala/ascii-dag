@@ -472,6 +472,16 @@ impl<'a> LayoutIRArenaBuilder<'a> {
                         wp.1 = flip_row(wp.1);
                     }
                 }
+                #[cfg(feature = "ports")]
+                EdgePathArena::Orthogonal {
+                    bends_start,
+                    bends_len,
+                } => {
+                    let range = *bends_start..*bends_start + *bends_len;
+                    for b in &mut self.waypoints[range] {
+                        b.1 = flip_row(b.1);
+                    }
+                }
                 EdgePathArena::Spline { cp1_y, cp2_y, .. } => {
                     *cp1_y = flip_row(*cp1_y);
                     *cp2_y = flip_row(*cp2_y);
@@ -565,6 +575,16 @@ impl<'a> LayoutIRArenaBuilder<'a> {
                     let range = *waypoints_start..*waypoints_start + *waypoints_len;
                     for wp in &mut self.waypoints[range] {
                         wp.0 = flip_col(wp.0);
+                    }
+                }
+                #[cfg(feature = "ports")]
+                EdgePathArena::Orthogonal {
+                    bends_start,
+                    bends_len,
+                } => {
+                    let range = *bends_start..*bends_start + *bends_len;
+                    for b in &mut self.waypoints[range] {
+                        b.0 = flip_col(b.0);
                     }
                 }
                 EdgePathArena::Spline { cp1_x, cp2_x, .. } => {

@@ -145,6 +145,15 @@ pub(crate) enum Face {
     CrossTrailing,
 }
 
+impl Face {
+    /// A face on the level axis — the two the trunk can leave or
+    /// enter head-on (the role's own `Auto` face and its opposite).
+    #[cfg_attr(not(feature = "ports"), allow(dead_code))]
+    pub(crate) const fn is_level(self) -> bool {
+        matches!(self, Face::LevelLeading | Face::LevelTrailing)
+    }
+}
+
 /// An edge end's role in LAYOUT order: the trunk leaves `Source` and
 /// arrives at `Target`. Under a cycle reversal the layout roles swap
 /// relative to the declared endpoints — `Auto` binds to the layout
@@ -1270,5 +1279,534 @@ mod csr_tests {
         assert!(!plain.has_ports());
         let config = LayoutConfig::standard();
         assert_eq!(render_csr(&csr, &config), render_csr(&plain, &config));
+    }
+}
+
+/// Whether an explicit side puts an end on the level face OPPOSITE its
+/// layout role's own: a source leaving through its arrive face, a
+/// target arriving through its leave face. Such an end routes AROUND
+/// its node (behavior rule 7b) instead of attaching head-on.
+#[cfg_attr(not(feature = "ports"), allow(dead_code))]
+pub(crate) const fn detours(
+    side: PortSide,
+    axis: crate::ir::FlowAxis,
+    level_flipped: bool,
+    role: EndRole,
+) -> bool {
+    if matches!(side, PortSide::Auto) {
+        return false;
+    }
+    let opposite = match role {
+        EndRole::Source => Face::LevelLeading,
+        EndRole::Target => Face::LevelTrailing,
+    };
+    matches!(
+        (Face::of(side, axis, level_flipped, role), opposite),
+        (Face::LevelLeading, Face::LevelLeading) | (Face::LevelTrailing, Face::LevelTrailing)
+    )
+}
+
+/// The cross-axis lane a detour runs along beside its node: the cell
+/// just past the node on the side facing the peer, falling back to
+/// the other side; `usize::MAX` when neither is free. `after` sits one
+/// further out on a self-loop node (the `↺` cell is at the node's
+/// trailing edge on its leading line). Lanes live in the packing gap
+/// — nothing is reserved — so a caller-blocked column (a neighbor at
+/// `node_spacing == 0`, a dummy chain, a marker cell) or the canvas
+/// edge means no lane on that side. Both backends decide this way.
+#[cfg_attr(not(feature = "ports"), allow(dead_code))]
+pub(crate) fn choose_lane(
+    base: usize,
+    extent: usize,
+    self_loop: bool,
+    toward_after: bool,
+    cross_limit: usize,
+    blocked: &dyn Fn(usize) -> bool,
+) -> usize {
+    let after = base + extent + usize::from(self_loop);
+    let after_ok = after < cross_limit && !blocked(after);
+    let before = base.checked_sub(1).filter(|&b| !blocked(b));
+    match (toward_after, after_ok, before) {
+        (true, true, _) | (false, true, None) => after,
+        (_, _, Some(b)) => b,
+        _ => usize::MAX,
+    }
+}
+
+/// One edge's detour plan: the lane beside each detouring end
+/// (`usize::MAX` = that end attaches head-on) and the routing-row
+/// slots its runs were allocated — the up-run above the source
+/// (`up_slot`: in the band above the source's level, or the rows above
+/// level 0), the first run below the source (`first_slot`, absent when
+/// the descent starts in the lane's own column), and the run under
+/// the target (`below_slot`).
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(feature = "ports"), allow(dead_code))]
+pub(crate) struct Detour {
+    /// The declared side puts this end on its opposite level face.
+    pub(crate) src_wants: bool,
+    pub(crate) dst_wants: bool,
+    pub(crate) src_lane: usize,
+    pub(crate) dst_lane: usize,
+    pub(crate) up_slot: usize,
+    pub(crate) first_slot: usize,
+    pub(crate) below_slot: usize,
+}
+
+impl Detour {
+    #[cfg_attr(not(feature = "ports"), allow(dead_code))]
+    pub(crate) const NONE: Detour = Detour {
+        src_wants: false,
+        dst_wants: false,
+        src_lane: usize::MAX,
+        dst_lane: usize::MAX,
+        up_slot: usize::MAX,
+        first_slot: usize::MAX,
+        below_slot: usize::MAX,
+    };
+
+    #[cfg_attr(not(feature = "ports"), allow(dead_code))]
+    pub(crate) const fn active(&self) -> bool {
+        self.src_lane != usize::MAX || self.dst_lane != usize::MAX
+    }
+}
+
+/// Opposite-face detours (behavior rule 7b) through the heap layout:
+/// an explicit side on the level face opposite the layout role routes
+/// AROUND the node — up out of a TopDown source's top face, or in
+/// through a target's bottom face — as an explicit polyline.
+#[cfg(all(
+    test,
+    feature = "std",
+    feature = "ports",
+    any(feature = "layout-vertical", feature = "layout-horizontal")
+))]
+mod detour_tests {
+    use super::PortSide;
+    use crate::graph::{Direction, Graph};
+    use crate::ir::{EdgePath, LayoutIR};
+    use crate::render::engine::RenderOptions;
+    use crate::render::engine::plan::{HitResult, RenderPlan};
+
+    const EDGE_INK: &str = "│─┌┐└┘├┤┬┴┼↓↑←→⇣⇡⇠⇢┆┄";
+
+    fn cell_at(out: &str, x: usize, y: usize) -> char {
+        out.lines()
+            .nth(y)
+            .and_then(|l| l.chars().nth(x))
+            .unwrap_or(' ')
+    }
+
+    fn node_rect(ir: &LayoutIR<'_>, id: usize) -> (usize, usize, usize, usize) {
+        let n = ir.node_by_id(id).unwrap();
+        (n.x, n.y, n.width, n.height)
+    }
+
+    /// Every bend stays outside every node (rule 4b), and every inked
+    /// cell outside the nodes belongs to an edge — hit-testing, which
+    /// walks the plan's visitors, agrees with the painter.
+    fn assert_routing_invariants(ir: &LayoutIR<'_>, tag: &str) {
+        let out = ir.render_string(&RenderOptions::plain());
+        let plan = RenderPlan::build(ir, &RenderOptions::plain().plan);
+        let rects: Vec<(usize, usize, usize, usize)> = ir
+            .nodes()
+            .iter()
+            .map(|n| (n.x, n.y, n.width, n.height))
+            .collect();
+        let inside = |x: usize, y: usize| {
+            rects
+                .iter()
+                .any(|&(nx, ny, w, h)| (nx..nx + w).contains(&x) && (ny..ny + h).contains(&y))
+        };
+        let loop_cells: Vec<(usize, usize)> =
+            ir.nodes().iter().filter_map(|n| n.self_loop_at).collect();
+        // Two edges share an overlapping horizontal run on one row only
+        // when they share a layout end: a fan-out bus (same source — a
+        // reversed edge's included, it is drawn from its layout source)
+        // or a fan-in into one face cell (same target). Anything else
+        // merges two unrelated edges into one unreadable line.
+        let mut runs: Vec<(usize, usize, usize, (usize, usize))> = Vec::new();
+        for (i, e) in ir.edges().iter().enumerate() {
+            let v = crate::render::engine::view::LayoutView::edge(ir, i);
+            crate::render::engine::plan::for_each_h_run_all(
+                &v.path,
+                v.from_x,
+                v.from_y,
+                v.to_x,
+                v.to_y,
+                v.flow_axis,
+                &mut |row, a, b| {
+                    let ends = if e.reversed {
+                        (e.to_id, e.from_id)
+                    } else {
+                        (e.from_id, e.to_id)
+                    };
+                    runs.push((row, a, b, ends))
+                },
+            );
+        }
+        for (i, &(row, a0, a1, ends_a)) in runs.iter().enumerate() {
+            for &(row_b, b0, b1, ends_b) in &runs[i + 1..] {
+                let shared_end = ends_a.0 == ends_b.0 || ends_a.1 == ends_b.1;
+                assert!(
+                    row != row_b || shared_end || a1 < b0 || b1 < a0,
+                    "{tag}: runs of different sources overlap on row {row}: [{a0}, {a1}] vs [{b0}, {b1}]:\n{out}"
+                );
+            }
+        }
+        for y in 0..ir.height() {
+            for x in 0..ir.width() {
+                let ch = cell_at(&out, x, y);
+                if inside(x, y) {
+                    assert!(
+                        !EDGE_INK.contains(ch),
+                        "{tag}: edge ink {ch:?} inside a node at ({x}, {y}):\n{out}"
+                    );
+                    continue;
+                }
+                if loop_cells.contains(&(x, y)) {
+                    continue;
+                }
+                let inked = ch != ' ';
+                let owned = matches!(plan.element_at(ir, x, y), HitResult::Edge(_));
+                assert_eq!(
+                    inked, owned,
+                    "{tag}: ({x}, {y}) {ch:?} inked={inked} owned={owned}:\n{out}"
+                );
+            }
+        }
+    }
+
+    /// The bends of the routed edge with INPUT index `edge` (self-loops
+    /// never enter the routed list, so positions and input indices
+    /// can differ).
+    fn bends(ir: &LayoutIR<'_>, edge: usize) -> Vec<(usize, usize)> {
+        let e = ir
+            .edges()
+            .iter()
+            .find(|e| e.edge_index == edge)
+            .unwrap_or_else(|| panic!("edge {edge} is not routed"));
+        match &e.path {
+            EdgePath::Orthogonal { bends } => bends.clone(),
+            other => panic!("edge {edge}: expected an explicit polyline, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn upstream_source_leaves_through_its_arrive_face() {
+        let mut auto = Graph::new();
+        auto.add_node(1usize, "A");
+        auto.add_node(2usize, "B");
+        auto.add_edge(1usize, 2usize, None);
+        let plain = auto.compute_layout();
+
+        let mut g = Graph::new();
+        g.add_node(1usize, "A");
+        g.add_node(2usize, "B");
+        g.add_edge(1usize, 2usize, None)
+            .from_port(PortSide::Upstream);
+        let ir = g.compute_layout();
+        let out = ir.render_string(&RenderOptions::plain());
+        let (ax, ay, aw, _) = node_rect(&ir, 1);
+        let (_, by, _, _) = node_rect(&ir, 2);
+        let b = bends(&ir, 0);
+        // Up out of the top face, around, down into B: four turns, the
+        // first above A, the last between the nodes.
+        assert_eq!(b.len(), 4, "{b:?}\n{out}");
+        assert!(b[0].1 < ay && b[1].1 < ay, "{b:?}\n{out}");
+        assert!(b[2].1 > ay && b[3].1 > ay && b[3].1 < by, "{b:?}\n{out}");
+        // The lane runs beside A, never through it.
+        assert!(b[1].0 < ax || b[1].0 >= ax + aw, "{b:?}\n{out}");
+        let e = &ir.edges()[0];
+        assert_eq!(e.from_y, ay, "the endpoint is A's own top line");
+        assert_eq!(cell_at(&out, e.from_x, ay - 1), '│', "{out}");
+        assert_eq!(cell_at(&out, e.to_x, by - 1), '↓', "{out}");
+        // Two rows were opened above the first level: one slot row and
+        // the clearance line.
+        assert_eq!(ir.height(), plain.height() + 2, "{out}");
+        assert_routing_invariants(&ir, "upstream source");
+    }
+
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn downstream_target_arrives_through_its_leave_face() {
+        let mut g = Graph::new();
+        g.add_node(1usize, "A");
+        g.add_node(2usize, "B");
+        g.add_edge(1usize, 2usize, None)
+            .to_port(PortSide::Downstream);
+        let ir = g.compute_layout();
+        let out = ir.render_string(&RenderOptions::plain());
+        let (bx, by, bw, bh) = node_rect(&ir, 2);
+        let b = bends(&ir, 0);
+        let bottom = by + bh - 1;
+        assert_eq!(b.len(), 4, "{b:?}\n{out}");
+        assert!(b[0].1 < by && b[1].1 < by, "{b:?}\n{out}");
+        assert!(b[2].1 > bottom && b[3].1 > bottom, "{b:?}\n{out}");
+        assert!(b[1].0 < bx || b[1].0 >= bx + bw, "{b:?}\n{out}");
+        let e = &ir.edges()[0];
+        assert_eq!(e.to_y, bottom, "the endpoint is B's own bottom line");
+        assert_eq!(cell_at(&out, e.to_x, bottom + 1), '↑', "{out}");
+        assert_routing_invariants(&ir, "downstream target");
+    }
+
+    /// In every direction the exit is on the face AGAINST the flow and
+    /// the arrival on the face WITH it — physically wherever the
+    /// direction puts them.
+    #[test]
+    fn detours_follow_the_flow_in_every_direction() {
+        let mut directions = Vec::new();
+        #[cfg(feature = "layout-vertical")]
+        directions.extend([Direction::TopDown, Direction::BottomUp]);
+        #[cfg(feature = "layout-horizontal")]
+        directions.extend([Direction::LeftRight, Direction::RightLeft]);
+        for direction in directions {
+            let mut g = Graph::new();
+            g.set_direction(direction);
+            g.add_node(1usize, "A");
+            g.add_node(2usize, "B");
+            g.add_edge(1usize, 2usize, None)
+                .from_port(PortSide::Upstream)
+                .to_port(PortSide::Downstream);
+            let ir = g.compute_layout();
+            let out = ir.render_string(&RenderOptions::plain());
+            let (ax, ay, aw, ah) = node_rect(&ir, 1);
+            let (bx, by, bw, bh) = node_rect(&ir, 2);
+            let b = bends(&ir, 0);
+            let (first, last) = (b[0], b[b.len() - 1]);
+            let (exit_ok, entry_ok) = match direction {
+                #[cfg(feature = "layout-vertical")]
+                Direction::TopDown => (first.1 < ay, last.1 > by + bh - 1),
+                #[cfg(feature = "layout-vertical")]
+                Direction::BottomUp => (first.1 > ay + ah - 1, last.1 < by),
+                #[cfg(feature = "layout-horizontal")]
+                Direction::LeftRight => (first.0 < ax, last.0 > bx + bw - 1),
+                #[cfg(feature = "layout-horizontal")]
+                Direction::RightLeft => (first.0 > ax + aw - 1, last.0 < bx),
+            };
+            assert!(
+                exit_ok,
+                "{direction:?}: exit {first:?} vs A {:?}\n{out}",
+                (ax, ay, aw, ah)
+            );
+            assert!(
+                entry_ok,
+                "{direction:?}: entry {last:?} vs B {:?}\n{out}",
+                (bx, by, bw, bh)
+            );
+            assert_routing_invariants(&ir, "direction sweep");
+        }
+    }
+
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn skip_edges_detour_and_thread_their_dummy_column() {
+        let mut g = Graph::new();
+        g.add_node(1usize, "A");
+        g.add_node(2usize, "B");
+        g.add_node(3usize, "C");
+        g.add_edge(1usize, 2usize, None);
+        g.add_edge(2usize, 3usize, None);
+        g.add_edge(1usize, 3usize, None)
+            .from_port(PortSide::Upstream);
+        let ir = g.compute_layout();
+        let out = ir.render_string(&RenderOptions::plain());
+        let b = bends(&ir, 2);
+        let (_, ay, _, _) = node_rect(&ir, 1);
+        let (_, cy, _, _) = node_rect(&ir, 3);
+        assert!(b.len() >= 4, "{b:?}\n{out}");
+        assert!(b[0].1 < ay, "{b:?}\n{out}");
+        assert!(b.iter().all(|&(_, y)| y < cy), "{b:?}\n{out}");
+        assert_routing_invariants(&ir, "skip edge");
+    }
+
+    /// A reversed cycle edge binds its declared sides to its declared
+    /// ends: `Downstream` on the declared source (the layout TARGET)
+    /// is that node's leave face — opposite for a target — so it
+    /// detours; `Upstream` there is the arrive face, head-on.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn a_reversed_edge_detours_from_its_declared_end() {
+        for (side, detours) in [(PortSide::Downstream, true), (PortSide::Upstream, false)] {
+            let mut g = Graph::new();
+            g.add_node(1usize, "A");
+            g.add_node(2usize, "B");
+            g.add_edge(1usize, 2usize, None);
+            g.add_edge(2usize, 1usize, None).from_port(side);
+            let ir = g.compute_layout();
+            let out = ir.render_string(&RenderOptions::plain());
+            let e = &ir.edges()[1];
+            assert!(e.reversed, "{out}");
+            let explicit = matches!(e.path, EdgePath::Orthogonal { .. });
+            assert_eq!(explicit, detours, "{side:?}: {:?}\n{out}", e.path);
+            if detours {
+                let (_, by, _, bh) = node_rect(&ir, 2);
+                let b = bends(&ir, 1);
+                assert!(b[b.len() - 1].1 > by + bh - 1, "{b:?}\n{out}");
+            }
+            assert_routing_invariants(&ir, "reversed");
+        }
+    }
+
+    /// Spread ports on a skip edge's target: the chain's last jog is
+    /// budgeted against the RESOLVED port, not the node center — the
+    /// bend to a spread cell gets its row like any other jog.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn spread_ports_on_skip_edges_keep_a_budgeted_jog_row() {
+        let mut g = Graph::new();
+        g.add_node(1usize, "A");
+        g.add_node(2usize, "B");
+        g.add_node(3usize, "Wide target node");
+        g.add_node(4usize, "L");
+        g.add_node(5usize, "R");
+        g.add_edge(1usize, 2usize, None);
+        g.add_edge(2usize, 3usize, None).to_port(PortSide::Upstream);
+        g.add_edge(1usize, 3usize, None).to_port(PortSide::Upstream);
+        g.add_edge(4usize, 3usize, None).to_port(PortSide::Upstream);
+        g.add_edge(5usize, 3usize, None).to_port(PortSide::Upstream);
+        let ir = g.compute_layout();
+        let out = ir.render_string(&RenderOptions::plain());
+        let arrivals = out.lines().map(|l| l.matches('↓').count()).sum::<usize>();
+        assert_eq!(arrivals, 5, "{out}");
+        assert_routing_invariants(&ir, "spread skip");
+    }
+
+    /// No lane on either side (neighbors packed at spacing 0) means
+    /// the end attaches head-on after all — the drawing is the Auto
+    /// drawing, and nothing panics.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn no_free_lane_means_head_on_attachment() {
+        let build = |declare: bool| {
+            let mut g = Graph::new();
+            g.add_node(0usize, "Root");
+            g.add_node(1usize, "L");
+            g.add_node(2usize, "M");
+            g.add_node(3usize, "R");
+            g.add_node(4usize, "T");
+            g.add_edge(0usize, 1usize, None);
+            g.add_edge(0usize, 2usize, None);
+            g.add_edge(0usize, 3usize, None);
+            let h = g.add_edge(2usize, 4usize, None);
+            if declare {
+                h.from_port(PortSide::Upstream);
+            }
+            let cfg = crate::algorithms::sugiyama::config::LayoutConfig {
+                node_spacing: 0,
+                ..crate::algorithms::sugiyama::config::LayoutConfig::standard()
+            };
+            g.compute_layout_with_config(&cfg)
+        };
+        let plain = build(false).render_string(&RenderOptions::plain());
+        let ir = build(true);
+        let out = ir.render_string(&RenderOptions::plain());
+        assert!(
+            !matches!(ir.edges()[3].path, EdgePath::Orthogonal { .. }),
+            "{out}"
+        );
+        assert_eq!(out, plain);
+    }
+
+    /// Both backends route every detour fixture identically — the arena
+    /// layout from arenas sized EXACTLY by the estimates (detour scratch
+    /// and staged bends counted).
+    #[cfg(feature = "arena")]
+    #[test]
+    fn both_backends_route_detours_identically() {
+        use crate::algorithms::sugiyama::config::LayoutConfig;
+        use crate::graph::arena::Arena;
+        let mut fixtures: Vec<(&str, Graph<'static>, LayoutConfig<'static>)> = Vec::new();
+        let mut directions = Vec::new();
+        #[cfg(feature = "layout-vertical")]
+        directions.extend([Direction::TopDown, Direction::BottomUp]);
+        #[cfg(feature = "layout-horizontal")]
+        directions.extend([Direction::LeftRight, Direction::RightLeft]);
+        for direction in directions {
+            let mut cfg = LayoutConfig::standard();
+            cfg.direction = direction;
+            let mut g = Graph::new();
+            g.add_node(1usize, "A");
+            g.add_node(2usize, "B");
+            g.add_node(3usize, "C");
+            g.add_node(4usize, "Wide target node");
+            g.add_edge(1usize, 2usize, None)
+                .from_port(PortSide::Upstream);
+            g.add_edge(2usize, 3usize, None)
+                .to_port(PortSide::Downstream);
+            g.add_edge(1usize, 3usize, Some("skip"))
+                .from_port(PortSide::Upstream)
+                .to_port(PortSide::Downstream);
+            g.add_edge(3usize, 4usize, None);
+            g.add_edge(2usize, 4usize, None).to_port(PortSide::Upstream);
+            g.add_edge(1usize, 4usize, None).to_port(PortSide::Upstream);
+            g.add_edge(4usize, 1usize, None)
+                .from_port(PortSide::Downstream);
+            g.add_edge(3usize, 3usize, None);
+            fixtures.push(("mixed", g, cfg));
+            let mut tight = LayoutConfig::standard();
+            tight.direction = direction;
+            tight.node_spacing = 0;
+            let mut g = Graph::new();
+            g.add_node(0usize, "Root");
+            g.add_node(1usize, "L");
+            g.add_node(2usize, "M");
+            g.add_node(3usize, "R");
+            g.add_node(4usize, "T");
+            g.add_edge(0usize, 1usize, None);
+            g.add_edge(0usize, 2usize, None);
+            g.add_edge(0usize, 3usize, None);
+            g.add_edge(2usize, 4usize, None)
+                .from_port(PortSide::Upstream);
+            g.add_edge(1usize, 4usize, None)
+                .from_port(PortSide::Upstream);
+            fixtures.push(("tight", g, tight));
+        }
+        for (tag, g, cfg) in &fixtures {
+            let heap_ir = g.compute_layout_with_config(cfg);
+            assert_routing_invariants(&heap_ir, tag);
+            let heap = heap_ir.render_string(&RenderOptions::plain());
+            let mut csr_buf = vec![0u8; g.estimate_csr_arena_size()];
+            let mut csr_arena = Arena::new(&mut csr_buf);
+            let csr = g.to_csr(&mut csr_arena).expect("exact CSR estimate");
+            let bytes = g.estimate_layout_arena_size_with(cfg);
+            let mut temp = vec![0u8; bytes];
+            let mut out = vec![0u8; bytes];
+            let mut ta = Arena::new(&mut temp);
+            let mut oa = Arena::new(&mut out);
+            let ir = csr
+                .compute_layout_arena(cfg, &mut ta, &mut oa)
+                .expect("exact layout estimate covers the detour scratch");
+            let mut arena = String::new();
+            ir.render_with(&RenderOptions::plain(), &mut arena).unwrap();
+            assert_eq!(heap, arena, "{tag} {:?}", cfg.direction);
+        }
+    }
+
+    /// A self-loop node keeps its `↺` cell: the lane on that side sits
+    /// one further out.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn self_loop_nodes_keep_their_marker_beside_a_lane() {
+        let mut g = Graph::new();
+        g.add_node(1usize, "A");
+        g.add_node(2usize, "B");
+        g.add_node(3usize, "C");
+        g.add_edge(1usize, 1usize, None);
+        g.add_edge(1usize, 2usize, None);
+        g.add_edge(1usize, 3usize, None)
+            .from_port(PortSide::Upstream);
+        let ir = g.compute_layout();
+        let out = ir.render_string(&RenderOptions::plain());
+        let a = ir.node_by_id(1).unwrap();
+        let (mx, my) = a.self_loop_at.unwrap();
+        assert_eq!(cell_at(&out, mx, my), '↺', "{out}");
+        let b = bends(&ir, 2);
+        assert!(
+            b.iter().all(|&(x, _)| x != mx),
+            "lane on the marker column: {b:?}\n{out}"
+        );
+        assert_routing_invariants(&ir, "self-loop");
     }
 }

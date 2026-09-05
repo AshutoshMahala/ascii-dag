@@ -158,6 +158,14 @@ pub enum EdgePathView<'s> {
         /// Level-axis offset of the first bend past the source.
         start_offset: usize,
     },
+    #[cfg(feature = "ports")]
+    /// An explicit orthogonal polyline — every turn stated, lent from
+    /// the IR as physical `(x, y)` bend cells (see
+    /// [`EdgePath::Orthogonal`](crate::ir::EdgePath::Orthogonal)).
+    Orthogonal {
+        /// The bend cells, in path order.
+        bends: &'s [(usize, usize)],
+    },
     /// A preserved self-loop: no routed path, one marker cell.
     SelfLoop {
         /// The `↺` marker cell.
@@ -375,6 +383,8 @@ impl Scene<'_, '_> {
                         waypoints,
                         start_offset,
                     },
+                    #[cfg(feature = "ports")]
+                    PathRef::Orthogonal { bends } => EdgePathView::Orthogonal { bends },
                 },
                 flow_axis: e.flow_axis,
                 label: e.label.map(|text| LabelView {

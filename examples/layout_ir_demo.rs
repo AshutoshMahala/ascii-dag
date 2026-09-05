@@ -102,6 +102,10 @@ fn run_heap() {
             ascii_dag::FlowAxis::X => ("x", "y"),
         };
         let route_type = match &edge.path {
+            #[cfg(feature = "ports")]
+            ascii_dag::ir::EdgePath::Orthogonal { bends } => {
+                format!("Orthogonal ({} stated bends)", bends.len())
+            }
             ascii_dag::ir::EdgePath::Direct => "Direct (straight flow segment)".to_string(),
             ascii_dag::ir::EdgePath::Corner { bend_at } => {
                 format!("Corner (L-shape, bend at {level}={bend_at})")

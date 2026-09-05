@@ -66,6 +66,12 @@ pub(crate) enum PathRef<'a> {
         waypoints: &'a [(usize, usize)],
         start_offset: usize,
     },
+    #[cfg(feature = "ports")]
+    /// Explicit polyline — every bend stated (see
+    /// `EdgePath::Orthogonal`).
+    Orthogonal {
+        bends: &'a [(usize, usize)],
+    },
     Spline {
         cp1_x: usize,
         cp1_y: usize,
@@ -233,6 +239,10 @@ impl LayoutView for crate::ir::LayoutIR<'_> {
                 waypoints: waypoints.as_slice(),
                 start_offset: *start_offset,
             },
+            #[cfg(feature = "ports")]
+            crate::ir::EdgePath::Orthogonal { bends } => PathRef::Orthogonal {
+                bends: bends.as_slice(),
+            },
             crate::ir::EdgePath::Spline {
                 cp1_x,
                 cp1_y,
@@ -385,6 +395,13 @@ impl LayoutView for crate::ir::arena::LayoutIRArena<'_> {
             } => PathRef::MultiSegment {
                 waypoints: self.edge_waypoints_raw(waypoints_start, waypoints_len),
                 start_offset,
+            },
+            #[cfg(feature = "ports")]
+            crate::ir::arena::EdgePathArena::Orthogonal {
+                bends_start,
+                bends_len,
+            } => PathRef::Orthogonal {
+                bends: self.edge_waypoints_raw(bends_start, bends_len),
             },
             crate::ir::arena::EdgePathArena::Spline {
                 cp1_x,

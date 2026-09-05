@@ -126,6 +126,16 @@ pub enum EdgePathArena {
         /// Level-axis offset of the first bend past the source.
         start_offset: usize,
     },
+    #[cfg(feature = "ports")]
+    /// An explicit orthogonal polyline — every turn stated. Mirrors
+    /// heap `EdgePath::Orthogonal`; the bends live in the shared
+    /// waypoints array.
+    Orthogonal {
+        /// Start index into the waypoints array
+        bends_start: usize,
+        /// Number of bends
+        bends_len: usize,
+    },
     /// Bézier spline hint (for SVG/canvas renderers; ASCII renderers fall back to Direct).
     /// Mirrors zigraph's `EdgePath.spline`.
     Spline {
@@ -454,7 +464,9 @@ impl<'a> LayoutIRArena<'a> {
         &self.level_data[start..end]
     }
 
-    /// Get waypoints for a multi-segment edge.
+    /// The stored points of an edge's path: a multi-segment edge's
+    /// waypoints, an orthogonal edge's bends; empty for every other
+    /// path shape.
     #[inline]
     pub fn edge_waypoints(&self, edge: &LayoutEdgeArena) -> &[(usize, usize)] {
         match edge.path {
@@ -463,6 +475,11 @@ impl<'a> LayoutIRArena<'a> {
                 waypoints_len,
                 ..
             } => &self.waypoints[waypoints_start..waypoints_start + waypoints_len],
+            #[cfg(feature = "ports")]
+            EdgePathArena::Orthogonal {
+                bends_start,
+                bends_len,
+            } => &self.waypoints[bends_start..bends_start + bends_len],
             _ => &[],
         }
     }

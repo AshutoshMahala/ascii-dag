@@ -1,4 +1,4 @@
-//! JSON serialization for Layout IR (schema v1.4).
+//! JSON serialization for Layout IR (schema v1.5).
 //!
 //! Produces JSON output extending zigraph's JSON IR schema: v1.3 added
 //! the per-edge `flow_axis` tag, the per-node `self_loop_at` cell, and
@@ -6,11 +6,14 @@
 //! `span_start`/`span_end` — a v1.2 `horizontal_y` is a v1.3 `bend_at`
 //! on a `flow_axis: "y"` edge). v1.4 adds the `self_loops[]` records:
 //! self-loops never enter the routed `edges[]` list, so their input
-//! identity, label, and multiplicity travel here.
+//! identity, label, and multiplicity travel here. v1.5 adds the
+//! `orthogonal` path type — an explicit polyline whose `bends[]` are
+//! every turn, the shape of routes that leave a node against the flow
+//! or beside it.
 //!
 //! # Schema
 //!
-//! - `version`: always `"1.4"`
+//! - `version`: always `"1.5"`
 //! - `width`, `height`, `level_count`: top-level dimensions
 //! - `nodes[]`: positioned node objects with `id`, `label`, `x`, `y`, etc.
 //! - `edges[]`: routed edge objects with `from`, `to`, path info, etc.
@@ -26,7 +29,7 @@
 
 /// JSON schema version (zigraph v1.2 + the direction and self-loop
 /// extensions).
-pub(crate) const VERSION: &str = "1.4";
+pub(crate) const VERSION: &str = "1.5";
 
 // ── Minimal no-alloc JSON writer ─────────────────────────────────────────
 
@@ -156,7 +159,7 @@ use super::arena::{
 };
 
 impl<'a> LayoutIRArena<'a> {
-    /// Serialize the layout IR to JSON (schema v1.4 — zigraph v1.2
+    /// Serialize the layout IR to JSON (schema v1.5 — zigraph v1.2
     /// plus the direction and self-loop extensions; see the module
     /// docs).
     ///
@@ -285,7 +288,7 @@ impl<'a> LayoutIRArena<'a> {
     ///
     /// Returns a conservative upper bound. The actual output is usually smaller.
     pub fn estimate_json_size(&self) -> usize {
-        // Base: {"version":"1.4","width":N,"height":N,"level_count":N,"nodes":[...],"edges":[...]}
+        // Base: {"version":"1.5","width":N,"height":N,"level_count":N,"nodes":[...],"edges":[...]}
         let base: usize = 100;
         // Each node: fixed fields incl. `content_kind` and the v1.3
         // `self_loop_at` cell (~210 bytes) plus its label at
@@ -339,6 +342,8 @@ impl<'a> LayoutIRArena<'a> {
                 EdgePathArena::MultiSegment { waypoints_len, .. } => {
                     waypoints_len.saturating_mul(20)
                 }
+                #[cfg(feature = "ports")]
+                EdgePathArena::Orthogonal { bends_len, .. } => bends_len.saturating_mul(20),
                 _ => 0,
             })
             .fold(0usize, |a, b| a.saturating_add(b));
@@ -565,6 +570,28 @@ fn write_edge_path_arena(
             w.write_byte(b']')?;
             w.write_byte(b'}')
         }
+        #[cfg(feature = "ports")]
+        EdgePathArena::Orthogonal {
+            bends_start,
+            bends_len,
+        } => {
+            w.write_bytes(b"{\"type\":\"orthogonal\",")?;
+            w.write_key("bends")?;
+            w.write_byte(b'[')?;
+            let bends = ir.edge_waypoints_raw(bends_start, bends_len);
+            for (i, &(x, y)) in bends.iter().enumerate() {
+                if i > 0 {
+                    w.write_byte(b',')?;
+                }
+                w.write_byte(b'[')?;
+                w.write_usize(x)?;
+                w.write_byte(b',')?;
+                w.write_usize(y)?;
+                w.write_byte(b']')?;
+            }
+            w.write_byte(b']')?;
+            w.write_byte(b'}')
+        }
         EdgePathArena::Spline {
             cp1_x,
             cp1_y,
@@ -631,7 +658,7 @@ mod heap_json {
     use alloc::string::String;
 
     impl<'a> LayoutIR<'a> {
-        /// Serialize the layout IR to a JSON string (schema v1.4 —
+        /// Serialize the layout IR to a JSON string (schema v1.5 —
         /// zigraph v1.2 plus the direction and self-loop extensions).
         ///
         /// # Example
@@ -645,7 +672,7 @@ mod heap_json {
         /// );
         /// let ir = dag.compute_layout();
         /// let json = ir.to_json();
-        /// assert!(json.contains("\"version\":\"1.4\""));
+        /// assert!(json.contains("\"version\":\"1.5\""));
         /// assert!(json.contains("\"nodes\":["));
         /// ```
         pub fn to_json(&self) -> String {
@@ -766,9 +793,24 @@ mod heap_json {
                 })
                 .fold(0usize, |a, b| a.saturating_add(b));
             let loop_wrapper = if self.self_loops().is_empty() { 0 } else { 20 };
+            // Stored path points (waypoints, bends): 20 bytes each —
+            // `[x,y],` with two 9-digit coordinates — as the arena
+            // estimator counts them.
+            let points: usize = self
+                .edges()
+                .iter()
+                .map(|e| match &e.path {
+                    EdgePath::MultiSegment { waypoints, .. } => waypoints.len(),
+                    #[cfg(feature = "ports")]
+                    EdgePath::Orthogonal { bends } => bends.len(),
+                    _ => 0,
+                })
+                .fold(0usize, |a, b| a.saturating_add(b))
+                .saturating_mul(20);
             100usize
                 .saturating_add(self.nodes().len().saturating_mul(180))
                 .saturating_add(self.edges().len().saturating_mul(220))
+                .saturating_add(points)
                 .saturating_add(self.self_loops().len().saturating_mul(60))
                 .saturating_add(loop_labels)
                 .saturating_add(loop_wrapper)
@@ -997,6 +1039,24 @@ mod heap_json {
                 out.push(']');
                 out.push('}');
             }
+            #[cfg(feature = "ports")]
+            EdgePath::Orthogonal { bends } => {
+                out.push_str("{\"type\":\"orthogonal\",");
+                push_key(out, "bends");
+                out.push('[');
+                for (i, &(x, y)) in bends.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push('[');
+                    push_usize(out, x);
+                    out.push(',');
+                    push_usize(out, y);
+                    out.push(']');
+                }
+                out.push(']');
+                out.push('}');
+            }
             EdgePath::Spline {
                 cp1_x,
                 cp1_y,
@@ -1065,7 +1125,7 @@ mod tests {
         // Validate structure
         assert!(json.starts_with('{'));
         assert!(json.ends_with('}'));
-        assert!(json.contains("\"version\":\"1.4\""));
+        assert!(json.contains("\"version\":\"1.5\""));
         assert!(json.contains("\"nodes\":["));
         assert!(json.contains("\"edges\":["));
 
@@ -1266,7 +1326,7 @@ mod arena_tests {
 
         assert!(json.starts_with('{'));
         assert!(json.ends_with('}'));
-        assert!(json.contains("\"version\":\"1.4\""));
+        assert!(json.contains("\"version\":\"1.5\""));
         assert!(json.contains("\"nodes\":["));
         assert!(json.contains("\"edges\":["));
         assert!(json.contains("\"label\":\"A\""));

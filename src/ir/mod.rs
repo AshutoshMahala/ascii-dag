@@ -173,6 +173,21 @@ pub enum EdgePath {
         /// fan-outs from overlapping at the source band).
         start_offset: usize,
     },
+    #[cfg(feature = "ports")]
+    /// An explicit orthogonal polyline: the edge runs from the source
+    /// endpoint through every bend in order to the target endpoint,
+    /// each leg axis-aligned (consecutive points share `x` or `y`; a
+    /// leg sharing neither paints nothing). Where
+    /// [`MultiSegment`](Self::MultiSegment) leaves its turns to the
+    /// painter — one line past each waypoint, along the flow — every
+    /// turn here is stated, which is what a route that leaves a node
+    /// against the flow or beside it needs. Physical `(x, y)` cells
+    /// whatever the flow axis; the endpoint cells are node faces and
+    /// are never painted.
+    Orthogonal {
+        /// The bend cells, in path order.
+        bends: Vec<(usize, usize)>,
+    },
     /// Bézier spline hint (for SVG/canvas renderers; ASCII renderers fall back to Direct).
     ///
     /// **Status: forward-compatible stub.** The layout engine does not currently produce
@@ -364,6 +379,12 @@ impl<'a> LayoutIR<'a> {
                         *wy = flip_row(*wy);
                     }
                 }
+                #[cfg(feature = "ports")]
+                EdgePath::Orthogonal { bends } => {
+                    for (_, by) in bends.iter_mut() {
+                        *by = flip_row(*by);
+                    }
+                }
                 EdgePath::SideChannel {
                     span_start,
                     span_end,
@@ -460,6 +481,12 @@ impl<'a> LayoutIR<'a> {
                 EdgePath::MultiSegment { waypoints, .. } => {
                     for (wx, _) in waypoints.iter_mut() {
                         *wx = flip_col(*wx);
+                    }
+                }
+                #[cfg(feature = "ports")]
+                EdgePath::Orthogonal { bends } => {
+                    for (bx, _) in bends.iter_mut() {
+                        *bx = flip_col(*bx);
                     }
                 }
                 // Never produced by the layout, but the flip must be

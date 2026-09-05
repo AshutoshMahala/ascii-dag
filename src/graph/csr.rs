@@ -111,6 +111,35 @@ pub struct CsrGraph<'a> {
 }
 
 impl<'a> CsrGraph<'a> {
+    /// Stored bends the explicit-polyline routes of this graph can
+    /// need in the IR output: per ported edge, two per run over the
+    /// detour's three runs plus one per jogging level (bounded by the
+    /// dummies). Zero without a port table. Mirrors the heap graph's
+    /// bound so an estimate made on either side sizes both layouts.
+    pub(crate) fn explicit_path_points(&self, dummies: usize) -> usize {
+        #[cfg(feature = "ports")]
+        {
+            if !self.has_ports() {
+                return 0;
+            }
+            let ported = (0..self.edge_ports.len() / 2)
+                .filter(|&e| {
+                    let (a, b) = self.edge_ports(e);
+                    !matches!(a, crate::algorithms::sugiyama::ports::PortSide::Auto)
+                        || !matches!(b, crate::algorithms::sugiyama::ports::PortSide::Auto)
+                })
+                .count();
+            ported
+                .saturating_mul(6)
+                .saturating_add(dummies.saturating_mul(2))
+        }
+        #[cfg(not(feature = "ports"))]
+        {
+            let _ = dummies;
+            0
+        }
+    }
+
     /// Whether this graph carries a port table (built with ports).
     pub fn has_ports(&self) -> bool {
         !self.edge_ports.is_empty()
