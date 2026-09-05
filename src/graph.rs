@@ -207,7 +207,7 @@ use crate::algorithms::sugiyama::config::SugiyamaConfig;
 #[cfg(feature = "alloc")]
 use crate::algorithms::sugiyama::crossing::CrossingReducer;
 #[cfg(all(feature = "alloc", feature = "ports"))]
-use crate::algorithms::sugiyama::ports::{Port, PortSide};
+use crate::algorithms::sugiyama::ports::{Port, PortPolicy, PortSide};
 #[cfg(feature = "alloc")]
 use crate::errors::GraphError;
 #[cfg(feature = "alloc")]
@@ -372,13 +372,13 @@ impl EdgeHandle<'_, '_> {
     }
 
     /// Declare the side the edge leaves its DECLARED `from` node
-    /// from. Crate-internal until side routing exists.
+    /// from. The layout reports the side it used on the IR edge's
+    /// `from_port`; the crate docs' *Ports* section lists the sides.
     ///
     /// The name mirrors `add_edge(from, to)`; clippy's naming
     /// heuristic reads `from_*` as a constructor, which this is not.
     #[cfg(feature = "ports")]
     #[allow(clippy::wrong_self_convention)]
-    #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
     pub fn from_port(self, port: impl Into<Port>) -> Self {
         self.graph
             .declare_port(self.receipt.edge, 0, port.into().side());
@@ -386,13 +386,13 @@ impl EdgeHandle<'_, '_> {
     }
 
     /// Declare the side the edge arrives at its DECLARED `to` node
-    /// on. Crate-internal until side routing exists.
+    /// on. The layout reports the side it used on the IR edge's
+    /// `to_port`.
     ///
     /// Mirrors `add_edge(from, to)`; clippy's heuristic reads `to_*`
     /// as a borrowing conversion, which this is not.
     #[cfg(feature = "ports")]
     #[allow(clippy::wrong_self_convention)]
-    #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
     pub fn to_port(self, port: impl Into<Port>) -> Self {
         self.graph
             .declare_port(self.receipt.edge, 1, port.into().side());
@@ -691,6 +691,14 @@ pub struct Graph<'a> {
     /// that never declares a port stores nothing per edge.
     #[cfg(feature = "ports")]
     pub(crate) edge_ports: Vec<(PortSide, PortSide)>,
+    /// The graph-wide port policy — how a node places the ends
+    /// declared on a face; `Single` unless set.
+    #[cfg(feature = "ports")]
+    pub(crate) port_policy: PortPolicy,
+    /// Per-node overrides of [`port_policy`](Self::port_policy), by
+    /// node id, sorted; empty until the first override.
+    #[cfg(feature = "ports")]
+    pub(crate) node_port_policies: Vec<(usize, PortPolicy)>,
     pub(crate) render_mode: RenderMode,
     pub(crate) direction: Direction,
     pub(crate) auto_created: HashSet<usize>, // Track auto-created nodes for visual distinction (O(1) lookups)
@@ -760,6 +768,10 @@ impl<'a> Graph<'a> {
             edges: Vec::new(),
             #[cfg(feature = "ports")]
             edge_ports: Vec::new(),
+            #[cfg(feature = "ports")]
+            port_policy: PortPolicy::Single,
+            #[cfg(feature = "ports")]
+            node_port_policies: Vec::new(),
             render_mode: RenderMode::default(),
             direction: Direction::default(),
             auto_created: HashSet::new(),
@@ -827,6 +839,10 @@ impl<'a> Graph<'a> {
             edges: Vec::new(),
             #[cfg(feature = "ports")]
             edge_ports: Vec::new(),
+            #[cfg(feature = "ports")]
+            port_policy: PortPolicy::Single,
+            #[cfg(feature = "ports")]
+            node_port_policies: Vec::new(),
             render_mode: RenderMode::default(),
             direction: Direction::default(),
             auto_created: HashSet::new(),
@@ -1289,11 +1305,10 @@ impl<'a> Graph<'a> {
         self.missing_node_policy = Some(policy);
     }
 
-    /// Declare the physical sides an edge (by input index) attaches
-    /// to; `false` for an unknown edge. Crate-internal until the port
-    /// API's public shape is decided.
+    /// Declare the sides an edge (by input index) attaches to —
+    /// the index form of the handle's `from_port` / `to_port`, for a
+    /// declaration made after insertion; `false` for an unknown edge.
     #[cfg(feature = "ports")]
-    #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
     pub fn set_edge_ports(&mut self, edge: usize, source: PortSide, target: PortSide) -> bool {
         if edge >= self.edges.len() {
             return false;
@@ -1301,6 +1316,86 @@ impl<'a> Graph<'a> {
         self.declare_port(edge, 0, source);
         self.declare_port(edge, 1, target);
         true
+    }
+
+    /// Set the graph-wide port policy: how a node places the ends
+    /// declared on each of its faces (`Single` unless set — one shared
+    /// port per face). `false`, and nothing changes, for a `Custom`
+    /// policy whose placer differs from the one this graph already
+    /// runs: a graph carries ONE placer, which every `Custom` policy
+    /// on it shares (it is told the node id), so the graph converts to
+    /// the CSR form exactly.
+    #[cfg(feature = "ports")]
+    pub fn set_port_policy(&mut self, policy: PortPolicy) -> bool {
+        if !self.placer_compatible(policy) {
+            return false;
+        }
+        self.port_policy = policy;
+        true
+    }
+
+    /// The graph-wide port policy.
+    #[cfg(feature = "ports")]
+    pub fn port_policy(&self) -> PortPolicy {
+        self.port_policy
+    }
+
+    /// Override the port policy for one node; `false` for an unknown
+    /// node or a `Custom` placer other than the graph's (see
+    /// [`set_port_policy`](Self::set_port_policy)). A face with one
+    /// cell holds one port whatever the policy.
+    #[cfg(feature = "ports")]
+    pub fn set_node_port_policy(&mut self, node: impl Into<NodeId>, policy: PortPolicy) -> bool {
+        let id = node.into().id();
+        if !self.id_to_index.contains_key(&id) || !self.placer_compatible(policy) {
+            return false;
+        }
+        match self.node_port_policies.binary_search_by_key(&id, |e| e.0) {
+            Ok(i) => self.node_port_policies[i].1 = policy,
+            Err(i) => self.node_port_policies.insert(i, (id, policy)),
+        }
+        true
+    }
+
+    /// Remove a node's override so it follows the graph-wide policy
+    /// again, now and after that policy changes; `false` when the node
+    /// had none.
+    #[cfg(feature = "ports")]
+    pub fn clear_node_port_policy(&mut self, node: impl Into<NodeId>) -> bool {
+        let id = node.into().id();
+        match self.node_port_policies.binary_search_by_key(&id, |e| e.0) {
+            Ok(i) => {
+                self.node_port_policies.remove(i);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// The port policy a node is declared under: its override, else
+    /// the graph-wide policy. Unknown nodes read the graph-wide one.
+    #[cfg(feature = "ports")]
+    pub fn node_port_policy(&self, node: impl Into<NodeId>) -> PortPolicy {
+        let id = node.into().id();
+        self.node_port_policies
+            .binary_search_by_key(&id, |e| e.0)
+            .map_or(self.port_policy, |i| self.node_port_policies[i].1)
+    }
+
+    /// The one placer this graph runs, if any `Custom` policy is set.
+    #[cfg(feature = "ports")]
+    pub(crate) fn port_placer(&self) -> Option<crate::PortPlacer> {
+        self.port_policy
+            .placer()
+            .or_else(|| self.node_port_policies.iter().find_map(|(_, p)| p.placer()))
+    }
+
+    #[cfg(feature = "ports")]
+    fn placer_compatible(&self, policy: PortPolicy) -> bool {
+        match (policy.placer(), self.port_placer()) {
+            (Some(new), Some(current)) => core::ptr::fn_addr_eq(new, current),
+            _ => true,
+        }
     }
 
     /// Record one declared side (`end` 0 = from, 1 = to) of an

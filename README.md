@@ -144,6 +144,47 @@ assert!(cycle.is_some());
 `algorithms::generic`) returns an order or the cycle that prevents one.
 Both modules need the `generic` feature, on by default.
 
+### Ports
+
+An edge can say which side of a node it leaves from and which side it
+arrives on:
+
+```rust
+use ascii_dag::PortSide;
+
+g.add_edge(service, audit, Some("trail")).from_port(PortSide::Clockwise);
+g.add_edge(gateway, cache, None).to_port(PortSide::West);
+g.add_edge(client, store, None).to_port(PortSide::Downstream);
+```
+
+Three vocabularies name a side: the compass (`North` / `East` /
+`South` / `West`, fixed on the page), the flow (`Upstream` is the face
+edges arrive on, `Downstream` the face they leave by), and rotations
+of the flow (`Clockwise` is the traveler's right hand facing
+downstream, `Counterclockwise` the left). Flow and rotation sides
+follow the direction, so a graph declared once reads the same way in
+`LR` as in `TB`:
+
+| Side | `TB` | `BT` | `LR` | `RL` |
+|---|:---:|:---:|:---:|:---:|
+| `Upstream` | N | S | W | E |
+| `Downstream` | S | N | E | W |
+| `Clockwise` | W | E | S | N |
+| `Counterclockwise` | E | W | N | S |
+
+`Auto` (the default) is the head-on rule: leave `Downstream`, arrive
+`Upstream`. A face has one port by default, shared by every edge
+declared on it — the drawing `Auto` fan-ins already have; a port
+policy (`set_port_policy` for the graph, `set_node_port_policy` for
+a node) chooses `Paired` (an arrival and a departure port), `Spread`
+(up to a bound) or `Custom` (your `fn`) instead. A node is never
+widened for its ports. Every IR edge reports
+the side each end asked for and the side it got (`from_port` /
+`to_port`), and a side that could not be honored is a warning on the
+run (see the table under *Errors and warnings*). The drawing rules and
+the no-alloc form: [docs/ports.md](docs/ports.md); runnable:
+`examples/ports.rs`.
+
 ### Render settings (`RenderOptions`)
 
 Options live in three homes by what they affect: `plan` (resolved
@@ -216,6 +257,7 @@ reference: [docs.rs/ascii-dag](https://docs.rs/ascii-dag).
 | `generic` | ✓ | cycle detection / toposort / impact analysis over your own types |
 | `arena` | | CSR + arena layout pipeline (no-alloc capable) |
 | `arena-idx-u8` / `-u16` / `-u32` | | index width: 255 / 65,535 / 4B nodes (RAM tradeoff) |
+| `ports` | ✓ | side ports: declared attachment sides on edges (`from_port` / `to_port`); off, nothing of it is linked |
 
 Typical configurations: default (`ascii-dag = "0.10"`) for the heap
 API; `default-features = false, features = ["arena"]` for no-alloc
@@ -229,7 +271,8 @@ build — see [BENCHMARK.md](BENCHMARK.md) for how that is measured.
 *The arena pipeline on a Longan Nano (RISC-V, 32 KB RAM, no
 allocator): `LeftRight` and the ASCII charset, because the LCD font
 has no box-drawing glyphs. Firmware is 92 KB; the graph costs ~10 KB
-of stack. See `examples/longan_nano`.*
+of stack. It builds without the `ports` feature. See
+`examples/longan_nano`.*
 
 ## Errors and warnings
 
@@ -269,8 +312,9 @@ Point events are receipts at the call site instead: `add_edge` returns
 - [docs/layout.md](docs/layout.md) — directions, clusters, spacing, crossing reduction, reading the IR
 - [docs/rendering.md](docs/rendering.md) — options, styling, streaming, no-alloc output, hit-testing
 - [docs/nodes.md](docs/nodes.md) — nodes as objects: painters, payloads, blank nodes
+- [docs/ports.md](docs/ports.md) — side ports: the side vocabulary, how a side is drawn, attachments, warnings
 - [docs/migrate-from-0.9.md](docs/migrate-from-0.9.md) — upgrading to 0.10
-- [examples/README.md](examples/README.md) — 19 runnable examples; the rendering ones take `--csr` to show the arena pipeline
+- [examples/README.md](examples/README.md) — 20 runnable examples; the rendering ones take `--csr` to show the arena pipeline
 - [BENCHMARK.md](BENCHMARK.md) — measured performance, desktop and embedded
 - [ARCHITECTURE.md](ARCHITECTURE.md) — how the pipeline works
 

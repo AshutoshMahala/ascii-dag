@@ -23,6 +23,7 @@ cargo run --example node_painting --features arena -- --csr
 | `dependency_analysis` | Roots/leaves/impact queries over a package graph |
 | `topological_sort` | Topological ordering (no rendering) |
 | `dummy_nodes` | Routing waypoints: `include_dummy_nodes` (IR) + `show_dummy_nodes` (◍ markers) |
+| `ports` | **Side ports**, every section through both pipelines: `from_port` / `to_port`, the three side vocabularies resolved per direction, port policies (`Single` / `Paired` / `Spread` / `Custom`) on one boxed hub, attachments on the IR and in JSON, the port warnings on both pipelines, and the no-alloc builder (`new_with_ports`, `set_edge_ports`, `set_node_port_policy`, exact sizing, the reporting layout entry); `--bt`/`--lr`/`--rl`, `--ascii`; `--features arena` for the no-alloc half |
 | `hit_test` | Interactive mouse hit-testing (raw ANSI mouse reports, zero deps); `--probe X Y` for scripts |
 | `svg_export` | **Semantic consumption**: a mini SVG exporter over scene views — no terminal text, no charset; `> graph.svg` |
 | `hero` | The showcase graph; `--bt`/`--lr`/`--rl` (direction), `--ascii`, `--color`, `--dummy` (mark routing waypoints), `--csr` |

@@ -118,10 +118,6 @@ pub(crate) struct LayoutTemps<'a> {
     /// sorted by edge index; EMPTY when no end detours.
     #[cfg(feature = "ports")]
     pub(crate) detour_plans: &'a mut [(usize, super::ports::Detour)],
-    /// Detouring nodes `(node, flags)` in index order — self-loop and
-    /// cancelled-role bits; EMPTY when no end detours.
-    #[cfg(feature = "ports")]
-    pub(crate) detour_nodes: &'a mut [(usize, u8)],
     /// Jog bend blocks `(level, bend counter, min, max)` — one per kept
     /// waypoint at most; EMPTY when no end detours. The slot index is
     /// `1 + label row + counter`, applied at allocation.
@@ -134,10 +130,6 @@ pub(crate) struct LayoutTemps<'a> {
     /// detours.
     #[cfg(feature = "ports")]
     pub(crate) lane_blockers: &'a mut [(usize, usize, usize, usize)],
-    /// Head-on attachment records `(node, role, cell)` at the detouring
-    /// nodes, sorted once; EMPTY when no end detours.
-    #[cfg(feature = "ports")]
-    pub(crate) head_on: &'a mut [(usize, usize, usize)],
     pub(crate) waypoint_scratch: &'a mut [(usize, usize)],
     // ── Lane pass (temp/09 P4). All empty when the shared budget
     //    (`geometry::lane_pass_enabled`) disables the pass — the heap
@@ -239,8 +231,9 @@ fn alloc_slot_csr(
     let used = next.get(lvl).map_or(0, |&n| n as usize);
     let label_row = usize::from(labeled.get(lvl).is_some_and(|&l| l != 0));
     let in_jog = |s: usize| {
-        jogs.iter()
-            .any(|&(l, k, a, b)| l == lvl && 1 + label_row + k == s && a < max_x && b > min_x)
+        jogs.iter().any(|&(l, k, a, b)| {
+            l == lvl && 1 + label_row + k == s && slot_hits(a, b, min_x, max_x)
+        })
     };
     for s in 0..MAX_SLOTS_PER_LEVEL {
         let base = lvl * MAX_SLOTS_PER_LEVEL + s;
@@ -268,8 +261,20 @@ fn alloc_slot_csr(
     }
 }
 
-/// Does `[min_x, max_x]` overlap any interval in the (level, slot) list?
-/// (`s < max_x && e > min_x` — the heap allocator's collide test.)
+/// Does a registered `[s, e]` collide with a request `[min_x, max_x]`?
+/// A run (with length) collides on a shared column; a point only when
+/// strictly inside — the heap `alloc_slot`'s test.
+#[inline]
+fn slot_hits(s: usize, e: usize, min_x: usize, max_x: usize) -> bool {
+    if s == e {
+        s < max_x && e > min_x
+    } else {
+        s <= max_x && e >= min_x
+    }
+}
+
+/// Does `[min_x, max_x]` collide with any interval in the (level, slot)
+/// list, by [`slot_hits`]?
 #[inline]
 fn slot_collides(
     pool: &[(usize, usize, usize)],
@@ -284,7 +289,7 @@ fn slot_collides(
     let mut cur = heads[base];
     while cur != usize::MAX {
         let (s0, e0, next) = pool[cur];
-        if s0 < max_x && e0 > min_x {
+        if slot_hits(s0, e0, min_x, max_x) {
             return true;
         }
         cur = next;
@@ -478,7 +483,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     // by the graph. A declared port on its role's own face costs
     // nothing. The marks feed the sparse tables below.
     #[cfg(feature = "ports")]
-    let (budget, node_marks, level_marks) = if graph.has_ports() {
+    let (budget, _node_marks, level_marks) = if graph.has_ports() {
         let node_marks = temp_arena
             .alloc_slice_default::<bool>(node_count.max(1))
             .ok_or(GraphError::ArenaOom)?;
@@ -943,9 +948,9 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             } else {
                 (src_side, dst_side)
             };
-            for (node, peer, side, end) in [
-                (src, dst, src_side, EndRole::Source),
-                (dst, src, dst_side, EndRole::Target),
+            for (node, peer, side, end, arrival) in [
+                (src, dst, src_side, EndRole::Source, is_back),
+                (dst, src, dst_side, EndRole::Target, !is_back),
             ] {
                 if matches!(side, PortSide::Auto) {
                     continue;
@@ -961,15 +966,23 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                     key: A::cross_center(peer_base, peer_extent),
                     edge: edge_idx,
                     end,
+                    arrival,
                 };
                 count += 1;
             }
         }
+        // The node's policy: its override, else the graph's — and the
+        // node's id, which a custom placer is told.
+        let policy = |idx: usize| -> (super::ports::PortPolicy, usize) {
+            (graph.node_port_policy(idx), graph.node_id(idx))
+        };
         // `port_cross` holds each end's position ALONG its face: the
         // cross line on a level face, the row offset on a lateral one.
         assign_level_face_positions::<A>(
             &mut port_requests[..count],
             cross_span,
+            policy,
+            level_flipped,
             |edge, end, cross| match end {
                 EndRole::Source => port_cross[edge].0 = cross,
                 EndRole::Target => port_cross[edge].1 = cross,
@@ -994,9 +1007,9 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             } else {
                 (src_side, dst_side)
             };
-            for (node, peer, side, end) in [
-                (src, dst, src_side, EndRole::Source),
-                (dst, src, dst_side, EndRole::Target),
+            for (node, peer, side, end, arrival) in [
+                (src, dst, src_side, EndRole::Source, is_back),
+                (dst, src, dst_side, EndRole::Target, !is_back),
             ] {
                 if matches!(side, PortSide::Auto) {
                     continue;
@@ -1011,6 +1024,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                     key: real_coords[peer].0,
                     edge: edge_idx,
                     end,
+                    arrival,
                 };
                 count += 1;
             }
@@ -1023,6 +1037,8 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                     A::level_extent(graph.node_width(idx), graph.node_height(idx)),
                 )
             },
+            policy,
+            level_flipped,
             |edge, end, along| match end {
                 EndRole::Source => port_cross[edge].0 = along,
                 EndRole::Target => port_cross[edge].1 = along,
@@ -1091,10 +1107,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
     // reservations. Mirrors the heap backend decision for decision.
     #[cfg(feature = "ports")]
     if budget.any() {
-        use super::ports::{
-            Detour, EndRole, Face, NODE_DST_CANCELLED, NODE_LOOP, NODE_SRC_CANCELLED, choose_lane,
-            detours, lateral_key, lateral_lane,
-        };
+        use super::ports::{Detour, EndRole, Face, choose_lane, detours, lateral_lane};
         let real_coords: &[(usize, usize, usize, usize)] = &*temps.real_coords;
         let dummy_data: &[(Idx, Coord)] = &*temps.dummy_data;
         let dummy_total =
@@ -1173,26 +1186,31 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                 bn += 1;
             }
         }
+        // Sort; merge hard spans; drop duplicates and every single
+        // cell a hard span already covers — so on each level the entries
+        // are disjoint hard spans and single cells between them, and a
+        // query needs two predecessors at most.
         blockers[..bn].sort_unstable();
         let mut w = 0usize;
         for r in 0..bn {
             let cur = blockers[r];
-            if w > 0
-                && cur.3 == 0
-                && blockers[w - 1].3 == 0
-                && blockers[w - 1].0 == cur.0
-                && cur.1 <= blockers[w - 1].2
-            {
-                blockers[w - 1].2 = blockers[w - 1].2.max(cur.2);
-            } else {
-                blockers[w] = cur;
-                w += 1;
+            if w > 0 && blockers[w - 1].0 == cur.0 {
+                let prev = blockers[w - 1];
+                if cur.3 == 0 && prev.3 == 0 && cur.1 <= prev.2 {
+                    blockers[w - 1].2 = prev.2.max(cur.2);
+                    continue;
+                }
+                if cur == prev || (prev.3 == 0 && cur.1 >= prev.1 && cur.2 <= prev.2) {
+                    continue;
+                }
             }
+            blockers[w] = cur;
+            w += 1;
         }
         let blockers: &[(usize, usize, usize, usize)] = &blockers[..w];
-        // `Some(true)`: only a marker cell covers `col`; `Some(false)`: a
-        // span or dummy does.
-        let blocked_kind = |level: usize, col: usize| -> Option<bool> {
+        // `Some(0)`: a span or dummy covers `(level, col)`; `Some(1)`:
+        // only a marker cell.
+        let blocked_kind = |level: usize, col: usize| -> Option<usize> {
             let start = blockers.partition_point(|b| b.0 < level);
             let end = blockers.partition_point(|b| b.0 <= level);
             let lv = &blockers[start..end];
@@ -1202,12 +1220,60 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                 let (_, lo, hi, kind) = lv[k];
                 if lo <= col && col <= hi {
                     if kind == 0 {
-                        return Some(false);
+                        return Some(0);
                     }
-                    hit = Some(true);
+                    hit = Some(1);
                 }
             }
             hit
+        };
+        // Another edge's trunk at `col` in gap `gap` (matches the heap's
+        // per-gap table, computed on demand — a lane query asks about
+        // two columns, so no table is carved): a head-on source end at
+        // level L runs through gap L + 1, a head-on target end at level
+        // L through gap L, a dummy at level L through both.
+        let other_trunk = |pc: &[(usize, usize)], gap: usize, col: usize, ei: usize| -> bool {
+            graph.edges_iter().enumerate().any(|(qe, (f, t))| {
+                if qe == ei || f == t {
+                    return false;
+                }
+                let is_back = back_edges.get(qe).copied().unwrap_or(false);
+                let (qs, qt) = if is_back { (t, f) } else { (f, t) };
+                let (ss, ds) = graph.edge_ports(qe);
+                let (ss, ds) = if is_back { (ds, ss) } else { (ss, ds) };
+                let sf = Face::of(ss, A::FLOW_AXIS, level_flipped, EndRole::Source);
+                let df = Face::of(ds, A::FLOW_AXIS, level_flipped, EndRole::Target);
+                if !detours(ss, A::FLOW_AXIS, level_flipped, EndRole::Source)
+                    && sf.is_level()
+                    && real_coords[qs].0 + 1 == gap
+                    && resolved(pc, qe, qs, false) == col
+                {
+                    return true;
+                }
+                if !detours(ds, A::FLOW_AXIS, level_flipped, EndRole::Target)
+                    && df.is_level()
+                    && real_coords[qt].0 == gap
+                    && resolved(pc, qe, qt, true) == col
+                {
+                    return true;
+                }
+                let ds_ = temps.dummy_offsets[qe] as usize;
+                let de_ = (temps.dummy_offsets[qe + 1] as usize).min(dummy_total);
+                dummy_data[ds_..de_].iter().any(|&(l, x)| {
+                    let l = l as usize;
+                    x as usize == col && (l == gap || l + 1 == gap)
+                })
+            })
+        };
+        // The gaps an end's lane run crosses (matches heap).
+        let run_gaps = |level: usize, face: Face, is_target: bool| -> (usize, usize) {
+            if face.is_level() {
+                (level, level + 1)
+            } else if is_target {
+                (level, level)
+            } else {
+                (level + 1, level + 1)
+            }
         };
         // Plans for the detouring edges, in edge order — faces first.
         let plans: &mut [(usize, Detour)] = &mut *temps.detour_plans;
@@ -1253,6 +1319,28 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                     continue;
                 }
                 let (level, _, base, _) = real_coords[node];
+                // A lane another edge already chose on this level or an
+                // adjacent one is taken (matches the heap's `taken`
+                // list); an edge's own ends may share, their runs are
+                // one line.
+                // Another edge's lane in a gap this run crosses (matches
+                // the heap's `taken` list); a side-face stub at this
+                // very node shares the column with this end's by design.
+                let gaps = run_gaps(level, face, is_target);
+                let overlaps = |n: usize, f: Face, target: bool| {
+                    let (a, b) = run_gaps(real_coords[n].0, f, target);
+                    a <= gaps.1 && b >= gaps.0 && !(!f.is_level() && n == node && !face.is_level())
+                };
+                let taken_here = |c: usize| {
+                    plans[..pi].iter().any(|&(qe, qd)| {
+                        layout_ends(qe).is_some_and(|(qs, qt)| {
+                            (qd.src_lane == c && overlaps(qs, qd.src_face, false))
+                                || (qd.dst_lane == c && overlaps(qt, qd.dst_face, true))
+                        })
+                    })
+                };
+                let trunk_here =
+                    |c: usize| (gaps.0..=gaps.1).any(|g| other_trunk(port_cross, g, c, ei));
                 let lane = if face.is_level() {
                     choose_lane(
                         base,
@@ -1260,15 +1348,15 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                         has_loop(node),
                         center(peer) > center(node),
                         max_width as usize,
-                        &|c| blocked_kind(level, c).is_some(),
+                        &|c| blocked_kind(level, c).is_some() || trunk_here(c) || taken_here(c),
                     )
                 } else {
                     let top_row = side_row(port_cross, ei, node, is_target) == 0;
                     lateral_lane(base, extent(node), face, max_width as usize, &|c| {
                         match blocked_kind(level, c) {
-                            None => false,
-                            Some(true) => top_row,
-                            Some(false) => true,
+                            Some(0) => true,
+                            Some(1) => top_row || trunk_here(c) || taken_here(c),
+                            _ => trunk_here(c) || taken_here(c),
                         }
                     })
                 };
@@ -1288,174 +1376,9 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             }
             plans[pi].1 = det;
         }
-        // 2. The effective occupancy: the detouring nodes (a flag table,
-        // self-loop bit from the edges) and the head-on records — every
-        // end AT those nodes that attaches head-on, lane-less ends
-        // included, plus the lateral source exits keyed by face.
-        let node_marks: &mut [bool] = node_marks;
-        node_marks.fill(false);
-        for pi in 0..plans.len() {
-            let (ei, det) = plans[pi];
-            let Some((src, dst)) = layout_ends(ei) else {
-                continue;
-            };
-            if det.src_lane != usize::MAX {
-                node_marks[src] = true;
-            }
-            if det.dst_lane != usize::MAX {
-                node_marks[dst] = true;
-            }
-        }
-        let nodes: &mut [(usize, u8)] = &mut *temps.detour_nodes;
-        let mut nn = 0usize;
-        for (n, &marked) in node_marks.iter().enumerate() {
-            if marked && nn < nodes.len() {
-                nodes[nn] = (n, 0);
-                nn += 1;
-            }
-        }
-        let nodes: &mut [(usize, u8)] = &mut nodes[..nn];
-        let node_slot =
-            |nodes: &[(usize, u8)], n: usize| nodes.binary_search_by_key(&n, |e| e.0).ok();
-        for (f, t) in graph.edges_iter() {
-            if f == t {
-                if let Some(i) = node_slot(nodes, f) {
-                    nodes[i].1 |= NODE_LOOP;
-                }
-            }
-        }
-        let head_on: &mut [(usize, usize, usize)] = &mut *temps.head_on;
-        let mut hn = 0usize;
-        for (ei, (from_idx, to_idx)) in graph.edges_iter().enumerate() {
-            if from_idx == to_idx {
-                continue;
-            }
-            let (src, dst) = if back_edges.get(ei).copied().unwrap_or(false) {
-                (to_idx, from_idx)
-            } else {
-                (from_idx, to_idx)
-            };
-            let det = super::ports::plan_lookup(plans, ei).unwrap_or(Detour::NONE);
-            if node_marks[src] && det.src_lane == usize::MAX && hn < head_on.len() {
-                head_on[hn] = (src, 0, resolved(port_cross, ei, src, false));
-                hn += 1;
-            }
-            if node_marks[dst] && det.dst_lane == usize::MAX && hn < head_on.len() {
-                head_on[hn] = (dst, 1, resolved(port_cross, ei, dst, true));
-                hn += 1;
-            }
-            if det.src_lane != usize::MAX && !det.src_face.is_level() && hn < head_on.len() {
-                head_on[hn] = (
-                    src,
-                    lateral_key(det.src_face),
-                    side_row(port_cross, ei, src, false),
-                );
-                hn += 1;
-            }
-        }
-        head_on[..hn].sort_unstable();
-        let head_on: &[(usize, usize, usize)] = &head_on[..hn];
-        let is_head_on = |nodes: &[(usize, u8)], node: usize, role: usize, cell: usize| -> bool {
-            if head_on.binary_search(&(node, role, cell)).is_ok() {
-                return true;
-            }
-            if role > 1 {
-                return false;
-            }
-            let bit = if role == 0 {
-                NODE_SRC_CANCELLED
-            } else {
-                NODE_DST_CANCELLED
-            };
-            cell == center(node) && node_slot(nodes, node).is_some_and(|i| nodes[i].1 & bit != 0)
-        };
-        // 3. Conflicts (matches heap): a lateral TARGET yields to a
-        // lateral source exit on the same side cell; a detouring end on
-        // a level face must not share its cell with a head-on end of
-        // the other role. A cancelled end gives up its lane and counts
-        // as head-on at the center.
-        for pi in 0..plans.len() {
-            let (ei, mut det) = plans[pi];
-            if !det.active() {
-                continue;
-            }
-            let Some((src, dst)) = layout_ends(ei) else {
-                continue;
-            };
-            for (is_target, node) in [(false, src), (true, dst)] {
-                let (lane, face) = if is_target {
-                    (det.dst_lane, det.dst_face)
-                } else {
-                    (det.src_lane, det.src_face)
-                };
-                if lane == usize::MAX {
-                    continue;
-                }
-                let mut cancel = false;
-                if !face.is_level() {
-                    if !is_target {
-                        continue;
-                    }
-                    let key = lateral_key(face);
-                    let h = level_extent(node);
-                    let row = side_row(port_cross, ei, node, true);
-                    if !is_head_on(nodes, node, key, row) {
-                        continue;
-                    }
-                    let loop_node = has_loop(node);
-                    let marker_row =
-                        |r: usize| r == 0 && matches!(face, Face::CrossTrailing) && loop_node;
-                    let shifted = [row + 1, row.wrapping_sub(1)]
-                        .into_iter()
-                        .find(|&r| r < h && !marker_row(r) && !is_head_on(nodes, node, key, r));
-                    match shifted {
-                        Some(r) => port_cross[ei].1 = r,
-                        None => cancel = true,
-                    }
-                } else {
-                    let other = usize::from(!is_target);
-                    let cell = resolved(port_cross, ei, node, is_target);
-                    if !is_head_on(nodes, node, other, cell) {
-                        continue;
-                    }
-                    let (_, _, base, _) = real_coords[node];
-                    let ext = extent(node);
-                    let inside = |c: usize| c >= base && c < base + ext;
-                    let shifted = [cell + 1, cell.wrapping_sub(1)]
-                        .into_iter()
-                        .find(|&c| inside(c) && !is_head_on(nodes, node, other, c));
-                    match shifted {
-                        Some(c) => {
-                            if is_target {
-                                port_cross[ei].1 = c;
-                            } else {
-                                port_cross[ei].0 = c;
-                            }
-                        }
-                        None => cancel = true,
-                    }
-                }
-                if cancel {
-                    if is_target {
-                        det.dst_lane = usize::MAX;
-                        det.dst_wants = false;
-                        port_cross[ei].1 = usize::MAX;
-                    } else {
-                        det.src_lane = usize::MAX;
-                        det.src_wants = false;
-                        port_cross[ei].0 = usize::MAX;
-                    }
-                    if let Some(i) = node_slot(nodes, node) {
-                        nodes[i].1 |= if is_target {
-                            NODE_DST_CANCELLED
-                        } else {
-                            NODE_SRC_CANCELLED
-                        };
-                    }
-                }
-            }
-            plans[pi].1 = det;
-        }
+        // A policy places both directions of a face deterministically,
+        // so colliding ends share their cell — the ordinary drawing —
+        // and nothing is shifted or cancelled here.
         // 4. Bottom-face arrivals reserve their arrowhead cell on the
         // target level's slot 0 exactly as reversed edges do.
         for pi in 0..plans.len() {
@@ -3087,12 +3010,6 @@ fn alloc_layout_temps_csr<'b>(
         (core::ptr::null_mut(), 0)
     };
     #[cfg(feature = "ports")]
-    let (detour_nodes_ptr, _) = if budget.nodes > 0 {
-        arena.alloc_raw_uninit::<(usize, u8)>(budget.nodes)?
-    } else {
-        (core::ptr::null_mut(), 0)
-    };
-    #[cfg(feature = "ports")]
     let jog_cap = if budget.any() { total_dummies } else { 0 };
     #[cfg(feature = "ports")]
     let (jog_blocks_ptr, _) = if jog_cap > 0 {
@@ -3103,12 +3020,6 @@ fn alloc_layout_temps_csr<'b>(
     #[cfg(feature = "ports")]
     let (lane_blockers_ptr, _) = if budget.blockers > 0 {
         arena.alloc_raw_uninit::<(usize, usize, usize, usize)>(budget.blockers)?
-    } else {
-        (core::ptr::null_mut(), 0)
-    };
-    #[cfg(feature = "ports")]
-    let (head_on_ptr, _) = if budget.ends > 0 {
-        arena.alloc_raw_uninit::<(usize, usize, usize)>(budget.ends)?
     } else {
         (core::ptr::null_mut(), 0)
     };
@@ -3203,12 +3114,6 @@ fn alloc_layout_temps_csr<'b>(
                 &mut []
             },
             #[cfg(feature = "ports")]
-            detour_nodes: if budget.nodes > 0 {
-                core::slice::from_raw_parts_mut(detour_nodes_ptr, budget.nodes)
-            } else {
-                &mut []
-            },
-            #[cfg(feature = "ports")]
             jog_blocks: if jog_cap > 0 {
                 core::slice::from_raw_parts_mut(jog_blocks_ptr, jog_cap)
             } else {
@@ -3217,12 +3122,6 @@ fn alloc_layout_temps_csr<'b>(
             #[cfg(feature = "ports")]
             lane_blockers: if budget.blockers > 0 {
                 core::slice::from_raw_parts_mut(lane_blockers_ptr, budget.blockers)
-            } else {
-                &mut []
-            },
-            #[cfg(feature = "ports")]
-            head_on: if budget.ends > 0 {
-                core::slice::from_raw_parts_mut(head_on_ptr, budget.ends)
             } else {
                 &mut []
             },
@@ -7388,7 +7287,6 @@ impl<'a> Graph<'a> {
                     budget.edges,
                     core::mem::size_of::<(usize, crate::algorithms::sugiyama::ports::Detour)>(),
                 ))
-                .saturating_add(item(budget.nodes, core::mem::size_of::<(usize, u8)>()))
                 .saturating_add(item(
                     dummies,
                     core::mem::size_of::<(usize, usize, usize, usize)>(),
@@ -7396,10 +7294,6 @@ impl<'a> Graph<'a> {
                 .saturating_add(item(
                     budget.blockers,
                     core::mem::size_of::<(usize, usize, usize, usize)>(),
-                ))
-                .saturating_add(item(
-                    budget.ends,
-                    core::mem::size_of::<(usize, usize, usize)>(),
                 ))
                 .saturating_add(item(
                     budget.edges.saturating_mul(5),

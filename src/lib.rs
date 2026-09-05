@@ -55,6 +55,58 @@
 //! println!("{}", dag.render());
 //! ```
 //!
+//! ## Ports
+//!
+//! An edge can declare which side of a node it leaves from and which
+//! side it arrives on, on the handle [`Graph::add_edge`](graph::Graph::add_edge)
+//! returns (or by index with `set_edge_ports`); the layout reports the
+//! side each end actually took on every IR edge:
+//!
+//! ```rust
+//! # #[cfg(feature = "ports")] {
+//! use ascii_dag::{Graph, PhysicalSide, PortSide};
+//!
+//! let mut g = Graph::new();
+//! g.add_node(1usize, "Gateway");
+//! g.add_node(2usize, "Service");
+//! g.add_node(3usize, "Cache");
+//! g.add_edge(1usize, 2usize, None);
+//! g.add_edge(1usize, 3usize, None).to_port(PortSide::West);
+//!
+//! let ir = g.compute_layout();
+//! let cache = ir.edges().iter().find(|e| e.to_id == 3).unwrap();
+//! assert_eq!(cache.to_port.requested, PortSide::West);
+//! assert_eq!(cache.to_port.side, PhysicalSide::West);
+//! # }
+//! ```
+//!
+//! [`PortSide`] names a side three ways. Compass sides (`North`,
+//! `East`, `South`, `West`) are fixed on the page. Flow sides follow
+//! the direction: `Upstream` is the face the flow arrives on,
+//! `Downstream` the face it leaves by. Rotations follow it too:
+//! `Clockwise` is the traveler's right hand facing downstream,
+//! `Counterclockwise` the left. `Auto` (the default) is head-on:
+//! leave `Downstream`, arrive `Upstream`.
+//!
+//! | Side | `TopDown` | `BottomUp` | `LeftRight` | `RightLeft` |
+//! |---|---|---|---|---|
+//! | `Upstream` | North | South | West | East |
+//! | `Downstream` | South | North | East | West |
+//! | `Clockwise` | West | East | South | North |
+//! | `Counterclockwise` | East | West | North | South |
+//!
+//! A face has one port by default, shared by every edge declared on
+//! it; a [`PortPolicy`] — the graph's (`set_port_policy`) or one
+//! node's (`set_node_port_policy`) — chooses `Paired` (an arrival and
+//! a departure port), `Spread` (up to a [`PortBound`]) or `Custom` (a
+//! [`PortPlacer`] of yours) instead. A node is never widened for its
+//! ports, and a face with one cell holds one port whatever the policy.
+//! Ends the layout could not honor are warnings on the run
+//! (`W.Graph.Port.034` for a side on a self-loop, `W.Graph.Port.035`
+//! when no lane beside the node was free). The guide:
+//! `docs/ports.md`; runnable: `examples/ports.rs`, every section
+//! through both pipelines.
+//!
 //! ## Modular Design
 //!
 //! The library is organized into separate, independently-usable modules:
@@ -203,7 +255,10 @@ pub use algorithms::sugiyama::config::{
     AlgorithmConfig, CycleBreaking, Layering, LayoutConfig, Positioning, Routing,
 };
 pub use algorithms::sugiyama::crossing::{CrossingReducer, FAST, QUALITY, STANDARD};
-pub use algorithms::sugiyama::ports::{EdgeEnd, PhysicalSide, Port, PortAttachment, PortSide};
+pub use algorithms::sugiyama::ports::{
+    EdgeEnd, PhysicalSide, Port, PortAttachment, PortBound, PortPlacer, PortPolicy, PortSide,
+    PortSlot,
+};
 
 // Legacy type (alloc-dependent, deprecated)
 #[cfg(feature = "alloc")]

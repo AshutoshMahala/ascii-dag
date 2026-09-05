@@ -254,6 +254,125 @@ impl PortAttachment {
     }
 }
 
+/// How a node places the ends declared on each of its faces. A
+/// graph-wide default with a per-node override; `Single` unless set.
+/// A face with one cell holds one port whatever the policy. Arrival
+/// and departure are the DECLARED ends (`to` and `from`), which a
+/// cycle reversal does not change.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default)]
+pub enum PortPolicy {
+    /// One port per face, at its center, shared by every arrival and
+    /// departure declared on it — the default, and the drawing every
+    /// undeclared fan-in and fan-out already has.
+    #[default]
+    Single,
+    /// One arrival port and one departure port per face, adjacent:
+    /// the face's primary direction (arrivals on the face the flow
+    /// arrives on, departures on the face it leaves by, arrivals on a
+    /// side face) at the center, the other on the next cell along the
+    /// face. A one-cell face shares.
+    Paired,
+    /// Up to the bound's number of ports per face, spread evenly and
+    /// centered; ends beyond the bound share round-robin — all in
+    /// tangent order, the peer's position along the face.
+    Spread(PortBound),
+    /// The caller's placer chooses every end's cell.
+    Custom(PortPlacer),
+}
+
+#[cfg(feature = "ports")]
+impl PortPolicy {
+    /// The CSR table's one-byte code for "inherit the graph's policy".
+    pub(crate) const INHERIT: u8 = 0;
+    const CODE_SINGLE: u8 = 1;
+    const CODE_PAIRED: u8 = 2;
+    const CODE_SPREAD_FACE: u8 = 3;
+    const CODE_CUSTOM: u8 = 255;
+    /// The largest `Ports(n)` bound: what the byte code carries, and
+    /// what larger bounds saturate to on both backends.
+    pub const SPREAD_MAX: u8 = Self::CODE_CUSTOM - Self::CODE_SPREAD_FACE - 1;
+
+    /// The one-byte code the CSR port table stores (the placer of a
+    /// `Custom` policy travels separately, one per graph).
+    pub(crate) const fn to_code(self) -> u8 {
+        match self {
+            PortPolicy::Single => Self::CODE_SINGLE,
+            PortPolicy::Paired => Self::CODE_PAIRED,
+            PortPolicy::Spread(PortBound::Face) | PortPolicy::Spread(PortBound::Ports(0)) => {
+                Self::CODE_SPREAD_FACE
+            }
+            PortPolicy::Spread(PortBound::Ports(n)) => {
+                Self::CODE_SPREAD_FACE
+                    + if n > Self::SPREAD_MAX {
+                        Self::SPREAD_MAX
+                    } else {
+                        n
+                    }
+            }
+            PortPolicy::Custom(_) => Self::CODE_CUSTOM,
+        }
+    }
+
+    /// Inverse of [`to_code`](Self::to_code): `None` for the inherit
+    /// code; a `Custom` code without a placer reads as `Single`.
+    pub(crate) fn from_code(code: u8, placer: Option<PortPlacer>) -> Option<PortPolicy> {
+        Some(match code {
+            Self::INHERIT => return None,
+            Self::CODE_SINGLE => PortPolicy::Single,
+            Self::CODE_PAIRED => PortPolicy::Paired,
+            Self::CODE_SPREAD_FACE => PortPolicy::Spread(PortBound::Face),
+            Self::CODE_CUSTOM => placer.map_or(PortPolicy::Single, PortPolicy::Custom),
+            n => PortPolicy::Spread(PortBound::Ports(n - Self::CODE_SPREAD_FACE)),
+        })
+    }
+
+    /// The placer a `Custom` policy carries.
+    pub(crate) fn placer(self) -> Option<PortPlacer> {
+        match self {
+            PortPolicy::Custom(f) => Some(f),
+            _ => None,
+        }
+    }
+}
+
+/// The upper bound of a [`PortPolicy::Spread`] face.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortBound {
+    /// As many ports as the face has cells.
+    Face,
+    /// At most this many ports; `0` means [`Face`](Self::Face). Bounds
+    /// above 251 saturate to 251 on both backends (the CSR table's
+    /// byte code carries that much).
+    Ports(u8),
+}
+
+/// A caller's placement rule: the cell offset along the face for one
+/// end, clamped to the face by the layout. A plain `fn`, so it runs
+/// on the no-alloc pipeline and both backends place identically.
+pub type PortPlacer = fn(PortSlot) -> usize;
+
+/// One end to place, as a [`PortPlacer`] sees it.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortSlot {
+    /// The node's id.
+    pub node: usize,
+    /// The face, physically.
+    pub face: PhysicalSide,
+    /// Cells along the face.
+    pub cells: usize,
+    /// Arrivals declared on this face.
+    pub arrivals: usize,
+    /// Departures declared on this face.
+    pub departures: usize,
+    /// This end's index among the face's ends, in tangent order.
+    pub index: usize,
+    /// Whether this end is an arrival.
+    pub arrival: bool,
+}
+
 impl Face {
     /// The physical side this role-space face is under a profile and
     /// its level flip: level faces follow the flow (leading is North
@@ -455,14 +574,7 @@ impl Iterator for SubSpans {
 /// assignment pass walks the iterator once instead.
 #[cfg(all(test, feature = "ports"))]
 pub(crate) fn face_offset<A: Axis>(k: usize, n: usize, capacity: usize) -> usize {
-    if capacity == 0 {
-        return 0;
-    }
-    if n > capacity {
-        return k % capacity;
-    }
-    let (start, end) = SubSpans::new(n, capacity).nth(k).unwrap_or((0, capacity));
-    A::cross_center(start, end - start)
+    spread_offset::<A>(k, n, capacity, PortBound::Face, true)
 }
 
 /// One explicit request for a position on a node face.
@@ -480,6 +592,9 @@ pub(crate) struct FaceRequest {
     pub edge: usize,
     /// Which end of that edge this is (layout role).
     pub end: EndRole,
+    /// Whether this is the edge's DECLARED target end — the identity
+    /// the policies see, which a cycle reversal does not change.
+    pub arrival: bool,
 }
 
 /// Tangent order: per (node, face), by key, then input index. Not
@@ -489,14 +604,16 @@ fn sort_requests(requests: &mut [FaceRequest]) {
     requests.sort_unstable_by_key(|r| (r.node, r.face as u8, r.key, r.edge));
 }
 
-/// Assign every LEVEL-face request its cell: requests are grouped per
-/// (node, face), ordered along the tangent by `key` then input index,
-/// and placed at sub-span centers under capacity or round-robin above
-/// it. `face_span(node)` yields the node's `(base, extent)` along the
-/// CROSS axis — the tangent of a level face; `place(edge, end,
-/// coordinate)` receives each result. O(R log R) over the requests
-/// only — Auto edges never enter. Slice-based, so the arena backend
-/// runs it on carved scratch.
+/// Assign every LEVEL-face request its cell under the node's port
+/// policy: requests are grouped per (node, face), ordered along the
+/// tangent by `key` then input index, and placed as the policy says.
+/// `face_span(node)` yields the node's `(base, extent)` along the
+/// CROSS axis — the tangent of a level face; `policy(node)` the node's
+/// policy (its override, else the graph's) and its id;
+/// `place(edge, end, coordinate)` receives each result. O(R log R)
+/// over the requests only — Auto edges never enter — plus the spread
+/// walk (bounded by the face's cells) per shared end. Slice-based, so
+/// the arena backend runs it on carved scratch.
 ///
 /// Level faces only — a lateral face's tangent is the LEVEL axis and
 /// its centering the profile's level rule:
@@ -505,6 +622,8 @@ fn sort_requests(requests: &mut [FaceRequest]) {
 pub(crate) fn assign_level_face_positions<A: Axis>(
     requests: &mut [FaceRequest],
     face_span: impl FnMut(usize) -> (usize, usize),
+    policy: impl FnMut(usize) -> (PortPolicy, usize),
+    flipped: bool,
     place: impl FnMut(usize, EndRole, usize),
 ) {
     debug_assert!(
@@ -513,18 +632,20 @@ pub(crate) fn assign_level_face_positions<A: Axis>(
             .all(|r| matches!(r.face, Face::LevelLeading | Face::LevelTrailing)),
         "level faces only"
     );
-    assign_face_positions(requests, face_span, place, A::cross_center);
+    assign_face_positions::<A>(requests, face_span, policy, flipped, place, true);
 }
 
 /// The lateral twin of [`assign_level_face_positions`]: requests on a
-/// node's CROSS faces spread along the LEVEL axis — `face_span(node)`
+/// node's CROSS faces are placed along the LEVEL axis — `face_span(node)`
 /// yields `(0, level extent)` and the result is the row offset within
 /// the node — centered by the profile's level rule (`level_center`),
-/// which is where a single request lands and where `Auto` would.
+/// which is where `Single` lands and where `Auto` would.
 #[cfg(feature = "ports")]
 pub(crate) fn assign_cross_face_positions<A: Axis>(
     requests: &mut [FaceRequest],
     face_span: impl FnMut(usize) -> (usize, usize),
+    policy: impl FnMut(usize) -> (PortPolicy, usize),
+    flipped: bool,
     place: impl FnMut(usize, EndRole, usize),
 ) {
     debug_assert!(
@@ -533,20 +654,30 @@ pub(crate) fn assign_cross_face_positions<A: Axis>(
             .all(|r| matches!(r.face, Face::CrossLeading | Face::CrossTrailing)),
         "cross faces only"
     );
-    assign_face_positions(requests, face_span, place, A::level_center);
+    assign_face_positions::<A>(requests, face_span, policy, flipped, place, false);
 }
 
-/// The shared spread: per (node, face) group in tangent order, sub-span
-/// centers under capacity, round-robin above it, the center line for a
-/// zero-extent face.
+/// The shared pass: per (node, face) group in tangent order, the
+/// policy's cell for each end; the center line for a zero-extent
+/// face whatever the policy. O(n) per group over its `n` ends plus
+/// one walk of the face's sub-spans per round of a `Spread`.
 #[cfg(feature = "ports")]
-fn assign_face_positions(
+fn assign_face_positions<A: Axis>(
     requests: &mut [FaceRequest],
     mut face_span: impl FnMut(usize) -> (usize, usize),
+    mut policy: impl FnMut(usize) -> (PortPolicy, usize),
+    flipped: bool,
     mut place: impl FnMut(usize, EndRole, usize),
-    center: fn(usize, usize) -> usize,
+    level: bool,
 ) {
     sort_requests(requests);
+    let center_of = |start: usize, len: usize| {
+        if level {
+            A::cross_center(start, len)
+        } else {
+            A::level_center(start, len)
+        }
+    };
     let mut i = 0;
     while i < requests.len() {
         let (node, face) = (requests[i].node, requests[i].face);
@@ -556,21 +687,109 @@ fn assign_face_positions(
         }
         let (base, capacity) = face_span(node);
         let group = &requests[i..j];
-        let n = group.len();
+        i = j;
         if capacity == 0 {
             for r in group {
                 place(r.edge, r.end, base);
             }
-        } else if n > capacity {
-            for (k, r) in group.iter().enumerate() {
-                place(r.edge, r.end, base + k % capacity);
-            }
-        } else {
-            for (r, (start, end)) in group.iter().zip(SubSpans::new(n, capacity)) {
-                place(r.edge, r.end, base + center(start, end - start));
-            }
+            continue;
         }
-        i = j;
+        let (policy, id) = policy(node);
+        let n = group.len();
+        let center = center_of(0, capacity);
+        if let PortPolicy::Spread(bound) = policy {
+            // `m` ports at sub-span centers; end k takes port k mod m.
+            // One walk of the sub-spans per round of `m` ends.
+            let m = n.min(bound_ports(bound, capacity)).max(1);
+            let mut k = 0;
+            while k < n {
+                for (start, end) in SubSpans::new(m, capacity) {
+                    let Some(r) = group.get(k) else {
+                        break;
+                    };
+                    place(r.edge, r.end, base + center_of(start, end - start));
+                    k += 1;
+                }
+            }
+            continue;
+        }
+        let arrivals = group.iter().filter(|r| r.arrival).count();
+        for (k, r) in group.iter().enumerate() {
+            let offset = match policy {
+                PortPolicy::Single | PortPolicy::Spread(_) => center,
+                PortPolicy::Paired => paired_offset(face, r.arrival, center, capacity),
+                PortPolicy::Custom(placer) => placer(PortSlot {
+                    node: id,
+                    face: face.physical(A::FLOW_AXIS, flipped),
+                    cells: capacity,
+                    arrivals,
+                    departures: n - arrivals,
+                    index: k,
+                    arrival: r.arrival,
+                })
+                .min(capacity - 1),
+            };
+            place(r.edge, r.end, base + offset);
+        }
+    }
+}
+
+/// The ports a `Spread` bound allows on a face of `capacity` cells:
+/// the face's cells for `Face` (and `Ports(0)`), else the bound,
+/// saturated at [`PortPolicy::SPREAD_MAX`] — the same number on both
+/// backends, whatever the byte code can carry.
+#[cfg(feature = "ports")]
+pub(crate) fn bound_ports(bound: PortBound, capacity: usize) -> usize {
+    match bound {
+        PortBound::Face | PortBound::Ports(0) => capacity,
+        PortBound::Ports(p) => (p.min(PortPolicy::SPREAD_MAX) as usize).min(capacity),
+    }
+}
+
+/// `Paired`: the face's primary direction — arrivals on the arrive
+/// face, departures on the leave face, arrivals on a side face — at
+/// the center; the other on the next cell along the tangent, the
+/// previous when the center is the last cell; a one-cell face shares.
+#[cfg(feature = "ports")]
+pub(crate) fn paired_offset(face: Face, arrival: bool, center: usize, capacity: usize) -> usize {
+    let primary = match face {
+        Face::LevelLeading => arrival,
+        Face::LevelTrailing => !arrival,
+        Face::CrossLeading | Face::CrossTrailing => arrival,
+    };
+    if primary || capacity < 2 {
+        center
+    } else if center + 1 < capacity {
+        center + 1
+    } else {
+        center - 1
+    }
+}
+
+/// `Spread(bound)`: `m = min(ends, bound, cells)` ports at the centers
+/// — by the profile's own rule for the face's tangent — of `m` equal
+/// sub-spans; end `k` takes port `k mod m`. One end lands exactly
+/// where `Auto` does; `n ≤ m` ends spread evenly and centered; beyond
+/// the bound they share evenly. O(m) through [`SubSpans`].
+#[cfg(all(test, feature = "ports"))]
+pub(crate) fn spread_offset<A: Axis>(
+    k: usize,
+    n: usize,
+    capacity: usize,
+    bound: PortBound,
+    level: bool,
+) -> usize {
+    if capacity == 0 {
+        return 0;
+    }
+    let m = n.min(bound_ports(bound, capacity)).max(1);
+    let (start, end) = SubSpans::new(m, capacity)
+        .nth(k % m)
+        .unwrap_or((0, capacity));
+    if level {
+        A::cross_center(start, end - start)
+    } else {
+        A::level_center(start, end - start)
     }
 }
 
@@ -859,7 +1078,7 @@ mod tests {
     any(feature = "layout-vertical", feature = "layout-horizontal")
 ))]
 mod layout_tests {
-    use super::PortSide;
+    use super::{PortBound, PortPolicy, PortSide};
     use crate::graph::Graph;
     use crate::render::engine::RenderOptions;
 
@@ -1006,15 +1225,19 @@ mod layout_tests {
     fn explicit_requests_spread_along_the_face_in_tangent_order() {
         use super::super::geometry::Vertical;
         use super::face_offset;
+        use crate::render::engine::BoxedNode;
+        // A boxed node has three rows, so a policy other than `Single`
+        // applies; its box is 8 cells wide.
         let mut g = Graph::new();
-        g.add_node(0usize, "Root"); // "[Root]" = 6 cells wide
+        g.set_port_policy(PortPolicy::Spread(PortBound::Face));
+        g.add_node(0usize, BoxedNode("Root"));
         for i in 1..=3usize {
             g.add_node(i, "x");
             g.add_edge(0usize, i, None).from_port(PortSide::South);
         }
         let auto = {
             let mut a = Graph::new();
-            a.add_node(0usize, "Root");
+            a.add_node(0usize, BoxedNode("Root"));
             for i in 1..=3usize {
                 a.add_node(i, "x");
                 a.add_edge(0usize, i, None);
@@ -1023,7 +1246,7 @@ mod layout_tests {
         };
         let ir = g.compute_layout();
         let root = ir.node_by_id(0).unwrap();
-        assert_eq!(root.width, 6);
+        assert_eq!(root.width, 8);
         // Tangent order: by the child's x.
         let mut edges: Vec<_> = ir.edges().iter().collect();
         edges.sort_by_key(|e| ir.node_by_id(e.to_id).unwrap().x);
@@ -1031,12 +1254,19 @@ mod layout_tests {
         assert_eq!(
             cells,
             (0..3)
-                .map(|k| face_offset::<Vertical>(k, 3, 6))
+                .map(|k| face_offset::<Vertical>(k, 3, 8))
                 .collect::<Vec<_>>()
         );
-        assert_eq!(cells, vec![1, 3, 5]);
+        assert_eq!(cells, vec![1, 3, 6]);
         let rendered = ir.render_string(&RenderOptions::plain());
         assert_ne!(rendered, auto, "positions change the drawing");
+        // The default policy shares the one port: the Auto drawing.
+        g.set_port_policy(PortPolicy::Single);
+        assert_eq!(
+            g.compute_layout().render_string(&RenderOptions::plain()),
+            auto,
+            "Single is the Auto drawing"
+        );
     }
 
     /// A resolved port on a one-cell `Fixed` custom node in a two-node
@@ -1086,19 +1316,213 @@ mod layout_tests {
     #[cfg(feature = "layout-vertical")]
     #[test]
     fn over_capacity_wraps_round_robin_in_tangent_order() {
+        use crate::render::engine::BoxedNode;
         let mut g = Graph::new();
-        g.add_node(0usize, "A"); // "[A]" = 3 cells
-        for i in 1..=5usize {
+        g.set_port_policy(PortPolicy::Spread(PortBound::Face));
+        g.add_node(0usize, BoxedNode("A")); // 5 cells wide, 3 rows
+        for i in 1..=7usize {
             g.add_node(i, "x");
             g.add_edge(0usize, i, None).from_port(PortSide::South);
         }
         let ir = g.compute_layout();
         let root = ir.node_by_id(0).unwrap();
-        assert_eq!(root.width, 3);
+        assert_eq!(root.width, 5);
         let mut edges: Vec<_> = ir.edges().iter().collect();
         edges.sort_by_key(|e| ir.node_by_id(e.to_id).unwrap().x);
         let cells: Vec<usize> = edges.iter().map(|e| e.from_x - root.x).collect();
-        assert_eq!(cells, vec![0, 1, 2, 0, 1]);
+        assert_eq!(cells, vec![0, 1, 2, 3, 4, 0, 1]);
+        // A numeric bound caps the ports: three ports for seven ends.
+        g.set_port_policy(PortPolicy::Spread(PortBound::Ports(3)));
+        let ir = g.compute_layout();
+        let root = ir.node_by_id(0).unwrap();
+        let mut edges: Vec<_> = ir.edges().iter().collect();
+        edges.sort_by_key(|e| ir.node_by_id(e.to_id).unwrap().x);
+        let cells: Vec<usize> = edges.iter().map(|e| e.from_x - root.x).collect();
+        assert_eq!(cells, vec![0, 2, 4, 0, 2, 4, 0]);
+    }
+
+    /// `Paired`: on a level face the head-on direction keeps the center
+    /// and the other direction takes the next cell; on a side face the
+    /// arrival keeps the center row and the departure the next. Under
+    /// `Single` every end of a face shares its center.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn paired_gives_a_face_an_arrival_and_a_departure_port() {
+        use crate::ir::EdgePath;
+        use crate::render::engine::BoxedNode;
+        // A hub wide enough that its neighbors' trunks stay inside its
+        // span, so a lane beside it is free: 17 cells, 3 rows, center
+        // x+8, row 1.
+        let level_faces = |policy: PortPolicy| {
+            let mut g = Graph::new();
+            g.set_port_policy(policy);
+            g.add_node(0usize, BoxedNode("Hub with room"));
+            g.add_node(1usize, "In");
+            g.add_node(2usize, "Out");
+            g.add_edge(1usize, 0usize, None).to_port(PortSide::Upstream);
+            g.add_edge(0usize, 2usize, None)
+                .from_port(PortSide::Upstream);
+            let ir = g.compute_layout();
+            let hub = ir.node_by_id(0).unwrap();
+            let arrival = ir.edges().iter().find(|e| e.to_id == 0).unwrap();
+            let departure = ir.edges().iter().find(|e| e.from_id == 0).unwrap();
+            assert!(
+                matches!(departure.path, EdgePath::Orthogonal { .. }),
+                "the departure detours"
+            );
+            (arrival.to_x - hub.x, departure.from_x - hub.x)
+        };
+        assert_eq!(level_faces(PortPolicy::Paired), (8, 9));
+        assert_eq!(level_faces(PortPolicy::Single), (8, 8));
+        let side_faces = |policy: PortPolicy| {
+            let mut g = Graph::new();
+            g.set_port_policy(policy);
+            g.add_node(0usize, BoxedNode("Hub with room"));
+            g.add_node(3usize, "Side");
+            g.add_node(4usize, "Back");
+            g.add_edge(3usize, 0usize, None).to_port(PortSide::East);
+            g.add_edge(0usize, 4usize, None).from_port(PortSide::East);
+            let ir = g.compute_layout();
+            let hub = ir.node_by_id(0).unwrap();
+            let arrival = ir.edges().iter().find(|e| e.to_id == 0).unwrap();
+            let departure = ir.edges().iter().find(|e| e.from_id == 0).unwrap();
+            for e in [arrival, departure] {
+                assert!(matches!(e.path, EdgePath::Orthogonal { .. }), "both route");
+            }
+            (arrival.to_y - hub.y, departure.from_y - hub.y)
+        };
+        assert_eq!(side_faces(PortPolicy::Paired), (1, 2));
+        assert_eq!(side_faces(PortPolicy::Single), (1, 1));
+    }
+
+    /// `Custom`: the placer sees the node, the physical face, its cells
+    /// and its ends, and its answer is clamped to the face.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn a_custom_placer_places_every_end_of_a_face() {
+        use crate::render::engine::BoxedNode;
+        use crate::{PhysicalSide, PortSlot};
+        fn ends_apart(slot: PortSlot) -> usize {
+            assert_eq!(slot.node, 0);
+            assert_eq!(slot.face, PhysicalSide::North);
+            assert_eq!(slot.cells, 7);
+            assert_eq!((slot.arrivals, slot.departures), (1, 1));
+            assert!(slot.index < 2);
+            if slot.arrival { 0 } else { slot.cells - 1 }
+        }
+        fn past_the_face(_: PortSlot) -> usize {
+            usize::MAX
+        }
+        let mut g = Graph::new();
+        g.add_node(0usize, BoxedNode("Hub"));
+        g.set_node_port_policy(0usize, PortPolicy::Custom(ends_apart));
+        g.add_node(1usize, "In");
+        g.add_node(2usize, "Out");
+        g.add_edge(1usize, 0usize, None).to_port(PortSide::Upstream);
+        g.add_edge(0usize, 2usize, None)
+            .from_port(PortSide::Upstream);
+        let ir = g.compute_layout();
+        let hub = ir.node_by_id(0).unwrap();
+        let arrival = ir.edges().iter().find(|e| e.to_id == 0).unwrap();
+        let departure = ir.edges().iter().find(|e| e.from_id == 0).unwrap();
+        assert_eq!(arrival.to_x, hub.x);
+        assert_eq!(departure.from_x, hub.x + 6);
+        // A graph runs one placer: a different one is refused.
+        assert!(!g.set_node_port_policy(0usize, PortPolicy::Custom(past_the_face)));
+        let mut g = Graph::new();
+        g.add_node(0usize, BoxedNode("Hub"));
+        g.set_node_port_policy(0usize, PortPolicy::Custom(past_the_face));
+        g.add_node(1usize, "In");
+        g.add_edge(1usize, 0usize, None).to_port(PortSide::Upstream);
+        let ir = g.compute_layout();
+        let hub = ir.node_by_id(0).unwrap();
+        let arrival = ir.edges().iter().find(|e| e.to_id == 0).unwrap();
+        assert_eq!(arrival.to_x, hub.x + 6, "clamped to the face's last cell");
+    }
+
+    /// A face with one cell holds one port whatever the policy, while
+    /// the same node's wide faces take the policy: on a one-row
+    /// `[Hub node]` the east arrival and departure share the side cell
+    /// under `Paired`, and the top face pairs.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn a_one_cell_face_holds_one_port_under_every_policy() {
+        let mut g = Graph::new();
+        g.add_node(0usize, "Hub node"); // "[Hub node]": one row, 10 cells, center x+5
+        assert!(
+            !g.set_node_port_policy(9usize, PortPolicy::Paired),
+            "unknown node"
+        );
+        assert!(g.set_node_port_policy(0usize, PortPolicy::Paired));
+        assert!(matches!(g.node_port_policy(0usize), PortPolicy::Paired));
+        assert!(matches!(g.node_port_policy(1usize), PortPolicy::Single));
+        g.add_node(1usize, "In");
+        g.add_node(2usize, "Out");
+        g.add_node(3usize, "Side");
+        g.add_node(4usize, "Back");
+        g.add_edge(1usize, 0usize, None).to_port(PortSide::Upstream);
+        g.add_edge(0usize, 2usize, None)
+            .from_port(PortSide::Upstream);
+        g.add_edge(3usize, 0usize, None).to_port(PortSide::East);
+        g.add_edge(0usize, 4usize, None).from_port(PortSide::East);
+        assert_eq!(g.layout().reported().warnings().count(), 0);
+        let ir = g.compute_layout();
+        let hub = ir.node_by_id(0).unwrap();
+        let edge = |from: usize, to: usize| {
+            ir.edges()
+                .iter()
+                .find(|e| e.from_id == from && e.to_id == to)
+                .unwrap()
+        };
+        assert_eq!(edge(1, 0).to_x - hub.x, 5, "top arrival at the center");
+        assert_eq!(edge(0, 2).from_x - hub.x, 6, "top departure beside it");
+        assert_eq!(edge(3, 0).to_y, hub.y, "one east cell, shared");
+        assert_eq!(edge(0, 4).from_y, hub.y, "one east cell, shared");
+        // Clearing the override restores inheritance, now and later.
+        assert!(g.clear_node_port_policy(0usize));
+        assert!(!g.clear_node_port_policy(0usize));
+        assert!(matches!(g.node_port_policy(0usize), PortPolicy::Single));
+        g.set_port_policy(PortPolicy::Paired);
+        assert!(matches!(g.node_port_policy(0usize), PortPolicy::Paired));
+    }
+
+    /// Arrival and departure are the DECLARED ends: on a cycle-reversed
+    /// edge the declared target is the layout source, and the policies
+    /// still see an arrival — `Paired` gives it the arrival port and a
+    /// custom placer is told so.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn policies_see_declared_ends_on_reversed_edges() {
+        use crate::render::engine::BoxedNode;
+        use crate::{PhysicalSide, PortSlot};
+        fn expects_an_arrival(slot: PortSlot) -> usize {
+            assert!(slot.arrival, "the declared target end is an arrival");
+            assert_eq!((slot.arrivals, slot.departures), (1, 0));
+            assert_eq!(slot.face, PhysicalSide::North);
+            0
+        }
+        let build = |policy: PortPolicy| {
+            let mut g = Graph::new();
+            g.add_node(1usize, BoxedNode("Hub with room")); // 17 wide, center x+8
+            g.add_node(2usize, "B");
+            g.add_edge(1usize, 2usize, None);
+            // Declared B → A, reversed by cycle breaking: its declared
+            // target A becomes the layout source, and `Upstream` at A
+            // is A's top face.
+            g.add_edge(2usize, 1usize, None).to_port(PortSide::Upstream);
+            g.set_node_port_policy(1usize, policy);
+            g
+        };
+        let g = build(PortPolicy::Custom(expects_an_arrival));
+        let ir = g.compute_layout();
+        let hub = ir.node_by_id(1).unwrap();
+        let reversed = ir.edges().iter().find(|e| e.reversed).unwrap();
+        assert_eq!(reversed.from_x, hub.x, "the placer's cell 0");
+        let g = build(PortPolicy::Paired);
+        let ir = g.compute_layout();
+        let hub = ir.node_by_id(1).unwrap();
+        let reversed = ir.edges().iter().find(|e| e.reversed).unwrap();
+        assert_eq!(reversed.from_x, hub.x + 8, "the arrival port: the center");
     }
 }
 
@@ -1297,6 +1721,182 @@ mod csr_tests {
 
     /// An undeclared graph converts without a table and the estimate
     /// does not grow; a declared one grows by exactly the table.
+    /// Policies travel through `to_csr` (node codes, the graph's code
+    /// and its one placer) and through the builder's setters, and the
+    /// arena backend places exactly as the heap backend does.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn policies_travel_to_the_arena_backend() {
+        use crate::render::engine::BoxedNode;
+        use crate::{PortBound, PortPolicy, PortSlot};
+        fn ends_apart(slot: PortSlot) -> usize {
+            if slot.arrival { 0 } else { slot.cells - 1 }
+        }
+        fn other(_: PortSlot) -> usize {
+            0
+        }
+        let mut g = Graph::new();
+        g.set_port_policy(PortPolicy::Spread(PortBound::Ports(2)));
+        g.add_node(1usize, BoxedNode("Spread"));
+        g.add_node(2usize, BoxedNode("Paired"));
+        g.add_node(3usize, BoxedNode("Custom"));
+        g.set_node_port_policy(2usize, PortPolicy::Paired);
+        g.set_node_port_policy(3usize, PortPolicy::Custom(ends_apart));
+        assert!(
+            !g.set_node_port_policy(1usize, PortPolicy::Custom(other)),
+            "one placer per graph — so the conversion below is exact"
+        );
+        assert!(!g.set_port_policy(PortPolicy::Custom(other)));
+        // A bound past what the byte code carries saturates on both.
+        g.add_node(4usize, BoxedNode("Saturated bound node"));
+        g.set_node_port_policy(4usize, PortPolicy::Spread(PortBound::Ports(255)));
+        for hub in 1usize..=4 {
+            let (a, b, c) = (hub * 10, hub * 10 + 1, hub * 10 + 2);
+            g.add_node(a, "In");
+            g.add_node(b, "In");
+            g.add_node(c, "Out");
+            g.add_edge(a, hub, None).to_port(PortSide::Upstream);
+            g.add_edge(b, hub, None).to_port(PortSide::Upstream);
+            g.add_edge(hub, c, None).from_port(PortSide::Upstream);
+        }
+        let config = LayoutConfig::standard();
+        let heap = g.compute_layout().render_string(&RenderOptions::plain());
+        let mut buf = vec![0u8; g.estimate_csr_arena_size()];
+        let mut arena = Arena::new(&mut buf);
+        let csr = g.to_csr(&mut arena).unwrap();
+        assert_eq!(
+            render_csr(&csr, &config),
+            heap,
+            "to_csr carries the policies"
+        );
+        // The same graph on the builder.
+        let nodes = g.nodes.len();
+        let edges = g.edges.len();
+        let need = CsrGraph::required_arena_size_with_ports(nodes, edges, 160, 0, 0);
+        let mut buf = vec![0u8; need];
+        let mut arena = Arena::new(&mut buf);
+        let mut b = CsrGraphBuilder::new_with_ports(&mut arena, nodes, edges, 160, 0, 0).unwrap();
+        assert!(
+            b.set_port_policy(PortPolicy::Spread(PortBound::Ports(2)))
+                .is_some()
+        );
+        let mut index = std::collections::HashMap::new();
+        for &(id, label) in &g.nodes {
+            let boxed = id <= 4;
+            let idx = if boxed {
+                b.add_node(id, BoxedNode(label)).unwrap()
+            } else {
+                b.add_node(id, label).unwrap()
+            };
+            index.insert(id, idx);
+        }
+        assert!(
+            b.set_node_port_policy(index[&2], PortPolicy::Paired)
+                .is_some()
+        );
+        assert!(
+            b.set_node_port_policy(index[&3], PortPolicy::Custom(ends_apart))
+                .is_some()
+        );
+        assert!(
+            b.set_node_port_policy(index[&4], PortPolicy::Spread(PortBound::Ports(255)))
+                .is_some()
+        );
+        assert!(
+            b.set_node_port_policy(index[&1], PortPolicy::Custom(other))
+                .is_none(),
+            "one placer per builder"
+        );
+        assert!(
+            b.set_node_port_policy(index[&1], PortPolicy::Paired)
+                .is_some()
+        );
+        assert!(
+            b.clear_node_port_policy(index[&1]).is_some(),
+            "back to the graph's policy"
+        );
+        assert!(b.clear_node_port_policy(nodes).is_none(), "unknown node");
+        assert!(
+            b.set_node_port_policy(nodes, PortPolicy::Paired).is_none(),
+            "unknown node"
+        );
+        for (ei, &(from, to, _)) in g.edges.iter().enumerate() {
+            let (src, dst) = g.edge_ports[ei];
+            b.add_edge(index[&from], index[&to])
+                .unwrap()
+                .from_port(src)
+                .unwrap()
+                .to_port(dst)
+                .unwrap();
+        }
+        let csr = b.build().unwrap();
+        assert_eq!(
+            render_csr(&csr, &config),
+            heap,
+            "the builder carries the policies"
+        );
+        // A builder without a port table refuses.
+        let mut buf = vec![0u8; CsrGraph::required_arena_size(4, 4, 16)];
+        let mut arena = Arena::new(&mut buf);
+        let mut plain = CsrGraphBuilder::new(&mut arena, 4, 4, 16, 0).unwrap();
+        plain.add_node(1, "A").unwrap();
+        assert!(plain.set_port_policy(PortPolicy::Paired).is_none());
+        assert!(plain.set_node_port_policy(0, PortPolicy::Paired).is_none());
+    }
+
+    /// The no-alloc pipeline reports the same port conditions as the
+    /// heap run, through `compute_layout_arena_reporting`: a side on a
+    /// self-loop before the layout, an unroutable side after it.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn the_arena_entry_reports_port_conditions() {
+        use crate::diagnostics::{DiagnosticKind, DiagnosticRun, VecDiagnostics};
+        let mut g = Graph::new();
+        g.add_node(0usize, "Root");
+        for (id, label) in [(1usize, "L"), (2, "M"), (3, "R")] {
+            g.add_node(id, label);
+            g.add_edge(0usize, id, None);
+        }
+        g.add_node(4usize, "T");
+        g.add_edge(2usize, 4usize, None).from_port(PortSide::East);
+        g.add_edge(4usize, 4usize, None).from_port(PortSide::East);
+        let tight = LayoutConfig {
+            node_spacing: 0,
+            ..LayoutConfig::standard()
+        };
+        let heap: Vec<DiagnosticKind> = g
+            .layout()
+            .with_config(&tight)
+            .reported()
+            .warnings()
+            .map(|d| *d.kind())
+            .collect();
+        assert_eq!(heap.len(), 2, "{heap:?}");
+        let mut buf = vec![0u8; g.estimate_csr_arena_size()];
+        let mut arena = Arena::new(&mut buf);
+        let csr = g.to_csr(&mut arena).unwrap();
+        let size = g.estimate_layout_arena_size_with(&tight);
+        let (mut t, mut o) = (vec![0u8; size], vec![0u8; size]);
+        let (mut ta, mut oa) = (Arena::new(&mut t), Arena::new(&mut o));
+        let mut run = DiagnosticRun::new(VecDiagnostics::default());
+        let ir = {
+            let mut cx = run.context();
+            csr.compute_layout_arena_reporting(&tight, &mut ta, &mut oa, &mut cx)
+                .unwrap()
+        };
+        let report = run.finish(Ok::<_, crate::errors::GraphError>(ir));
+        let arena_kinds: Vec<DiagnosticKind> = report.warnings().map(|d| *d.kind()).collect();
+        assert_eq!(arena_kinds, heap, "same conditions, same order");
+        assert!(matches!(
+            arena_kinds[0],
+            DiagnosticKind::PortIgnoredOnSelfLoop { edge: 4 }
+        ));
+        assert!(matches!(
+            arena_kinds[1],
+            DiagnosticKind::PortUnroutable { edge: 3, .. }
+        ));
+    }
+
     #[test]
     fn undeclared_graphs_carry_no_csr_table() {
         let auto = heap_fixture();
@@ -1304,8 +1904,8 @@ mod csr_tests {
         assert!(declared.set_edge_ports(0, PortSide::South, PortSide::North));
         assert_eq!(
             declared.estimate_csr_arena_size(),
-            auto.estimate_csr_arena_size() + 5 * 2 + 8,
-            "two bytes per edge plus slack, only when declared"
+            auto.estimate_csr_arena_size() + 5 * 2 + auto.nodes.len() + 16,
+            "two bytes per edge, one policy byte per node, plus slack — only when declared"
         );
         let mut buf = vec![0u8; auto.estimate_csr_arena_size()];
         let mut arena = Arena::new(&mut buf);
@@ -1470,17 +2070,6 @@ pub(crate) const fn detours(
         )
 }
 
-/// The head-on record key of a lateral SOURCE exit on `face`: level
-/// faces use the role (0 source, 1 target); side faces use 2 and 4 so
-/// a lateral target can find the exits it must not share a cell with.
-#[cfg_attr(not(feature = "ports"), allow(dead_code))]
-pub(crate) const fn lateral_key(face: Face) -> usize {
-    match face {
-        Face::CrossTrailing => 4,
-        _ => 2,
-    }
-}
-
 /// The lane a LATERAL end's stub turns onto: the cell just past the
 /// node on that face's side — no fallback to the other side, the face
 /// was named. `usize::MAX` when that cell is blocked (a neighbor at
@@ -1536,20 +2125,6 @@ pub(crate) fn choose_lane(
     }
 }
 
-/// Node flag bits in a detour-node table entry `(node, flags)`.
-/// The node carries a self-loop (its `↺` cell pushes the trailing lane
-/// one further out).
-#[cfg_attr(not(feature = "ports"), allow(dead_code))]
-pub(crate) const NODE_LOOP: u8 = 1;
-/// A source-role end at this node cancelled its detour and attaches
-/// head-on at the leave face's center.
-#[cfg_attr(not(feature = "ports"), allow(dead_code))]
-pub(crate) const NODE_SRC_CANCELLED: u8 = 2;
-/// A target-role end at this node cancelled its detour and attaches
-/// head-on at the arrive face's center.
-#[cfg_attr(not(feature = "ports"), allow(dead_code))]
-pub(crate) const NODE_DST_CANCELLED: u8 = 4;
-
 /// The flip and axis a direction lays out under — the same facts
 /// `level_flipped::<A>` and `A::FLOW_AXIS` give the layout, for callers
 /// that are not generic over the profile (the size estimate).
@@ -1577,10 +2152,6 @@ pub(crate) struct DetourBudget {
     /// Edges with at least one detouring end: plans, slot intervals,
     /// staged bends.
     pub(crate) edges: usize,
-    /// Nodes with at least one detouring end: the flag table.
-    pub(crate) nodes: usize,
-    /// Edge ends at those nodes: head-on records.
-    pub(crate) ends: usize,
     /// Lane blockers on those nodes' levels: node spans, dummy columns,
     /// self-loop marker cells.
     pub(crate) blockers: usize,
@@ -1593,8 +2164,6 @@ impl DetourBudget {
     #[cfg_attr(not(feature = "ports"), allow(dead_code))]
     pub(crate) const NONE: DetourBudget = DetourBudget {
         edges: 0,
-        nodes: 0,
-        ends: 0,
         blockers: 0,
         points: 0,
     };
@@ -1658,7 +2227,6 @@ pub(crate) fn detour_budget(
     }
     for (n, &marked) in node_marks.iter().enumerate() {
         if marked {
-            budget.nodes += 1;
             let l = level(n);
             if l < level_marks.len() {
                 level_marks[l] = true;
@@ -1676,9 +2244,7 @@ pub(crate) fn detour_budget(
             if l < level_marks.len() && level_marks[l] {
                 budget.blockers += 1;
             }
-            continue;
         }
-        budget.ends += usize::from(node_marks[f]) + usize::from(node_marks[t]);
     }
     for (l, &marked) in level_marks.iter().enumerate() {
         if marked {
@@ -1754,7 +2320,7 @@ impl Detour {
     any(feature = "layout-vertical", feature = "layout-horizontal")
 ))]
 mod detour_tests {
-    use super::PortSide;
+    use super::{PortBound, PortPolicy, PortSide};
     use crate::graph::{Direction, Graph};
     use crate::ir::{EdgePath, LayoutIR};
     use crate::render::engine::RenderOptions;
@@ -1785,19 +2351,35 @@ mod detour_tests {
             .iter()
             .map(|n| (n.x, n.y, n.width, n.height))
             .collect();
-        let inside = |x: usize, y: usize| {
+        // A node's body must carry no edge ink. A boxed or custom node
+        // paints its own border with box glyphs, so for a multi-row
+        // node only the interior counts.
+        let in_rect = |x: usize, y: usize| {
             rects
                 .iter()
                 .any(|&(nx, ny, w, h)| (nx..nx + w).contains(&x) && (ny..ny + h).contains(&y))
+        };
+        let inside = |x: usize, y: usize| {
+            rects.iter().any(|&(nx, ny, w, h)| {
+                if h > 1 {
+                    (nx + 1..nx + w.saturating_sub(1)).contains(&x)
+                        && (ny + 1..ny + h.saturating_sub(1)).contains(&y)
+                } else {
+                    (nx..nx + w).contains(&x) && (ny..ny + h).contains(&y)
+                }
+            })
         };
         let loop_cells: Vec<(usize, usize)> =
             ir.nodes().iter().filter_map(|n| n.self_loop_at).collect();
         // Two edges share an overlapping horizontal run on one row only
         // when they share a layout end: a fan-out bus (same source — a
         // reversed edge's included, it is drawn from its layout source)
-        // or a fan-in into one face cell (same target). Anything else
+        // or a fan-in into one face cell (same target) — or when the
+        // overlap is exactly one cell that is an endpoint of both, a
+        // port two ends share under the node's policy. Anything else
         // merges two unrelated edges into one unreadable line.
-        let mut runs: Vec<(usize, usize, usize, (usize, usize))> = Vec::new();
+        type Run = (usize, usize, usize, (usize, usize), [(usize, usize); 2]);
+        let mut runs: Vec<Run> = Vec::new();
         for (i, e) in ir.edges().iter().enumerate() {
             let v = crate::render::engine::view::LayoutView::edge(ir, i);
             crate::render::engine::plan::for_each_h_run_all(
@@ -1813,25 +2395,36 @@ mod detour_tests {
                     } else {
                         (e.from_id, e.to_id)
                     };
-                    runs.push((row, a, b, ends))
+                    let cells = [(e.from_x, e.from_y), (e.to_x, e.to_y)];
+                    runs.push((row, a, b, ends, cells))
                 },
             );
         }
-        for (i, &(row, a0, a1, ends_a)) in runs.iter().enumerate() {
-            for &(row_b, b0, b1, ends_b) in &runs[i + 1..] {
+        for (i, &(row, a0, a1, ends_a, cells_a)) in runs.iter().enumerate() {
+            for &(row_b, b0, b1, ends_b, cells_b) in &runs[i + 1..] {
                 let shared_end = ends_a.0 == ends_b.0 || ends_a.1 == ends_b.1;
+                // Two ends on one port — an endpoint cell both edges
+                // own, on this row or the row a side face's stub runs
+                // on beside it — run together from that cell until they
+                // part; that is what sharing a port draws.
+                let (lo, hi) = (a0.max(b0), a1.min(b1));
+                let shared_port = cells_a.iter().any(|c| {
+                    cells_b.contains(c)
+                        && c.1.abs_diff(row) <= 1
+                        && (lo.saturating_sub(1)..=hi + 1).contains(&c.0)
+                });
                 assert!(
-                    row != row_b || shared_end || a1 < b0 || b1 < a0,
-                    "{tag}: runs of different sources overlap on row {row}: [{a0}, {a1}] vs [{b0}, {b1}]:\n{out}"
+                    row != row_b || shared_end || a1 < b0 || b1 < a0 || shared_port,
+                    "{tag}: runs of different sources overlap on row {row}: [{a0}, {a1}] vs [{b0}, {b1}] (edges {ends_a:?} at {cells_a:?} vs {ends_b:?} at {cells_b:?}):\n{out}"
                 );
             }
         }
         for y in 0..ir.height() {
             for x in 0..ir.width() {
                 let ch = cell_at(&out, x, y);
-                if inside(x, y) {
+                if in_rect(x, y) {
                     assert!(
-                        !EDGE_INK.contains(ch),
+                        !inside(x, y) || !EDGE_INK.contains(ch),
                         "{tag}: edge ink {ch:?} inside a node at ({x}, {y}):\n{out}"
                     );
                     continue;
@@ -2027,10 +2620,12 @@ mod detour_tests {
     #[cfg(feature = "layout-vertical")]
     #[test]
     fn spread_ports_on_skip_edges_keep_a_budgeted_jog_row() {
+        use crate::render::engine::BoxedNode;
         let mut g = Graph::new();
+        g.set_port_policy(PortPolicy::Spread(PortBound::Face));
         g.add_node(1usize, "A");
         g.add_node(2usize, "B");
-        g.add_node(3usize, "Wide target node");
+        g.add_node(3usize, BoxedNode("Wide target node"));
         g.add_node(4usize, "L");
         g.add_node(5usize, "R");
         g.add_edge(1usize, 2usize, None);
@@ -2157,6 +2752,28 @@ mod detour_tests {
                 .from_port(PortSide::Clockwise);
             g.add_edge(3usize, 3usize, None);
             fixtures.push(("lateral", g, cfg));
+            let mut cfg = LayoutConfig::standard();
+            cfg.direction = direction;
+            let mut g = Graph::new();
+            g.set_port_policy(PortPolicy::Spread(PortBound::Ports(2)));
+            g.add_node(1usize, crate::render::engine::BoxedNode("Hub"));
+            g.add_node(2usize, crate::render::engine::BoxedNode("Pair"));
+            g.set_node_port_policy(2usize, PortPolicy::Paired);
+            g.add_node(3usize, "In");
+            g.add_node(4usize, "Out");
+            g.add_node(5usize, "Side");
+            g.add_edge(3usize, 1usize, None).to_port(PortSide::Upstream);
+            g.add_edge(5usize, 1usize, None).to_port(PortSide::Upstream);
+            g.add_edge(1usize, 2usize, None)
+                .from_port(PortSide::Upstream)
+                .to_port(PortSide::Downstream);
+            g.add_edge(1usize, 4usize, None)
+                .from_port(PortSide::Clockwise);
+            g.add_edge(2usize, 4usize, None)
+                .from_port(PortSide::Clockwise);
+            g.add_edge(3usize, 2usize, None)
+                .to_port(PortSide::Counterclockwise);
+            fixtures.push(("policies", g, cfg));
         }
         // A zero-extent neighbor occupies no cell: the lane beside it
         // is free on both backends (the heap's inclusive blocker used
@@ -2446,7 +3063,7 @@ mod detour_tests {
     /// must not share that cell.
     #[cfg(feature = "layout-vertical")]
     #[test]
-    fn a_lane_less_end_is_head_on_before_conflicts_are_settled() {
+    fn a_lane_less_end_attaches_head_on_and_shares_the_port() {
         let mut g = Graph::new();
         g.add_node(0usize, "Root");
         g.add_node(1usize, "M");
@@ -2457,17 +3074,14 @@ mod detour_tests {
         g.add_edge(1usize, 2usize, None).from_port(PortSide::East);
         let ir = g.compute_layout();
         let out = ir.render_string(&RenderOptions::plain());
-        // The east exit fell back (Direct or Corner); the arrival still
-        // detours; the two never share a cell.
+        // The east exit fell back (Direct or Corner) onto the leave
+        // face's port; the arrival still detours into that same port —
+        // under `Single` a face has one port and both ends share it.
         let exit = ir.edges().iter().find(|e| e.edge_index == 2).unwrap();
         assert!(!matches!(exit.path, EdgePath::Orthogonal { .. }), "{out}");
         let arrival = ir.edges().iter().find(|e| e.edge_index == 0).unwrap();
         assert!(matches!(arrival.path, EdgePath::Orthogonal { .. }), "{out}");
-        assert_ne!(
-            (exit.from_x, exit.from_y),
-            (arrival.to_x, arrival.to_y),
-            "{out}"
-        );
+        assert_eq!(exit.from_x, arrival.to_x, "{out}");
         assert_routing_invariants(&ir, "lane-less east exit");
     }
 

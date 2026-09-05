@@ -231,7 +231,9 @@ the shape of a route that leaves a node against the flow or beside
 it), plus `SideChannel` and `Spline` variants for hand-built IRs. The
 level-axis scalars (`bend_at`, `channel_at`, `span_start`/`span_end`)
 live on the axis the edge's `flow_axis` names — a row for `Y` trunks,
-a column for `X`.
+a column for `X`. Every edge also reports its attachments:
+`from_port` / `to_port` say which side each end asked for and which
+physical side it took — see [ports.md](ports.md).
 
 Export it as JSON (schema v1.5) for a renderer in another language:
 

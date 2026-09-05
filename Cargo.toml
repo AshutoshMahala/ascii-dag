@@ -87,3 +87,8 @@ panic = "abort"     # Remove panic unwinding (critical for WASM size)
 
 [profile.dev]
 # Note: panic = "abort" removed - set in downstream project for embedded targets
+
+[[example]]
+name = "ports"
+path = "examples/ports.rs"
+required-features = ["ports", "layout-vertical", "layout-horizontal"]
