@@ -97,6 +97,7 @@ pub struct CustomNodeArena {
 
 /// Edge routing type (no heap allocation version).
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum EdgePathArena {
     /// Straight flow segment (endpoints share their cross-axis line).
     Direct,
@@ -125,6 +126,16 @@ pub enum EdgePathArena {
         waypoints_len: usize,
         /// Level-axis offset of the first bend past the source.
         start_offset: usize,
+    },
+    #[cfg(feature = "ports")]
+    /// An explicit orthogonal polyline — every turn stated. Mirrors
+    /// heap `EdgePath::Orthogonal`; the bends live in the shared
+    /// waypoints array.
+    Orthogonal {
+        /// Start index into the waypoints array
+        bends_start: usize,
+        /// Number of bends
+        bends_len: usize,
     },
     /// Bézier spline hint (for SVG/canvas renderers; ASCII renderers fall back to Direct).
     /// Mirrors zigraph's `EdgePath.spline`.
@@ -199,6 +210,11 @@ pub struct LayoutEdgeArena {
     pub min_y: usize,
     /// Maximum Y coordinate this edge occupies (for early-exit optimization)
     pub max_y: usize,
+    /// How the end at the DECLARED source is attached (mirrors heap
+    /// `LayoutEdge::from_port`).
+    pub from_port: crate::PortAttachment,
+    /// How the end at the DECLARED target is attached.
+    pub to_port: crate::PortAttachment,
 }
 
 /// Subgraph bounding box for arena-backed layout.
@@ -454,7 +470,9 @@ impl<'a> LayoutIRArena<'a> {
         &self.level_data[start..end]
     }
 
-    /// Get waypoints for a multi-segment edge.
+    /// The stored points of an edge's path: a multi-segment edge's
+    /// waypoints, an orthogonal edge's bends; empty for every other
+    /// path shape.
     #[inline]
     pub fn edge_waypoints(&self, edge: &LayoutEdgeArena) -> &[(usize, usize)] {
         match edge.path {
@@ -463,6 +481,11 @@ impl<'a> LayoutIRArena<'a> {
                 waypoints_len,
                 ..
             } => &self.waypoints[waypoints_start..waypoints_start + waypoints_len],
+            #[cfg(feature = "ports")]
+            EdgePathArena::Orthogonal {
+                bends_start,
+                bends_len,
+            } => &self.waypoints[bends_start..bends_start + bends_len],
             _ => &[],
         }
     }

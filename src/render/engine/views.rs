@@ -123,6 +123,11 @@ pub struct EdgeView<'s> {
     pub path: EdgePathView<'s>,
     /// Physical axis of the edge's trunk.
     pub flow_axis: FlowAxis,
+    /// How the end at the declared source is attached — the requested
+    /// side and the physical side it landed on (`from` is the cell).
+    pub from_port: crate::PortAttachment,
+    /// How the end at the declared target is attached (`to` is the cell).
+    pub to_port: crate::PortAttachment,
     /// The edge's label, if it declared one — with its resolved color
     /// and where it ended up (inline, legend, or omitted).
     pub label: Option<LabelView<'s>>,
@@ -157,6 +162,14 @@ pub enum EdgePathView<'s> {
         waypoints: &'s [(usize, usize)],
         /// Level-axis offset of the first bend past the source.
         start_offset: usize,
+    },
+    #[cfg(feature = "ports")]
+    /// An explicit orthogonal polyline — every turn stated, lent from
+    /// the IR as physical `(x, y)` bend cells (see
+    /// [`EdgePath::Orthogonal`](crate::ir::EdgePath::Orthogonal)).
+    Orthogonal {
+        /// The bend cells, in path order.
+        bends: &'s [(usize, usize)],
     },
     /// A preserved self-loop: no routed path, one marker cell.
     SelfLoop {
@@ -375,8 +388,12 @@ impl Scene<'_, '_> {
                         waypoints,
                         start_offset,
                     },
+                    #[cfg(feature = "ports")]
+                    PathRef::Orthogonal { bends } => EdgePathView::Orthogonal { bends },
                 },
                 flow_axis: e.flow_axis,
+                from_port: e.from_port,
+                to_port: e.to_port,
                 label: e.label.map(|text| LabelView {
                     text,
                     color: ep.label_color,
@@ -391,6 +408,15 @@ impl Scene<'_, '_> {
     /// label — which has no inline placement host — reports where it
     /// actually went (legend or omitted).
     fn self_loop_view_at(&self, scene_index: usize, j: usize) -> EdgeView<'_> {
+        /// The side the `↺` cell sits on: one cell past the node on
+        /// the cross axis — East under vertical flows, South under
+        /// horizontal ones.
+        fn loop_marker_side(flow_axis: FlowAxis) -> crate::PhysicalSide {
+            match flow_axis {
+                FlowAxis::Y => crate::PhysicalSide::East,
+                FlowAxis::X => crate::PhysicalSide::South,
+            }
+        }
         let plan = self.plan();
         with_view!(self, v => {
             let r = LayoutView::self_loop(v, j);
@@ -418,6 +444,11 @@ impl Scene<'_, '_> {
                 to: at,
                 path: EdgePathView::SelfLoop { at },
                 flow_axis,
+                // A preserved loop has no routed ends: both report the
+                // marker's side (past the node on the cross axis), as
+                // undeclared — declared sides on loops are deferred.
+                from_port: crate::PortAttachment::auto(loop_marker_side(flow_axis)),
+                to_port: crate::PortAttachment::auto(loop_marker_side(flow_axis)),
                 label: r.label.map(|text| LabelView {
                     text,
                     color: ep.label_color,
@@ -696,6 +727,8 @@ mod tests {
         b.add_edge(crate::ir::LayoutEdge {
             from_id: 0,
             to_id: 1,
+            from_port: crate::PortAttachment::auto(crate::PhysicalSide::South),
+            to_port: crate::PortAttachment::auto(crate::PhysicalSide::North),
             from_x: 1,
             from_y: 0,
             to_x: 1,

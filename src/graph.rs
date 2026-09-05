@@ -206,6 +206,8 @@ use crate::algorithms::sugiyama::config::LayoutConfig;
 use crate::algorithms::sugiyama::config::SugiyamaConfig;
 #[cfg(feature = "alloc")]
 use crate::algorithms::sugiyama::crossing::CrossingReducer;
+#[cfg(all(feature = "alloc", feature = "ports"))]
+use crate::algorithms::sugiyama::ports::{Port, PortPolicy, PortSide};
 #[cfg(feature = "alloc")]
 use crate::errors::GraphError;
 #[cfg(feature = "alloc")]
@@ -309,12 +311,13 @@ impl From<NodeId> for usize {
 #[derive(Debug, Clone, Copy)]
 pub struct Auto;
 
-/// Receipt for one [`Graph::add_edge`] call — always returned, uniform
+/// Receipt for one [`Graph::add_edge`] call — always produced, uniform
 /// in shape: an edge was always inserted, and the booleans answer the
 /// one question the caller cannot already answer (did an endpoint get
-/// auto-created?). Deliberately NOT `#[must_use]`: a receipt is
-/// branchable domain data, not a warning — ignoring it is legitimate,
-/// and statement-position calls compile unchanged.
+/// auto-created?). Reached through the [`EdgeHandle`] `add_edge`
+/// returns (which derefs to it). Deliberately NOT `#[must_use]`: a
+/// receipt is branchable domain data, not a warning — ignoring it is
+/// legitimate, and statement-position calls compile unchanged.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EdgeInsertion {
@@ -326,6 +329,75 @@ pub struct EdgeInsertion {
     pub created_source: bool,
     /// Whether the target endpoint was auto-created as a placeholder.
     pub created_target: bool,
+}
+
+/// What [`Graph::add_edge`] returns: the [`EdgeInsertion`] receipt
+/// (through `Deref`, so `.edge` / `.created_*` read directly) plus
+/// eager, chainable layout declarations for the edge just inserted.
+/// Nothing is deferred — the edge exists before this handle does, and
+/// each declaration mutates the graph immediately; the handle is
+/// merely the shortest spelling of "…and about that edge". Bind
+/// `*handle` (or [`receipt`](Self::receipt)) to keep the `Copy`
+/// receipt past the graph borrow.
+#[cfg(feature = "alloc")]
+pub struct EdgeHandle<'g, 'a> {
+    #[cfg_attr(not(feature = "ports"), allow(dead_code))] // read only by the port setters
+    graph: &'g mut Graph<'a>,
+    receipt: EdgeInsertion,
+}
+
+#[cfg(feature = "alloc")]
+impl core::ops::Deref for EdgeHandle<'_, '_> {
+    type Target = EdgeInsertion;
+    #[inline]
+    fn deref(&self) -> &EdgeInsertion {
+        &self.receipt
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl core::fmt::Debug for EdgeHandle<'_, '_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EdgeHandle")
+            .field("receipt", &self.receipt)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl EdgeHandle<'_, '_> {
+    /// The `Copy` receipt, detached from the graph borrow.
+    pub fn receipt(&self) -> EdgeInsertion {
+        self.receipt
+    }
+
+    /// Declare the side the edge leaves its DECLARED `from` node
+    /// from. The layout reports the side it used on the IR edge's
+    /// `from_port`; the crate docs' *Ports* section lists the sides.
+    ///
+    /// The name mirrors `add_edge(from, to)`; clippy's naming
+    /// heuristic reads `from_*` as a constructor, which this is not.
+    #[cfg(feature = "ports")]
+    #[allow(clippy::wrong_self_convention)]
+    pub fn from_port(self, port: impl Into<Port>) -> Self {
+        self.graph
+            .declare_port(self.receipt.edge, 0, port.into().side());
+        self
+    }
+
+    /// Declare the side the edge arrives at its DECLARED `to` node
+    /// on. The layout reports the side it used on the IR edge's
+    /// `to_port`.
+    ///
+    /// Mirrors `add_edge(from, to)`; clippy's heuristic reads `to_*`
+    /// as a borrowing conversion, which this is not.
+    #[cfg(feature = "ports")]
+    #[allow(clippy::wrong_self_convention)]
+    pub fn to_port(self, port: impl Into<Port>) -> Self {
+        self.graph
+            .declare_port(self.receipt.edge, 1, port.into().side());
+        self
+    }
 }
 
 /// How [`Graph::add_edge`] treats an edge endpoint that was never
@@ -447,10 +519,72 @@ impl<'g, 'a> LayoutRun<'g, 'a> {
                 diagnostics.emit(note);
             }
         }
-        match self.config {
+        // Port conditions derivable from the graph alone, per run: a
+        // declared side on a self-loop is deferred. (Several edges
+        // sharing one port cell is the ordinary drawing — every fan-in
+        // and fan-out does it — and never a condition.) Edges in input
+        // order.
+        #[cfg(feature = "ports")]
+        let frame = {
+            use crate::algorithms::sugiyama::ports::frame;
+            let direction = self.config.map_or(self.graph.direction(), |c| c.direction);
+            frame(direction)
+        };
+        #[cfg(feature = "ports")]
+        if !self.graph.edge_ports.is_empty() {
+            use crate::algorithms::sugiyama::ports::PortSide;
+            for (ei, &(from_id, to_id, _)) in self.graph.edges.iter().enumerate() {
+                if from_id != to_id {
+                    continue;
+                }
+                let (a, b) = self.graph.edge_ports.get(ei).copied().unwrap_or_default();
+                if !matches!(a, PortSide::Auto) || !matches!(b, PortSide::Auto) {
+                    diagnostics.emit(crate::diagnostics::DiagnosticKind::PortIgnoredOnSelfLoop {
+                        edge: ei,
+                    });
+                }
+            }
+        }
+        let ir = match self.config {
             Some(config) => self.graph.compute_layout_with_config(config),
             None => self.graph.compute_layout(),
+        };
+        // The layout's own verdicts: a declared side whose end attached
+        // elsewhere (no lane, or the cell was taken) — read back from the
+        // attachments the IR reports, so the condition is exactly what
+        // the drawing shows.
+        #[cfg(feature = "ports")]
+        if !self.graph.edge_ports.is_empty() {
+            use crate::algorithms::sugiyama::ports::{EndRole, Face, PortSide};
+            let (axis, flipped) = frame;
+            for e in ir.edges() {
+                for (end, attachment) in [
+                    (crate::EdgeEnd::Source, e.from_port),
+                    (crate::EdgeEnd::Target, e.to_port),
+                ] {
+                    if matches!(attachment.requested, PortSide::Auto) {
+                        continue;
+                    }
+                    let role = match (end, e.reversed) {
+                        (crate::EdgeEnd::Source, false) | (crate::EdgeEnd::Target, true) => {
+                            EndRole::Source
+                        }
+                        _ => EndRole::Target,
+                    };
+                    let requested =
+                        Face::of(attachment.requested, axis, flipped, role).physical(axis, flipped);
+                    if requested != attachment.side {
+                        diagnostics.emit(crate::diagnostics::DiagnosticKind::PortUnroutable {
+                            edge: e.edge_index,
+                            end,
+                            requested,
+                            resolved: attachment.side,
+                        });
+                    }
+                }
+            }
         }
+        ir
     }
 
     /// Report terminal: run with an owned collector and package the
@@ -549,6 +683,26 @@ impl From<NodeId> for IdOrAuto {
 pub struct Graph<'a> {
     pub(crate) nodes: Vec<(usize, &'a str)>,
     pub(crate) edges: Vec<(usize, usize, Option<&'a str>)>,
+    /// Declared attachment sides per edge — a layout input, consumed
+    /// by attachment resolution and reported back as resolved
+    /// geometry. PAY-PER-USE: stays empty (no allocation) until the
+    /// first declaration, which materializes it to `edges.len()` with
+    /// `Auto`/`Auto`; readers treat a missing entry as `Auto`. A graph
+    /// that never declares a port stores nothing per edge.
+    #[cfg(feature = "ports")]
+    pub(crate) edge_ports: Vec<(PortSide, PortSide)>,
+    /// The graph-wide port policy — how a node places the ends
+    /// declared on a face; `Single` unless set.
+    #[cfg(feature = "ports")]
+    pub(crate) port_policy: PortPolicy,
+    /// Per-node overrides of [`port_policy`](Self::port_policy), by
+    /// node id, sorted; empty until the first override.
+    #[cfg(feature = "ports")]
+    pub(crate) node_port_policies: Vec<(usize, PortPolicy)>,
+    /// The one placer every `Custom` policy runs; `None` until
+    /// [`set_port_placer`](Self::set_port_placer).
+    #[cfg(feature = "ports")]
+    pub(crate) port_placer: Option<crate::PortPlacer>,
     pub(crate) render_mode: RenderMode,
     pub(crate) direction: Direction,
     pub(crate) auto_created: HashSet<usize>, // Track auto-created nodes for visual distinction (O(1) lookups)
@@ -616,6 +770,14 @@ impl<'a> Graph<'a> {
         let mut dag = Self {
             nodes: nodes.to_vec(),
             edges: Vec::new(),
+            #[cfg(feature = "ports")]
+            edge_ports: Vec::new(),
+            #[cfg(feature = "ports")]
+            port_policy: PortPolicy::Single,
+            #[cfg(feature = "ports")]
+            node_port_policies: Vec::new(),
+            #[cfg(feature = "ports")]
+            port_placer: None,
             render_mode: RenderMode::default(),
             direction: Direction::default(),
             auto_created: HashSet::new(),
@@ -681,6 +843,14 @@ impl<'a> Graph<'a> {
         let mut dag = Self {
             nodes: nodes.to_vec(),
             edges: Vec::new(),
+            #[cfg(feature = "ports")]
+            edge_ports: Vec::new(),
+            #[cfg(feature = "ports")]
+            port_policy: PortPolicy::Single,
+            #[cfg(feature = "ports")]
+            node_port_policies: Vec::new(),
+            #[cfg(feature = "ports")]
+            port_placer: None,
             render_mode: RenderMode::default(),
             direction: Direction::default(),
             auto_created: HashSet::new(),
@@ -1099,17 +1269,23 @@ impl<'a> Graph<'a> {
     /// Accepts raw ids and [`NodeId`] handles alike. The [`AUTO`]
     /// sentinel is *not* accepted here — an edge references nodes, and
     /// "auto" is meaningless as a reference.
-    pub fn add_edge(
-        &mut self,
+    pub fn add_edge<'g>(
+        &'g mut self,
         from: impl Into<NodeId>,
         to: impl Into<NodeId>,
         label: Option<&'a str>,
-    ) -> EdgeInsertion {
+    ) -> EdgeHandle<'g, 'a> {
         let (from, to) = (from.into().id(), to.into().id());
         let created_source = self.ensure_node_exists(from);
         let created_target = self.ensure_node_exists(to);
         let edge = self.edges.len();
         self.edges.push((from, to, label));
+        #[cfg(feature = "ports")]
+        if !self.edge_ports.is_empty() {
+            // Only a graph that already declared ports keeps the table
+            // parallel; everyone else pays nothing here.
+            self.edge_ports.push((PortSide::Auto, PortSide::Auto));
+        }
 
         // Update adjacency lists (O(1) lookups)
         if let (Some(&from_idx), Some(&to_idx)) =
@@ -1118,10 +1294,13 @@ impl<'a> Graph<'a> {
             self.children[from_idx].push(to_idx);
             self.parents[to_idx].push(from_idx);
         }
-        EdgeInsertion {
-            edge,
-            created_source,
-            created_target,
+        EdgeHandle {
+            receipt: EdgeInsertion {
+                edge,
+                created_source,
+                created_target,
+            },
+            graph: self,
         }
     }
 
@@ -1132,6 +1311,119 @@ impl<'a> Graph<'a> {
     /// the record either way).
     pub fn set_missing_node_policy(&mut self, policy: MissingNodePolicy) {
         self.missing_node_policy = Some(policy);
+    }
+
+    /// Declare the sides an edge (by input index) attaches to —
+    /// the index form of the handle's `from_port` / `to_port`, for a
+    /// declaration made after insertion; `false` for an unknown edge.
+    #[cfg(feature = "ports")]
+    pub fn set_edge_ports(&mut self, edge: usize, source: PortSide, target: PortSide) -> bool {
+        if edge >= self.edges.len() {
+            return false;
+        }
+        self.declare_port(edge, 0, source);
+        self.declare_port(edge, 1, target);
+        true
+    }
+
+    /// Set the graph-wide port policy: how a node places the ends
+    /// declared on each of its faces (`Single` unless set — one shared
+    /// port per face). `false`, and nothing changes, for `Custom`
+    /// before a placer is registered
+    /// ([`set_port_placer`](Self::set_port_placer)).
+    #[cfg(feature = "ports")]
+    pub fn set_port_policy(&mut self, policy: PortPolicy) -> bool {
+        if policy == PortPolicy::Custom && self.port_placer.is_none() {
+            return false;
+        }
+        self.port_policy = policy;
+        true
+    }
+
+    /// The graph-wide port policy.
+    #[cfg(feature = "ports")]
+    pub fn port_policy(&self) -> PortPolicy {
+        self.port_policy
+    }
+
+    /// Register the placer every `Custom` policy runs — one per graph,
+    /// told the node id, so one function places every node. A later
+    /// registration replaces it for every `Custom` node.
+    #[cfg(feature = "ports")]
+    pub fn set_port_placer(&mut self, placer: crate::PortPlacer) {
+        self.port_placer = Some(placer);
+    }
+
+    /// The registered placer, if any.
+    #[cfg(feature = "ports")]
+    pub fn port_placer(&self) -> Option<crate::PortPlacer> {
+        self.port_placer
+    }
+
+    /// Override the port policy for one node; `false` for an unknown
+    /// node, or for `Custom` before a placer is registered. A face
+    /// with one cell holds one port whatever the policy.
+    #[cfg(feature = "ports")]
+    pub fn set_node_port_policy(&mut self, node: impl Into<NodeId>, policy: PortPolicy) -> bool {
+        let id = node.into().id();
+        if !self.id_to_index.contains_key(&id)
+            || (policy == PortPolicy::Custom && self.port_placer.is_none())
+        {
+            return false;
+        }
+        match self.node_port_policies.binary_search_by_key(&id, |e| e.0) {
+            Ok(i) => self.node_port_policies[i].1 = policy,
+            Err(i) => self.node_port_policies.insert(i, (id, policy)),
+        }
+        true
+    }
+
+    /// Remove a node's override so it follows the graph-wide policy
+    /// again, now and after that policy changes; `false` when the node
+    /// had none.
+    #[cfg(feature = "ports")]
+    pub fn clear_node_port_policy(&mut self, node: impl Into<NodeId>) -> bool {
+        let id = node.into().id();
+        match self.node_port_policies.binary_search_by_key(&id, |e| e.0) {
+            Ok(i) => {
+                self.node_port_policies.remove(i);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// The port policy a node is declared under: its override, else
+    /// the graph-wide policy. Unknown nodes read the graph-wide one.
+    #[cfg(feature = "ports")]
+    pub fn node_port_policy(&self, node: impl Into<NodeId>) -> PortPolicy {
+        let id = node.into().id();
+        self.node_port_policies
+            .binary_search_by_key(&id, |e| e.0)
+            .map_or(self.port_policy, |i| self.node_port_policies[i].1)
+    }
+
+    /// Record one declared side (`end` 0 = from, 1 = to) of an
+    /// existing edge. The table materializes on the first NON-`Auto`
+    /// declaration — the only moment a port-declaring graph pays; an
+    /// explicit `Auto` on an empty table is exactly what an undeclared
+    /// edge already means, so it costs nothing.
+    #[cfg(feature = "ports")]
+    fn declare_port(&mut self, edge: usize, end: usize, side: PortSide) {
+        debug_assert!(edge < self.edges.len());
+        if self.edge_ports.is_empty() && matches!(side, PortSide::Auto) {
+            return;
+        }
+        if self.edge_ports.len() < self.edges.len() {
+            self.edge_ports
+                .resize(self.edges.len(), (PortSide::Auto, PortSide::Auto));
+        }
+        let slot = &mut self.edge_ports[edge];
+        if end == 0 {
+            slot.0 = side;
+        } else {
+            slot.1 = side;
+        }
     }
 
     /// Get the label for an edge, if any.

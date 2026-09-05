@@ -21,6 +21,9 @@
 //! └─────────────────────────────────────────┘
 //! ```
 
+#[cfg(feature = "ports")]
+use crate::algorithms::sugiyama::ports::Port;
+use crate::algorithms::sugiyama::ports::PortSide;
 use crate::graph::arena::Arena;
 
 /// Node data stride: fields per node
@@ -101,15 +104,85 @@ pub struct CsrGraph<'a> {
     subgraph_count: usize,
     /// Per-node subgraph index (u32::MAX = not in any subgraph)
     node_subgraph: &'a [u32],
+    /// Declared attachment sides, two encoded bytes per edge
+    /// (`[from, to]`), present ONLY for a graph built with ports —
+    /// empty otherwise, so an undeclared graph stores nothing.
+    edge_ports: &'a [u8],
+    /// Per-node port policy codes (`0` = the graph's policy), present
+    /// only with a port table.
+    #[cfg(feature = "ports")]
+    node_port_policies: &'a [u8],
+    /// The graph-wide port policy code.
+    #[cfg(feature = "ports")]
+    port_policy: u8,
+    /// The placer a `Custom` policy runs — one per graph.
+    #[cfg(feature = "ports")]
+    port_placer: Option<crate::PortPlacer>,
 }
 
 impl<'a> CsrGraph<'a> {
+    /// The port policy node `index` places under: its override, else
+    /// the graph's; `Single` without a port table.
+    #[cfg(feature = "ports")]
+    pub(crate) fn node_port_policy(&self, index: usize) -> crate::PortPolicy {
+        use crate::PortPolicy;
+        self.node_port_policies
+            .get(index)
+            .and_then(|&code| PortPolicy::from_code(code))
+            .or_else(|| PortPolicy::from_code(self.port_policy))
+            .unwrap_or(PortPolicy::Single)
+    }
+
+    /// The placer every `Custom` policy runs, if one was registered.
+    #[cfg(feature = "ports")]
+    pub(crate) fn port_placer(&self) -> Option<crate::PortPlacer> {
+        self.port_placer
+    }
+
+    /// Whether this graph carries a port table (built with ports).
+    pub fn has_ports(&self) -> bool {
+        !self.edge_ports.is_empty()
+    }
+
+    /// The declared sides of edge `index` — `Auto`/`Auto` when the
+    /// graph carries no port table.
+    pub(crate) fn edge_ports(&self, index: usize) -> (PortSide, PortSide) {
+        match self.edge_ports.get(index * 2..index * 2 + 2) {
+            Some(pair) => (PortSide::from_u8(pair[0]), PortSide::from_u8(pair[1])),
+            None => (PortSide::Auto, PortSide::Auto),
+        }
+    }
+
     /// Calculate required arena size for a graph with given dimensions.
     ///
     /// This helps users pre-allocate the right arena size.
     #[inline]
     pub fn required_arena_size(node_count: usize, edge_count: usize, label_bytes: usize) -> usize {
         Self::required_arena_size_with_subgraphs(node_count, edge_count, label_bytes, 0)
+    }
+
+    /// Like [`required_arena_size_with_content`](Self::required_arena_size_with_content),
+    /// plus the port table a builder constructed with ports carries:
+    /// two bytes per edge and one policy byte per node, plus alignment
+    /// slack.
+    #[cfg(feature = "ports")]
+    pub fn required_arena_size_with_ports(
+        node_count: usize,
+        edge_count: usize,
+        label_bytes: usize,
+        subgraph_count: usize,
+        custom_count: usize,
+    ) -> usize {
+        Self::required_arena_size_with_content(
+            node_count,
+            edge_count,
+            label_bytes,
+            subgraph_count,
+            custom_count,
+        )
+        .saturating_add(edge_count.saturating_mul(2))
+        .saturating_add(node_count)
+        .saturating_add(16)
     }
 
     /// Like [`required_arena_size_with_subgraphs`](Self::required_arena_size_with_subgraphs),
@@ -156,6 +229,9 @@ impl<'a> CsrGraph<'a> {
         let children_data_size = edge_count * core::mem::size_of::<u32>();
         let parents_offsets_size = (node_count + 1) * core::mem::size_of::<u32>();
         let parents_data_size = edge_count * core::mem::size_of::<u32>();
+        // The parent-index fill counters `build`/`to_csr` carve from the
+        // same arena: one `u32` per node.
+        let counters_size = node_count * core::mem::size_of::<u32>();
 
         // Subgraph storage
         let sg_data_size = subgraph_count * SUBGRAPH_STRIDE * core::mem::size_of::<usize>();
@@ -166,7 +242,7 @@ impl<'a> CsrGraph<'a> {
         };
 
         // Add alignment padding (estimate 8 bytes per allocation)
-        let num_allocs = 6 + if subgraph_count > 0 { 2 } else { 0 };
+        let num_allocs = 7 + if subgraph_count > 0 { 2 } else { 0 };
         let padding = num_allocs * 8;
 
         nodes_size
@@ -175,6 +251,7 @@ impl<'a> CsrGraph<'a> {
             .saturating_add(children_data_size)
             .saturating_add(parents_offsets_size)
             .saturating_add(parents_data_size)
+            .saturating_add(counters_size)
             .saturating_add(sg_data_size)
             .saturating_add(node_sg_size)
             .saturating_add(label_bytes)
@@ -464,6 +541,72 @@ impl<'a> CsrGraph<'a> {
         )
     }
 
+    /// [`compute_layout_arena`](Self::compute_layout_arena) with the
+    /// run's standing conditions replayed into `diagnostics` — the CSR
+    /// twin of the heap graph's `layout().compute(&mut cx)`: a declared
+    /// side on a self-loop (`W.Graph.Port.034`) before the layout, and
+    /// every declared side the layout could not honor
+    /// (`W.Graph.Port.035`) after it, read from the IR's attachments.
+    /// The plain method stays the quiet convenience.
+    pub fn compute_layout_arena_reporting<'b>(
+        &self,
+        config: &crate::algorithms::sugiyama::config::LayoutConfig<'_>,
+        temp_arena: &mut Arena<'_>,
+        output_arena: &'b mut Arena<'b>,
+        diagnostics: &mut crate::diagnostics::DiagnosticContext<'_>,
+    ) -> Result<crate::ir::arena::LayoutIRArena<'b>, crate::errors::GraphError> {
+        #[cfg(feature = "ports")]
+        if self.has_ports() {
+            for i in 0..self.edge_count() {
+                let (f, t) = self.edge(i);
+                if f != t {
+                    continue;
+                }
+                let (a, b) = self.edge_ports(i);
+                if !matches!(a, PortSide::Auto) || !matches!(b, PortSide::Auto) {
+                    diagnostics.emit(crate::diagnostics::DiagnosticKind::PortIgnoredOnSelfLoop {
+                        edge: i,
+                    });
+                }
+            }
+        }
+        let ir = self.compute_layout_arena(config, temp_arena, output_arena)?;
+        #[cfg(feature = "ports")]
+        if self.has_ports() {
+            use crate::algorithms::sugiyama::ports::{EndRole, Face, frame};
+            let (axis, flipped) = frame(config.direction);
+            for e in ir.edges() {
+                for (end, attachment) in [
+                    (crate::EdgeEnd::Source, e.from_port),
+                    (crate::EdgeEnd::Target, e.to_port),
+                ] {
+                    if matches!(attachment.requested, PortSide::Auto) {
+                        continue;
+                    }
+                    let role = match (end, e.reversed) {
+                        (crate::EdgeEnd::Source, false) | (crate::EdgeEnd::Target, true) => {
+                            EndRole::Source
+                        }
+                        _ => EndRole::Target,
+                    };
+                    let requested =
+                        Face::of(attachment.requested, axis, flipped, role).physical(axis, flipped);
+                    if requested != attachment.side {
+                        diagnostics.emit(crate::diagnostics::DiagnosticKind::PortUnroutable {
+                            edge: e.edge_index,
+                            end,
+                            requested,
+                            resolved: attachment.side,
+                        });
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "ports"))]
+        let _ = diagnostics;
+        Ok(ir)
+    }
+
     /// Create a `CsrGraph` from node and edge slices (batch construction).
     ///
     /// Edges use **node IDs** (not indices), matching the `Graph::from_edges` API.
@@ -621,6 +764,21 @@ pub struct CsrGraphBuilder<'a> {
     // Sparse custom-content entries (graph node index order)
     custom_nodes: &'a mut [crate::ir::arena::CustomNodeArena],
 
+    // Declared attachment sides, two encoded bytes per edge —
+    // PREALLOCATED by the with-ports constructor (setters never
+    // allocate); empty, with `ports == false`, otherwise.
+    edge_ports: &'a mut [u8],
+    #[cfg_attr(not(feature = "ports"), allow(dead_code))] // written only by `new_with_ports`
+    ports: bool,
+    // Per-node port policy codes (0 = inherit) and the graph-wide
+    // policy — preallocated with the port table.
+    #[cfg(feature = "ports")]
+    node_port_policies: &'a mut [u8],
+    #[cfg(feature = "ports")]
+    port_policy: u8,
+    #[cfg(feature = "ports")]
+    port_placer: Option<crate::PortPlacer>,
+
     // Tracking current progress
     current_node_count: usize,
     current_edge_count: usize,
@@ -707,6 +865,14 @@ impl<'a> CsrGraphBuilder<'a> {
             subgraph_data,
             node_subgraph,
             custom_nodes,
+            edge_ports: &mut [],
+            #[cfg(feature = "ports")]
+            node_port_policies: &mut [],
+            #[cfg(feature = "ports")]
+            port_policy: 0,
+            #[cfg(feature = "ports")]
+            port_placer: None,
+            ports: false,
             current_node_count: 0,
             current_edge_count: 0,
             current_label_offset: 0,
@@ -716,6 +882,41 @@ impl<'a> CsrGraphBuilder<'a> {
             max_edges,
             max_subgraphs: 0,
         })
+    }
+
+    /// Create a builder that will carry PORT declarations: the full
+    /// form (subgraphs, custom content) plus a preallocated port table
+    /// of two bytes per edge — so `from_port`/`to_port` on the handles
+    /// this builder's `add_edge` returns can never fail and never
+    /// allocate. Size the arena with
+    /// [`CsrGraph::required_arena_size_with_ports`].
+    #[cfg(feature = "ports")]
+    pub fn new_with_ports(
+        arena: &'a mut Arena<'a>,
+        max_nodes: usize,
+        max_edges: usize,
+        max_label_bytes: usize,
+        max_subgraphs: usize,
+        max_custom: usize,
+    ) -> Option<Self> {
+        let mut builder = Self::new_with_subgraphs(
+            arena,
+            max_nodes,
+            max_edges,
+            max_label_bytes,
+            max_subgraphs,
+            max_custom,
+        )?;
+        let (ports_ptr, _) = builder.arena.alloc_raw::<u8>(max_edges.checked_mul(2)?)?;
+        // SAFETY: alloc_raw validated and zeroed the bytes; zero encodes
+        // `Auto`, so an undeclared edge reads as "no declaration".
+        builder.edge_ports = unsafe { core::slice::from_raw_parts_mut(ports_ptr, max_edges * 2) };
+        let (policies_ptr, _) = builder.arena.alloc_raw::<u8>(max_nodes)?;
+        // SAFETY: as above; zero is the inherit code.
+        builder.node_port_policies =
+            unsafe { core::slice::from_raw_parts_mut(policies_ptr, max_nodes) };
+        builder.ports = true;
+        Some(builder)
     }
 
     /// Create a new builder with subgraph support.
@@ -794,6 +995,14 @@ impl<'a> CsrGraphBuilder<'a> {
             subgraph_data,
             node_subgraph,
             custom_nodes,
+            edge_ports: &mut [],
+            #[cfg(feature = "ports")]
+            node_port_policies: &mut [],
+            #[cfg(feature = "ports")]
+            port_policy: 0,
+            #[cfg(feature = "ports")]
+            port_placer: None,
+            ports: false,
             current_node_count: 0,
             current_edge_count: 0,
             current_label_offset: 0,
@@ -901,17 +1110,19 @@ impl<'a> CsrGraphBuilder<'a> {
     /// Add an edge between two node INDICES (not IDs).
     /// To get the index, use the return value of add_node.
     /// This is safer and faster than looking up IDs.
-    pub fn add_edge(&mut self, from_idx: usize, to_idx: usize) -> Option<()> {
+    pub fn add_edge(&mut self, from_idx: usize, to_idx: usize) -> Option<CsrEdgeHandle<'_, 'a>> {
         self.add_edge_with_label(from_idx, to_idx, "")
     }
 
-    /// Add a labeled edge between two node INDICES.
+    /// Add a labeled edge between two node INDICES. The returned handle
+    /// carries the edge index and the port declarations for a builder
+    /// constructed with ports; `None` when the edge does not fit.
     pub fn add_edge_with_label(
         &mut self,
         from_idx: usize,
         to_idx: usize,
         label: &str,
-    ) -> Option<()> {
+    ) -> Option<CsrEdgeHandle<'_, 'a>> {
         if self.current_edge_count >= self.max_edges {
             return None;
         }
@@ -943,6 +1154,78 @@ impl<'a> CsrGraphBuilder<'a> {
         }
 
         self.current_edge_count += 1;
+        Some(CsrEdgeHandle {
+            builder: self,
+            edge: idx,
+        })
+    }
+
+    /// Declare the sides edge `edge` (by index) attaches to. `None`
+    /// when the edge does not exist or the builder was constructed
+    /// without a port table — never an allocation.
+    #[cfg(feature = "ports")]
+    pub fn set_edge_ports(
+        &mut self,
+        edge: usize,
+        source: PortSide,
+        target: PortSide,
+    ) -> Option<()> {
+        if !self.ports || edge >= self.current_edge_count {
+            return None;
+        }
+        self.edge_ports[edge * 2] = source.to_u8();
+        self.edge_ports[edge * 2 + 1] = target.to_u8();
+        Some(())
+    }
+
+    /// Set the graph-wide port policy. `None` without a port table, or
+    /// for `Custom` before a placer is registered
+    /// ([`set_port_placer`](Self::set_port_placer)).
+    #[cfg(feature = "ports")]
+    pub fn set_port_policy(&mut self, policy: crate::PortPolicy) -> Option<()> {
+        if !self.ports || (policy == crate::PortPolicy::Custom && self.port_placer.is_none()) {
+            return None;
+        }
+        self.port_policy = policy.to_code();
+        Some(())
+    }
+
+    /// Register the placer every `Custom` policy runs — one per
+    /// builder, told the node id. A later registration replaces it.
+    /// `None` without a port table.
+    #[cfg(feature = "ports")]
+    pub fn set_port_placer(&mut self, placer: crate::PortPlacer) -> Option<()> {
+        if !self.ports {
+            return None;
+        }
+        self.port_placer = Some(placer);
+        Some(())
+    }
+
+    /// Override the port policy of node `index`. `None` for an unknown
+    /// node, without a port table, or for `Custom` before a placer is
+    /// registered.
+    #[cfg(feature = "ports")]
+    pub fn set_node_port_policy(&mut self, index: usize, policy: crate::PortPolicy) -> Option<()> {
+        if !self.ports
+            || index >= self.current_node_count
+            || (policy == crate::PortPolicy::Custom && self.port_placer.is_none())
+        {
+            return None;
+        }
+        self.node_port_policies[index] = policy.to_code();
+        Some(())
+    }
+
+    /// Remove node `index`'s override so it follows the graph-wide
+    /// policy again. `None` for an unknown node or without a port
+    /// table.
+    #[cfg(feature = "ports")]
+    pub fn clear_node_port_policy(&mut self, index: usize) -> Option<()> {
+        if !self.ports || index >= self.current_node_count {
+            return None;
+        }
+        self.node_port_policies[index] = crate::PortPolicy::INHERIT;
         Some(())
     }
 
@@ -1008,6 +1291,14 @@ impl<'a> CsrGraphBuilder<'a> {
             subgraph_data,
             node_subgraph,
             custom_nodes,
+            edge_ports,
+            #[cfg(feature = "ports")]
+            node_port_policies,
+            #[cfg(feature = "ports")]
+            port_policy,
+            #[cfg(feature = "ports")]
+            port_placer,
+            ports,
             current_node_count,
             current_edge_count,
             current_label_offset,
@@ -1101,7 +1392,72 @@ impl<'a> CsrGraphBuilder<'a> {
             } else {
                 &[]
             },
+            edge_ports: if ports {
+                &edge_ports[..edge_count * 2]
+            } else {
+                &[]
+            },
+            #[cfg(feature = "ports")]
+            node_port_policies: if ports {
+                &node_port_policies[..node_count]
+            } else {
+                &[]
+            },
+            #[cfg(feature = "ports")]
+            port_policy,
+            #[cfg(feature = "ports")]
+            port_placer,
         })
+    }
+}
+
+/// What [`CsrGraphBuilder::add_edge`] returns: the edge's index plus
+/// eager port declarations — the CSR twin of the heap graph's
+/// `EdgeHandle`, with the same names. Setters return `None` only for
+/// a builder constructed WITHOUT a port table (the builder's uniform
+/// `Option` idiom for a configuration failure); on a builder
+/// constructed with ports they cannot fail, because the table was
+/// preallocated and no setter ever allocates.
+pub struct CsrEdgeHandle<'b, 'a> {
+    #[cfg_attr(not(feature = "ports"), allow(dead_code))] // read only by the port setters
+    builder: &'b mut CsrGraphBuilder<'a>,
+    edge: usize,
+}
+
+impl core::fmt::Debug for CsrEdgeHandle<'_, '_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CsrEdgeHandle")
+            .field("edge", &self.edge)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CsrEdgeHandle<'_, '_> {
+    /// The inserted edge's index.
+    pub fn edge(&self) -> usize {
+        self.edge
+    }
+
+    /// Declare the side the edge leaves its `from` node from.
+    #[cfg(feature = "ports")]
+    #[allow(clippy::wrong_self_convention)] // mirrors add_edge(from, to); not a constructor
+    pub fn from_port(self, port: impl Into<Port>) -> Option<Self> {
+        if !self.builder.ports {
+            return None;
+        }
+        self.builder.edge_ports[self.edge * 2] = port.into().side().to_u8();
+        Some(self)
+    }
+
+    /// Declare the side the edge arrives at its `to` node on.
+    #[cfg(feature = "ports")]
+    #[allow(clippy::wrong_self_convention)] // mirrors add_edge(from, to); not a conversion
+    pub fn to_port(self, port: impl Into<Port>) -> Option<Self> {
+        if !self.builder.ports {
+            return None;
+        }
+        self.builder.edge_ports[self.edge * 2 + 1] = port.into().side().to_u8();
+        Some(self)
     }
 }
 
@@ -1316,6 +1672,44 @@ impl<'a> super::Graph<'a> {
         let parent_counts = unsafe { core::slice::from_raw_parts_mut(counters_ptr, node_count) };
         parent_counts.fill(0);
 
+        // Port table: only a graph that declared ports carries one
+        // (the heap table is empty until the first declaration).
+        #[cfg(not(feature = "ports"))]
+        let edge_ports_slice: &[u8] = &[];
+        #[cfg(feature = "ports")]
+        let edge_ports_slice: &[u8] = if self.edge_ports.is_empty() {
+            &[]
+        } else {
+            let (ports_ptr, _) = arena.alloc_raw::<u8>(edge_count * 2)?;
+            // SAFETY: alloc_raw validated and zeroed `edge_count * 2` bytes.
+            let table = unsafe { core::slice::from_raw_parts_mut(ports_ptr, edge_count * 2) };
+            for (edge_idx, &(src, dst)) in self.edge_ports.iter().enumerate() {
+                table[edge_idx * 2] = src.to_u8();
+                table[edge_idx * 2 + 1] = dst.to_u8();
+            }
+            table
+        };
+        // Policies ride the port table: one code per node, the graph's
+        // code, and its one registered placer.
+        #[cfg(feature = "ports")]
+        let (node_policy_slice, port_policy_code, port_placer): (
+            &[u8],
+            u8,
+            Option<crate::PortPlacer>,
+        ) = if self.edge_ports.is_empty() {
+            (&[], 0, None)
+        } else {
+            let (ptr, _) = arena.alloc_raw::<u8>(node_count)?;
+            // SAFETY: alloc_raw validated and zeroed `node_count` bytes.
+            let table = unsafe { core::slice::from_raw_parts_mut(ptr, node_count) };
+            for &(id, policy) in &self.node_port_policies {
+                if let Some(&idx) = self.id_to_index.get(&id) {
+                    table[idx] = policy.to_code();
+                }
+            }
+            (table, self.port_policy.to_code(), self.port_placer())
+        };
+
         for &(from_id, to_id, _) in &self.edges {
             if let (Some(from_idx), Some(to_idx)) =
                 (self.node_index(from_id), self.node_index(to_id))
@@ -1429,6 +1823,13 @@ impl<'a> super::Graph<'a> {
             subgraph_data,
             subgraph_count: sg_count,
             node_subgraph: node_subgraph_slice,
+            edge_ports: edge_ports_slice,
+            #[cfg(feature = "ports")]
+            node_port_policies: node_policy_slice,
+            #[cfg(feature = "ports")]
+            port_policy: port_policy_code,
+            #[cfg(feature = "ports")]
+            port_placer,
         })
     }
 
@@ -1454,5 +1855,27 @@ impl<'a> super::Graph<'a> {
                 .saturating_mul(core::mem::size_of::<crate::ir::arena::CustomNodeArena>()),
         )
         .saturating_add(if self.node_custom.is_empty() { 0 } else { 16 })
+        .saturating_add(self.csr_port_table_bytes())
+    }
+
+    /// The port table's arena bytes — only when something was declared
+    /// (and only with the `ports` feature at all).
+    fn csr_port_table_bytes(&self) -> usize {
+        #[cfg(feature = "ports")]
+        {
+            if self.edge_ports.is_empty() {
+                0
+            } else {
+                self.edges
+                    .len()
+                    .saturating_mul(2)
+                    .saturating_add(self.nodes.len())
+                    .saturating_add(16)
+            }
+        }
+        #[cfg(not(feature = "ports"))]
+        {
+            0
+        }
     }
 }

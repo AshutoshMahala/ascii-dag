@@ -20,6 +20,8 @@
 //! spans derive their flow sign from each edge's own coordinates,
 //! mirroring the compositor (M4).
 
+#[cfg(feature = "ports")]
+use super::cell::Dir;
 use super::color::CellColor;
 use super::config::{PlanOptions, RenderOptions};
 use super::mem::PlanBuf;
@@ -1390,6 +1392,14 @@ fn edge_row_span(
         lo = lo.min(y);
         hi = hi.max(y);
     };
+    // Explicit orthogonal paths: every bend row, on either axis.
+    #[cfg(feature = "ports")]
+    if let PathRef::Orthogonal { bends } = *path {
+        for &(_, by) in bends {
+            take(by);
+        }
+        return (lo, hi);
+    }
     // X flows: rows are the trunk rows — ports plus every waypoint's
     // row (waypoint excursions exceed the port span; bends are
     // columns and add no rows).
@@ -1408,6 +1418,9 @@ fn edge_row_span(
         return (lo, hi);
     }
     match *path {
+        // Explicit polylines: handled before the axis split above.
+        #[cfg(feature = "ports")]
+        PathRef::Orthogonal { .. } => {}
         PathRef::Direct | PathRef::Spline { .. } => {}
         PathRef::Corner { bend_at } => take(bend_at),
         PathRef::SideChannel {
@@ -1521,6 +1534,9 @@ fn count_h_runs(
         PathRef::Direct | PathRef::Spline { .. } => 0,
         PathRef::Corner { .. } => 1,
         PathRef::SideChannel { .. } => 2,
+        // Explicit polylines stroke per cell — no deferred runs.
+        #[cfg(feature = "ports")]
+        PathRef::Orthogonal { .. } => 0,
         PathRef::MultiSegment { waypoints, .. } => {
             let mut count = 0usize;
             let mut px = from_x;
@@ -1761,11 +1777,125 @@ pub(super) fn span_blocked<V: LayoutView>(
     blocked
 }
 
+// ── Explicit orthogonal paths ────────────────────────────────────────────
+//
+// One geometry authority for `PathRef::Orthogonal`, shared by the
+// compositor and every placement-side visitor: the legs between
+// consecutive distinct points, and the two marker cells. Whatever the
+// flow axis, an orthogonal path is a plain polyline in physical cells.
+
+#[cfg(feature = "ports")]
+/// Visit the legs of an orthogonal path — source endpoint → bends →
+/// target endpoint — as `(a, b, first, last)`. Zero-length legs are
+/// dropped, so `first`/`last` name the legs that actually touch the
+/// endpoints.
+pub(super) fn for_each_orthogonal_leg(
+    from: (usize, usize),
+    bends: &[(usize, usize)],
+    to: (usize, usize),
+    f: &mut dyn FnMut((usize, usize), (usize, usize), bool, bool),
+) {
+    let n = bends.len() + 2;
+    let point = |i: usize| -> (usize, usize) {
+        if i == 0 {
+            from
+        } else if i <= bends.len() {
+            bends[i - 1]
+        } else {
+            to
+        }
+    };
+    let mut a = from;
+    let mut first = true;
+    for i in 1..n {
+        let b = point(i);
+        if b == a {
+            continue;
+        }
+        // Last leg iff no later point differs from `b`.
+        let last = (i + 1..n).all(|j| point(j) == b);
+        f(a, b, first, last);
+        first = false;
+        a = b;
+    }
+}
+
+#[cfg(feature = "ports")]
+/// A marker cell and the direction its arrow points, if the end has one.
+pub(super) type MarkerCell = Option<((usize, usize), Dir)>;
+
+#[cfg(feature = "ports")]
+/// The marker cells of an orthogonal path — `(cell, direction)` for
+/// the source end (present only when the style resolves a marker
+/// there: on a reversed edge, the arrow that shows the original
+/// direction, pointing INTO the source) and for the target end — from
+/// one rule the painter and the placement visitors share: the cell
+/// adjacent to the endpoint along the endpoint's leg; that leg's far
+/// bend when the leg has no interior cell (the adjacent-bend rule the
+/// inferred-bend painters apply); nothing when the far point is the
+/// other endpoint.
+pub(super) fn orthogonal_markers(
+    from: (usize, usize),
+    bends: &[(usize, usize)],
+    to: (usize, usize),
+    from_m: bool,
+    to_m: bool,
+) -> (MarkerCell, MarkerCell) {
+    let toward = |c: (usize, usize), t: (usize, usize)| -> Dir {
+        if t.0 < c.0 {
+            Dir::Left
+        } else if t.0 > c.0 {
+            Dir::Right
+        } else if t.1 < c.1 {
+            Dir::Up
+        } else {
+            Dir::Down
+        }
+    };
+    // One cell from `a` toward `b` along an axis-aligned leg.
+    let step = |a: (usize, usize), b: (usize, usize)| -> (usize, usize) {
+        if a.0 == b.0 {
+            (a.0, if b.1 > a.1 { a.1 + 1 } else { a.1 - 1 })
+        } else {
+            (if b.0 > a.0 { a.0 + 1 } else { a.0 - 1 }, a.1)
+        }
+    };
+    let mut src = None;
+    let mut dst = None;
+    for_each_orthogonal_leg(from, bends, to, &mut |a, b, first, last| {
+        if a.0 != b.0 && a.1 != b.1 {
+            return;
+        }
+        let has_interior = a.0.abs_diff(b.0) + a.1.abs_diff(b.1) >= 2;
+        if first && from_m {
+            src = if has_interior {
+                let c = step(a, b);
+                Some((c, toward(c, a)))
+            } else if !last {
+                Some((b, toward(b, a)))
+            } else {
+                None
+            };
+        }
+        if last && to_m {
+            dst = if has_interior {
+                let c = step(b, a);
+                Some((c, toward(c, b)))
+            } else if !first {
+                Some((a, toward(a, b)))
+            } else {
+                None
+            };
+        }
+    });
+    (src, dst)
+}
+
 /// Visit EVERY horizontal run `(row, x0, x1)` (x-inclusive) this path
 /// paints, on every row — the row-agnostic authority behind
 /// [`for_each_h_run`] and the ink index. One body holds the painter's
 /// formulas; the per-row API filters this.
-pub(super) fn for_each_h_run_all(
+pub(crate) fn for_each_h_run_all(
     path: &PathRef<'_>,
     from_x: usize,
     from_y: usize,
@@ -1775,6 +1905,41 @@ pub(super) fn for_each_h_run_all(
     f: &mut dyn FnMut(usize, usize, usize),
 ) {
     let mut push = |row: usize, x0: usize, x1: usize| f(row, x0.min(x1), x0.max(x1));
+    // Explicit orthogonal paths are physical polylines on either axis:
+    // every horizontal leg is one run, its bend cells included, the
+    // endpoint faces trimmed.
+    #[cfg(feature = "ports")]
+    if let PathRef::Orthogonal { bends } = *path {
+        for_each_orthogonal_leg(
+            (from_x, from_y),
+            bends,
+            (to_x, to_y),
+            &mut |a, b, first, last| {
+                if a.1 != b.1 || a.0 == b.0 {
+                    return;
+                }
+                let (mut lo, mut hi) = (a.0.min(b.0), a.0.max(b.0));
+                if first {
+                    if a.0 < b.0 {
+                        lo += 1;
+                    } else {
+                        hi -= 1;
+                    }
+                }
+                if last {
+                    if b.0 < a.0 {
+                        lo += 1;
+                    } else {
+                        hi -= 1;
+                    }
+                }
+                if lo <= hi {
+                    push(a.1, lo, hi);
+                }
+            },
+        );
+        return;
+    }
     // X flows: horizontal ink is the TRUNK segments (node faces
     // trimmed, arrow cells included, bend corners included) — the
     // exact mirror of the compositor's `paint_edge_x`.
@@ -1783,6 +1948,9 @@ pub(super) fn for_each_h_run_all(
         let trim = |x: usize| (x as isize + step) as usize;
         let back = |x: usize| (x as isize - step) as usize;
         match *path {
+            // Explicit polylines: handled before the axis split above.
+            #[cfg(feature = "ports")]
+            PathRef::Orthogonal { .. } => {}
             PathRef::Direct | PathRef::Spline { .. } => {
                 if from_x.abs_diff(to_x) > 1 {
                     push(from_y, trim(from_x), back(to_x));
@@ -1845,6 +2013,9 @@ pub(super) fn for_each_h_run_all(
         return;
     }
     match *path {
+        // Explicit polylines: handled before the axis split above.
+        #[cfg(feature = "ports")]
+        PathRef::Orthogonal { .. } => {}
         PathRef::Direct | PathRef::Spline { .. } => {}
         PathRef::Corner { bend_at } => {
             push(bend_at, from_x, to_x);
@@ -1961,6 +2132,28 @@ fn for_each_own_corner(
     };
     match path {
         PathRef::Direct | PathRef::Spline { .. } => {}
+        // Every stated bend where the orientation changes; a bend
+        // between collinear legs is a straight cell, not a corner.
+        #[cfg(feature = "ports")]
+        PathRef::Orthogonal { bends } => {
+            let mut prev_vertical = None;
+            for_each_orthogonal_leg(
+                (from_x, from_y),
+                bends,
+                (to_x, to_y),
+                &mut |a, b, first, _| {
+                    let vertical = a.0 == b.0;
+                    if !first && prev_vertical != Some(vertical) {
+                        if is_x {
+                            emit(a.0, a.1);
+                        } else {
+                            emit(a.1, a.0);
+                        }
+                    }
+                    prev_vertical = Some(vertical);
+                },
+            );
+        }
         PathRef::Corner { bend_at } => {
             emit(*bend_at, from_c);
             emit(*bend_at, to_c);
@@ -2070,6 +2263,14 @@ fn for_each_own_marker(
             f(cross, flow);
         }
     };
+    #[cfg(feature = "ports")]
+    if let PathRef::Orthogonal { bends } = *path {
+        let (s, d) = orthogonal_markers((from_x, from_y), bends, (to_x, to_y), from_m, to_m);
+        for (cell, _) in [s, d].into_iter().flatten() {
+            f(cell.0, cell.1);
+        }
+        return;
+    }
     if from_m && (is_x || !matches!(path, PathRef::SideChannel { .. })) {
         emit(off(from_f, 1), from_c);
     }
@@ -2224,6 +2425,56 @@ fn for_each_flow_host_segment(
     let dir: isize = if to_f >= from_f { 1 } else { -1 };
     let off = |v: usize, k: isize| (v as isize + k * dir) as usize;
 
+    // Explicit orthogonal paths: the interior of every flow-axis leg,
+    // minus the marker cells that sit on it.
+    #[cfg(feature = "ports")]
+    if let PathRef::Orthogonal { bends } = *path {
+        let (from, to) = ((from_x, from_y), (to_x, to_y));
+        let (s, d) = orthogonal_markers(from, bends, to, from_m, to_m);
+        for_each_orthogonal_leg(from, bends, to, &mut |a, b, _, _| {
+            let along_flow = if is_x {
+                a.1 == b.1 && a.0 != b.0
+            } else {
+                a.0 == b.0 && a.1 != b.1
+            };
+            if !along_flow {
+                return;
+            }
+            let (line, fa, fb) = if is_x {
+                (a.1, a.0, b.0)
+            } else {
+                (a.0, a.1, b.1)
+            };
+            let (mut lo, hi) = (fa.min(fb) + 1, fa.max(fb).wrapping_sub(1));
+            if lo > hi {
+                return;
+            }
+            let mut cuts = [usize::MAX; 2];
+            let mut k = 0usize;
+            for (cell, _) in [s, d].into_iter().flatten() {
+                let (ml, mf) = if is_x {
+                    (cell.1, cell.0)
+                } else {
+                    (cell.0, cell.1)
+                };
+                if ml == line && mf >= lo && mf <= hi {
+                    cuts[k] = mf;
+                    k += 1;
+                }
+            }
+            cuts[..k].sort_unstable();
+            for &c in &cuts[..k] {
+                if c > lo {
+                    f(line, lo, c - 1);
+                }
+                lo = c + 1;
+            }
+            if lo <= hi {
+                f(line, lo, hi);
+            }
+        });
+        return;
+    }
     // `between(a, b)` in the painter is exclusive of both endpoints:
     // cells min+1 ..= max-1. Emit that interval minus up to one marker
     // cell at either end, splitting when the marker is interior.
@@ -2262,6 +2513,9 @@ fn for_each_flow_host_segment(
     };
 
     match path {
+        // Explicit polylines: handled before the axis split above.
+        #[cfg(feature = "ports")]
+        PathRef::Orthogonal { .. } => {}
         PathRef::Direct | PathRef::Spline { .. } => {
             emit(from_c, from_f, to_f, true, true);
         }
@@ -2480,6 +2734,14 @@ fn for_each_x_cross_segment(
     match *path {
         PathRef::Direct | PathRef::Spline { .. } => {}
         PathRef::Corner { bend_at } => f(bend_at, from_y, to_y),
+        #[cfg(feature = "ports")]
+        PathRef::Orthogonal { bends } => {
+            for_each_orthogonal_leg((from_x, from_y), bends, (to_x, to_y), &mut |a, b, _, _| {
+                if a.0 == b.0 && a.1 != b.1 {
+                    f(a.0, a.1, b.1);
+                }
+            });
+        }
         PathRef::SideChannel {
             channel_at,
             span_start,
@@ -2540,6 +2802,30 @@ pub(super) fn for_each_v_seg_all(
             f(col, lo, hi);
         }
     }
+    // Explicit orthogonal paths, either axis: every vertical leg's
+    // interior, plus a bend between two vertical legs — a straight
+    // cell no horizontal run covers — as a one-row segment (the
+    // waypoint gap-fill rule).
+    #[cfg(feature = "ports")]
+    if let PathRef::Orthogonal { bends } = *path {
+        let mut prev_vertical = false;
+        for_each_orthogonal_leg(
+            (from_x, from_y),
+            bends,
+            (to_x, to_y),
+            &mut |a, b, first, _| {
+                let vertical = a.0 == b.0 && a.1 != b.1;
+                if !first && vertical && prev_vertical {
+                    f(a.0, a.1, a.1);
+                }
+                if vertical {
+                    interior(f, a.0, a.1, b.1);
+                }
+                prev_vertical = vertical;
+            },
+        );
+        return;
+    }
     // X flows: vertical ink is the CROSS runs, strictly between the
     // trunk rows (corner cells belong to the trunk rows' horizontal
     // ink). One authority for that geometry — delegate.
@@ -2550,6 +2836,9 @@ pub(super) fn for_each_v_seg_all(
         return;
     }
     match *path {
+        // Explicit polylines: handled before the axis split above.
+        #[cfg(feature = "ports")]
+        PathRef::Orthogonal { .. } => {}
         PathRef::Direct | PathRef::Spline { .. } => {
             interior(f, from_x, from_y, to_y);
         }

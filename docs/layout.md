@@ -225,12 +225,17 @@ for edge in ir.edges() {
 ```
 
 `EdgePath` describes the route: `Direct`, `Corner { bend_at }`,
-`MultiSegment { waypoints, .. }`, plus `SideChannel` and `Spline`
-variants for hand-built IRs. The level-axis scalars (`bend_at`,
-`channel_at`, `span_start`/`span_end`) live on the axis the edge's
-`flow_axis` names — a row for `Y` trunks, a column for `X`.
+`MultiSegment { waypoints, .. }`, `Orthogonal { bends }` (an explicit
+polyline — every turn stated, physical `(x, y)` cells on either axis;
+the shape of a route that leaves a node against the flow or beside
+it), plus `SideChannel` and `Spline` variants for hand-built IRs. The
+level-axis scalars (`bend_at`, `channel_at`, `span_start`/`span_end`)
+live on the axis the edge's `flow_axis` names — a row for `Y` trunks,
+a column for `X`. Every edge also reports its attachments:
+`from_port` / `to_port` say which side each end asked for and which
+physical side it took — see [ports.md](ports.md).
 
-Export it as JSON (schema v1.4) for a renderer in another language:
+Export it as JSON (schema v1.5) for a renderer in another language:
 
 ```rust
 let json = ir.to_json();

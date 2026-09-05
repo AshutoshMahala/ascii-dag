@@ -617,6 +617,11 @@ fn paint_edge<V: LayoutView>(
     p: &mut EdgePainter<'_, '_, '_, '_>,
 ) {
     let e = view.edge(edge_index);
+    // Explicit polylines are physical on either axis — one painter.
+    #[cfg(feature = "ports")]
+    if let PathRef::Orthogonal { bends } = e.path {
+        return paint_orthogonal(view, plan, edge_index, bends, p);
+    }
     // Horizontal trunks paint through the X mirror; the Y path below
     // is the byte-frozen legacy compositor.
     if matches!(e.flow_axis, crate::ir::FlowAxis::X) {
@@ -638,6 +643,9 @@ fn paint_edge<V: LayoutView>(
     let bwd = if dir > 0 { Dir::Up } else { Dir::Down };
 
     match e.path {
+        // Explicit polylines paint through `paint_orthogonal` (dispatched above).
+        #[cfg(feature = "ports")]
+        PathRef::Orthogonal { .. } => {}
         PathRef::Direct | PathRef::Spline { .. } => {
             for y in between(e.from_y, e.to_y) {
                 if to_m && y == off(e.to_y, -1) {
@@ -764,6 +772,82 @@ fn paint_edge<V: LayoutView>(
     }
 }
 
+#[cfg(feature = "ports")]
+/// Explicit orthogonal polylines paint the same way on both flow
+/// axes: every leg is a straight run of strokes, every stated bend a
+/// corner with arms toward its two neighbors, and the markers sit on
+/// the cells adjacent to the endpoints along the first and last legs
+/// — taking the bend cell itself when the leg has no interior (the
+/// adjacent-bend rule the inferred-bend painters apply at the
+/// source). Geometry comes from the plan's shared visitors, so the
+/// placement side sees exactly these cells. Cells are stroked one by
+/// one (no deferred runs), like the X mirror.
+fn paint_orthogonal<V: LayoutView>(
+    view: &V,
+    plan: &RenderPlan,
+    edge_index: usize,
+    bends: &[(usize, usize)],
+    p: &mut EdgePainter<'_, '_, '_, '_>,
+) {
+    use super::plan::{for_each_orthogonal_leg, orthogonal_markers};
+    let e = view.edge(edge_index);
+    let ep = plan.edge_plan(edge_index);
+    let w = ep.weight.arm();
+    let rev = e.reversed;
+    let (from_m, to_m) = ep.resolved_markers(rev);
+    let (from, to) = ((e.from_x, e.from_y), (e.to_x, e.to_y));
+    let (src_marker, dst_marker) = orthogonal_markers(from, bends, to, from_m, to_m);
+    let n = Weight::None;
+    // The target marker wins a shared cell, as in every other arm.
+    let marker_at = |cell: (usize, usize)| -> Option<Dir> {
+        [dst_marker, src_marker]
+            .into_iter()
+            .flatten()
+            .find(|&(c, _)| c == cell)
+            .map(|(_, d)| d)
+    };
+    let mut prev: Option<(usize, usize)> = None;
+    for_each_orthogonal_leg(from, bends, to, &mut |a, b, first, _| {
+        // The bend at `a` (never the source endpoint): arms toward
+        // the previous point and toward `b`.
+        if !first {
+            if let Some(d) = marker_at(a) {
+                p.marker(a.0, a.1, MarkerKind::Arrow, d, rev);
+            } else if let Some(q) = prev {
+                let (mut up, mut down, mut left, mut right) = (n, n, n, n);
+                for t in [q, b] {
+                    if t.0 < a.0 {
+                        left = w;
+                    } else if t.0 > a.0 {
+                        right = w;
+                    } else if t.1 < a.1 {
+                        up = w;
+                    } else if t.1 > a.1 {
+                        down = w;
+                    }
+                }
+                p.stroke(a.0, a.1, up, down, left, right);
+            }
+        }
+        if a.0 == b.0 {
+            for y in between(a.1, b.1) {
+                match marker_at((a.0, y)) {
+                    Some(d) => p.marker(a.0, y, MarkerKind::Arrow, d, rev),
+                    None => p.stroke(a.0, y, w, w, n, n),
+                }
+            }
+        } else if a.1 == b.1 {
+            for x in between(a.0, b.0) {
+                match marker_at((x, a.1)) {
+                    Some(d) => p.marker(x, a.1, MarkerKind::Arrow, d, rev),
+                    None => p.stroke(x, a.1, n, n, w, w),
+                }
+            }
+        }
+        prev = Some(a);
+    });
+}
+
 /// The X-flow mirror of the Y paint path (temp/08 P3): trunks run
 /// horizontally, the bend scalar in `Corner`/`MultiSegment` is a
 /// COLUMN, markers point `→`/`←`, and vertical segments are the
@@ -791,6 +875,9 @@ fn paint_edge_x<V: LayoutView>(
     let n = Weight::None;
 
     match e.path {
+        // Explicit polylines paint through `paint_orthogonal` (dispatched above).
+        #[cfg(feature = "ports")]
+        PathRef::Orthogonal { .. } => {}
         PathRef::Direct | PathRef::Spline { .. } => {
             for x in between(e.from_x, e.to_x) {
                 if to_m && x == off(e.to_x, -1) {

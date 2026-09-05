@@ -2725,6 +2725,8 @@ mod lr_invariants {
             from_id: 1,
             to_id: 2,
             from_x: 2,
+            from_port: crate::PortAttachment::auto(crate::PhysicalSide::East),
+            to_port: crate::PortAttachment::auto(crate::PhysicalSide::West),
             from_y: 0,
             to_x: 12,
             to_y,
@@ -3073,6 +3075,8 @@ mod lr_invariants {
         let edge = |path| LayoutEdgeArena {
             from_id: 1,
             to_id: 2,
+            from_port: crate::PortAttachment::auto(crate::PhysicalSide::East),
+            to_port: crate::PortAttachment::auto(crate::PhysicalSide::West),
             from_x: 2,
             from_y: 0,
             to_x: 12,
@@ -3295,6 +3299,16 @@ mod quality {
     /// this work scores 5.
     fn lane_changes(e: &LayoutEdge<'_>) -> usize {
         match &e.path {
+            #[cfg(feature = "ports")]
+            EdgePath::Orthogonal { bends } => {
+                let mut seq = Vec::with_capacity(bends.len() + 2);
+                seq.push(cross(e, e.from_x, e.from_y));
+                for &(bx, by) in bends.iter() {
+                    seq.push(cross(e, bx, by));
+                }
+                seq.push(cross(e, e.to_x, e.to_y));
+                seq.windows(2).filter(|w| w[0] != w[1]).count()
+            }
             EdgePath::Direct => 0,
             EdgePath::Corner { .. } => 1,
             EdgePath::SideChannel { .. } => 2,
@@ -3332,6 +3346,12 @@ mod quality {
         // Distance outside [lo, hi]; 0 when inside, both branches saturating.
         let over = |c: usize| lo.saturating_sub(c).max(c.saturating_sub(hi));
         match &e.path {
+            #[cfg(feature = "ports")]
+            EdgePath::Orthogonal { bends } => bends
+                .iter()
+                .map(|&(bx, by)| over(cross(e, bx, by)))
+                .max()
+                .unwrap_or(0),
             EdgePath::Direct | EdgePath::Corner { .. } => 0,
             EdgePath::SideChannel { channel_at, .. } => over(*channel_at),
             EdgePath::MultiSegment { waypoints, .. } => waypoints
@@ -4619,5 +4639,501 @@ mod quality {
              spread = worst single edge's cross-axis excursion\n\
              area  = canvas w*h (guards against trading crossings for size)\n"
         );
+    }
+}
+
+#[cfg(feature = "ports")]
+/// Explicit orthogonal paths — the shape port routing emits for
+/// against-the-flow and beside-the-node exits. Hand-built IRs on both
+/// backends pin the painter and the placement visitors cell for cell,
+/// on both flow axes and in both charsets.
+mod orthogonal {
+    use super::*;
+    use crate::ir::{
+        EdgePath, FlowAxis, LayoutEdge, LayoutIR, LayoutIRBuilder, LayoutNode, NodeKind,
+    };
+    use crate::render::engine::plan::{HitResult, RenderPlan};
+
+    /// Two 3-wide, 1-tall nodes and one edge with the given bends.
+    #[allow(clippy::too_many_arguments)]
+    fn ortho_ir(
+        axis: FlowAxis,
+        a: (usize, usize),
+        b: (usize, usize),
+        from: (usize, usize),
+        to: (usize, usize),
+        bends: Vec<(usize, usize)>,
+        reversed: bool,
+        label: Option<(&'static str, usize, usize)>,
+        (w, h): (usize, usize),
+    ) -> LayoutIR<'static> {
+        let mut bld = LayoutIRBuilder::new();
+        bld.set_dimensions(w, h);
+        for (i, (id, text, (x, y))) in [(1usize, "A", a), (2, "B", b)].into_iter().enumerate() {
+            bld.add_node(LayoutNode {
+                id,
+                label: text,
+                x,
+                y,
+                width: 3,
+                height: 1,
+                center_x: x + 1,
+                center_y: y,
+                level: i,
+                level_position: 0,
+                kind: NodeKind::Explicit,
+                has_self_loop: false,
+                self_loop_at: None,
+                edge_index: None,
+                content_tag: 0,
+            });
+        }
+        let (label, label_x, label_y) = match label {
+            Some((t, x, y)) => (Some(t), x, y),
+            None => (None, 0, 0),
+        };
+        let (from_side, to_side) = match axis {
+            FlowAxis::Y => (crate::PhysicalSide::South, crate::PhysicalSide::North),
+            FlowAxis::X => (crate::PhysicalSide::East, crate::PhysicalSide::West),
+        };
+        bld.add_edge(LayoutEdge {
+            from_id: 1,
+            to_id: 2,
+            from_port: crate::PortAttachment::auto(from_side),
+            to_port: crate::PortAttachment::auto(to_side),
+            from_x: from.0,
+            from_y: from.1,
+            to_x: to.0,
+            to_y: to.1,
+            path: EdgePath::Orthogonal { bends },
+            flow_axis: axis,
+            edge_index: 0,
+            label,
+            label_x,
+            label_y,
+            directed: true,
+            reversed,
+        });
+        bld.build()
+    }
+
+    /// The same two-node fixture through the arena builder.
+    #[allow(clippy::too_many_arguments)]
+    fn ortho_ir_arena<'a>(
+        arena: &'a mut Arena<'a>,
+        axis: FlowAxis,
+        a: (usize, usize),
+        b: (usize, usize),
+        from: (usize, usize),
+        to: (usize, usize),
+        bends: &[(usize, usize)],
+        reversed: bool,
+        (w, h): (usize, usize),
+    ) -> crate::ir::arena::LayoutIRArena<'a> {
+        use crate::ir::arena::{EdgePathArena, LayoutEdgeArena};
+        use crate::ir::arena_builder::LayoutIRArenaBuilder;
+        let mut bld = LayoutIRArenaBuilder::new(arena, 2, 1, bends.len().max(1), 8, 2).unwrap();
+        bld.set_dimensions(w, h);
+        for (i, (id, text, (x, y))) in [(1usize, "A", a), (2, "B", b)].into_iter().enumerate() {
+            let idx = bld
+                .add_node(
+                    id,
+                    text,
+                    x,
+                    y,
+                    3,
+                    1,
+                    i,
+                    0,
+                    NodeKind::Explicit,
+                    usize::MAX,
+                    0,
+                )
+                .unwrap();
+            bld.add_node_to_level(i, idx).unwrap();
+        }
+        bld.finalize_levels();
+        let (bends_start, bends_len) = bld.add_waypoints(bends).unwrap();
+        let ys = bends.iter().map(|&(_, y)| y).chain([from.1, to.1]);
+        let (min_y, max_y) = ys
+            .clone()
+            .fold((usize::MAX, 0), |(lo, hi), y| (lo.min(y), hi.max(y)));
+        let (from_side, to_side) = match axis {
+            FlowAxis::Y => (crate::PhysicalSide::South, crate::PhysicalSide::North),
+            FlowAxis::X => (crate::PhysicalSide::East, crate::PhysicalSide::West),
+        };
+        bld.add_edge(LayoutEdgeArena {
+            from_id: 1,
+            to_id: 2,
+            from_port: crate::PortAttachment::auto(from_side),
+            to_port: crate::PortAttachment::auto(to_side),
+            from_x: from.0,
+            from_y: from.1,
+            to_x: to.0,
+            to_y: to.1,
+            directed: true,
+            reversed,
+            path: EdgePathArena::Orthogonal {
+                bends_start,
+                bends_len,
+            },
+            flow_axis: axis,
+            edge_index: 0,
+            label_offset: 0,
+            label_len: 0,
+            label_x: 0,
+            label_y: 0,
+            min_y,
+            max_y,
+        });
+        bld.build()
+    }
+
+    fn cell_at(out: &str, x: usize, y: usize) -> char {
+        out.lines()
+            .nth(y)
+            .and_then(|l| l.chars().nth(x))
+            .unwrap_or(' ')
+    }
+
+    /// The TopDown detour: up out of A's top face, around, down into
+    /// B's top face — four stated turns.
+    struct Fixture {
+        a: (usize, usize),
+        b: (usize, usize),
+        from: (usize, usize),
+        to: (usize, usize),
+        bends: [(usize, usize); 4],
+    }
+    const TD: Fixture = Fixture {
+        a: (4, 3),
+        b: (12, 8),
+        from: (5, 3),
+        to: (13, 8),
+        bends: [(5, 1), (8, 1), (8, 5), (13, 5)],
+    };
+
+    fn td_ir(reversed: bool) -> LayoutIR<'static> {
+        let Fixture {
+            a,
+            b,
+            from,
+            to,
+            bends,
+        } = TD;
+        ortho_ir(
+            FlowAxis::Y,
+            a,
+            b,
+            from,
+            to,
+            bends.to_vec(),
+            reversed,
+            None,
+            (20, 10),
+        )
+    }
+
+    /// Every painted ink cell outside the nodes is owned by the edge,
+    /// and no blank cell is — the placement visitors and the painter
+    /// agree cell for cell (hit-testing walks the visitors).
+    fn assert_ownership_matches_ink<V: crate::render::engine::view::LayoutView>(
+        ir: &V,
+        nodes: &[(usize, usize)],
+        tag: &str,
+    ) {
+        let out = render_plain(ir, &RenderOptions::plain());
+        let plan = RenderPlan::build(ir, &RenderOptions::plain().plan);
+        for y in 0..plan.height() {
+            for x in 0..plan.width() {
+                if nodes
+                    .iter()
+                    .any(|&(nx, ny)| y == ny && (nx..nx + 3).contains(&x))
+                {
+                    continue;
+                }
+                let inked = cell_at(&out, x, y) != ' ';
+                let owned = matches!(plan.element_at(ir, x, y), HitResult::Edge(0));
+                assert_eq!(
+                    inked, owned,
+                    "{tag}: cell ({x}, {y}) inked={inked} owned={owned}:\n{out}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn against_the_flow_exit_paints_every_stated_turn() {
+        let ir = td_ir(false);
+        let ascii = render_plain(&ir, &RenderOptions::ascii());
+        for (x, y, want) in [
+            (5, 2, '|'),
+            (5, 1, '+'),
+            (6, 1, '-'),
+            (7, 1, '-'),
+            (8, 1, '+'),
+            (8, 2, '|'),
+            (8, 3, '|'),
+            (8, 4, '|'),
+            (8, 5, '+'),
+            (9, 5, '-'),
+            (12, 5, '-'),
+            (13, 5, '+'),
+            (13, 6, '|'),
+            (13, 7, 'v'),
+        ] {
+            assert_eq!(cell_at(&ascii, x, y), want, "ascii ({x}, {y}):\n{ascii}");
+        }
+        let uni = render_plain(&ir, &RenderOptions::plain());
+        for (x, y, want) in [
+            (5, 2, '│'),
+            (5, 1, '┌'),
+            (6, 1, '─'),
+            (8, 1, '┐'),
+            (8, 5, '└'),
+            (13, 5, '┐'),
+            (13, 7, '↓'),
+        ] {
+            assert_eq!(cell_at(&uni, x, y), want, "unicode ({x}, {y}):\n{uni}");
+        }
+        // The endpoint cells are node faces — never edge ink.
+        assert!(!"|-+v".contains(cell_at(&ascii, 5, 3)), "{ascii}");
+        assert!(!"|-+v".contains(cell_at(&ascii, 13, 8)), "{ascii}");
+        assert_ownership_matches_ink(&ir, &[(4, 3), (12, 8)], "td forward");
+    }
+
+    #[test]
+    fn reversed_paths_point_the_source_marker_into_the_source() {
+        let ir = td_ir(true);
+        let uni = render_plain(&ir, &RenderOptions::plain());
+        // The arrow shows the ORIGINAL direction: at the layout source,
+        // pointing down into A; the target end is plain (dashed) stroke.
+        assert_eq!(cell_at(&uni, 5, 2), '⇣', "{uni}");
+        let tail = cell_at(&uni, 13, 7);
+        assert!(tail != ' ' && tail != '↓' && tail != '⇣', "{uni}");
+        let ascii = render_plain(&ir, &RenderOptions::ascii());
+        assert_eq!(cell_at(&ascii, 5, 2), 'v', "{ascii}");
+        assert_ownership_matches_ink(&ir, &[(4, 3), (12, 8)], "td reversed");
+    }
+
+    #[test]
+    fn adjacent_bends_carry_the_markers() {
+        // A's exit bend sits on the cell right above the face; B's
+        // entry bend right above B: neither endpoint leg has an
+        // interior cell, so the bend cells take the markers.
+        let bends = vec![(5, 2), (8, 2), (8, 7)];
+        let forward = ortho_ir(
+            FlowAxis::Y,
+            (4, 3),
+            (7, 8),
+            (5, 3),
+            (8, 8),
+            bends.clone(),
+            false,
+            None,
+            (14, 10),
+        );
+        let uni = render_plain(&forward, &RenderOptions::plain());
+        assert_eq!(cell_at(&uni, 8, 7), '↓', "{uni}");
+        assert_eq!(cell_at(&uni, 5, 2), '┌', "{uni}");
+        assert_eq!(cell_at(&uni, 8, 2), '┐', "{uni}");
+        assert_eq!(cell_at(&uni, 7, 2), '─', "{uni}");
+        assert_eq!(cell_at(&uni, 8, 4), '│', "{uni}");
+        assert_ownership_matches_ink(&forward, &[(4, 3), (7, 8)], "adjacent forward");
+
+        let reversed = ortho_ir(
+            FlowAxis::Y,
+            (4, 3),
+            (7, 8),
+            (5, 3),
+            (8, 8),
+            bends,
+            true,
+            None,
+            (14, 10),
+        );
+        let uni = render_plain(&reversed, &RenderOptions::plain());
+        assert_eq!(cell_at(&uni, 5, 2), '⇣', "{uni}");
+        let tail = cell_at(&uni, 8, 7);
+        assert!(tail != ' ' && tail != '↓' && tail != '⇣', "{uni}");
+        assert_ownership_matches_ink(&reversed, &[(4, 3), (7, 8)], "adjacent reversed");
+    }
+
+    #[test]
+    fn x_flow_paths_paint_through_the_same_painter() {
+        let ir = ortho_ir(
+            FlowAxis::X,
+            (0, 2),
+            (10, 6),
+            (2, 2),
+            (10, 6),
+            vec![(4, 2), (4, 0), (8, 0), (8, 6)],
+            false,
+            None,
+            (14, 8),
+        );
+        let ascii = render_plain(&ir, &RenderOptions::ascii());
+        for (x, y, want) in [
+            (3, 2, '-'),
+            (4, 2, '+'),
+            (4, 1, '|'),
+            (4, 0, '+'),
+            (6, 0, '-'),
+            (8, 0, '+'),
+            (8, 3, '|'),
+            (8, 6, '+'),
+            (9, 6, '>'),
+        ] {
+            assert_eq!(cell_at(&ascii, x, y), want, "ascii ({x}, {y}):\n{ascii}");
+        }
+        let uni = render_plain(&ir, &RenderOptions::plain());
+        for (x, y, want) in [
+            (4, 2, '┘'),
+            (4, 0, '┌'),
+            (8, 0, '┐'),
+            (8, 6, '└'),
+            (9, 6, '→'),
+        ] {
+            assert_eq!(cell_at(&uni, x, y), want, "unicode ({x}, {y}):\n{uni}");
+        }
+        assert_ownership_matches_ink(&ir, &[(0, 2), (10, 6)], "x flow");
+    }
+
+    #[test]
+    fn labels_host_on_a_leg_without_covering_turns_or_arrows() {
+        let ir = ortho_ir(
+            FlowAxis::Y,
+            (4, 3),
+            (12, 12),
+            (5, 3),
+            (13, 12),
+            vec![(5, 1), (8, 1), (8, 5), (13, 5)],
+            false,
+            Some(("go", 11, 9)),
+            (20, 14),
+        );
+        let uni = render_plain(&ir, &RenderOptions::plain());
+        assert!(uni.contains("go"), "{uni}");
+        for (x, y, want) in [
+            (5, 1, '┌'),
+            (8, 1, '┐'),
+            (8, 5, '└'),
+            (13, 5, '┐'),
+            (13, 11, '↓'),
+        ] {
+            assert_eq!(cell_at(&uni, x, y), want, "({x}, {y}):\n{uni}");
+        }
+    }
+
+    #[test]
+    fn both_backends_paint_and_serialize_the_same_bends() {
+        let Fixture {
+            a,
+            b,
+            from,
+            to,
+            bends,
+        } = TD;
+        let heap = td_ir(false);
+        let mut backing = [0u8; 8192];
+        let mut arena = Arena::new(&mut backing);
+        let csr = ortho_ir_arena(
+            &mut arena,
+            FlowAxis::Y,
+            a,
+            b,
+            from,
+            to,
+            &bends,
+            false,
+            (20, 10),
+        );
+        for options in [RenderOptions::plain(), RenderOptions::ascii()] {
+            assert_same(
+                "orthogonal heap vs arena",
+                &render_plain(&heap, &options),
+                &render_plain(&csr, &options),
+            );
+        }
+        assert_ownership_matches_ink(&csr, &[(4, 3), (12, 8)], "arena td");
+        let want = "{\"type\":\"orthogonal\",\"bends\":[[5,1],[8,1],[8,5],[13,5]]}";
+        let heap_json = heap.to_json();
+        assert!(heap_json.contains(want), "{heap_json}");
+        assert!(heap_json.contains("\"version\":\"1.5\""), "{heap_json}");
+        let mut buf = [0u8; 4096];
+        let n = csr.serialize_json(&mut buf).unwrap();
+        let csr_json = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(csr_json.contains(want), "{csr_json}");
+        assert_eq!(csr.edge_waypoints(csr.edge(0)), &bends[..]);
+    }
+
+    /// The JSON sizing contract: a stored point can need 44 bytes on a
+    /// 64-bit target (`[usize::MAX,usize::MAX],`), and both estimators
+    /// reserve that — an exactly-estimated buffer serializes sixty-four
+    /// of them.
+    #[test]
+    fn max_coordinate_bends_fit_the_json_estimates() {
+        let bends = vec![(usize::MAX, usize::MAX); 64];
+        let Fixture { a, b, from, to, .. } = TD;
+        let heap = ortho_ir(
+            FlowAxis::Y,
+            a,
+            b,
+            from,
+            to,
+            bends.clone(),
+            false,
+            None,
+            (20, 10),
+        );
+        let json = heap.to_json();
+        assert!(
+            json.len() <= heap.estimate_json_size(),
+            "heap: {} > {}",
+            json.len(),
+            heap.estimate_json_size()
+        );
+        let mut backing = [0u8; 8192];
+        let mut arena = Arena::new(&mut backing);
+        let csr = ortho_ir_arena(
+            &mut arena,
+            FlowAxis::Y,
+            a,
+            b,
+            from,
+            to,
+            &bends,
+            false,
+            (20, 10),
+        );
+        let mut buf = vec![0u8; csr.estimate_json_size()];
+        let n = csr.serialize_json(&mut buf).expect("exact estimate");
+        assert!(
+            core::str::from_utf8(&buf[..n])
+                .unwrap()
+                .contains("18446744073709551615")
+        );
+    }
+
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn a_level_flip_mirrors_the_bend_rows_in_place() {
+        let mut ir = td_ir(false);
+        ir.flip_vertical();
+        let EdgePath::Orthogonal { bends } = &ir.edges()[0].path else {
+            panic!("shape");
+        };
+        assert_eq!(bends, &vec![(5, 8), (8, 8), (8, 4), (13, 4)]);
+    }
+
+    #[cfg(feature = "layout-horizontal")]
+    #[test]
+    fn a_cross_flip_mirrors_the_bend_columns_in_place() {
+        let mut ir = td_ir(false);
+        ir.flip_horizontal();
+        let EdgePath::Orthogonal { bends } = &ir.edges()[0].path else {
+            panic!("shape");
+        };
+        assert_eq!(bends, &vec![(14, 1), (11, 1), (11, 5), (6, 5)]);
     }
 }

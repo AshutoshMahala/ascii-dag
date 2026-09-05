@@ -407,6 +407,160 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         max_width
     };
 
+    let level_flipped = super::ports::level_flipped::<A>(config.direction);
+
+    // A leading-side lateral lane needs a cell BEFORE the node on the
+    // cross axis; a node packed at cross 0 has none. One leading cross
+    // cell is opened for the whole layout when any end declares such a
+    // face — the cross-axis mirror of the rows opened above level 0
+    // for upward exits. Zero for every other layout.
+    #[allow(unused_mut)] // set only by the ports pass
+    let mut cross_extra = 0usize;
+    #[cfg(feature = "ports")]
+    if !dag.edge_ports.is_empty() {
+        use super::ports::{EndRole, Face};
+        for (ei, &(from_id, to_id, _)) in dag.edges.iter().enumerate() {
+            if from_id == to_id {
+                continue;
+            }
+            let is_back = back_edges.get(ei).copied().unwrap_or(false);
+            let (src_side, dst_side) = dag.edge_ports.get(ei).copied().unwrap_or_default();
+            let (src_side, dst_side) = if is_back {
+                (dst_side, src_side)
+            } else {
+                (src_side, dst_side)
+            };
+            if matches!(
+                Face::of(src_side, A::FLOW_AXIS, level_flipped, EndRole::Source),
+                Face::CrossLeading
+            ) || matches!(
+                Face::of(dst_side, A::FLOW_AXIS, level_flipped, EndRole::Target),
+                Face::CrossLeading
+            ) {
+                cross_extra = 1;
+                break;
+            }
+        }
+    }
+    if cross_extra > 0 {
+        for coords in &mut real_node_coords {
+            coords.2 += cross_extra;
+        }
+    }
+
+    // Explicit ports on a LEVEL face get POSITIONS along it: the
+    // centered, tangent-ordered spread, round-robin beyond capacity —
+    // on the layout role's own Auto face and on the opposite face
+    // alike (a source's arrive face, a target's leave face: those ends
+    // detour around their node below). Lateral faces keep the center
+    // line until their routing exists; Auto edges never take a slot —
+    // and a graph without declarations skips all of this.
+    // Per-edge `(from, to)` cross overrides, `usize::MAX` = none —
+    // EMPTY (no allocation) for a graph that declared no port.
+    #[allow(unused_mut)] // mutated only by the ports pass
+    let mut port_cross: Vec<(usize, usize)> = Vec::new();
+    #[cfg(feature = "ports")]
+    if !dag.edge_ports.is_empty() {
+        use super::ports::{EndRole, Face, FaceRequest, PortSide, assign_level_face_positions};
+        port_cross.resize(dag.edges.len(), (usize::MAX, usize::MAX));
+        let cross_span = |idx: usize| -> (usize, usize) {
+            let (_, _, base, _) = real_node_coords[idx];
+            (
+                base,
+                A::cross_extent(dag.get_node_width(idx), dag.get_node_height(idx)),
+            )
+        };
+        let mut requests: Vec<FaceRequest> = Vec::new();
+        // Lateral requests spread along the LEVEL axis: the key is the
+        // peer's level, the result the row offset within the node.
+        let mut cross_requests: Vec<FaceRequest> = Vec::new();
+        for (edge_idx, &(from_id, to_id, _)) in dag.edges.iter().enumerate() {
+            if from_id == to_id {
+                continue;
+            }
+            let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id))
+            else {
+                continue;
+            };
+            let is_back = back_edges.get(edge_idx).copied().unwrap_or(false);
+            let (src, dst) = if is_back {
+                (to_idx, from_idx)
+            } else {
+                (from_idx, to_idx)
+            };
+            let (src_side, dst_side) = dag.edge_ports.get(edge_idx).copied().unwrap_or_default();
+            let (src_side, dst_side) = if is_back {
+                (dst_side, src_side)
+            } else {
+                (src_side, dst_side)
+            };
+            for (node, peer, side, end, arrival) in [
+                (src, dst, src_side, EndRole::Source, is_back),
+                (dst, src, dst_side, EndRole::Target, !is_back),
+            ] {
+                if matches!(side, PortSide::Auto) {
+                    continue;
+                }
+                let face = Face::of(side, A::FLOW_AXIS, level_flipped, end);
+                if !face.is_level() {
+                    cross_requests.push(FaceRequest {
+                        node,
+                        face,
+                        key: node_levels[peer],
+                        edge: edge_idx,
+                        end,
+                        arrival,
+                    });
+                    continue;
+                }
+                let (peer_base, peer_extent) = cross_span(peer);
+                requests.push(FaceRequest {
+                    node,
+                    face,
+                    key: A::cross_center(peer_base, peer_extent),
+                    edge: edge_idx,
+                    end,
+                    arrival,
+                });
+            }
+        }
+        // The node's policy: its override, else the graph's — and the
+        // node's id, which a custom placer is told.
+        let policy = |idx: usize| -> (super::ports::PortPolicy, usize) {
+            let id = dag.nodes[idx].0;
+            (dag.node_port_policy(id), id)
+        };
+        // `port_cross` holds each end's position ALONG its face: the
+        // cross line on a level face, the row offset on a lateral one.
+        assign_level_face_positions::<A>(
+            &mut requests,
+            cross_span,
+            policy,
+            dag.port_placer,
+            level_flipped,
+            |edge, end, cross| match end {
+                EndRole::Source => port_cross[edge].0 = cross,
+                EndRole::Target => port_cross[edge].1 = cross,
+            },
+        );
+        super::ports::assign_cross_face_positions::<A>(
+            &mut cross_requests,
+            |idx| {
+                (
+                    0,
+                    A::level_extent(dag.get_node_width(idx), dag.get_node_height(idx)),
+                )
+            },
+            policy,
+            dag.port_placer,
+            level_flipped,
+            |edge, end, along| match end {
+                EndRole::Source => port_cross[edge].0 = along,
+                EndRole::Target => port_cross[edge].1 = along,
+            },
+        );
+    }
+
     let mut node_slots = vec![usize::MAX; dag.nodes.len()];
     let mut edge_slots = vec![0usize; dag.edges.len()];
 
@@ -438,6 +592,360 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 slots.push(Vec::new());
             }
             slots[0].push((ax.saturating_sub(ARROW_CELL_PAD), ax + ARROW_CELL_PAD));
+        }
+    }
+
+    // Collect dummy node X positions for skip-level edge routing
+    let mut dummy_positions: Vec<Vec<(usize, usize)>> = vec![Vec::new(); dag.edges.len()];
+    for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
+        let level_width = level_widths[level_idx];
+        // Apply the same centering policy as real nodes: skip when subgraphs
+        // are present to avoid misalignment between real and dummy positions.
+        let level_offset = if center_levels && max_width > level_width {
+            (max_width - level_width) / 2
+        } else {
+            0
+        };
+
+        for (pos, vnode) in level_vnodes.iter().enumerate() {
+            if let VNode::Dummy { edge_idx } = vnode {
+                // Get the actual x-coordinate from the layout, including centering offset
+                let base_x = x_coords[level_idx][pos] + level_offset;
+                // Add bounded offset for visual separation between skip-level edges
+                // This keeps convergent edges from merging visually
+                let edge_offset = A::dummy_draw_offset(*edge_idx);
+                let x = base_x + edge_offset + cross_extra;
+                dummy_positions[*edge_idx].push((level_idx, x));
+            }
+        }
+    }
+
+    // Sort dummy positions by level for each edge (they should already be in order, but ensure it)
+    for positions in &mut dummy_positions {
+        positions.sort_by_key(|(level, _)| *level);
+    }
+
+    // temp/09 P3: allocate each skip-edge chain a lane clear of the fans
+    // its gaps sweep. The canvas must cover any lane past the packed
+    // extent — the flip reflects around the canvas width, so an extent it
+    // cannot see would skew RightLeft instead of mirroring it (§4.8).
+    let lane_reach = allocate_chain_lanes::<A>(
+        dag,
+        &virtual_levels,
+        &real_node_coords,
+        &back_edges,
+        &mut dummy_positions,
+    );
+    let max_width = (max_width + cross_extra).max(lane_reach);
+
+    // Detour ends: an explicit side on the level face OPPOSITE the
+    // layout role's own, or on a lateral face. Decided per end here, in
+    // the order the facts allow — faces, then lanes (an end without a
+    // lane attaches head-on after all), then the EFFECTIVE occupancy,
+    // then the lateral and level-face conflicts, then the arrow-cell
+    // reservations — so no later fallback lands on a cell a conflict
+    // pass already settled. Empty when no port is declared.
+    #[cfg_attr(not(feature = "ports"), allow(unused_mut, unused_variables))]
+    let mut detour_ends: Vec<(bool, bool)> = Vec::new();
+    #[cfg_attr(not(feature = "ports"), allow(unused_mut, unused_variables))]
+    let mut detour_faces: Vec<(super::ports::Face, super::ports::Face)> = Vec::new();
+    #[cfg_attr(not(feature = "ports"), allow(unused_mut))]
+    let mut detours: Vec<super::ports::Detour> = Vec::new();
+    #[cfg(feature = "ports")]
+    if !dag.edge_ports.is_empty() {
+        use super::ports::{
+            Detour, EndRole, Face, choose_lane, detours as end_detours, lateral_lane,
+        };
+        use crate::algorithms::sugiyama::geometry::ARROW_CELL_PAD;
+        let layout_ends = |ei: usize| -> Option<(usize, usize)> {
+            let (from_id, to_id, _) = dag.edges[ei];
+            if from_id == to_id {
+                return None;
+            }
+            let (from_idx, to_idx) = (dag.node_index(from_id)?, dag.node_index(to_id)?);
+            Some(if back_edges.get(ei).copied().unwrap_or(false) {
+                (to_idx, from_idx)
+            } else {
+                (from_idx, to_idx)
+            })
+        };
+        detour_ends.resize(dag.edges.len(), (false, false));
+        detour_faces.resize(dag.edges.len(), (Face::LevelLeading, Face::LevelLeading));
+        for ei in 0..dag.edges.len() {
+            if layout_ends(ei).is_none() {
+                continue;
+            }
+            let is_back = back_edges.get(ei).copied().unwrap_or(false);
+            let (src_side, dst_side) = dag.edge_ports.get(ei).copied().unwrap_or_default();
+            let (src_side, dst_side) = if is_back {
+                (dst_side, src_side)
+            } else {
+                (src_side, dst_side)
+            };
+            detour_faces[ei] = (
+                Face::of(src_side, A::FLOW_AXIS, level_flipped, EndRole::Source),
+                Face::of(dst_side, A::FLOW_AXIS, level_flipped, EndRole::Target),
+            );
+            detour_ends[ei] = (
+                end_detours(src_side, A::FLOW_AXIS, level_flipped, EndRole::Source),
+                end_detours(dst_side, A::FLOW_AXIS, level_flipped, EndRole::Target),
+            );
+        }
+        if detour_ends.iter().any(|&(s, d)| s || d) {
+            detours.resize(dag.edges.len(), Detour::NONE);
+            let span = |idx: usize| -> (usize, usize) {
+                let (_, _, base, _) = real_node_coords[idx];
+                (
+                    base,
+                    A::cross_extent(dag.get_node_width(idx), dag.get_node_height(idx)),
+                )
+            };
+            let center = |idx: usize| {
+                let (b, e) = span(idx);
+                A::cross_center(b, e)
+            };
+            let level_extent =
+                |idx: usize| A::level_extent(dag.get_node_width(idx), dag.get_node_height(idx));
+            let resolved = |pc: &[(usize, usize)], ei: usize, idx: usize, target: bool| -> usize {
+                let positioned = pc
+                    .get(ei)
+                    .map_or(usize::MAX, |p| if target { p.1 } else { p.0 });
+                if positioned != usize::MAX {
+                    positioned
+                } else {
+                    center(idx)
+                }
+            };
+            // The row a lateral end takes along its side face.
+            let side_row = |pc: &[(usize, usize)], ei: usize, idx: usize, target: bool| -> usize {
+                let along = pc
+                    .get(ei)
+                    .map_or(usize::MAX, |p| if target { p.1 } else { p.0 });
+                if along == usize::MAX {
+                    A::level_center(0, level_extent(idx))
+                } else {
+                    along
+                }
+            };
+            // Per level, the cross intervals a lane may not touch —
+            // `(lo, hi, marker)`: node spans (a zero-extent node occupies
+            // no cell) and dummy columns block every row; a self-loop
+            // marker cell only its own top row. Sorted by `lo`, spans
+            // merged, so a query is one predecessor lookup.
+            let mut level_blockers: Vec<Vec<(usize, usize, bool)>> =
+                vec![Vec::new(); max_level + 1];
+            for idx in 0..dag.nodes.len() {
+                let (level, _, base, _) = real_node_coords[idx];
+                let (_, ext) = span(idx);
+                if ext > 0 {
+                    level_blockers[level].push((base, base + ext - 1, false));
+                }
+                if node_has_self_loop[idx] {
+                    level_blockers[level].push((base + ext, base + ext, true));
+                }
+            }
+            for chain in &dummy_positions {
+                for &(level, x) in chain {
+                    level_blockers[level].push((x, x, false));
+                }
+            }
+            // Trunk lines in the gaps a lane crosses. Gap `g` lies
+            // between levels `g - 1` and `g` (gap 0 is the top band):
+            // a head-on source end at level L runs its trunk through
+            // gap L + 1, a head-on target end at level L through gap L,
+            // a dummy at level L through both. A lane beside a node at
+            // level L crosses gap L when its run goes up (a side-face
+            // arrival), gap L + 1 when it goes down (a side-face
+            // departure), both when it goes around. Registered
+            // `(column, edge)` per gap, so a detour never rides another
+            // edge's trunk, while an edge's own trunk never blocks it.
+            let mut gap_trunks: Vec<Vec<(usize, usize)>> = vec![Vec::new(); max_level + 2];
+            for ei in 0..dag.edges.len() {
+                let Some((src, dst)) = layout_ends(ei) else {
+                    continue;
+                };
+                let (src_wants, dst_wants) = detour_ends[ei];
+                let (src_face, dst_face) = detour_faces[ei];
+                if !src_wants && src_face.is_level() {
+                    gap_trunks[node_levels[src] + 1]
+                        .push((resolved(&port_cross, ei, src, false), ei));
+                }
+                if !dst_wants && dst_face.is_level() {
+                    gap_trunks[node_levels[dst]].push((resolved(&port_cross, ei, dst, true), ei));
+                }
+            }
+            for (ei, chain) in dummy_positions.iter().enumerate() {
+                for &(level, x) in chain {
+                    gap_trunks[level].push((x, ei));
+                    gap_trunks[level + 1].push((x, ei));
+                }
+            }
+            for trunks in &mut gap_trunks {
+                trunks.sort_unstable();
+                trunks.dedup();
+            }
+            // Another edge's trunk at `col` in gap `gap`.
+            let other_trunk = |gap: usize, col: usize, ei: usize| {
+                let t = &gap_trunks[gap];
+                let i = t.partition_point(|&(c, _)| c < col);
+                t[i..]
+                    .iter()
+                    .take_while(|&&(c, _)| c == col)
+                    .any(|&(_, e)| e != ei)
+            };
+            // The gaps an end's lane run crosses.
+            let run_gaps = |level: usize, face: Face, is_target: bool| -> (usize, usize) {
+                if face.is_level() {
+                    (level, level + 1)
+                } else if is_target {
+                    (level, level)
+                } else {
+                    (level + 1, level + 1)
+                }
+            };
+            for blockers in &mut level_blockers {
+                blockers.sort_unstable();
+                let mut merged: Vec<(usize, usize, bool)> = Vec::with_capacity(blockers.len());
+                for &(lo, hi, marker) in blockers.iter() {
+                    match merged.last_mut() {
+                        Some(last) if !marker && !last.2 && lo <= last.1 => last.1 = last.1.max(hi),
+                        _ => merged.push((lo, hi, marker)),
+                    }
+                }
+                *blockers = merged;
+            }
+            // `Some(true)`: only a marker cell covers `col`; `Some(false)`:
+            // a span or dummy does.
+            let blocked_kind = |level: usize, col: usize| -> Option<bool> {
+                let v = &level_blockers[level];
+                let i = v.partition_point(|&(lo, _, _)| lo <= col);
+                let mut hit = None;
+                for k in i.saturating_sub(2)..i {
+                    let (lo, hi, marker) = v[k];
+                    if lo <= col && col <= hi {
+                        if !marker {
+                            return Some(false);
+                        }
+                        hit = Some(true);
+                    }
+                }
+                hit
+            };
+            // 1. Lanes. An end without one attaches head-on after all —
+            // on its role's own face, at the center. A chosen lane is
+            // taken on its level and the adjacent ones (its run crosses
+            // both gaps), so two EDGES never share a lane column — an
+            // edge's two ends may, their runs are one line.
+            let mut taken: Vec<(usize, usize, usize, usize, bool)> = Vec::new(); // (gap, col, edge, node, lateral)
+            for ei in 0..dag.edges.len() {
+                let (src_d, dst_d) = detour_ends[ei];
+                if !(src_d || dst_d) {
+                    continue;
+                }
+                let Some((src, dst)) = layout_ends(ei) else {
+                    continue;
+                };
+                let mut det = Detour::NONE;
+                (det.src_face, det.dst_face) = detour_faces[ei];
+                (det.src_wants, det.dst_wants) = detour_ends[ei];
+                for (is_target, node, peer) in [(false, src, dst), (true, dst, src)] {
+                    let (wants, face) = if is_target {
+                        (det.dst_wants, det.dst_face)
+                    } else {
+                        (det.src_wants, det.src_face)
+                    };
+                    if !wants {
+                        continue;
+                    }
+                    let (base, ext) = span(node);
+                    let level = node_levels[node];
+                    // Another edge's lane in a gap this run crosses —
+                    // except a side-face stub at this very node, whose
+                    // run shares the column with this end's by design.
+                    let gaps = run_gaps(level, face, is_target);
+                    let taken_here = |c: usize| {
+                        taken.iter().any(|&(g, x, e, n, lateral)| {
+                            g >= gaps.0
+                                && g <= gaps.1
+                                && x == c
+                                && e != ei
+                                && !(lateral && n == node && !face.is_level())
+                        })
+                    };
+                    let trunk_here = |c: usize| (gaps.0..=gaps.1).any(|g| other_trunk(g, c, ei));
+                    let lane = if face.is_level() {
+                        // Around the node: the lane passes every row, so
+                        // a marker cell blocks it like a span.
+                        choose_lane(
+                            base,
+                            ext,
+                            node_has_self_loop[node],
+                            center(peer) > center(node),
+                            max_width,
+                            &|c| blocked_kind(level, c).is_some() || trunk_here(c) || taken_here(c),
+                        )
+                    } else {
+                        // Beside the node: the stub runs at its own row,
+                        // so a marker cell blocks it only on the top row.
+                        let top_row = side_row(&port_cross, ei, node, is_target) == 0;
+                        lateral_lane(
+                            base,
+                            ext,
+                            face,
+                            max_width,
+                            &|c| match blocked_kind(level, c) {
+                                None => trunk_here(c) || taken_here(c),
+                                Some(true) => top_row || trunk_here(c) || taken_here(c),
+                                Some(false) => true,
+                            },
+                        )
+                    };
+                    if lane == usize::MAX {
+                        if is_target {
+                            det.dst_wants = false;
+                            detour_ends[ei].1 = false;
+                            port_cross[ei].1 = usize::MAX;
+                        } else {
+                            det.src_wants = false;
+                            detour_ends[ei].0 = false;
+                            port_cross[ei].0 = usize::MAX;
+                        }
+                    } else {
+                        if is_target {
+                            det.dst_lane = lane;
+                        } else {
+                            det.src_lane = lane;
+                        }
+                        for g in gaps.0..=gaps.1 {
+                            taken.push((g, lane, ei, node, !face.is_level()));
+                        }
+                    }
+                }
+                detours[ei] = det;
+            }
+            // A policy places both directions of a face deterministically,
+            // so colliding ends share their cell — the ordinary drawing —
+            // and nothing is shifted or cancelled here.
+            // 4. A bottom-face arrival paints its arrowhead on the cell
+            // right under the target's port; reserve it (± ARROW_CELL_PAD)
+            // on the target level's slot 0, exactly as reversed edges
+            // reserve theirs, so no run — this edge's own included —
+            // crosses it.
+            for ei in 0..dag.edges.len() {
+                let det = detours[ei];
+                if det.dst_lane == usize::MAX || !det.dst_face.is_level() {
+                    continue;
+                }
+                let Some((_, dst)) = layout_ends(ei) else {
+                    continue;
+                };
+                let ax = resolved(&port_cross, ei, dst, true);
+                let slots = &mut level_occupied_slots[node_levels[dst]];
+                if slots.is_empty() {
+                    slots.push(Vec::new());
+                }
+                slots[0].push((ax.saturating_sub(ARROW_CELL_PAD), ax + ARROW_CELL_PAD));
+            }
         }
     }
 
@@ -541,49 +1049,6 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         }
     }
 
-    // Collect dummy node X positions for skip-level edge routing
-    let mut dummy_positions: Vec<Vec<(usize, usize)>> = vec![Vec::new(); dag.edges.len()];
-    for (level_idx, level_vnodes) in virtual_levels.iter().enumerate() {
-        let level_width = level_widths[level_idx];
-        // Apply the same centering policy as real nodes: skip when subgraphs
-        // are present to avoid misalignment between real and dummy positions.
-        let level_offset = if center_levels && max_width > level_width {
-            (max_width - level_width) / 2
-        } else {
-            0
-        };
-
-        for (pos, vnode) in level_vnodes.iter().enumerate() {
-            if let VNode::Dummy { edge_idx } = vnode {
-                // Get the actual x-coordinate from the layout, including centering offset
-                let base_x = x_coords[level_idx][pos] + level_offset;
-                // Add bounded offset for visual separation between skip-level edges
-                // This keeps convergent edges from merging visually
-                let edge_offset = A::dummy_draw_offset(*edge_idx);
-                let x = base_x + edge_offset;
-                dummy_positions[*edge_idx].push((level_idx, x));
-            }
-        }
-    }
-
-    // Sort dummy positions by level for each edge (they should already be in order, but ensure it)
-    for positions in &mut dummy_positions {
-        positions.sort_by_key(|(level, _)| *level);
-    }
-
-    // temp/09 P3: allocate each skip-edge chain a lane clear of the fans
-    // its gaps sweep. The canvas must cover any lane past the packed
-    // extent — the flip reflects around the canvas width, so an extent it
-    // cannot see would skew RightLeft instead of mirroring it (§4.8).
-    let lane_reach = allocate_chain_lanes::<A>(
-        dag,
-        &virtual_levels,
-        &real_node_coords,
-        &back_edges,
-        &mut dummy_positions,
-    );
-    let max_width = max_width.max(lane_reach);
-
     // Jog-aware dummy rows: a waypoint claims a routing row only where the
     // edge actually changes column — its x differs from the NEXT chain x
     // (next waypoint, or the layout-target center), because the bend to a
@@ -592,6 +1057,17 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     // routing row of their own. Mirrored in the CSR backend.
     let mut kept_wps: Vec<Vec<bool>> = Vec::with_capacity(dag.edges.len());
     let mut level_jog_count = vec![0usize; max_level + 1];
+    // Jog bend rows share the band's slot rows (bend `k` of a level
+    // paints on slot index `1 + label row + k`): with detours in play
+    // their intervals are recorded so detour runs are allocated clear
+    // of them. Per level: `(bend counter, min, max)` — the label row
+    // is known only after the flags pass, so the allocator adds it.
+    // Nothing is allocated for a layout without detours.
+    let mut jog_blocks: Vec<Vec<(usize, usize, usize)>> = if detours.is_empty() {
+        Vec::new()
+    } else {
+        vec![Vec::new(); max_level + 1]
+    };
     for (edge_idx, chain) in dummy_positions.iter().enumerate() {
         let mut kept = vec![false; chain.len()];
         if !chain.is_empty() {
@@ -600,8 +1076,23 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             if let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id))
             {
                 let layout_dst = if is_back { from_idx } else { to_idx };
-                let (_, _, dx, dw) = real_node_coords[layout_dst];
-                let target_x = dx + dw / 2;
+                // The chain's entry column: the lane when the target
+                // detours, else the RESOLVED port (a positioned
+                // explicit request, or the center) — never the bare
+                // center, or a spread port would leave the last jog
+                // without a budgeted row.
+                let target_x = match detours.get(edge_idx) {
+                    Some(d) if d.dst_lane != usize::MAX => d.dst_lane,
+                    _ => {
+                        let positioned = port_cross.get(edge_idx).map_or(usize::MAX, |p| p.1);
+                        if positioned != usize::MAX {
+                            positioned
+                        } else {
+                            let (_, _, dx, dw) = real_node_coords[layout_dst];
+                            dx + dw / 2
+                        }
+                    }
+                };
                 for i in 0..chain.len() {
                     let next_x = if i + 1 < chain.len() {
                         chain[i + 1].1
@@ -610,7 +1101,13 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                     };
                     if chain[i].1 != next_x {
                         kept[i] = true;
-                        level_jog_count[chain[i].0] += 1;
+                        let lvl = chain[i].0;
+                        let k = level_jog_count[lvl];
+                        level_jog_count[lvl] += 1;
+                        if !detours.is_empty() {
+                            let (x, nx) = (chain[i].1, next_x);
+                            jog_blocks[lvl].push((k, x.min(nx), x.max(nx)));
+                        }
                     }
                 }
             }
@@ -632,6 +1129,158 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             level_labeled_src[node_levels[layout_src]] = true;
         }
     }
+
+    // Detour rows: every detour run gets a slot with its EXACT interval
+    // — never the source's fan-out bus, whose registered extent stops
+    // at the targets' centers. The up-run above a level-0 source lives
+    // in rows above the first level (`top_slots`).
+    #[cfg_attr(not(feature = "ports"), allow(unused_mut))]
+    let mut top_slots: Vec<Vec<(usize, usize)>> = Vec::new();
+    #[cfg(feature = "ports")]
+    if !detours.is_empty() {
+        let resolved = |ei: usize, idx: usize, end_is_target: bool| -> usize {
+            let positioned = port_cross
+                .get(ei)
+                .map_or(usize::MAX, |p| if end_is_target { p.1 } else { p.0 });
+            if positioned != usize::MAX {
+                positioned
+            } else {
+                let (_, _, base, _) = real_node_coords[idx];
+                A::cross_center(
+                    base,
+                    A::cross_extent(dag.get_node_width(idx), dag.get_node_height(idx)),
+                )
+            }
+        };
+        // The greedy pass registered each bus run as the CENTERS span,
+        // which understates a skip edge's first run (it reaches the
+        // chain's first jogging column) and a spread port's. Detour
+        // runs must see the TRUE extents, so register them here — for
+        // graphs with detours only, so undeclared layouts keep their
+        // bytes.
+        for ei in 0..dag.edges.len() {
+            if detours[ei].active() {
+                continue;
+            }
+            let (from_id, to_id, _) = dag.edges[ei];
+            if from_id == to_id {
+                continue;
+            }
+            let is_back = back_edges.get(ei).copied().unwrap_or(false);
+            let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id))
+            else {
+                continue;
+            };
+            let (src, dst) = if is_back {
+                (to_idx, from_idx)
+            } else {
+                (from_idx, to_idx)
+            };
+            let from_x = resolved(ei, src, false);
+            let first_target = dummy_positions[ei]
+                .iter()
+                .zip(&kept_wps[ei])
+                .find(|(_, k)| **k)
+                .map_or_else(|| resolved(ei, dst, true), |(&(_, x), _)| x);
+            if from_x == first_target {
+                continue;
+            }
+            let level = node_levels[src];
+            let slot = if node_slots[src] != usize::MAX {
+                node_slots[src]
+            } else {
+                0
+            };
+            let slots = &mut level_occupied_slots[level];
+            while slots.len() <= slot {
+                slots.push(Vec::new());
+            }
+            slots[slot].push((from_x.min(first_target), from_x.max(first_target)));
+        }
+        for ei in 0..dag.edges.len() {
+            let mut det = detours[ei];
+            if !det.active() {
+                continue;
+            }
+            let (from_id, to_id, _) = dag.edges[ei];
+            let is_back = back_edges.get(ei).copied().unwrap_or(false);
+            let (Some(from_idx), Some(to_idx)) = (dag.node_index(from_id), dag.node_index(to_id))
+            else {
+                continue;
+            };
+            let (src, dst) = if is_back {
+                (to_idx, from_idx)
+            } else {
+                (from_idx, to_idx)
+            };
+            let (src_level, dst_level) = (node_levels[src], node_levels[dst]);
+            let from_x = resolved(ei, src, false);
+            let to_x = resolved(ei, dst, true);
+            let minmax = |a: usize, b: usize| (a.min(b), a.max(b));
+            let mut col = from_x;
+            if det.src_lane != usize::MAX {
+                // An opposite-face exit needs its up-run row; a lateral
+                // stub runs at the node's own row.
+                if det.src_face.is_level() {
+                    let (lo, hi) = minmax(from_x, det.src_lane);
+                    det.up_slot = if src_level == 0 {
+                        alloc_slot(&mut top_slots, &[], false, lo, hi)
+                    } else {
+                        alloc_slot(
+                            &mut level_occupied_slots[src_level - 1],
+                            &jog_blocks[src_level - 1],
+                            level_labeled_src[src_level - 1],
+                            lo,
+                            hi,
+                        )
+                    };
+                }
+                col = det.src_lane;
+            }
+            let final_col = if det.dst_lane != usize::MAX {
+                det.dst_lane
+            } else {
+                to_x
+            };
+            let first_target = dummy_positions[ei]
+                .iter()
+                .zip(&kept_wps[ei])
+                .find(|(_, k)| **k)
+                .map_or(final_col, |(&(_, x), _)| x);
+            if col != first_target {
+                let (lo, hi) = minmax(col, first_target);
+                det.first_slot = alloc_slot(
+                    &mut level_occupied_slots[src_level],
+                    &jog_blocks[src_level],
+                    level_labeled_src[src_level],
+                    lo,
+                    hi,
+                );
+            }
+            if det.dst_lane != usize::MAX && det.dst_face.is_level() {
+                let (lo, hi) = minmax(det.dst_lane, to_x);
+                det.below_slot = alloc_slot(
+                    &mut level_occupied_slots[dst_level],
+                    &jog_blocks[dst_level],
+                    level_labeled_src[dst_level],
+                    lo,
+                    hi,
+                );
+            }
+            detours[ei] = det;
+        }
+    }
+    let detour_of = |ei: usize| -> Option<super::ports::Detour> {
+        detours.get(ei).copied().filter(|d| d.active())
+    };
+    // Rows above the first level for its upward exits: one per slot
+    // plus the clearance line before the nodes (the mirror of the
+    // routing block below a level).
+    let top_extra = if top_slots.is_empty() {
+        0
+    } else {
+        crate::algorithms::sugiyama::geometry::EDGE_START_OFFSET + top_slots.len()
+    };
 
     // Calculate per-level heights: node height + routing overhead + extra rows for slot separation
     // Compute max node height per level from actual node heights
@@ -661,7 +1310,9 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         (0, vec![0; max_level + 1], 0)
     };
 
-    let mut current_offset = sg_initial_offset;
+    #[cfg_attr(not(feature = "ports"), allow(unused_variables))]
+    let top_base = sg_initial_offset;
+    let mut current_offset = sg_initial_offset + top_extra;
     // D8(b) bookkeeping only exists where labels claim level-axis room
     // (Horizontal with subgraphs) — the Vertical/no-cluster hot path
     // allocates and traverses nothing extra.
@@ -721,7 +1372,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         );
         if label_extras.iter().any(|&e| e > 0) {
             let mut offsets = Vec::with_capacity(max_level + 1);
-            let mut off = sg_initial_offset;
+            let mut off = sg_initial_offset + top_extra;
             for level in 0..=max_level {
                 offsets.push(off);
                 off += level_heights[level] + label_extras[level];
@@ -883,22 +1534,58 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             let (_, _, src_x_base, _) = real_node_coords[layout_src_idx];
             let (_, _, dst_x_base, _) = real_node_coords[layout_dst_idx];
 
-            // Ports sit on the node's DECLARED span — the packed tuple
-            // extent may carry the D5(ii) marker reserve.
-            let from_x = A::cross_port(
-                src_x_base,
-                A::cross_extent(
-                    dag.get_node_width(layout_src_idx),
-                    dag.get_node_height(layout_src_idx),
-                ),
-            );
-            let to_x = A::cross_port(
-                dst_x_base,
-                A::cross_extent(
-                    dag.get_node_width(layout_dst_idx),
-                    dag.get_node_height(layout_dst_idx),
-                ),
-            );
+            // Attachment resolution (ports sit on the node's DECLARED
+            // span — the packed tuple extent may carry the D5(ii)
+            // marker reserve). Declared sides bind to declared
+            // endpoints, so a reversal swaps the SIDES onto the layout
+            // roles; `Auto` binds to the layout role itself.
+            #[cfg(feature = "ports")]
+            let (src_side, dst_side) = dag.edge_ports.get(edge_idx).copied().unwrap_or_default();
+            #[cfg(not(feature = "ports"))]
+            let (src_side, dst_side) = (super::ports::PortSide::Auto, super::ports::PortSide::Auto);
+            let (layout_src_side, layout_dst_side) = if is_back {
+                (dst_side, src_side)
+            } else {
+                (src_side, dst_side)
+            };
+            use super::ports::{Attachment, EndRole};
+            // A positioned request overrides the center line; anything
+            // else (Auto, or a face without routing yet) resolves as
+            // before.
+            let positioned = port_cross
+                .get(edge_idx)
+                .copied()
+                .unwrap_or((usize::MAX, usize::MAX));
+            let from_x = if positioned.0 != usize::MAX {
+                positioned.0
+            } else {
+                Attachment::resolve::<A>(
+                    layout_src_side,
+                    level_flipped,
+                    EndRole::Source,
+                    src_x_base,
+                    A::cross_extent(
+                        dag.get_node_width(layout_src_idx),
+                        dag.get_node_height(layout_src_idx),
+                    ),
+                )
+                .cross
+            };
+            let to_x = if positioned.1 != usize::MAX {
+                positioned.1
+            } else {
+                Attachment::resolve::<A>(
+                    layout_dst_side,
+                    level_flipped,
+                    EndRole::Target,
+                    dst_x_base,
+                    A::cross_extent(
+                        dag.get_node_width(layout_dst_idx),
+                        dag.get_node_height(layout_dst_idx),
+                    ),
+                )
+                .cross
+            };
             // 2-node cycle sharing a column: offset the forward edge left
             // and the back edge right so the anti-parallel pair renders
             // side by side (↓ next to ⇡) instead of overlapping. Matches
@@ -908,15 +1595,27 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             // are typically ONE row tall — shifted endpoints leave the
             // node face, so the pair keeps its shared port and lane
             // separation becomes paint-time work (temp/08 P3).
+            // The shift is applied only while BOTH shifted endpoints stay
+            // inside their nodes' declared spans: a resolved port on a
+            // narrow custom node (0, 1, or 2 cells) keeps its boundary
+            // cell rather than being pushed off the face, and the pair
+            // then shares the port as horizontal pairs do.
             let (from_x, to_x) = if from_x == to_x
                 && from_id != to_id
                 && matches!(A::FLOW_AXIS, crate::ir::FlowAxis::Y)
                 && edge_in_two_cycle.get(edge_idx).copied().unwrap_or(false)
+                && detour_of(edge_idx).is_none()
             {
-                if is_back {
-                    (from_x + 1, to_x + 1)
-                } else {
-                    (from_x.saturating_sub(1), to_x.saturating_sub(1))
+                let delta: isize = if is_back { 1 } else { -1 };
+                let inside = |x: usize, idx: usize| -> Option<usize> {
+                    let (_, _, base, _) = real_node_coords[idx];
+                    let extent = A::cross_extent(dag.get_node_width(idx), dag.get_node_height(idx));
+                    let shifted = x.checked_add_signed(delta)?;
+                    (shifted >= base && shifted < base + extent).then_some(shifted)
+                };
+                match (inside(from_x, layout_src_idx), inside(to_x, layout_dst_idx)) {
+                    (Some(f), Some(t)) => (f, t),
+                    _ => (from_x, to_x),
                 }
             } else {
                 (from_x, to_x)
@@ -940,13 +1639,164 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 max_node_height[layout_from_level],
             );
             let to_y = level_offsets[layout_to_level];
+            // A detouring end attaches on its node's OWN face line — the
+            // leading line for an upward exit, the trailing line for an
+            // arrival from below — never the band-trailing port line.
+            let detour = detour_of(edge_idx);
+            // A lateral end sits on the node's OWN side cell: the face
+            // column, at the row the spread assigned along the face.
+            let lateral = |idx: usize, face: super::ports::Face, along: usize, level: usize| {
+                let (_, _, base, _) = real_node_coords[idx];
+                let (w, h) = (dag.get_node_width(idx), dag.get_node_height(idx));
+                let cross = if matches!(face, super::ports::Face::CrossTrailing) {
+                    base + A::cross_extent(w, h).saturating_sub(1)
+                } else {
+                    base
+                };
+                let row = if along == usize::MAX {
+                    A::level_center(0, A::level_extent(w, h))
+                } else {
+                    along
+                };
+                (cross, level_offsets[level] + row)
+            };
+            let (from_x, from_y, to_x, to_y) = match detour {
+                Some(d) => {
+                    let (fx, fy) = if d.src_lane == usize::MAX {
+                        (from_x, from_y)
+                    } else if d.src_face.is_level() {
+                        (from_x, level_offsets[layout_from_level])
+                    } else {
+                        lateral(layout_src_idx, d.src_face, positioned.0, layout_from_level)
+                    };
+                    let (tx, ty) = if d.dst_lane == usize::MAX {
+                        (to_x, to_y)
+                    } else if d.dst_face.is_level() {
+                        (
+                            to_x,
+                            level_offsets[layout_to_level]
+                                + A::level_extent(
+                                    dag.get_node_width(layout_dst_idx),
+                                    dag.get_node_height(layout_dst_idx),
+                                )
+                                - 1,
+                        )
+                    } else {
+                        lateral(layout_dst_idx, d.dst_face, positioned.1, layout_to_level)
+                    };
+                    (fx, fy, tx, ty)
+                }
+                None => (from_x, from_y, to_x, to_y),
+            };
+            #[cfg_attr(not(feature = "ports"), allow(unused_mut, unused_variables))]
+            let mut explicit_label_col: Option<usize> = None;
 
             // Edge routing starts one row below the source node. Reversed
             // edges' arrowheads on that row are protected by the arrow-cell
             // reservation in the slot allocator, not by shifting corners.
             let edge_start_row = crate::algorithms::sugiyama::geometry::EDGE_START_OFFSET;
 
-            let path = if layout_to_level == layout_from_level + 1 {
+            // The explicit polyline of a detouring edge (feature-gated with
+            // the path shape itself); `None` routes the inferred way.
+            #[cfg(feature = "ports")]
+            let explicit: Option<EdgePath> = detour.map(|det| {
+                // Around the node, as an explicit
+                // polyline in role space — `(cross, level)` pairs,
+                // materialized with the rest below. Every horizontal run
+                // sits on a row allocated for its exact interval; the
+                // jog rows are the MultiSegment rows, bend line included.
+                let band_row = |level: usize, slot: usize| {
+                    level_offsets[level] + max_node_height[level] - 1 + edge_start_row + slot
+                };
+                // (row, from column, to column)
+                let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+                let mut col = from_x;
+                if det.src_lane != usize::MAX {
+                    if det.src_face.is_level() {
+                        let up_row = if layout_from_level == 0 {
+                            top_base + top_extra - 1 - edge_start_row - det.up_slot
+                        } else {
+                            let row = band_row(layout_from_level - 1, det.up_slot);
+                            level_routing_floor[layout_from_level - 1] =
+                                level_routing_floor[layout_from_level - 1].max(row);
+                            row
+                        };
+                        runs.push((up_row, from_x, det.src_lane));
+                    } else {
+                        // The lateral stub: out of the side face at the
+                        // port's own row, straight onto the lane.
+                        runs.push((from_y, from_x, det.src_lane));
+                    }
+                    col = det.src_lane;
+                }
+                let final_col = if det.dst_lane != usize::MAX {
+                    det.dst_lane
+                } else {
+                    to_x
+                };
+                let kept_cols: Vec<(usize, usize)> = dummy_positions[edge_idx]
+                    .iter()
+                    .zip(&kept_wps[edge_idx])
+                    .filter(|(_, k)| **k)
+                    .map(|(&(level, x), _)| (level, x))
+                    .collect();
+                let first_target = kept_cols.first().map_or(final_col, |&(_, x)| x);
+                explicit_label_col = Some(first_target);
+                if col != first_target {
+                    let row = band_row(layout_from_level, det.first_slot);
+                    level_routing_floor[layout_from_level] =
+                        level_routing_floor[layout_from_level].max(row);
+                    runs.push((row, col, first_target));
+                    col = first_target;
+                }
+                for (i, &(level, x)) in kept_cols.iter().enumerate() {
+                    debug_assert_eq!(col, x);
+                    let next = kept_cols.get(i + 1).map_or(final_col, |&(_, nx)| nx);
+                    let slot = level_edge_next[level];
+                    level_edge_next[level] += 1;
+                    let wp_y = level_offsets[level]
+                        + max_node_height[level]
+                        + usize::from(level_labeled_src[level])
+                        + slot;
+                    edge_routing_ys.insert(wp_y);
+                    level_routing_floor[level] = level_routing_floor[level].max(wp_y + 1);
+                    runs.push((wp_y + 1, x, next));
+                    col = next;
+                }
+                if det.dst_lane != usize::MAX {
+                    if det.dst_face.is_level() {
+                        let row = band_row(layout_to_level, det.below_slot);
+                        level_routing_floor[layout_to_level] =
+                            level_routing_floor[layout_to_level].max(row);
+                        runs.push((row, det.dst_lane, to_x));
+                    } else {
+                        // Down the lane to the port's row, then into the
+                        // side face.
+                        runs.push((to_y, det.dst_lane, to_x));
+                    }
+                }
+                // A run's end that IS an endpoint (a lateral stub leaves
+                // the face cell itself) is no bend.
+                let mut bends = Vec::with_capacity(runs.len() * 2);
+                for &(row, a, b) in &runs {
+                    edge_routing_ys.insert(row);
+                    if a == b {
+                        continue;
+                    }
+                    if (a, row) != (from_x, from_y) {
+                        bends.push((a, row));
+                    }
+                    if (b, row) != (to_x, to_y) {
+                        bends.push((b, row));
+                    }
+                }
+                EdgePath::Orthogonal { bends }
+            });
+            #[cfg(not(feature = "ports"))]
+            let explicit: Option<EdgePath> = None;
+            let path = if let Some(explicit) = explicit {
+                explicit
+            } else if layout_to_level == layout_from_level + 1 {
                 // Adjacent levels - direct or corner connection
                 if from_x == to_x {
                     EdgePath::Direct
@@ -1077,6 +1927,8 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
 
                     // Find the edge's X position at the label row
                     let edge_x_at_label = match &path {
+                        #[cfg(feature = "ports")]
+                        EdgePath::Orthogonal { .. } => explicit_label_col.unwrap_or(from_x),
                         EdgePath::Direct => from_x,
                         EdgePath::Corner { bend_at } => {
                             // If label row is before the corner, edge is at from_x
@@ -1146,11 +1998,56 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                         .collect(),
                     start_offset,
                 },
+                #[cfg(feature = "ports")]
+                EdgePath::Orthogonal { bends } => EdgePath::Orthogonal {
+                    bends: bends
+                        .into_iter()
+                        .map(|(cross, lvl)| A::materialize(lvl, cross))
+                        .collect(),
+                },
                 p => p,
+            };
+            // Attachments, by DECLARED end: the requested side, and the
+            // face the end actually took — its detour face when a lane
+            // carried it off its role's own face, that face otherwise.
+            let (from_port, to_port) = {
+                use super::ports::{EndRole, PortAttachment};
+                let (layout_src_face, layout_dst_face) = match detour {
+                    Some(d) => (
+                        if d.src_lane != usize::MAX {
+                            d.src_face
+                        } else {
+                            EndRole::Source.auto_face()
+                        },
+                        if d.dst_lane != usize::MAX {
+                            d.dst_face
+                        } else {
+                            EndRole::Target.auto_face()
+                        },
+                    ),
+                    None => (EndRole::Source.auto_face(), EndRole::Target.auto_face()),
+                };
+                let (from_face, to_face) = if is_back {
+                    (layout_dst_face, layout_src_face)
+                } else {
+                    (layout_src_face, layout_dst_face)
+                };
+                (
+                    PortAttachment {
+                        requested: src_side,
+                        side: from_face.physical(A::FLOW_AXIS, level_flipped),
+                    },
+                    PortAttachment {
+                        requested: dst_side,
+                        side: to_face.physical(A::FLOW_AXIS, level_flipped),
+                    },
+                )
             };
             builder.add_edge(LayoutEdge {
                 from_id,
                 to_id,
+                from_port,
+                to_port,
                 from_x,
                 from_y,
                 to_x,
@@ -1253,6 +2150,58 @@ fn build_node_edge_indices(dag: &Graph<'_>) -> Vec<Vec<usize>> {
 }
 
 // ── X-coordinate refinement (median placement) ─────────────────────────
+
+/// Allocate a routing-row slot at a level for the exact cross interval
+/// `[min_x, max_x]`: the first slot index whose registered intervals
+/// AND jog bend blocks do not collide, creating slots up to the
+/// per-level cap; past the cap, slot 0 (the cap's degradation).
+/// A registered RUN (an interval with length) collides on a shared
+/// column too (`s <= max_x && e >= min_x`, one stricter than the
+/// greedy bus allocator): a detour run that merely touched another
+/// edge's run would paint a junction that reads as one continuous
+/// line — a departure sharing its port with an arrival meets that
+/// arrival's bus exactly at its column. A registered POINT (a trunk
+/// crossing the row, an arrival cell) collides only when strictly
+/// inside: a run ending on it is the run's own port.
+#[cfg_attr(not(feature = "ports"), allow(dead_code))]
+fn alloc_slot(
+    slots: &mut Vec<Vec<(usize, usize)>>,
+    jogs: &[(usize, usize, usize)],
+    labeled: bool,
+    min_x: usize,
+    max_x: usize,
+) -> usize {
+    const MAX_SLOTS_PER_LEVEL: usize = 8;
+    let label_row = usize::from(labeled);
+    let hits = |s: usize, e: usize| {
+        if s == e {
+            s < max_x && e > min_x
+        } else {
+            s <= max_x && e >= min_x
+        }
+    };
+    for i in 0..MAX_SLOTS_PER_LEVEL {
+        let in_slot = slots
+            .get(i)
+            .is_some_and(|occupied| occupied.iter().any(|&(s, e)| hits(s, e)));
+        let in_jog = jogs
+            .iter()
+            .any(|&(k, s, e)| 1 + label_row + k == i && hits(s, e));
+        if in_slot || in_jog {
+            continue;
+        }
+        while slots.len() <= i {
+            slots.push(Vec::new());
+        }
+        slots[i].push((min_x, max_x));
+        return i;
+    }
+    if slots.is_empty() {
+        slots.push(Vec::new());
+    }
+    slots[0].push((min_x, max_x));
+    0
+}
 
 // ── Fan-aware chain-lane allocation (temp/09 P3) ─────────────────────────
 

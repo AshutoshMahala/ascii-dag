@@ -76,11 +76,16 @@ pub(crate) trait Axis {
     /// Physical axis of this profile's edge trunks (flow segments) —
     /// stamped on every emitted edge (temp/08 D2).
     const FLOW_AXIS: crate::ir::FlowAxis;
-    /// Cross-axis PORT line of a node span — the line an edge
-    /// attaches to. Matches the IR center-field formulas exactly:
-    /// Vertical `center_x = x + w/2`, Horizontal
-    /// `center_y = y + (h − 1)/2`.
-    fn cross_port(cross: usize, extent: usize) -> usize;
+    /// Cross-axis CENTER line of a node span — where an `Auto` port
+    /// attaches (explicit ports resolve their own line along the
+    /// face). Matches the IR center-field formulas exactly: Vertical
+    /// `center_x = x + w/2`, Horizontal `center_y = y + (h − 1)/2`.
+    fn cross_center(cross: usize, extent: usize) -> usize;
+    /// Level-axis CENTER line of a span — where a request on a LATERAL
+    /// face lands by the profile's own level rule, the IR center field
+    /// on that axis: Vertical `center_y = y + (h − 1)/2`, Horizontal
+    /// `center_x = x + w/2`.
+    fn level_center(level: usize, extent: usize) -> usize;
     /// Level-axis line of a source node's PORT. Vertical keeps the
     /// legacy band-trailing endpoint (the level's tallest node decides
     /// where every edge starts — byte-frozen behavior); Horizontal
@@ -194,8 +199,13 @@ impl Axis for Vertical {
     }
 
     #[inline]
-    fn cross_port(cross: usize, extent: usize) -> usize {
+    fn cross_center(cross: usize, extent: usize) -> usize {
         cross + extent / 2
+    }
+
+    #[inline]
+    fn level_center(level: usize, extent: usize) -> usize {
+        level + extent.saturating_sub(1) / 2
     }
 
     #[inline]
@@ -263,8 +273,13 @@ impl Axis for Horizontal {
     }
 
     #[inline]
-    fn cross_port(cross: usize, extent: usize) -> usize {
+    fn cross_center(cross: usize, extent: usize) -> usize {
         cross + extent.saturating_sub(1) / 2
+    }
+
+    #[inline]
+    fn level_center(level: usize, extent: usize) -> usize {
+        level + extent / 2
     }
 
     #[inline]

@@ -1,4 +1,4 @@
-//! JSON serialization for Layout IR (schema v1.4).
+//! JSON serialization for Layout IR (schema v1.5).
 //!
 //! Produces JSON output extending zigraph's JSON IR schema: v1.3 added
 //! the per-edge `flow_axis` tag, the per-node `self_loop_at` cell, and
@@ -6,11 +6,16 @@
 //! `span_start`/`span_end` — a v1.2 `horizontal_y` is a v1.3 `bend_at`
 //! on a `flow_axis: "y"` edge). v1.4 adds the `self_loops[]` records:
 //! self-loops never enter the routed `edges[]` list, so their input
-//! identity, label, and multiplicity travel here.
+//! identity, label, and multiplicity travel here. v1.5 adds the
+//! `orthogonal` path type — an explicit polyline whose `bends[]` are
+//! every turn, the shape of routes that leave a node against the flow
+//! or beside it — and the per-edge attachments: `from_side`/`to_side`
+//! (the physical side each end landed on, always) and
+//! `from_port`/`to_port` (the declared side, only when not `auto`).
 //!
 //! # Schema
 //!
-//! - `version`: always `"1.4"`
+//! - `version`: always `"1.5"`
 //! - `width`, `height`, `level_count`: top-level dimensions
 //! - `nodes[]`: positioned node objects with `id`, `label`, `x`, `y`, etc.
 //! - `edges[]`: routed edge objects with `from`, `to`, path info, etc.
@@ -26,7 +31,12 @@
 
 /// JSON schema version (zigraph v1.2 + the direction and self-loop
 /// extensions).
-pub(crate) const VERSION: &str = "1.4";
+pub(crate) const VERSION: &str = "1.5";
+
+/// Provable bytes per stored path point (`MultiSegment` waypoints,
+/// `Orthogonal` bends): `[` + up to 20 decimal digits (`usize::MAX`
+/// on 64-bit targets) + `,` + 20 digits + `]` + the separating `,`.
+pub(crate) const POINT_JSON_BYTES: usize = 44;
 
 // ── Minimal no-alloc JSON writer ─────────────────────────────────────────
 
@@ -156,7 +166,7 @@ use super::arena::{
 };
 
 impl<'a> LayoutIRArena<'a> {
-    /// Serialize the layout IR to JSON (schema v1.4 — zigraph v1.2
+    /// Serialize the layout IR to JSON (schema v1.5 — zigraph v1.2
     /// plus the direction and self-loop extensions; see the module
     /// docs).
     ///
@@ -285,7 +295,7 @@ impl<'a> LayoutIRArena<'a> {
     ///
     /// Returns a conservative upper bound. The actual output is usually smaller.
     pub fn estimate_json_size(&self) -> usize {
-        // Base: {"version":"1.4","width":N,"height":N,"level_count":N,"nodes":[...],"edges":[...]}
+        // Base: {"version":"1.5","width":N,"height":N,"level_count":N,"nodes":[...],"edges":[...]}
         let base: usize = 100;
         // Each node: fixed fields incl. `content_kind` and the v1.3
         // `self_loop_at` cell (~210 bytes) plus its label at
@@ -302,8 +312,9 @@ impl<'a> LayoutIRArena<'a> {
             .map(|entry| entry.payload_len.saturating_mul(6).saturating_add(16))
             .fold(0usize, |a, b| a.saturating_add(b));
         // Each edge: fixed fields + path + the v1.3 `flow_axis` tag
-        // (~220 bytes) plus its label at worst-case escaping.
-        let edges = self.edge_count().saturating_mul(220);
+        // (~320 bytes with the attachment keys) plus its label at
+        // worst-case escaping.
+        let edges = self.edge_count().saturating_mul(320);
         let edge_labels: usize = (0..self.edge_count())
             .map(|i| self.edge_label(i).len().saturating_mul(6))
             .fold(0usize, |a, b| a.saturating_add(b));
@@ -337,7 +348,11 @@ impl<'a> LayoutIRArena<'a> {
             .iter()
             .map(|e| match e.path {
                 EdgePathArena::MultiSegment { waypoints_len, .. } => {
-                    waypoints_len.saturating_mul(20)
+                    waypoints_len.saturating_mul(POINT_JSON_BYTES)
+                }
+                #[cfg(feature = "ports")]
+                EdgePathArena::Orthogonal { bends_len, .. } => {
+                    bends_len.saturating_mul(POINT_JSON_BYTES)
                 }
                 _ => 0,
             })
@@ -485,6 +500,24 @@ fn write_edge_arena(
         crate::ir::FlowAxis::Y => "y",
         crate::ir::FlowAxis::X => "x",
     })?;
+    // v1.5: attachments — the resolved side of each end always, the
+    // declaration only when it is not `Auto`.
+    w.write_byte(b',')?;
+    w.write_key("from_side")?;
+    w.write_str(edge.from_port.side.name())?;
+    w.write_byte(b',')?;
+    w.write_key("to_side")?;
+    w.write_str(edge.to_port.side.name())?;
+    if !matches!(edge.from_port.requested, crate::PortSide::Auto) {
+        w.write_byte(b',')?;
+        w.write_key("from_port")?;
+        w.write_str(edge.from_port.requested.name())?;
+    }
+    if !matches!(edge.to_port.requested, crate::PortSide::Auto) {
+        w.write_byte(b',')?;
+        w.write_key("to_port")?;
+        w.write_str(edge.to_port.requested.name())?;
+    }
 
     // reversed: only emit when true (per v1.2 spec)
     if edge.reversed {
@@ -565,6 +598,28 @@ fn write_edge_path_arena(
             w.write_byte(b']')?;
             w.write_byte(b'}')
         }
+        #[cfg(feature = "ports")]
+        EdgePathArena::Orthogonal {
+            bends_start,
+            bends_len,
+        } => {
+            w.write_bytes(b"{\"type\":\"orthogonal\",")?;
+            w.write_key("bends")?;
+            w.write_byte(b'[')?;
+            let bends = ir.edge_waypoints_raw(bends_start, bends_len);
+            for (i, &(x, y)) in bends.iter().enumerate() {
+                if i > 0 {
+                    w.write_byte(b',')?;
+                }
+                w.write_byte(b'[')?;
+                w.write_usize(x)?;
+                w.write_byte(b',')?;
+                w.write_usize(y)?;
+                w.write_byte(b']')?;
+            }
+            w.write_byte(b']')?;
+            w.write_byte(b'}')
+        }
         EdgePathArena::Spline {
             cp1_x,
             cp1_y,
@@ -631,7 +686,7 @@ mod heap_json {
     use alloc::string::String;
 
     impl<'a> LayoutIR<'a> {
-        /// Serialize the layout IR to a JSON string (schema v1.4 —
+        /// Serialize the layout IR to a JSON string (schema v1.5 —
         /// zigraph v1.2 plus the direction and self-loop extensions).
         ///
         /// # Example
@@ -645,7 +700,7 @@ mod heap_json {
         /// );
         /// let ir = dag.compute_layout();
         /// let json = ir.to_json();
-        /// assert!(json.contains("\"version\":\"1.4\""));
+        /// assert!(json.contains("\"version\":\"1.5\""));
         /// assert!(json.contains("\"nodes\":["));
         /// ```
         pub fn to_json(&self) -> String {
@@ -752,7 +807,8 @@ mod heap_json {
             out.push('}');
         }
 
-        fn estimate_json_size(&self) -> usize {
+        /// Upper bound on the bytes [`to_json`](Self::to_json) produces.
+        pub(crate) fn estimate_json_size(&self) -> usize {
             // Loop terms mirror the arena estimator's provable bound:
             // 60 per record (two 20-digit ids + keys + separators),
             // 12 + 6·len per label (`,"label":""` syntax + worst-case
@@ -766,9 +822,23 @@ mod heap_json {
                 })
                 .fold(0usize, |a, b| a.saturating_add(b));
             let loop_wrapper = if self.self_loops().is_empty() { 0 } else { 20 };
+            // Stored path points (waypoints, bends): the provable
+            // per-point bound, as the arena estimator counts them.
+            let points: usize = self
+                .edges()
+                .iter()
+                .map(|e| match &e.path {
+                    EdgePath::MultiSegment { waypoints, .. } => waypoints.len(),
+                    #[cfg(feature = "ports")]
+                    EdgePath::Orthogonal { bends } => bends.len(),
+                    _ => 0,
+                })
+                .fold(0usize, |a, b| a.saturating_add(b))
+                .saturating_mul(super::POINT_JSON_BYTES);
             100usize
                 .saturating_add(self.nodes().len().saturating_mul(180))
-                .saturating_add(self.edges().len().saturating_mul(220))
+                .saturating_add(self.edges().len().saturating_mul(320))
+                .saturating_add(points)
                 .saturating_add(self.self_loops().len().saturating_mul(60))
                 .saturating_add(loop_labels)
                 .saturating_add(loop_wrapper)
@@ -927,6 +997,24 @@ mod heap_json {
                 crate::ir::FlowAxis::X => "x",
             },
         );
+        // v1.5: attachments — the resolved side of each end always, the
+        // declaration only when it is not `Auto`.
+        out.push(',');
+        push_key(out, "from_side");
+        push_json_str(out, edge.from_port.side.name());
+        out.push(',');
+        push_key(out, "to_side");
+        push_json_str(out, edge.to_port.side.name());
+        if !matches!(edge.from_port.requested, crate::PortSide::Auto) {
+            out.push(',');
+            push_key(out, "from_port");
+            push_json_str(out, edge.from_port.requested.name());
+        }
+        if !matches!(edge.to_port.requested, crate::PortSide::Auto) {
+            out.push(',');
+            push_key(out, "to_port");
+            push_json_str(out, edge.to_port.requested.name());
+        }
 
         if edge.reversed {
             out.push(',');
@@ -985,6 +1073,24 @@ mod heap_json {
                 push_key(out, "waypoints");
                 out.push('[');
                 for (i, &(x, y)) in waypoints.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push('[');
+                    push_usize(out, x);
+                    out.push(',');
+                    push_usize(out, y);
+                    out.push(']');
+                }
+                out.push(']');
+                out.push('}');
+            }
+            #[cfg(feature = "ports")]
+            EdgePath::Orthogonal { bends } => {
+                out.push_str("{\"type\":\"orthogonal\",");
+                push_key(out, "bends");
+                out.push('[');
+                for (i, &(x, y)) in bends.iter().enumerate() {
                     if i > 0 {
                         out.push(',');
                     }
@@ -1056,6 +1162,113 @@ mod heap_json {
 mod tests {
     use crate::Graph;
 
+    /// The sizing contract holds for `MultiSegment` waypoints with
+    /// maximal coordinates too (44 bytes a point, not 20).
+    #[test]
+    fn max_coordinate_waypoints_fit_the_estimates() {
+        use crate::ir::arena::{EdgePathArena, LayoutEdgeArena};
+        use crate::ir::arena_builder::LayoutIRArenaBuilder;
+        use crate::ir::{EdgePath, FlowAxis, LayoutEdge, LayoutIRBuilder, LayoutNode, NodeKind};
+        let points = vec![(usize::MAX, usize::MAX); 64];
+        let node = |id: usize, label: &'static str, x: usize, y: usize| LayoutNode {
+            id,
+            label,
+            x,
+            y,
+            width: 3,
+            height: 1,
+            center_x: x + 1,
+            center_y: y,
+            level: 0,
+            level_position: 0,
+            kind: NodeKind::Explicit,
+            has_self_loop: false,
+            self_loop_at: None,
+            edge_index: None,
+            content_tag: 0,
+        };
+        let mut b = LayoutIRBuilder::new();
+        b.set_dimensions(20, 10);
+        b.add_node(node(1, "A", 0, 0));
+        b.add_node(node(2, "B", 10, 5));
+        b.add_edge(LayoutEdge {
+            from_id: 1,
+            to_id: 2,
+            from_port: crate::PortAttachment::auto(crate::PhysicalSide::South),
+            to_port: crate::PortAttachment::auto(crate::PhysicalSide::North),
+            from_x: 1,
+            from_y: 0,
+            to_x: 11,
+            to_y: 5,
+            path: EdgePath::MultiSegment {
+                waypoints: points.clone(),
+                start_offset: 0,
+            },
+            flow_axis: FlowAxis::Y,
+            edge_index: 0,
+            label: None,
+            label_x: 0,
+            label_y: 0,
+            directed: true,
+            reversed: false,
+        });
+        let ir = b.build();
+        assert!(ir.to_json().len() <= ir.estimate_json_size());
+
+        let mut backing = [0u8; 8192];
+        let mut arena = crate::graph::arena::Arena::new(&mut backing);
+        let mut bld = LayoutIRArenaBuilder::new(&mut arena, 2, 1, 64, 8, 1).unwrap();
+        bld.set_dimensions(20, 10);
+        for (id, label, x, y) in [(1usize, "A", 0usize, 0usize), (2, "B", 10, 5)] {
+            let idx = bld
+                .add_node(
+                    id,
+                    label,
+                    x,
+                    y,
+                    3,
+                    1,
+                    0,
+                    0,
+                    NodeKind::Explicit,
+                    usize::MAX,
+                    0,
+                )
+                .unwrap();
+            bld.add_node_to_level(0, idx).unwrap();
+        }
+        bld.finalize_levels();
+        let (waypoints_start, waypoints_len) = bld.add_waypoints(&points).unwrap();
+        bld.add_edge(LayoutEdgeArena {
+            from_id: 1,
+            to_id: 2,
+            from_port: crate::PortAttachment::auto(crate::PhysicalSide::South),
+            to_port: crate::PortAttachment::auto(crate::PhysicalSide::North),
+            from_x: 1,
+            from_y: 0,
+            to_x: 11,
+            to_y: 5,
+            directed: true,
+            reversed: false,
+            path: EdgePathArena::MultiSegment {
+                waypoints_start,
+                waypoints_len,
+                start_offset: 0,
+            },
+            flow_axis: FlowAxis::Y,
+            edge_index: 0,
+            label_offset: 0,
+            label_len: 0,
+            label_x: 0,
+            label_y: 0,
+            min_y: 0,
+            max_y: usize::MAX,
+        });
+        let csr = bld.build();
+        let mut buf = vec![0u8; csr.estimate_json_size()];
+        assert!(csr.serialize_json(&mut buf).is_some());
+    }
+
     #[test]
     fn heap_json_roundtrip_basic() {
         let dag = Graph::from_edges(&[(1, "A"), (2, "B"), (3, "C")], &[(1, 2), (1, 3), (2, 3)]);
@@ -1065,7 +1278,7 @@ mod tests {
         // Validate structure
         assert!(json.starts_with('{'));
         assert!(json.ends_with('}'));
-        assert!(json.contains("\"version\":\"1.4\""));
+        assert!(json.contains("\"version\":\"1.5\""));
         assert!(json.contains("\"nodes\":["));
         assert!(json.contains("\"edges\":["));
 
@@ -1266,7 +1479,7 @@ mod arena_tests {
 
         assert!(json.starts_with('{'));
         assert!(json.ends_with('}'));
-        assert!(json.contains("\"version\":\"1.4\""));
+        assert!(json.contains("\"version\":\"1.5\""));
         assert!(json.contains("\"nodes\":["));
         assert!(json.contains("\"edges\":["));
         assert!(json.contains("\"label\":\"A\""));

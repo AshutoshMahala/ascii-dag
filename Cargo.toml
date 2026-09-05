@@ -17,9 +17,14 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["std", "generic", "layout-vertical", "layout-horizontal"]
+default = ["std", "generic", "layout-vertical", "layout-horizontal", "ports"]
 std = ["alloc"]
 alloc = []            # Use heap allocation (Vec, String, HashMap)
+# Declared edge attachment sides (ports) on both graph types and their
+# per-face positioning in layout. Off, the attachment rule is exactly
+# the port-free one and none of the machinery is linked — measured on
+# the Longan Nano example, where the flag exists because of that number.
+ports = []
 # Optional modules for bundle size reduction
 # Generic cycle detection, topological sort, impact analysis, metrics.
 # Requires std, not just alloc: these algorithms track visited sets keyed by
@@ -82,3 +87,8 @@ panic = "abort"     # Remove panic unwinding (critical for WASM size)
 
 [profile.dev]
 # Note: panic = "abort" removed - set in downstream project for embedded targets
+
+[[example]]
+name = "ports"
+path = "examples/ports.rs"
+required-features = ["ports", "layout-vertical", "layout-horizontal"]

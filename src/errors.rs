@@ -26,11 +26,13 @@
 //! |-----|------|-------------|-----------|
 //! | 001 | MISSING | Required data not provided | `EmptyGraph` — no nodes in graph |
 //! | 003 | INVALID | Validation check failed | `CycleDetected`, `SubgraphCycle` |
-//! | 004 | OVERFLOW | Value too large | `ExceedsMaxNodes`, `ExceedsMaxLevels` |
+//! | 004 | OVERFLOW | Value too large | `ExceedsMaxNodes`, `ExceedsMaxLevels`, `ExceedsMaxExtent` |
 //! | 021 | NOT_FOUND | Referenced element not found | `NodeNotFound`, `SubgraphNotFound` |
 //! | 026 | EXHAUSTED | Resource exhausted | `ArenaOom`, `BuilderFailed` |
 //! | 031 | INVISIBLE | Output element will not be rendered | `WARN_LABEL_INVISIBLE` (crate extension) |
 //! | 033 | EXCESSIVE | Value kept but past its useful range | `WARN_CONFIG_EXCESSIVE` (crate extension) |
+//! | 034 | DEFERRED | Declared intent not honored in this release | `WARN_PORT_ON_SELF_LOOP` (crate extension) |
+//! | 035 | UNROUTABLE | Declared placement could not be honored | `WARN_PORT_UNROUTABLE` (crate extension) |
 //!
 //! All codes are composed from named macro building blocks at compile time via
 //! `wdp!`. Any unrecognised token causes a compile error.
@@ -100,6 +102,10 @@ macro_rules! component {
 /// - `Builder` — IR builder issues
 /// - `Node`    — node-count capacity issues (index type overflow)
 /// - `Level`   — level-depth capacity issues
+/// - `Extent`  — cross-axis extent past the coordinate type
+///
+/// **Under `Graph`, diagnostics:**
+/// - `Port`    — declared edge attachment sides
 ///
 /// **Under `Render`:**
 /// - `Plan`   — render-plan build issues (caller plan buffer/arena)
@@ -128,6 +134,12 @@ macro_rules! primary {
     };
     (Level) => {
         "Level"
+    };
+    (Extent) => {
+        "Extent"
+    };
+    (Port) => {
+        "Port"
     };
     (Label) => {
         "Label"
@@ -162,6 +174,9 @@ macro_rules! primary {
 /// | 026 | EXHAUSTED | Resource | Resource exhausted (OOM, capacity) |
 /// | 031 | INVISIBLE | Output | Element will not be rendered (crate extension) |
 /// | 032 | FAILED | Output | Downstream sink reported failure (crate extension) |
+/// | 033 | EXCESSIVE | Config | Value kept but past its useful range (crate extension) |
+/// | 034 | DEFERRED | Intent | Declared intent not honored in this release (crate extension) |
+/// | 035 | UNROUTABLE | Placement | Declared placement could not be honored (crate extension) |
 macro_rules! sequence {
     (MISSING) => {
         "001"
@@ -195,6 +210,12 @@ macro_rules! sequence {
     };
     (EXCESSIVE) => {
         "033"
+    };
+    (DEFERRED) => {
+        "034"
+    };
+    (UNROUTABLE) => {
+        "035"
     };
 }
 
@@ -236,6 +257,7 @@ macro_rules! wdp {
 //   ArenaLayout.Builder.026   BuilderFailed     (EXHAUSTED)
 //   ArenaLayout.Node.004      ExceedsMaxNodes   (OVERFLOW)
 //   ArenaLayout.Level.004     ExceedsMaxLevels  (OVERFLOW)
+//   ArenaLayout.Extent.004    ExceedsMaxExtent  (OVERFLOW)
 //
 // Render component:
 //   Render.Plan.026    RenderPlanOom         (EXHAUSTED)
@@ -289,6 +311,11 @@ pub const EXCEEDS_MAX_NODES: &str = wdp!(E.ArenaLayout.Node.OVERFLOW);
 ///
 /// `E.ArenaLayout.Level.004` — Sequence 004 = OVERFLOW.
 pub const EXCEEDS_MAX_LEVELS: &str = wdp!(E.ArenaLayout.Level.OVERFLOW);
+
+/// The layout's cross-axis extent exceeds the arena coordinate type.
+///
+/// `E.ArenaLayout.Extent.004` — Sequence 004 = OVERFLOW.
+pub const EXCEEDS_MAX_EXTENT: &str = wdp!(E.ArenaLayout.Extent.OVERFLOW);
 
 /// Caller-provided render-plan buffer/arena is too small (no_std path).
 ///
@@ -347,6 +374,21 @@ pub const WARN_CONFIG_CLAMPED: &str = wdp!(W.Graph.Dag.INVALID);
 /// like 031/032). A condition code, reported per run until fixed.
 pub const WARN_CONFIG_EXCESSIVE: &str = wdp!(W.Graph.Dag.EXCESSIVE);
 
+/// A declared side on a self-loop is not honored in this release: the
+/// loop keeps its marker cell.
+///
+/// `W.Graph.Port.034` — Sequence 034 = DEFERRED (crate extension). A
+/// condition code, reported per run until fixed.
+pub const WARN_PORT_ON_SELF_LOOP: &str = wdp!(W.Graph.Port.DEFERRED);
+
+/// A declared side could not be routed (no free lane beside the node,
+/// or the face cell was taken) and the end attached on its role's own
+/// face instead.
+///
+/// `W.Graph.Port.035` — Sequence 035 = UNROUTABLE (crate extension).
+/// A condition code, reported per run until fixed.
+pub const WARN_PORT_UNROUTABLE: &str = wdp!(W.Graph.Port.UNROUTABLE);
+
 /// An edge label will not paint AND the legend is disabled (the
 /// default) — the label appears nowhere in the output. With
 /// `LabelOverflow::Legend` set, unplaced labels are listed below
@@ -382,6 +424,7 @@ pub const WARN_LABEL_INVISIBLE: &str = wdp!(W.Render.Label.INVISIBLE);
 /// | `BuilderFailed` | `E.ArenaLayout.Builder.026` | EXHAUSTED — builder alloc |
 /// | `ExceedsMaxNodes` | `E.ArenaLayout.Node.004` | OVERFLOW — index type full |
 /// | `ExceedsMaxLevels` | `E.ArenaLayout.Level.004` | OVERFLOW — too deep |
+/// | `ExceedsMaxExtent` | `E.ArenaLayout.Extent.004` | OVERFLOW — canvas past the coordinate type |
 /// | `RenderPlanOom` | `E.Render.Plan.026` | EXHAUSTED — plan buffer |
 /// | `RenderCanvasTooSmall` | `E.Render.Canvas.026` | EXHAUSTED — band buffer |
 /// | `RenderOutputTooSmall` | `E.Render.Sink.026` | EXHAUSTED — output buffer |
@@ -457,6 +500,18 @@ pub enum GraphError {
         max: usize,
     },
 
+    /// The layout's cross-axis extent — its packed nodes plus the cells
+    /// port routing opens beside them — exceeds the arena coordinate
+    /// type.
+    ///
+    /// **WDP:** `E.ArenaLayout.Extent.004` (OVERFLOW)
+    ExceedsMaxExtent {
+        /// The extent the layout needs.
+        extent: usize,
+        /// Maximum representable by the coordinate type.
+        max: usize,
+    },
+
     /// The caller-provided render-plan buffer is too small.
     ///
     /// **WDP:** `E.Render.Plan.026` (EXHAUSTED)
@@ -523,6 +578,7 @@ impl GraphError {
             Self::BuilderFailed => BUILDER_FAILED,
             Self::ExceedsMaxNodes { .. } => EXCEEDS_MAX_NODES,
             Self::ExceedsMaxLevels { .. } => EXCEEDS_MAX_LEVELS,
+            Self::ExceedsMaxExtent { .. } => EXCEEDS_MAX_EXTENT,
             Self::RenderPlanOom => RENDER_PLAN_OOM,
             Self::RenderCanvasTooSmall { .. } => RENDER_CANVAS_TOO_SMALL,
             Self::RenderOutputTooSmall => RENDER_OUTPUT_TOO_SMALL,
@@ -549,6 +605,9 @@ impl GraphError {
             }
             Self::ExceedsMaxLevels { .. } => {
                 "Reduce chain depth or use a different layout strategy"
+            }
+            Self::ExceedsMaxExtent { .. } => {
+                "Narrow the widest level (node widths, spacing, side ports) or use the heap layout"
             }
             Self::RenderPlanOom => "Increase the render arena; use estimate_render_arena_size()",
             Self::RenderCanvasTooSmall { .. } => {
@@ -589,6 +648,9 @@ impl fmt::Display for GraphError {
             }
             Self::ExceedsMaxLevels { depth, max } => {
                 write!(f, "graph depth {} exceeds max levels {}", depth, max)
+            }
+            Self::ExceedsMaxExtent { extent, max } => {
+                write!(f, "layout extent {} exceeds coordinate max {}", extent, max)
             }
             Self::RenderPlanOom => write!(f, "render plan buffer exhausted"),
             Self::RenderCanvasTooSmall { needed, got } => {
