@@ -97,6 +97,7 @@ pub struct CustomNodeArena {
 
 /// Edge routing type (no heap allocation version).
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum EdgePathArena {
     /// Straight flow segment (endpoints share their cross-axis line).
     Direct,

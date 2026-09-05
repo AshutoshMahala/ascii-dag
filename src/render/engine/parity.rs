@@ -5051,6 +5051,54 @@ mod orthogonal {
         assert_eq!(csr.edge_waypoints(csr.edge(0)), &bends[..]);
     }
 
+    /// The JSON sizing contract: a stored point can need 44 bytes on a
+    /// 64-bit target (`[usize::MAX,usize::MAX],`), and both estimators
+    /// reserve that — an exactly-estimated buffer serializes sixty-four
+    /// of them.
+    #[test]
+    fn max_coordinate_bends_fit_the_json_estimates() {
+        let bends = vec![(usize::MAX, usize::MAX); 64];
+        let Fixture { a, b, from, to, .. } = TD;
+        let heap = ortho_ir(
+            FlowAxis::Y,
+            a,
+            b,
+            from,
+            to,
+            bends.clone(),
+            false,
+            None,
+            (20, 10),
+        );
+        let json = heap.to_json();
+        assert!(
+            json.len() <= heap.estimate_json_size(),
+            "heap: {} > {}",
+            json.len(),
+            heap.estimate_json_size()
+        );
+        let mut backing = [0u8; 8192];
+        let mut arena = Arena::new(&mut backing);
+        let csr = ortho_ir_arena(
+            &mut arena,
+            FlowAxis::Y,
+            a,
+            b,
+            from,
+            to,
+            &bends,
+            false,
+            (20, 10),
+        );
+        let mut buf = vec![0u8; csr.estimate_json_size()];
+        let n = csr.serialize_json(&mut buf).expect("exact estimate");
+        assert!(
+            core::str::from_utf8(&buf[..n])
+                .unwrap()
+                .contains("18446744073709551615")
+        );
+    }
+
     #[cfg(feature = "layout-vertical")]
     #[test]
     fn a_level_flip_mirrors_the_bend_rows_in_place() {

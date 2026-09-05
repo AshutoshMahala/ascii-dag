@@ -573,6 +573,63 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 (from_idx, to_idx)
             })
         };
+        // The detouring nodes, in index order, with their flags; and the
+        // head-on records `(node, role, cell)` of the non-detouring ends
+        // AT those nodes, sorted once — a query is a binary search. A
+        // cancelled detour attaches at its Auto face's center, recorded
+        // as a per-node flag, so no growing tail is ever scanned.
+        let mut node_marks = vec![false; dag.nodes.len()];
+        for e2 in 0..dag.edges.len() {
+            let Some((s2, d2)) = layout_ends(e2) else {
+                continue;
+            };
+            if detour_ends[e2].0 {
+                node_marks[s2] = true;
+            }
+            if detour_ends[e2].1 {
+                node_marks[d2] = true;
+            }
+        }
+        let mut detour_nodes: Vec<(usize, u8)> = node_marks
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| **m)
+            .map(|(n, _)| (n, 0u8))
+            .collect();
+        let mut head_on: Vec<(usize, u8, usize)> = Vec::new();
+        for e2 in 0..dag.edges.len() {
+            let Some((s2, d2)) = layout_ends(e2) else {
+                continue;
+            };
+            if node_marks[s2] && !detour_ends[e2].0 {
+                head_on.push((s2, 0, resolved(&port_cross, e2, s2, false)));
+            }
+            if node_marks[d2] && !detour_ends[e2].1 {
+                head_on.push((d2, 1, resolved(&port_cross, e2, d2, true)));
+            }
+        }
+        head_on.sort_unstable();
+        let node_center = |node: usize| {
+            let (_, _, base, _) = real_node_coords[node];
+            A::cross_center(
+                base,
+                A::cross_extent(dag.get_node_width(node), dag.get_node_height(node)),
+            )
+        };
+        let is_head_on = |nodes: &[(usize, u8)], node: usize, role: u8, cell: usize| {
+            if head_on.binary_search(&(node, role, cell)).is_ok() {
+                return true;
+            }
+            let bit = if role == 0 {
+                super::ports::NODE_SRC_CANCELLED
+            } else {
+                super::ports::NODE_DST_CANCELLED
+            };
+            cell == node_center(node)
+                && nodes
+                    .binary_search_by_key(&node, |e| e.0)
+                    .is_ok_and(|i| nodes[i].1 & bit != 0)
+        };
         for ei in 0..dag.edges.len() {
             let Some((src, dst)) = layout_ends(ei) else {
                 continue;
@@ -586,26 +643,10 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 if !wants {
                     continue;
                 }
-                // Head-on cells on this face: the OTHER role's ends at
-                // this node that do not detour.
-                let head_on = |pc: &[(usize, usize)], cell: usize| {
-                    (0..dag.edges.len()).any(|e2| {
-                        e2 != ei
-                            && layout_ends(e2).is_some_and(|(s2, d2)| {
-                                if is_target {
-                                    s2 == node
-                                        && !detour_ends[e2].0
-                                        && resolved(pc, e2, node, false) == cell
-                                } else {
-                                    d2 == node
-                                        && !detour_ends[e2].1
-                                        && resolved(pc, e2, node, true) == cell
-                                }
-                            })
-                    })
-                };
+                // The OTHER role's head-on ends share this face.
+                let other: u8 = if is_target { 0 } else { 1 };
                 let cell = resolved(&port_cross, ei, node, is_target);
-                if !head_on(&port_cross, cell) {
+                if !is_head_on(&detour_nodes, node, other, cell) {
                     continue;
                 }
                 let (_, _, base, _) = real_node_coords[node];
@@ -613,7 +654,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 let inside = |c: usize| c >= base && c < base + ext;
                 let shifted = [cell + 1, cell.wrapping_sub(1)]
                     .into_iter()
-                    .find(|&c| inside(c) && !head_on(&port_cross, c));
+                    .find(|&c| inside(c) && !is_head_on(&detour_nodes, node, other, c));
                 match shifted {
                     Some(c) => {
                         if is_target {
@@ -624,7 +665,8 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                     }
                     // No free cell: attach head-on after all — on the
                     // Auto face, at its center (the spread position was
-                    // for the opposite face).
+                    // for the opposite face) — and count as head-on
+                    // there from now on.
                     None => {
                         if is_target {
                             detour_ends[ei].1 = false;
@@ -632,6 +674,13 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                         } else {
                             detour_ends[ei].0 = false;
                             port_cross[ei].0 = usize::MAX;
+                        }
+                        if let Ok(i) = detour_nodes.binary_search_by_key(&node, |e| e.0) {
+                            detour_nodes[i].1 |= if is_target {
+                                super::ports::NODE_DST_CANCELLED
+                            } else {
+                                super::ports::NODE_SRC_CANCELLED
+                            };
                         }
                     }
                 }
@@ -832,7 +881,11 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
         for idx in 0..dag.nodes.len() {
             let (level, _, base, _) = real_node_coords[idx];
             let ext = A::cross_extent(dag.get_node_width(idx), dag.get_node_height(idx));
-            level_blockers[level].push((base, (base + ext).saturating_sub(1)));
+            // A zero-extent node occupies no cell (the arena's half-open
+            // span agrees).
+            if ext > 0 {
+                level_blockers[level].push((base, base + ext - 1));
+            }
             if node_has_self_loop[idx] {
                 level_blockers[level].push((base + ext, base + ext));
             }
@@ -841,6 +894,19 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             for &(level, x) in chain {
                 level_blockers[level].push((x, x));
             }
+        }
+        // Sorted and merged per level, so a query is one predecessor
+        // lookup by `lo` — the arena backend's structure.
+        for blockers in &mut level_blockers {
+            blockers.sort_unstable();
+            let mut merged: Vec<(usize, usize)> = Vec::with_capacity(blockers.len());
+            for &(lo, hi) in blockers.iter() {
+                match merged.last_mut() {
+                    Some(last) if lo <= last.1 + 1 => last.1 = last.1.max(hi),
+                    _ => merged.push((lo, hi)),
+                }
+            }
+            *blockers = merged;
         }
         let span = |idx: usize| -> (usize, usize) {
             let (_, _, base, _) = real_node_coords[idx];
@@ -879,7 +945,10 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 let (base, ext) = span(node);
                 let level = node_levels[node];
                 let blockers = &level_blockers[level];
-                let blocked = |col: usize| blockers.iter().any(|&(a, b)| a <= col && col <= b);
+                let blocked = |col: usize| {
+                    let i = blockers.partition_point(|&(lo, _)| lo <= col);
+                    i > 0 && blockers[i - 1].1 >= col
+                };
                 *lane = choose_lane(
                     base,
                     ext,
@@ -913,7 +982,12 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
     // their intervals are recorded so detour runs are allocated clear
     // of them. Per level: `(bend counter, min, max)` — the label row
     // is known only after the flags pass, so the allocator adds it.
-    let mut jog_blocks: Vec<Vec<(usize, usize, usize)>> = vec![Vec::new(); max_level + 1];
+    // Nothing is allocated for a layout without detours.
+    let mut jog_blocks: Vec<Vec<(usize, usize, usize)>> = if detours.is_empty() {
+        Vec::new()
+    } else {
+        vec![Vec::new(); max_level + 1]
+    };
     for (edge_idx, chain) in dummy_positions.iter().enumerate() {
         let mut kept = vec![false; chain.len()];
         if !chain.is_empty() {

@@ -31,6 +31,11 @@
 /// extensions).
 pub(crate) const VERSION: &str = "1.5";
 
+/// Provable bytes per stored path point (`MultiSegment` waypoints,
+/// `Orthogonal` bends): `[` + up to 20 decimal digits (`usize::MAX`
+/// on 64-bit targets) + `,` + 20 digits + `]` + the separating `,`.
+pub(crate) const POINT_JSON_BYTES: usize = 44;
+
 // ── Minimal no-alloc JSON writer ─────────────────────────────────────────
 
 /// A tiny JSON writer that appends to a `&mut [u8]` buffer.
@@ -340,10 +345,12 @@ impl<'a> LayoutIRArena<'a> {
             .iter()
             .map(|e| match e.path {
                 EdgePathArena::MultiSegment { waypoints_len, .. } => {
-                    waypoints_len.saturating_mul(20)
+                    waypoints_len.saturating_mul(POINT_JSON_BYTES)
                 }
                 #[cfg(feature = "ports")]
-                EdgePathArena::Orthogonal { bends_len, .. } => bends_len.saturating_mul(20),
+                EdgePathArena::Orthogonal { bends_len, .. } => {
+                    bends_len.saturating_mul(POINT_JSON_BYTES)
+                }
                 _ => 0,
             })
             .fold(0usize, |a, b| a.saturating_add(b));
@@ -779,7 +786,8 @@ mod heap_json {
             out.push('}');
         }
 
-        fn estimate_json_size(&self) -> usize {
+        /// Upper bound on the bytes [`to_json`](Self::to_json) produces.
+        pub(crate) fn estimate_json_size(&self) -> usize {
             // Loop terms mirror the arena estimator's provable bound:
             // 60 per record (two 20-digit ids + keys + separators),
             // 12 + 6·len per label (`,"label":""` syntax + worst-case
@@ -793,9 +801,8 @@ mod heap_json {
                 })
                 .fold(0usize, |a, b| a.saturating_add(b));
             let loop_wrapper = if self.self_loops().is_empty() { 0 } else { 20 };
-            // Stored path points (waypoints, bends): 20 bytes each —
-            // `[x,y],` with two 9-digit coordinates — as the arena
-            // estimator counts them.
+            // Stored path points (waypoints, bends): the provable
+            // per-point bound, as the arena estimator counts them.
             let points: usize = self
                 .edges()
                 .iter()
@@ -806,7 +813,7 @@ mod heap_json {
                     _ => 0,
                 })
                 .fold(0usize, |a, b| a.saturating_add(b))
-                .saturating_mul(20);
+                .saturating_mul(super::POINT_JSON_BYTES);
             100usize
                 .saturating_add(self.nodes().len().saturating_mul(180))
                 .saturating_add(self.edges().len().saturating_mul(220))
@@ -1115,6 +1122,109 @@ mod heap_json {
 #[cfg(feature = "alloc")]
 mod tests {
     use crate::Graph;
+
+    /// The sizing contract holds for `MultiSegment` waypoints with
+    /// maximal coordinates too (44 bytes a point, not 20).
+    #[test]
+    fn max_coordinate_waypoints_fit_the_estimates() {
+        use crate::ir::arena::{EdgePathArena, LayoutEdgeArena};
+        use crate::ir::arena_builder::LayoutIRArenaBuilder;
+        use crate::ir::{EdgePath, FlowAxis, LayoutEdge, LayoutIRBuilder, LayoutNode, NodeKind};
+        let points = vec![(usize::MAX, usize::MAX); 64];
+        let node = |id: usize, label: &'static str, x: usize, y: usize| LayoutNode {
+            id,
+            label,
+            x,
+            y,
+            width: 3,
+            height: 1,
+            center_x: x + 1,
+            center_y: y,
+            level: 0,
+            level_position: 0,
+            kind: NodeKind::Explicit,
+            has_self_loop: false,
+            self_loop_at: None,
+            edge_index: None,
+            content_tag: 0,
+        };
+        let mut b = LayoutIRBuilder::new();
+        b.set_dimensions(20, 10);
+        b.add_node(node(1, "A", 0, 0));
+        b.add_node(node(2, "B", 10, 5));
+        b.add_edge(LayoutEdge {
+            from_id: 1,
+            to_id: 2,
+            from_x: 1,
+            from_y: 0,
+            to_x: 11,
+            to_y: 5,
+            path: EdgePath::MultiSegment {
+                waypoints: points.clone(),
+                start_offset: 0,
+            },
+            flow_axis: FlowAxis::Y,
+            edge_index: 0,
+            label: None,
+            label_x: 0,
+            label_y: 0,
+            directed: true,
+            reversed: false,
+        });
+        let ir = b.build();
+        assert!(ir.to_json().len() <= ir.estimate_json_size());
+
+        let mut backing = [0u8; 8192];
+        let mut arena = crate::graph::arena::Arena::new(&mut backing);
+        let mut bld = LayoutIRArenaBuilder::new(&mut arena, 2, 1, 64, 8, 1).unwrap();
+        bld.set_dimensions(20, 10);
+        for (id, label, x, y) in [(1usize, "A", 0usize, 0usize), (2, "B", 10, 5)] {
+            let idx = bld
+                .add_node(
+                    id,
+                    label,
+                    x,
+                    y,
+                    3,
+                    1,
+                    0,
+                    0,
+                    NodeKind::Explicit,
+                    usize::MAX,
+                    0,
+                )
+                .unwrap();
+            bld.add_node_to_level(0, idx).unwrap();
+        }
+        bld.finalize_levels();
+        let (waypoints_start, waypoints_len) = bld.add_waypoints(&points).unwrap();
+        bld.add_edge(LayoutEdgeArena {
+            from_id: 1,
+            to_id: 2,
+            from_x: 1,
+            from_y: 0,
+            to_x: 11,
+            to_y: 5,
+            directed: true,
+            reversed: false,
+            path: EdgePathArena::MultiSegment {
+                waypoints_start,
+                waypoints_len,
+                start_offset: 0,
+            },
+            flow_axis: FlowAxis::Y,
+            edge_index: 0,
+            label_offset: 0,
+            label_len: 0,
+            label_x: 0,
+            label_y: 0,
+            min_y: 0,
+            max_y: usize::MAX,
+        });
+        let csr = bld.build();
+        let mut buf = vec![0u8; csr.estimate_json_size()];
+        assert!(csr.serialize_json(&mut buf).is_some());
+    }
 
     #[test]
     fn heap_json_roundtrip_basic() {

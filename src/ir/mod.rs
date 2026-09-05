@@ -138,8 +138,12 @@ pub struct LayoutNode<'a> {
 }
 
 /// How an edge is routed between nodes.
+///
+/// Non-exhaustive: shapes are added by feature (the explicit polyline
+/// arrives with `ports`) and by release — match with a wildcard arm.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EdgePath {
     /// Straight flow segment — the endpoints share their cross-axis
     /// line (`flow_axis: Y`: a vertical line; `X`: a horizontal one).

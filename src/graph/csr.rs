@@ -111,35 +111,6 @@ pub struct CsrGraph<'a> {
 }
 
 impl<'a> CsrGraph<'a> {
-    /// Stored bends the explicit-polyline routes of this graph can
-    /// need in the IR output: per ported edge, two per run over the
-    /// detour's three runs plus one per jogging level (bounded by the
-    /// dummies). Zero without a port table. Mirrors the heap graph's
-    /// bound so an estimate made on either side sizes both layouts.
-    pub(crate) fn explicit_path_points(&self, dummies: usize) -> usize {
-        #[cfg(feature = "ports")]
-        {
-            if !self.has_ports() {
-                return 0;
-            }
-            let ported = (0..self.edge_ports.len() / 2)
-                .filter(|&e| {
-                    let (a, b) = self.edge_ports(e);
-                    !matches!(a, crate::algorithms::sugiyama::ports::PortSide::Auto)
-                        || !matches!(b, crate::algorithms::sugiyama::ports::PortSide::Auto)
-                })
-                .count();
-            ported
-                .saturating_mul(6)
-                .saturating_add(dummies.saturating_mul(2))
-        }
-        #[cfg(not(feature = "ports"))]
-        {
-            let _ = dummies;
-            0
-        }
-    }
-
     /// Whether this graph carries a port table (built with ports).
     pub fn has_ports(&self) -> bool {
         !self.edge_ports.is_empty()
@@ -228,6 +199,9 @@ impl<'a> CsrGraph<'a> {
         let children_data_size = edge_count * core::mem::size_of::<u32>();
         let parents_offsets_size = (node_count + 1) * core::mem::size_of::<u32>();
         let parents_data_size = edge_count * core::mem::size_of::<u32>();
+        // The parent-index fill counters `build`/`to_csr` carve from the
+        // same arena: one `u32` per node.
+        let counters_size = node_count * core::mem::size_of::<u32>();
 
         // Subgraph storage
         let sg_data_size = subgraph_count * SUBGRAPH_STRIDE * core::mem::size_of::<usize>();
@@ -238,7 +212,7 @@ impl<'a> CsrGraph<'a> {
         };
 
         // Add alignment padding (estimate 8 bytes per allocation)
-        let num_allocs = 6 + if subgraph_count > 0 { 2 } else { 0 };
+        let num_allocs = 7 + if subgraph_count > 0 { 2 } else { 0 };
         let padding = num_allocs * 8;
 
         nodes_size
@@ -247,6 +221,7 @@ impl<'a> CsrGraph<'a> {
             .saturating_add(children_data_size)
             .saturating_add(parents_offsets_size)
             .saturating_add(parents_data_size)
+            .saturating_add(counters_size)
             .saturating_add(sg_data_size)
             .saturating_add(node_sg_size)
             .saturating_add(label_bytes)

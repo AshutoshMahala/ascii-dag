@@ -1333,6 +1333,168 @@ pub(crate) fn choose_lane(
     }
 }
 
+/// Node flag bits in a detour-node table entry `(node, flags)`.
+/// The node carries a self-loop (its `↺` cell pushes the trailing lane
+/// one further out).
+#[cfg_attr(not(feature = "ports"), allow(dead_code))]
+pub(crate) const NODE_LOOP: u8 = 1;
+/// A source-role end at this node cancelled its detour and attaches
+/// head-on at the leave face's center.
+#[cfg_attr(not(feature = "ports"), allow(dead_code))]
+pub(crate) const NODE_SRC_CANCELLED: u8 = 2;
+/// A target-role end at this node cancelled its detour and attaches
+/// head-on at the arrive face's center.
+#[cfg_attr(not(feature = "ports"), allow(dead_code))]
+pub(crate) const NODE_DST_CANCELLED: u8 = 4;
+
+/// The flip and axis a direction lays out under — the same facts
+/// `level_flipped::<A>` and `A::FLOW_AXIS` give the layout, for callers
+/// that are not generic over the profile (the size estimate).
+#[cfg_attr(not(all(feature = "ports", feature = "alloc")), allow(dead_code))]
+pub(crate) const fn frame(direction: Direction) -> (FlowAxis, bool) {
+    match direction {
+        #[cfg(feature = "layout-vertical")]
+        Direction::TopDown => (FlowAxis::Y, false),
+        #[cfg(feature = "layout-vertical")]
+        Direction::BottomUp => (FlowAxis::Y, true),
+        #[cfg(feature = "layout-horizontal")]
+        Direction::LeftRight => (FlowAxis::X, false),
+        #[cfg(feature = "layout-horizontal")]
+        Direction::RightLeft => (FlowAxis::X, true),
+    }
+}
+
+/// Sizes of the detour scratch a layout carves — from the same face
+/// decisions the layout makes, so an estimate on either graph type
+/// sizes the CSR layout exactly. All zero when no end detours: a
+/// declared port that lands on its role's own face costs nothing here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(feature = "ports"), allow(dead_code))]
+pub(crate) struct DetourBudget {
+    /// Edges with at least one detouring end: plans, slot intervals,
+    /// staged bends.
+    pub(crate) edges: usize,
+    /// Nodes with at least one detouring end: the flag table.
+    pub(crate) nodes: usize,
+    /// Edge ends at those nodes: head-on records.
+    pub(crate) ends: usize,
+    /// Lane blockers on those nodes' levels: node spans, dummy columns,
+    /// self-loop marker cells.
+    pub(crate) blockers: usize,
+    /// Stored bends the explicit polylines can need in the IR output:
+    /// six per detouring edge plus two per dummy on it.
+    pub(crate) points: usize,
+}
+
+impl DetourBudget {
+    #[cfg_attr(not(feature = "ports"), allow(dead_code))]
+    pub(crate) const NONE: DetourBudget = DetourBudget {
+        edges: 0,
+        nodes: 0,
+        ends: 0,
+        blockers: 0,
+        points: 0,
+    };
+
+    /// Whether any end detours at all.
+    #[cfg_attr(not(feature = "ports"), allow(dead_code))]
+    pub(crate) const fn any(&self) -> bool {
+        self.edges > 0
+    }
+}
+
+/// Compute the [`DetourBudget`] from resolved layout facts. `edge`
+/// yields DECLARED endpoint indices (`usize::MAX` for an unresolvable
+/// one), `sides` the declared `(from, to)` sides, `is_back` the cycle
+/// reversal, `level` a node's level; `level_real`/`level_dummy` count
+/// the vnodes per level. `node_marks` and `level_marks` are caller
+/// scratch, all `false` on entry: on return they mark the detouring
+/// nodes and their levels (the layout builds its sparse tables from
+/// them). O(E + N) and allocation-free.
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "ports"), allow(dead_code))]
+pub(crate) fn detour_budget(
+    edge_count: usize,
+    edge: &dyn Fn(usize) -> (usize, usize),
+    sides: &dyn Fn(usize) -> (PortSide, PortSide),
+    is_back: &dyn Fn(usize) -> bool,
+    level: &dyn Fn(usize) -> usize,
+    axis: FlowAxis,
+    flipped: bool,
+    level_real: &[usize],
+    level_dummy: &[usize],
+    node_marks: &mut [bool],
+    level_marks: &mut [bool],
+) -> DetourBudget {
+    let mut budget = DetourBudget::NONE;
+    for ei in 0..edge_count {
+        let (f, t) = edge(ei);
+        if f == t || f == usize::MAX || t == usize::MAX {
+            continue;
+        }
+        let (src_side, dst_side) = sides(ei);
+        let (src, dst, src_side, dst_side) = if is_back(ei) {
+            (t, f, dst_side, src_side)
+        } else {
+            (f, t, src_side, dst_side)
+        };
+        let sd = detours(src_side, axis, flipped, EndRole::Source);
+        let dd = detours(dst_side, axis, flipped, EndRole::Target);
+        if !(sd || dd) {
+            continue;
+        }
+        budget.edges += 1;
+        let span = level(src).abs_diff(level(dst));
+        budget.points += 6 + 2 * span.saturating_sub(1);
+        if sd && src < node_marks.len() {
+            node_marks[src] = true;
+        }
+        if dd && dst < node_marks.len() {
+            node_marks[dst] = true;
+        }
+    }
+    for (n, &marked) in node_marks.iter().enumerate() {
+        if marked {
+            budget.nodes += 1;
+            let l = level(n);
+            if l < level_marks.len() {
+                level_marks[l] = true;
+            }
+        }
+    }
+    for ei in 0..edge_count {
+        let (f, t) = edge(ei);
+        if f == usize::MAX || t == usize::MAX {
+            continue;
+        }
+        if f == t {
+            // A self-loop marker cell blocks a lane on its level.
+            let l = level(f);
+            if l < level_marks.len() && level_marks[l] {
+                budget.blockers += 1;
+            }
+            continue;
+        }
+        budget.ends += usize::from(node_marks[f]) + usize::from(node_marks[t]);
+    }
+    for (l, &marked) in level_marks.iter().enumerate() {
+        if marked {
+            budget.blockers +=
+                level_real.get(l).copied().unwrap_or(0) + level_dummy.get(l).copied().unwrap_or(0);
+        }
+    }
+    budget
+}
+
+/// The plan of edge `ei` in a table sorted by edge index, if any.
+#[cfg_attr(not(feature = "ports"), allow(dead_code))]
+pub(crate) fn plan_lookup(plans: &[(usize, Detour)], ei: usize) -> Option<Detour> {
+    plans
+        .binary_search_by_key(&ei, |p| p.0)
+        .ok()
+        .map(|i| plans[i].1)
+}
+
 /// One edge's detour plan: the lane beside each detouring end
 /// (`usize::MAX` = that end attaches head-on) and the routing-row
 /// slots its runs were allocated — the up-run above the source
@@ -1763,6 +1925,36 @@ mod detour_tests {
                 .from_port(PortSide::Upstream);
             fixtures.push(("tight", g, tight));
         }
+        // A zero-extent neighbor occupies no cell: the lane beside it
+        // is free on both backends (the heap's inclusive blocker used
+        // to claim the cell).
+        #[cfg(feature = "layout-vertical")]
+        {
+            use crate::render::engine::CustomNode;
+            let mut cfg = LayoutConfig::standard();
+            cfg.node_spacing = 1;
+            let mut g = Graph::new();
+            g.add_node(0usize, "Root");
+            g.add_node(
+                1usize,
+                CustomNode {
+                    label: "",
+                    width: 0,
+                    height: 1,
+                    painter: None,
+                    payload: "",
+                },
+            );
+            g.add_node(2usize, "B");
+            g.add_node(3usize, "C");
+            g.add_node(4usize, "T");
+            g.add_edge(0usize, 1usize, None);
+            g.add_edge(0usize, 2usize, None);
+            g.add_edge(0usize, 3usize, None);
+            g.add_edge(2usize, 4usize, None)
+                .from_port(PortSide::Upstream);
+            fixtures.push(("zero-extent", g, cfg));
+        }
         for (tag, g, cfg) in &fixtures {
             let heap_ir = g.compute_layout_with_config(cfg);
             assert_routing_invariants(&heap_ir, tag);
@@ -1782,6 +1974,64 @@ mod detour_tests {
             ir.render_with(&RenderOptions::plain(), &mut arena).unwrap();
             assert_eq!(heap, arena, "{tag} {:?}", cfg.direction);
         }
+    }
+
+    /// Scale: a wide star with ONE detouring port. Both backends agree,
+    /// the arena lays out from exactly estimated arenas, and the
+    /// declared port costs the estimate a bounded per-edge amount — the
+    /// detour tables are sized by what detours (one edge, one node, the
+    /// leaves' level), not by the graph.
+    #[cfg(all(feature = "arena", feature = "layout-vertical"))]
+    #[test]
+    fn a_wide_star_with_one_detouring_port_scales_linearly() {
+        use crate::algorithms::sugiyama::config::LayoutConfig;
+        use crate::graph::arena::Arena;
+        const LEAVES: usize = 2_000;
+        let build = |declare: bool| {
+            let mut g = Graph::new();
+            g.add_node(0usize, "Root");
+            for leaf in 1..=LEAVES {
+                g.add_node(leaf, "L");
+                let h = g.add_edge(0usize, leaf, None);
+                if declare && leaf == LEAVES / 2 {
+                    h.to_port(PortSide::Downstream);
+                }
+            }
+            g
+        };
+        let cfg = LayoutConfig::standard();
+        let plain = build(false);
+        let ported = build(true);
+        let plain_bytes = plain.estimate_layout_arena_size_with(&cfg);
+        let ported_bytes = ported.estimate_layout_arena_size_with(&cfg);
+        // Requests, positions and marks are per edge/node by design; the
+        // detour tables must not be.
+        assert!(
+            ported_bytes - plain_bytes <= 160 * (LEAVES + 1) + 16_384,
+            "one port grew the estimate by {} bytes",
+            ported_bytes - plain_bytes
+        );
+        let heap = ported
+            .compute_layout_with_config(&cfg)
+            .render_string(&RenderOptions::plain());
+        let mut csr_buf = vec![0u8; ported.estimate_csr_arena_size()];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = ported.to_csr(&mut csr_arena).expect("exact CSR estimate");
+        let mut temp = vec![0u8; ported_bytes];
+        let mut out = vec![0u8; ported_bytes];
+        let mut ta = Arena::new(&mut temp);
+        let mut oa = Arena::new(&mut out);
+        let ir = csr
+            .compute_layout_arena(&cfg, &mut ta, &mut oa)
+            .expect("exact layout estimate covers the sparse detour scratch");
+        let mut arena_render = String::new();
+        ir.render_with(&RenderOptions::plain(), &mut arena_render)
+            .unwrap();
+        assert_eq!(heap, arena_render);
+        assert!(
+            heap.contains('↑'),
+            "the detour reached the leaf's bottom face"
+        );
     }
 
     /// A self-loop node keeps its `↺` cell: the lane on that side sits
