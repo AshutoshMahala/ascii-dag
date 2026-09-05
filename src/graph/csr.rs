@@ -1045,7 +1045,7 @@ impl<'a> CsrGraphBuilder<'a> {
     /// without a port table — never an allocation.
     #[cfg(feature = "ports")]
     #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
-    pub(crate) fn set_edge_ports(
+    pub fn set_edge_ports(
         &mut self,
         edge: usize,
         source: PortSide,
@@ -1256,7 +1256,7 @@ impl CsrEdgeHandle<'_, '_> {
     #[cfg(feature = "ports")]
     #[allow(clippy::wrong_self_convention)] // mirrors add_edge(from, to); not a constructor
     #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
-    pub(crate) fn from_port(self, port: impl Into<Port>) -> Option<Self> {
+    pub fn from_port(self, port: impl Into<Port>) -> Option<Self> {
         if !self.builder.ports {
             return None;
         }
@@ -1268,7 +1268,7 @@ impl CsrEdgeHandle<'_, '_> {
     #[cfg(feature = "ports")]
     #[allow(clippy::wrong_self_convention)] // mirrors add_edge(from, to); not a conversion
     #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
-    pub(crate) fn to_port(self, port: impl Into<Port>) -> Option<Self> {
+    pub fn to_port(self, port: impl Into<Port>) -> Option<Self> {
         if !self.builder.ports {
             return None;
         }

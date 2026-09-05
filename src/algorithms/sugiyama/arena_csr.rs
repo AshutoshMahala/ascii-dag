@@ -2814,10 +2814,47 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             e_min_y = e_min_y.min(b_min).min(from_y_p.min(to_y_p));
             e_max_y = e_max_y.max(b_max).max(from_y_p.max(to_y_p));
         }
+        // Attachments, by DECLARED end (matches heap): the requested
+        // side, and the face the end actually took.
+        let (from_port, to_port) = {
+            use super::ports::{EndRole, PortAttachment};
+            let (layout_src_face, layout_dst_face) = match detour {
+                Some(d) => (
+                    if d.src_lane != usize::MAX {
+                        d.src_face
+                    } else {
+                        EndRole::Source.auto_face()
+                    },
+                    if d.dst_lane != usize::MAX {
+                        d.dst_face
+                    } else {
+                        EndRole::Target.auto_face()
+                    },
+                ),
+                None => (EndRole::Source.auto_face(), EndRole::Target.auto_face()),
+            };
+            let (from_face, to_face) = if is_back {
+                (layout_dst_face, layout_src_face)
+            } else {
+                (layout_src_face, layout_dst_face)
+            };
+            (
+                PortAttachment {
+                    requested: src_side,
+                    side: from_face.physical(A::FLOW_AXIS, level_flipped),
+                },
+                PortAttachment {
+                    requested: dst_side,
+                    side: to_face.physical(A::FLOW_AXIS, level_flipped),
+                },
+            )
+        };
         builder.add_edge(LayoutEdgeArena {
             flow_axis: A::FLOW_AXIS,
             from_id,
             to_id,
+            from_port,
+            to_port,
             from_x: from_x_p,
             from_y: from_y_p,
             to_x: to_x_p,

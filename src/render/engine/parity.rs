@@ -2725,6 +2725,8 @@ mod lr_invariants {
             from_id: 1,
             to_id: 2,
             from_x: 2,
+            from_port: crate::PortAttachment::auto(crate::PhysicalSide::East),
+            to_port: crate::PortAttachment::auto(crate::PhysicalSide::West),
             from_y: 0,
             to_x: 12,
             to_y,
@@ -3073,6 +3075,8 @@ mod lr_invariants {
         let edge = |path| LayoutEdgeArena {
             from_id: 1,
             to_id: 2,
+            from_port: crate::PortAttachment::auto(crate::PhysicalSide::East),
+            to_port: crate::PortAttachment::auto(crate::PhysicalSide::West),
             from_x: 2,
             from_y: 0,
             to_x: 12,
@@ -4688,9 +4692,15 @@ mod orthogonal {
             Some((t, x, y)) => (Some(t), x, y),
             None => (None, 0, 0),
         };
+        let (from_side, to_side) = match axis {
+            FlowAxis::Y => (crate::PhysicalSide::South, crate::PhysicalSide::North),
+            FlowAxis::X => (crate::PhysicalSide::East, crate::PhysicalSide::West),
+        };
         bld.add_edge(LayoutEdge {
             from_id: 1,
             to_id: 2,
+            from_port: crate::PortAttachment::auto(from_side),
+            to_port: crate::PortAttachment::auto(to_side),
             from_x: from.0,
             from_y: from.1,
             to_x: to.0,
@@ -4748,9 +4758,15 @@ mod orthogonal {
         let (min_y, max_y) = ys
             .clone()
             .fold((usize::MAX, 0), |(lo, hi), y| (lo.min(y), hi.max(y)));
+        let (from_side, to_side) = match axis {
+            FlowAxis::Y => (crate::PhysicalSide::South, crate::PhysicalSide::North),
+            FlowAxis::X => (crate::PhysicalSide::East, crate::PhysicalSide::West),
+        };
         bld.add_edge(LayoutEdgeArena {
             from_id: 1,
             to_id: 2,
+            from_port: crate::PortAttachment::auto(from_side),
+            to_port: crate::PortAttachment::auto(to_side),
             from_x: from.0,
             from_y: from.1,
             to_x: to.0,

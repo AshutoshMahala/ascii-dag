@@ -102,6 +102,8 @@ pub(crate) struct EdgeRef<'a> {
     /// compositor's paint path.
     pub flow_axis: crate::ir::FlowAxis,
     pub path: PathRef<'a>,
+    pub from_port: crate::PortAttachment,
+    pub to_port: crate::PortAttachment,
 }
 
 /// A preserved self-loop as the engine sees it.
@@ -270,6 +272,8 @@ impl LayoutView for crate::ir::LayoutIR<'_> {
             reversed: e.reversed,
             flow_axis: e.flow_axis,
             path,
+            from_port: e.from_port,
+            to_port: e.to_port,
         }
     }
 
@@ -434,6 +438,8 @@ impl LayoutView for crate::ir::arena::LayoutIRArena<'_> {
             reversed: e.reversed,
             flow_axis: e.flow_axis,
             path,
+            from_port: e.from_port,
+            to_port: e.to_port,
         }
     }
 

@@ -210,6 +210,11 @@ pub struct LayoutEdgeArena {
     pub min_y: usize,
     /// Maximum Y coordinate this edge occupies (for early-exit optimization)
     pub max_y: usize,
+    /// How the end at the DECLARED source is attached (mirrors heap
+    /// `LayoutEdge::from_port`).
+    pub from_port: crate::PortAttachment,
+    /// How the end at the DECLARED target is attached.
+    pub to_port: crate::PortAttachment,
 }
 
 /// Subgraph bounding box for arena-backed layout.

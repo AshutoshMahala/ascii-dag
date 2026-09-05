@@ -250,6 +250,12 @@ pub struct LayoutEdge<'a> {
     /// flipped for layering; renderers should draw it with dashed lines.
     /// Mirrors zigraph's `LayoutEdge.reversed`.
     pub reversed: bool,
+    /// How the end at the DECLARED source is attached: the requested
+    /// side and the physical side it landed on
+    /// ([`PortAttachment::auto`](crate::PortAttachment::auto) for an undeclared end).
+    pub from_port: crate::PortAttachment,
+    /// How the end at the DECLARED target is attached.
+    pub to_port: crate::PortAttachment,
 }
 
 /// Bounding box and metadata for a laid-out subgraph (cluster).

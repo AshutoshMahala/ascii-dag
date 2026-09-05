@@ -501,3 +501,69 @@ fn auto_replacement_is_the_receipts_business() {
     // Nothing reaches the run: the graph stores no event history.
     assert_eq!(g.layout().reported().warnings().count(), 0);
 }
+
+/// Port conditions are standing conditions like the others: reported
+/// per run until the graph is fixed, in a deterministic order, with
+/// the generic `(code, subject)` identity. Several edges sharing one
+/// port cell is the ordinary drawing and never a condition.
+#[cfg(feature = "ports")]
+#[test]
+fn port_conditions_report_and_clear() {
+    use ascii_dag::{EdgeEnd, PhysicalSide, PortSide};
+
+    // Five arrivals on a three-cell top face share cells — silently.
+    let mut g = Graph::new();
+    g.add_node(9usize, "T");
+    for src in 1usize..=5 {
+        g.add_node(src, "S");
+        g.add_edge(src, 9usize, None).to_port(PortSide::Upstream);
+    }
+    assert_eq!(g.layout().reported().warnings().count(), 0);
+
+    // A declared side on a self-loop is deferred, visibly.
+    let mut g = Graph::new();
+    g.add_node(1usize, "A");
+    g.add_node(2usize, "B");
+    g.add_edge(1usize, 2usize, None);
+    g.add_edge(1usize, 1usize, None).from_port(PortSide::East);
+    let report = g.layout().reported();
+    let kinds: Vec<DiagnosticKind> = report.warnings().map(|d| *d.kind()).collect();
+    assert_eq!(
+        kinds,
+        vec![DiagnosticKind::PortIgnoredOnSelfLoop { edge: 1 }]
+    );
+    let d = report.warnings().next().unwrap();
+    assert_eq!(d.code(), "W.Graph.Port.034");
+    assert_eq!(d.subject(), DiagnosticSubject::Edge(1));
+
+    // A side with no room beside the node attaches head-on — and says so,
+    // naming the end, the side it asked for and the side it got.
+    let mut g = Graph::new();
+    g.add_node(0usize, "Root");
+    g.add_node(1usize, "L");
+    g.add_node(2usize, "M");
+    g.add_node(3usize, "R");
+    g.add_node(4usize, "T");
+    g.add_edge(0usize, 1usize, None);
+    g.add_edge(0usize, 2usize, None);
+    g.add_edge(0usize, 3usize, None);
+    g.add_edge(2usize, 4usize, None).from_port(PortSide::East);
+    let cfg = ascii_dag::LayoutConfig {
+        node_spacing: 0,
+        ..ascii_dag::LayoutConfig::standard()
+    };
+    let report = g.layout().with_config(&cfg).reported();
+    let kinds: Vec<DiagnosticKind> = report.warnings().map(|d| *d.kind()).collect();
+    assert_eq!(
+        kinds,
+        vec![DiagnosticKind::PortUnroutable {
+            edge: 3,
+            end: EdgeEnd::Source,
+            requested: PhysicalSide::East,
+            resolved: PhysicalSide::South,
+        }]
+    );
+    assert_eq!(report.warnings().next().unwrap().code(), "W.Graph.Port.035");
+    // With room, the same declaration routes and the condition is gone.
+    assert_eq!(g.layout().reported().warnings().count(), 0);
+}

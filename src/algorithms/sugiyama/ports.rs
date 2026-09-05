@@ -28,8 +28,7 @@ use crate::ir::FlowAxis;
 #[non_exhaustive]
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)] // the explicit sides are constructed by the port API, which lands with side routing
-pub(crate) enum PortSide {
+pub enum PortSide {
     /// The layout picks: the role's default level face, center line.
     #[default]
     Auto,
@@ -105,8 +104,7 @@ impl PortSide {
 /// how `from_port(PortSide::North)` reads unchanged forever.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-#[allow(dead_code)] // constructed by the heap handle today; the CSR handle joins with its port table
-pub(crate) struct Port {
+pub struct Port {
     side: PortSide,
 }
 
@@ -114,12 +112,12 @@ pub(crate) struct Port {
 impl Port {
     /// A port on `side`, positioned by the router. `const`, so a
     /// declaration can live in a constant.
-    pub(crate) const fn of(side: PortSide) -> Port {
+    pub const fn of(side: PortSide) -> Port {
         Port { side }
     }
 
     /// The declared side.
-    pub(crate) const fn side(self) -> PortSide {
+    pub const fn side(self) -> PortSide {
         self.side
     }
 }
@@ -172,6 +170,129 @@ impl EndRole {
         match self {
             EndRole::Source => Face::LevelTrailing,
             EndRole::Target => Face::LevelLeading,
+        }
+    }
+}
+
+/// A physical side of a node — where an edge end actually attached.
+/// The RESOLUTION vocabulary: compass names only (a declaration is a
+/// [`PortSide`], which also has `Auto` and the flow-relative names).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PhysicalSide {
+    /// The top face.
+    North,
+    /// The right face.
+    East,
+    /// The bottom face.
+    South,
+    /// The left face.
+    West,
+}
+
+impl PhysicalSide {
+    /// The lowercase name (`"north"`, `"east"`, `"south"`, `"west"`) —
+    /// the JSON spelling.
+    pub const fn name(self) -> &'static str {
+        match self {
+            PhysicalSide::North => "north",
+            PhysicalSide::East => "east",
+            PhysicalSide::South => "south",
+            PhysicalSide::West => "west",
+        }
+    }
+}
+
+impl PortSide {
+    /// The lowercase name — the JSON spelling of a declaration
+    /// (`"auto"`, `"north"`, … `"upstream"`, `"downstream"`,
+    /// `"clockwise"`, `"counterclockwise"`).
+    pub const fn name(self) -> &'static str {
+        match self {
+            PortSide::Auto => "auto",
+            PortSide::North => "north",
+            PortSide::East => "east",
+            PortSide::South => "south",
+            PortSide::West => "west",
+            PortSide::Upstream => "upstream",
+            PortSide::Downstream => "downstream",
+            PortSide::Clockwise => "clockwise",
+            PortSide::Counterclockwise => "counterclockwise",
+        }
+    }
+}
+
+/// Which declared end of an edge a condition is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EdgeEnd {
+    /// The end at the edge's declared source.
+    Source,
+    /// The end at the edge's declared target.
+    Target,
+}
+
+/// How one end of a routed edge is attached: what was declared and
+/// the physical side it landed on. `requested` is `Auto` for an
+/// undeclared end; `side` is always the truth of the drawing — an end
+/// that could not route off its role's face reports that face here,
+/// and the run's diagnostics say why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortAttachment {
+    /// The declared side.
+    pub requested: PortSide,
+    /// The side the end attached on.
+    pub side: PhysicalSide,
+}
+
+impl PortAttachment {
+    /// An undeclared end that attached on `side` — what every edge of a
+    /// port-free layout reports.
+    pub const fn auto(side: PhysicalSide) -> Self {
+        PortAttachment {
+            requested: PortSide::Auto,
+            side,
+        }
+    }
+}
+
+impl Face {
+    /// The physical side this role-space face is under a profile and
+    /// its level flip: level faces follow the flow (leading is North
+    /// under TopDown, South under BottomUp, West under LeftRight, East
+    /// under RightLeft); cross faces never flip.
+    pub(crate) const fn physical(self, axis: FlowAxis, level_flipped: bool) -> PhysicalSide {
+        match (axis, self) {
+            (FlowAxis::Y, Face::LevelLeading) => {
+                if level_flipped {
+                    PhysicalSide::South
+                } else {
+                    PhysicalSide::North
+                }
+            }
+            (FlowAxis::Y, Face::LevelTrailing) => {
+                if level_flipped {
+                    PhysicalSide::North
+                } else {
+                    PhysicalSide::South
+                }
+            }
+            (FlowAxis::Y, Face::CrossLeading) => PhysicalSide::West,
+            (FlowAxis::Y, Face::CrossTrailing) => PhysicalSide::East,
+            (FlowAxis::X, Face::LevelLeading) => {
+                if level_flipped {
+                    PhysicalSide::East
+                } else {
+                    PhysicalSide::West
+                }
+            }
+            (FlowAxis::X, Face::LevelTrailing) => {
+                if level_flipped {
+                    PhysicalSide::West
+                } else {
+                    PhysicalSide::East
+                }
+            }
+            (FlowAxis::X, Face::CrossLeading) => PhysicalSide::North,
+            (FlowAxis::X, Face::CrossTrailing) => PhysicalSide::South,
         }
     }
 }
@@ -2085,6 +2206,15 @@ mod detour_tests {
             let mut arena = String::new();
             ir.render_with(&RenderOptions::plain(), &mut arena).unwrap();
             assert_eq!(heap, arena, "{tag} {:?}", cfg.direction);
+            // The attachments agree edge for edge.
+            for (i, e) in heap_ir.edges().iter().enumerate() {
+                let a = crate::ir::arena::LayoutIRArena::edge(&ir, i);
+                assert_eq!(
+                    (e.from_port, e.to_port),
+                    (a.from_port, a.to_port),
+                    "{tag} edge {i}"
+                );
+            }
         }
     }
 
@@ -2414,6 +2544,63 @@ mod detour_tests {
                 other.map(|ir| ir.width())
             ),
         }
+    }
+
+    /// Everything is reported back — requested AND resolved: the IR's
+    /// attachments, the scene view, and the JSON keys agree, on a
+    /// routed side, an undeclared end, and a reversed edge whose
+    /// declared side binds to its declared end.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn attachments_report_the_requested_and_resolved_sides() {
+        use crate::{PhysicalSide, PortAttachment};
+        let mut g = Graph::new();
+        g.add_node(1usize, "A");
+        g.add_node(2usize, "B");
+        g.add_edge(1usize, 2usize, None).from_port(PortSide::East);
+        g.add_edge(2usize, 1usize, None)
+            .from_port(PortSide::Downstream);
+        let ir = g.compute_layout();
+        let forward = &ir.edges()[0];
+        assert_eq!(
+            forward.from_port,
+            PortAttachment {
+                requested: PortSide::East,
+                side: PhysicalSide::East
+            }
+        );
+        assert_eq!(forward.to_port, PortAttachment::auto(PhysicalSide::North));
+        let back = &ir.edges()[1];
+        assert!(back.reversed);
+        assert_eq!(
+            back.from_port,
+            PortAttachment {
+                requested: PortSide::Downstream,
+                side: PhysicalSide::South
+            },
+            "declared on B, the layout target: its bottom face"
+        );
+        assert_eq!(back.to_port, PortAttachment::auto(PhysicalSide::South));
+        let json = ir.to_json();
+        assert!(
+            json.contains("\"from_side\":\"east\",\"to_side\":\"north\",\"from_port\":\"east\""),
+            "{json}"
+        );
+        assert!(
+            json.contains(
+                "\"from_side\":\"south\",\"to_side\":\"south\",\"from_port\":\"downstream\""
+            ),
+            "{json}"
+        );
+        assert!(!json.contains("\"to_port\""), "{json}");
+        let mut planner = crate::render::engine::ScenePlanner::new();
+        let scene = planner
+            .plan(&ir, &RenderOptions::plain().plan)
+            .quiet()
+            .unwrap();
+        let view = scene.edge(0).unwrap();
+        assert_eq!(view.from_port, forward.from_port);
+        assert_eq!(view.to_port, forward.to_port);
     }
 
     /// A self-loop node keeps its `↺` cell: the lane on that side sits

@@ -77,6 +77,25 @@ pub enum DiagnosticKind {
         /// The requested (and kept) pass count.
         requested: usize,
     },
+    /// A self-loop declared a side; sides on self-loops are not honored
+    /// in this release and the loop keeps its marker cell.
+    PortIgnoredOnSelfLoop {
+        /// The edge's input index.
+        edge: usize,
+    },
+    /// A declared side could not be routed — no free lane beside the
+    /// node, or the face cell was already taken — and the end attached
+    /// on its role's own face instead.
+    PortUnroutable {
+        /// The edge's input index.
+        edge: usize,
+        /// Which declared end.
+        end: crate::EdgeEnd,
+        /// The side the declaration named, physically.
+        requested: crate::PhysicalSide,
+        /// The side the end attached on.
+        resolved: crate::PhysicalSide,
+    },
 }
 
 /// What a diagnostic is about, normalized across kinds: the stable
@@ -123,6 +142,8 @@ impl Diagnostic {
             DiagnosticKind::LabelOmitted { .. } => crate::errors::WARN_LABEL_INVISIBLE,
             DiagnosticKind::CrossingPassesClamped { .. } => crate::errors::WARN_CONFIG_CLAMPED,
             DiagnosticKind::CrossingPassesExcessive { .. } => crate::errors::WARN_CONFIG_EXCESSIVE,
+            DiagnosticKind::PortIgnoredOnSelfLoop { .. } => crate::errors::WARN_PORT_ON_SELF_LOOP,
+            DiagnosticKind::PortUnroutable { .. } => crate::errors::WARN_PORT_UNROUTABLE,
         }
     }
 
@@ -132,7 +153,9 @@ impl Diagnostic {
             DiagnosticKind::PlaceholderCreated { .. }
             | DiagnosticKind::LabelOmitted { .. }
             | DiagnosticKind::CrossingPassesClamped { .. }
-            | DiagnosticKind::CrossingPassesExcessive { .. } => Severity::Warning,
+            | DiagnosticKind::CrossingPassesExcessive { .. }
+            | DiagnosticKind::PortIgnoredOnSelfLoop { .. }
+            | DiagnosticKind::PortUnroutable { .. } => Severity::Warning,
         }
     }
 
@@ -147,6 +170,8 @@ impl Diagnostic {
             DiagnosticKind::LabelOmitted { edge } => DiagnosticSubject::Edge(edge),
             DiagnosticKind::CrossingPassesClamped { .. }
             | DiagnosticKind::CrossingPassesExcessive { .. } => DiagnosticSubject::Configuration,
+            DiagnosticKind::PortIgnoredOnSelfLoop { edge }
+            | DiagnosticKind::PortUnroutable { edge, .. } => DiagnosticSubject::Edge(edge),
         }
     }
 
@@ -166,6 +191,13 @@ impl Diagnostic {
             }
             DiagnosticKind::CrossingPassesExcessive { .. } => {
                 "Values above 20 have diminishing returns and may be slow"
+            }
+            DiagnosticKind::PortIgnoredOnSelfLoop { .. } => {
+                "Sides on self-loops are not honored yet; the loop keeps its marker"
+            }
+            DiagnosticKind::PortUnroutable { .. } => {
+                "Leave room beside the node (node_spacing ≥ 1, no self-loop marker in \
+                 the way) or declare a side the node has a free cell for"
             }
         }
     }
@@ -192,6 +224,29 @@ impl core::fmt::Display for Diagnostic {
             }
             DiagnosticKind::CrossingPassesExcessive { requested } => {
                 write!(f, "crossing_reduction_passes={requested} is high")
+            }
+            DiagnosticKind::PortIgnoredOnSelfLoop { edge } => {
+                write!(
+                    f,
+                    "edge {edge}: the declared side of a self-loop is not honored"
+                )
+            }
+            DiagnosticKind::PortUnroutable {
+                edge,
+                end,
+                requested,
+                resolved,
+            } => {
+                write!(
+                    f,
+                    "edge {edge}: the {} end could not attach {}, attached {}",
+                    match end {
+                        crate::EdgeEnd::Source => "source",
+                        crate::EdgeEnd::Target => "target",
+                    },
+                    requested.name(),
+                    resolved.name()
+                )
             }
         }
     }

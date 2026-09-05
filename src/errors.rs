@@ -31,6 +31,8 @@
 //! | 026 | EXHAUSTED | Resource exhausted | `ArenaOom`, `BuilderFailed` |
 //! | 031 | INVISIBLE | Output element will not be rendered | `WARN_LABEL_INVISIBLE` (crate extension) |
 //! | 033 | EXCESSIVE | Value kept but past its useful range | `WARN_CONFIG_EXCESSIVE` (crate extension) |
+//! | 034 | DEFERRED | Declared intent not honored in this release | `WARN_PORT_ON_SELF_LOOP` (crate extension) |
+//! | 035 | UNROUTABLE | Declared placement could not be honored | `WARN_PORT_UNROUTABLE` (crate extension) |
 //!
 //! All codes are composed from named macro building blocks at compile time via
 //! `wdp!`. Any unrecognised token causes a compile error.
@@ -102,6 +104,9 @@ macro_rules! component {
 /// - `Level`   — level-depth capacity issues
 /// - `Extent`  — cross-axis extent past the coordinate type
 ///
+/// **Under `Graph`, diagnostics:**
+/// - `Port`    — declared edge attachment sides
+///
 /// **Under `Render`:**
 /// - `Plan`   — render-plan build issues (caller plan buffer/arena)
 /// - `Canvas` — band canvas issues (caller cell/color buffers)
@@ -132,6 +137,9 @@ macro_rules! primary {
     };
     (Extent) => {
         "Extent"
+    };
+    (Port) => {
+        "Port"
     };
     (Label) => {
         "Label"
@@ -166,6 +174,9 @@ macro_rules! primary {
 /// | 026 | EXHAUSTED | Resource | Resource exhausted (OOM, capacity) |
 /// | 031 | INVISIBLE | Output | Element will not be rendered (crate extension) |
 /// | 032 | FAILED | Output | Downstream sink reported failure (crate extension) |
+/// | 033 | EXCESSIVE | Config | Value kept but past its useful range (crate extension) |
+/// | 034 | DEFERRED | Intent | Declared intent not honored in this release (crate extension) |
+/// | 035 | UNROUTABLE | Placement | Declared placement could not be honored (crate extension) |
 macro_rules! sequence {
     (MISSING) => {
         "001"
@@ -199,6 +210,12 @@ macro_rules! sequence {
     };
     (EXCESSIVE) => {
         "033"
+    };
+    (DEFERRED) => {
+        "034"
+    };
+    (UNROUTABLE) => {
+        "035"
     };
 }
 
@@ -356,6 +373,21 @@ pub const WARN_CONFIG_CLAMPED: &str = wdp!(W.Graph.Dag.INVALID);
 /// `W.Graph.Dag.033` — Sequence 033 = EXCESSIVE (crate extension,
 /// like 031/032). A condition code, reported per run until fixed.
 pub const WARN_CONFIG_EXCESSIVE: &str = wdp!(W.Graph.Dag.EXCESSIVE);
+
+/// A declared side on a self-loop is not honored in this release: the
+/// loop keeps its marker cell.
+///
+/// `W.Graph.Port.034` — Sequence 034 = DEFERRED (crate extension). A
+/// condition code, reported per run until fixed.
+pub const WARN_PORT_ON_SELF_LOOP: &str = wdp!(W.Graph.Port.DEFERRED);
+
+/// A declared side could not be routed (no free lane beside the node,
+/// or the face cell was taken) and the end attached on its role's own
+/// face instead.
+///
+/// `W.Graph.Port.035` — Sequence 035 = UNROUTABLE (crate extension).
+/// A condition code, reported per run until fixed.
+pub const WARN_PORT_UNROUTABLE: &str = wdp!(W.Graph.Port.UNROUTABLE);
 
 /// An edge label will not paint AND the legend is disabled (the
 /// default) — the label appears nowhere in the output. With

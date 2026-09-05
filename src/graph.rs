@@ -379,7 +379,7 @@ impl EdgeHandle<'_, '_> {
     #[cfg(feature = "ports")]
     #[allow(clippy::wrong_self_convention)]
     #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
-    pub(crate) fn from_port(self, port: impl Into<Port>) -> Self {
+    pub fn from_port(self, port: impl Into<Port>) -> Self {
         self.graph
             .declare_port(self.receipt.edge, 0, port.into().side());
         self
@@ -393,7 +393,7 @@ impl EdgeHandle<'_, '_> {
     #[cfg(feature = "ports")]
     #[allow(clippy::wrong_self_convention)]
     #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
-    pub(crate) fn to_port(self, port: impl Into<Port>) -> Self {
+    pub fn to_port(self, port: impl Into<Port>) -> Self {
         self.graph
             .declare_port(self.receipt.edge, 1, port.into().side());
         self
@@ -519,10 +519,72 @@ impl<'g, 'a> LayoutRun<'g, 'a> {
                 diagnostics.emit(note);
             }
         }
-        match self.config {
+        // Port conditions derivable from the graph alone, per run: a
+        // declared side on a self-loop is deferred. (Several edges
+        // sharing one port cell is the ordinary drawing — every fan-in
+        // and fan-out does it — and never a condition.) Edges in input
+        // order.
+        #[cfg(feature = "ports")]
+        let frame = {
+            use crate::algorithms::sugiyama::ports::frame;
+            let direction = self.config.map_or(self.graph.direction(), |c| c.direction);
+            frame(direction)
+        };
+        #[cfg(feature = "ports")]
+        if !self.graph.edge_ports.is_empty() {
+            use crate::algorithms::sugiyama::ports::PortSide;
+            for (ei, &(from_id, to_id, _)) in self.graph.edges.iter().enumerate() {
+                if from_id != to_id {
+                    continue;
+                }
+                let (a, b) = self.graph.edge_ports.get(ei).copied().unwrap_or_default();
+                if !matches!(a, PortSide::Auto) || !matches!(b, PortSide::Auto) {
+                    diagnostics.emit(crate::diagnostics::DiagnosticKind::PortIgnoredOnSelfLoop {
+                        edge: ei,
+                    });
+                }
+            }
+        }
+        let ir = match self.config {
             Some(config) => self.graph.compute_layout_with_config(config),
             None => self.graph.compute_layout(),
+        };
+        // The layout's own verdicts: a declared side whose end attached
+        // elsewhere (no lane, or the cell was taken) — read back from the
+        // attachments the IR reports, so the condition is exactly what
+        // the drawing shows.
+        #[cfg(feature = "ports")]
+        if !self.graph.edge_ports.is_empty() {
+            use crate::algorithms::sugiyama::ports::{EndRole, Face, PortSide};
+            let (axis, flipped) = frame;
+            for e in ir.edges() {
+                for (end, attachment) in [
+                    (crate::EdgeEnd::Source, e.from_port),
+                    (crate::EdgeEnd::Target, e.to_port),
+                ] {
+                    if matches!(attachment.requested, PortSide::Auto) {
+                        continue;
+                    }
+                    let role = match (end, e.reversed) {
+                        (crate::EdgeEnd::Source, false) | (crate::EdgeEnd::Target, true) => {
+                            EndRole::Source
+                        }
+                        _ => EndRole::Target,
+                    };
+                    let requested =
+                        Face::of(attachment.requested, axis, flipped, role).physical(axis, flipped);
+                    if requested != attachment.side {
+                        diagnostics.emit(crate::diagnostics::DiagnosticKind::PortUnroutable {
+                            edge: e.edge_index,
+                            end,
+                            requested,
+                            resolved: attachment.side,
+                        });
+                    }
+                }
+            }
         }
+        ir
     }
 
     /// Report terminal: run with an owned collector and package the
@@ -1232,12 +1294,7 @@ impl<'a> Graph<'a> {
     /// API's public shape is decided.
     #[cfg(feature = "ports")]
     #[cfg_attr(not(test), allow(dead_code))] // exercised by the layout tests until the API lands
-    pub(crate) fn set_edge_ports(
-        &mut self,
-        edge: usize,
-        source: PortSide,
-        target: PortSide,
-    ) -> bool {
+    pub fn set_edge_ports(&mut self, edge: usize, source: PortSide, target: PortSide) -> bool {
         if edge >= self.edges.len() {
             return false;
         }

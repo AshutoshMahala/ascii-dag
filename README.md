@@ -257,6 +257,8 @@ writes to stderr:
 | `W.Graph.Dag.003` | the current `crossing_reduction_passes` value was clamped (condition — cleared by a sane value) | diagnostics channel |
 | `W.Graph.Dag.033` | the current `crossing_reduction_passes` value is kept but past useful range | diagnostics channel |
 | `W.Render.Label.031` | an edge label fits nowhere inline and the legend is off — it will not be rendered | diagnostics channel |
+| `W.Graph.Port.034` | a declared side on a self-loop is not honored yet — the loop keeps its marker | diagnostics channel |
+| `W.Graph.Port.035` | a declared side could not be routed (no room beside the node) — the end attached head-on | diagnostics channel |
 
 Point events are receipts at the call site instead: `add_edge` returns
 `EdgeInsertion` (did an endpoint get auto-created?), `add_node` returns

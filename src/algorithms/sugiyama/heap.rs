@@ -2063,9 +2063,47 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
                 },
                 p => p,
             };
+            // Attachments, by DECLARED end: the requested side, and the
+            // face the end actually took — its detour face when a lane
+            // carried it off its role's own face, that face otherwise.
+            let (from_port, to_port) = {
+                use super::ports::{EndRole, PortAttachment};
+                let (layout_src_face, layout_dst_face) = match detour {
+                    Some(d) => (
+                        if d.src_lane != usize::MAX {
+                            d.src_face
+                        } else {
+                            EndRole::Source.auto_face()
+                        },
+                        if d.dst_lane != usize::MAX {
+                            d.dst_face
+                        } else {
+                            EndRole::Target.auto_face()
+                        },
+                    ),
+                    None => (EndRole::Source.auto_face(), EndRole::Target.auto_face()),
+                };
+                let (from_face, to_face) = if is_back {
+                    (layout_dst_face, layout_src_face)
+                } else {
+                    (layout_src_face, layout_dst_face)
+                };
+                (
+                    PortAttachment {
+                        requested: src_side,
+                        side: from_face.physical(A::FLOW_AXIS, level_flipped),
+                    },
+                    PortAttachment {
+                        requested: dst_side,
+                        side: to_face.physical(A::FLOW_AXIS, level_flipped),
+                    },
+                )
+            };
             builder.add_edge(LayoutEdge {
                 from_id,
                 to_id,
+                from_port,
+                to_port,
                 from_x,
                 from_y,
                 to_x,

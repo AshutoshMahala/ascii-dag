@@ -203,6 +203,7 @@ pub use algorithms::sugiyama::config::{
     AlgorithmConfig, CycleBreaking, Layering, LayoutConfig, Positioning, Routing,
 };
 pub use algorithms::sugiyama::crossing::{CrossingReducer, FAST, QUALITY, STANDARD};
+pub use algorithms::sugiyama::ports::{EdgeEnd, PhysicalSide, Port, PortAttachment, PortSide};
 
 // Legacy type (alloc-dependent, deprecated)
 #[cfg(feature = "alloc")]

@@ -9,7 +9,9 @@
 //! identity, label, and multiplicity travel here. v1.5 adds the
 //! `orthogonal` path type — an explicit polyline whose `bends[]` are
 //! every turn, the shape of routes that leave a node against the flow
-//! or beside it.
+//! or beside it — and the per-edge attachments: `from_side`/`to_side`
+//! (the physical side each end landed on, always) and
+//! `from_port`/`to_port` (the declared side, only when not `auto`).
 //!
 //! # Schema
 //!
@@ -310,8 +312,9 @@ impl<'a> LayoutIRArena<'a> {
             .map(|entry| entry.payload_len.saturating_mul(6).saturating_add(16))
             .fold(0usize, |a, b| a.saturating_add(b));
         // Each edge: fixed fields + path + the v1.3 `flow_axis` tag
-        // (~220 bytes) plus its label at worst-case escaping.
-        let edges = self.edge_count().saturating_mul(220);
+        // (~320 bytes with the attachment keys) plus its label at
+        // worst-case escaping.
+        let edges = self.edge_count().saturating_mul(320);
         let edge_labels: usize = (0..self.edge_count())
             .map(|i| self.edge_label(i).len().saturating_mul(6))
             .fold(0usize, |a, b| a.saturating_add(b));
@@ -497,6 +500,24 @@ fn write_edge_arena(
         crate::ir::FlowAxis::Y => "y",
         crate::ir::FlowAxis::X => "x",
     })?;
+    // v1.5: attachments — the resolved side of each end always, the
+    // declaration only when it is not `Auto`.
+    w.write_byte(b',')?;
+    w.write_key("from_side")?;
+    w.write_str(edge.from_port.side.name())?;
+    w.write_byte(b',')?;
+    w.write_key("to_side")?;
+    w.write_str(edge.to_port.side.name())?;
+    if !matches!(edge.from_port.requested, crate::PortSide::Auto) {
+        w.write_byte(b',')?;
+        w.write_key("from_port")?;
+        w.write_str(edge.from_port.requested.name())?;
+    }
+    if !matches!(edge.to_port.requested, crate::PortSide::Auto) {
+        w.write_byte(b',')?;
+        w.write_key("to_port")?;
+        w.write_str(edge.to_port.requested.name())?;
+    }
 
     // reversed: only emit when true (per v1.2 spec)
     if edge.reversed {
@@ -816,7 +837,7 @@ mod heap_json {
                 .saturating_mul(super::POINT_JSON_BYTES);
             100usize
                 .saturating_add(self.nodes().len().saturating_mul(180))
-                .saturating_add(self.edges().len().saturating_mul(220))
+                .saturating_add(self.edges().len().saturating_mul(320))
                 .saturating_add(points)
                 .saturating_add(self.self_loops().len().saturating_mul(60))
                 .saturating_add(loop_labels)
@@ -976,6 +997,24 @@ mod heap_json {
                 crate::ir::FlowAxis::X => "x",
             },
         );
+        // v1.5: attachments — the resolved side of each end always, the
+        // declaration only when it is not `Auto`.
+        out.push(',');
+        push_key(out, "from_side");
+        push_json_str(out, edge.from_port.side.name());
+        out.push(',');
+        push_key(out, "to_side");
+        push_json_str(out, edge.to_port.side.name());
+        if !matches!(edge.from_port.requested, crate::PortSide::Auto) {
+            out.push(',');
+            push_key(out, "from_port");
+            push_json_str(out, edge.from_port.requested.name());
+        }
+        if !matches!(edge.to_port.requested, crate::PortSide::Auto) {
+            out.push(',');
+            push_key(out, "to_port");
+            push_json_str(out, edge.to_port.requested.name());
+        }
 
         if edge.reversed {
             out.push(',');
@@ -1155,6 +1194,8 @@ mod tests {
         b.add_edge(LayoutEdge {
             from_id: 1,
             to_id: 2,
+            from_port: crate::PortAttachment::auto(crate::PhysicalSide::South),
+            to_port: crate::PortAttachment::auto(crate::PhysicalSide::North),
             from_x: 1,
             from_y: 0,
             to_x: 11,
@@ -1201,6 +1242,8 @@ mod tests {
         bld.add_edge(LayoutEdgeArena {
             from_id: 1,
             to_id: 2,
+            from_port: crate::PortAttachment::auto(crate::PhysicalSide::South),
+            to_port: crate::PortAttachment::auto(crate::PhysicalSide::North),
             from_x: 1,
             from_y: 0,
             to_x: 11,
