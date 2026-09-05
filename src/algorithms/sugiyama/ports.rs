@@ -377,15 +377,14 @@ fn sort_requests(requests: &mut [FaceRequest]) {
 /// only — Auto edges never enter. Slice-based, so the arena backend
 /// runs it on carved scratch.
 ///
-/// Level faces only: a lateral face's tangent is the LEVEL axis and
-/// its centering is the profile's level rule, neither of which this
-/// helper knows (a debug assertion holds the line until lateral
-/// routing brings its own placement).
+/// Level faces only — a lateral face's tangent is the LEVEL axis and
+/// its centering the profile's level rule:
+/// [`assign_cross_face_positions`] is its twin.
 #[cfg(feature = "ports")]
 pub(crate) fn assign_level_face_positions<A: Axis>(
     requests: &mut [FaceRequest],
-    mut face_span: impl FnMut(usize) -> (usize, usize),
-    mut place: impl FnMut(usize, EndRole, usize),
+    face_span: impl FnMut(usize) -> (usize, usize),
+    place: impl FnMut(usize, EndRole, usize),
 ) {
     debug_assert!(
         requests
@@ -393,6 +392,39 @@ pub(crate) fn assign_level_face_positions<A: Axis>(
             .all(|r| matches!(r.face, Face::LevelLeading | Face::LevelTrailing)),
         "level faces only"
     );
+    assign_face_positions(requests, face_span, place, A::cross_center);
+}
+
+/// The lateral twin of [`assign_level_face_positions`]: requests on a
+/// node's CROSS faces spread along the LEVEL axis — `face_span(node)`
+/// yields `(0, level extent)` and the result is the row offset within
+/// the node — centered by the profile's level rule (`level_center`),
+/// which is where a single request lands and where `Auto` would.
+#[cfg(feature = "ports")]
+pub(crate) fn assign_cross_face_positions<A: Axis>(
+    requests: &mut [FaceRequest],
+    face_span: impl FnMut(usize) -> (usize, usize),
+    place: impl FnMut(usize, EndRole, usize),
+) {
+    debug_assert!(
+        requests
+            .iter()
+            .all(|r| matches!(r.face, Face::CrossLeading | Face::CrossTrailing)),
+        "cross faces only"
+    );
+    assign_face_positions(requests, face_span, place, A::level_center);
+}
+
+/// The shared spread: per (node, face) group in tangent order, sub-span
+/// centers under capacity, round-robin above it, the center line for a
+/// zero-extent face.
+#[cfg(feature = "ports")]
+fn assign_face_positions(
+    requests: &mut [FaceRequest],
+    mut face_span: impl FnMut(usize) -> (usize, usize),
+    mut place: impl FnMut(usize, EndRole, usize),
+    center: fn(usize, usize) -> usize,
+) {
     sort_requests(requests);
     let mut i = 0;
     while i < requests.len() {
@@ -414,7 +446,7 @@ pub(crate) fn assign_level_face_positions<A: Axis>(
             }
         } else {
             for (r, (start, end)) in group.iter().zip(SubSpans::new(n, capacity)) {
-                place(r.edge, r.end, base + A::cross_center(start, end - start));
+                place(r.edge, r.end, base + center(start, end - start));
             }
         }
         i = j;
@@ -434,11 +466,10 @@ impl Attachment {
     /// Resolve a declared side. `Auto` is the 0.10 rule: the layout
     /// role's default level face at the node's cross-axis center line
     /// (the profile's `cross_center` formula, which matches the IR
-    /// center fields exactly). Explicit level faces attach on the
-    /// center line for now (per-face offsets arrive with capacity
-    /// resolution); cross faces carry their face but the same center
-    /// cross line until side routing exists — the consumer decides
-    /// what it can honor.
+    /// center fields exactly). A positioned explicit request overrides
+    /// this (the backends carry positions along the face separately);
+    /// an end that could not route off its role's face falls back to
+    /// exactly this.
     pub(crate) fn resolve<A: Axis>(
         side: PortSide,
         flipped: bool,
@@ -1230,17 +1261,19 @@ mod csr_tests {
         b.add_node(1, "A").unwrap();
         b.add_node(2, "B").unwrap();
         b.add_node(3, "C").unwrap();
+        // Flow-relative names for Auto's own faces — Auto-equivalent
+        // under every direction this build lays out in.
         let h = b
             .add_edge(0, 1)
             .unwrap()
-            .from_port(PortSide::South)
+            .from_port(PortSide::Downstream)
             .expect("preallocated")
             .to_port(Port::of(PortSide::Upstream))
             .expect("preallocated");
         assert_eq!(h.edge(), 0);
         b.add_edge(1, 2).unwrap();
         assert!(
-            b.set_edge_ports(1, PortSide::Downstream, PortSide::North)
+            b.set_edge_ports(1, PortSide::Downstream, PortSide::Upstream)
                 .is_some()
         );
         assert!(
@@ -1250,8 +1283,14 @@ mod csr_tests {
         );
         let csr = b.build().unwrap();
         assert!(csr.has_ports());
-        assert_eq!(csr.edge_ports(0), (PortSide::South, PortSide::Upstream));
-        assert_eq!(csr.edge_ports(1), (PortSide::Downstream, PortSide::North));
+        assert_eq!(
+            csr.edge_ports(0),
+            (PortSide::Downstream, PortSide::Upstream)
+        );
+        assert_eq!(
+            csr.edge_ports(1),
+            (PortSide::Downstream, PortSide::Upstream)
+        );
         assert_eq!(
             csr.edge_ports(2),
             (PortSide::Auto, PortSide::Auto),
@@ -1267,7 +1306,7 @@ mod csr_tests {
         p.add_node(3, "C").unwrap();
         let h = p.add_edge(0, 1).unwrap();
         assert!(
-            h.from_port(PortSide::South).is_none(),
+            h.from_port(PortSide::Downstream).is_none(),
             "no table: refused, not discarded"
         );
         p.add_edge(1, 2).unwrap();
@@ -1282,10 +1321,12 @@ mod csr_tests {
     }
 }
 
-/// Whether an explicit side puts an end on the level face OPPOSITE its
-/// layout role's own: a source leaving through its arrive face, a
-/// target arriving through its leave face. Such an end routes AROUND
-/// its node (behavior rule 7b) instead of attaching head-on.
+/// Whether an explicit side takes an end OFF its layout role's own
+/// face: onto the opposite level face (a source leaving through its
+/// arrive face, a target arriving through its leave face — routed
+/// around the node) or onto a lateral face (a stub beside the node,
+/// then the turn onto the flow axis). Such an end gets a lane and an
+/// explicit path instead of attaching head-on.
 #[cfg_attr(not(feature = "ports"), allow(dead_code))]
 pub(crate) const fn detours(
     side: PortSide,
@@ -1296,14 +1337,55 @@ pub(crate) const fn detours(
     if matches!(side, PortSide::Auto) {
         return false;
     }
+    let face = Face::of(side, axis, level_flipped, role);
     let opposite = match role {
         EndRole::Source => Face::LevelLeading,
         EndRole::Target => Face::LevelTrailing,
     };
-    matches!(
-        (Face::of(side, axis, level_flipped, role), opposite),
-        (Face::LevelLeading, Face::LevelLeading) | (Face::LevelTrailing, Face::LevelTrailing)
-    )
+    !face.is_level()
+        || matches!(
+            (face, opposite),
+            (Face::LevelLeading, Face::LevelLeading) | (Face::LevelTrailing, Face::LevelTrailing)
+        )
+}
+
+/// The head-on record key of a lateral SOURCE exit on `face`: level
+/// faces use the role (0 source, 1 target); side faces use 2 and 4 so
+/// a lateral target can find the exits it must not share a cell with.
+#[cfg_attr(not(feature = "ports"), allow(dead_code))]
+pub(crate) const fn lateral_key(face: Face) -> usize {
+    match face {
+        Face::CrossTrailing => 4,
+        _ => 2,
+    }
+}
+
+/// The lane a LATERAL end's stub turns onto: the cell just past the
+/// node on that face's side — no fallback to the other side, the face
+/// was named. `usize::MAX` when that cell is blocked (a neighbor at
+/// `node_spacing == 0`, a dummy chain, a marker cell) or off the
+/// canvas; the end then attaches head-on.
+#[cfg_attr(not(feature = "ports"), allow(dead_code))]
+pub(crate) fn lateral_lane(
+    base: usize,
+    extent: usize,
+    face: Face,
+    cross_limit: usize,
+    blocked: &dyn Fn(usize) -> bool,
+) -> usize {
+    let lane = if matches!(face, Face::CrossTrailing) {
+        base + extent
+    } else {
+        match base.checked_sub(1) {
+            Some(b) => b,
+            None => return usize::MAX,
+        }
+    };
+    if lane < cross_limit && !blocked(lane) {
+        lane
+    } else {
+        usize::MAX
+    }
 }
 
 /// The cross-axis lane a detour runs along beside its node: the cell
@@ -1505,9 +1587,14 @@ pub(crate) fn plan_lookup(plans: &[(usize, Detour)], ei: usize) -> Option<Detour
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(not(feature = "ports"), allow(dead_code))]
 pub(crate) struct Detour {
-    /// The declared side puts this end on its opposite level face.
+    /// The declared side takes this end off its role's own face.
     pub(crate) src_wants: bool,
     pub(crate) dst_wants: bool,
+    /// The resolved face of each end — a LEVEL face routes around the
+    /// node (up-run or below-run), a CROSS face is a lateral stub at
+    /// the node's own row.
+    pub(crate) src_face: Face,
+    pub(crate) dst_face: Face,
     pub(crate) src_lane: usize,
     pub(crate) dst_lane: usize,
     pub(crate) up_slot: usize,
@@ -1520,6 +1607,8 @@ impl Detour {
     pub(crate) const NONE: Detour = Detour {
         src_wants: false,
         dst_wants: false,
+        src_face: Face::LevelLeading,
+        dst_face: Face::LevelLeading,
         src_lane: usize::MAX,
         dst_lane: usize::MAX,
         up_slot: usize::MAX,
@@ -1533,7 +1622,7 @@ impl Detour {
     }
 }
 
-/// Opposite-face detours (behavior rule 7b) through the heap layout:
+/// Opposite-face detours through the heap layout:
 /// an explicit side on the level face opposite the layout role routes
 /// AROUND the node — up out of a TopDown source's top face, or in
 /// through a target's bottom face — as an explicit polyline.
@@ -1564,7 +1653,7 @@ mod detour_tests {
         (n.x, n.y, n.width, n.height)
     }
 
-    /// Every bend stays outside every node (rule 4b), and every inked
+    /// Every bend stays outside every node, and every inked
     /// cell outside the nodes belongs to an edge — hit-testing, which
     /// walks the plan's visitors, agrees with the painter.
     fn assert_routing_invariants(ir: &LayoutIR<'_>, tag: &str) {
@@ -1924,6 +2013,29 @@ mod detour_tests {
             g.add_edge(1usize, 4usize, None)
                 .from_port(PortSide::Upstream);
             fixtures.push(("tight", g, tight));
+            let mut cfg = LayoutConfig::standard();
+            cfg.direction = direction;
+            let mut g = Graph::new();
+            g.add_node(1usize, "A");
+            g.add_node(2usize, "B");
+            g.add_node(3usize, "C");
+            g.add_node(4usize, "Wide target node");
+            g.add_edge(1usize, 2usize, None)
+                .from_port(PortSide::Clockwise);
+            g.add_edge(2usize, 3usize, None)
+                .to_port(PortSide::Counterclockwise);
+            g.add_edge(1usize, 3usize, Some("skip"))
+                .from_port(PortSide::Counterclockwise)
+                .to_port(PortSide::Clockwise);
+            g.add_edge(3usize, 4usize, None)
+                .from_port(PortSide::Clockwise);
+            g.add_edge(2usize, 4usize, None)
+                .to_port(PortSide::Counterclockwise);
+            g.add_edge(1usize, 4usize, None).to_port(PortSide::Upstream);
+            g.add_edge(4usize, 1usize, None)
+                .from_port(PortSide::Clockwise);
+            g.add_edge(3usize, 3usize, None);
+            fixtures.push(("lateral", g, cfg));
         }
         // A zero-extent neighbor occupies no cell: the lane beside it
         // is free on both backends (the heap's inclusive blocker used
@@ -1986,14 +2098,16 @@ mod detour_tests {
     fn a_wide_star_with_one_detouring_port_scales_linearly() {
         use crate::algorithms::sugiyama::config::LayoutConfig;
         use crate::graph::arena::Arena;
-        const LEAVES: usize = 2_000;
+        // Sized by the index type in play (`arena-idx-u8` holds 255 nodes).
+        let leaves: usize =
+            2_000.min(crate::algorithms::sugiyama::idx::MAX_NODES.saturating_sub(2));
         let build = |declare: bool| {
             let mut g = Graph::new();
             g.add_node(0usize, "Root");
-            for leaf in 1..=LEAVES {
+            for leaf in 1..=leaves {
                 g.add_node(leaf, "L");
                 let h = g.add_edge(0usize, leaf, None);
-                if declare && leaf == LEAVES / 2 {
+                if declare && leaf == leaves / 2 {
                     h.to_port(PortSide::Downstream);
                 }
             }
@@ -2007,7 +2121,7 @@ mod detour_tests {
         // Requests, positions and marks are per edge/node by design; the
         // detour tables must not be.
         assert!(
-            ported_bytes - plain_bytes <= 160 * (LEAVES + 1) + 16_384,
+            ported_bytes - plain_bytes <= 160 * (leaves + 1) + 16_384,
             "one port grew the estimate by {} bytes",
             ported_bytes - plain_bytes
         );
@@ -2032,6 +2146,274 @@ mod detour_tests {
             heap.contains('↑'),
             "the detour reached the leaf's bottom face"
         );
+    }
+
+    /// Lateral faces: a source leaves through its side face
+    /// with a stub straight onto the lane beside the node, then turns
+    /// onto the flow; a target is entered the same way in reverse.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn side_faces_leave_and_enter_beside_the_node() {
+        let mut g = Graph::new();
+        g.add_node(1usize, "A");
+        g.add_node(2usize, "B");
+        g.add_edge(1usize, 2usize, None).from_port(PortSide::East);
+        let ir = g.compute_layout();
+        let out = ir.render_string(&RenderOptions::plain());
+        let (ax, ay, aw, _) = node_rect(&ir, 1);
+        let b = bends(&ir, 0);
+        let e = &ir.edges()[0];
+        // The endpoint is A's own east cell; the first turn is beside
+        // it on A's row; the lane runs down from there.
+        assert_eq!((e.from_x, e.from_y), (ax + aw - 1, ay), "{out}");
+        assert_eq!(b[0].1, ay, "{b:?}\n{out}");
+        assert!(b[0].0 >= ax + aw, "{b:?}\n{out}");
+        assert_eq!(cell_at(&out, ax + aw, ay), '┐', "{out}");
+        assert_routing_invariants(&ir, "east exit");
+
+        let mut g = Graph::new();
+        g.add_node(1usize, "A");
+        g.add_node(2usize, "B");
+        g.add_edge(1usize, 2usize, None).to_port(PortSide::West);
+        let ir = g.compute_layout();
+        let out = ir.render_string(&RenderOptions::plain());
+        let (bx, by, _, _) = node_rect(&ir, 2);
+        let b = bends(&ir, 0);
+        let e = &ir.edges()[0];
+        assert_eq!((e.to_x, e.to_y), (bx, by), "{out}");
+        assert_eq!(b[b.len() - 1].1, by, "{b:?}\n{out}");
+        assert!(b[b.len() - 1].0 < bx, "{b:?}\n{out}");
+        assert_eq!(cell_at(&out, bx - 1, by), '→', "{out}");
+        assert_routing_invariants(&ir, "west arrival");
+    }
+
+    /// The rotations name a side by the traveler's hand facing
+    /// downstream: `Clockwise` is the right hand — West under TopDown,
+    /// East under BottomUp, South under LeftRight, North under
+    /// RightLeft — and `Counterclockwise` the other.
+    #[test]
+    fn rotations_pick_the_side_by_direction() {
+        let mut directions = Vec::new();
+        #[cfg(feature = "layout-vertical")]
+        directions.extend([Direction::TopDown, Direction::BottomUp]);
+        #[cfg(feature = "layout-horizontal")]
+        directions.extend([Direction::LeftRight, Direction::RightLeft]);
+        for direction in directions {
+            for (side, clockwise) in [
+                (PortSide::Clockwise, true),
+                (PortSide::Counterclockwise, false),
+            ] {
+                let mut g = Graph::new();
+                g.set_direction(direction);
+                g.add_node(1usize, "A");
+                g.add_node(2usize, "B");
+                g.add_edge(1usize, 2usize, None).from_port(side);
+                let ir = g.compute_layout();
+                let out = ir.render_string(&RenderOptions::plain());
+                let (ax, ay, aw, ah) = node_rect(&ir, 1);
+                let first = bends(&ir, 0)[0];
+                let west = first.0 < ax;
+                let east = first.0 >= ax + aw;
+                let south = first.1 >= ay + ah;
+                let north = first.1 < ay;
+                let _ = (west, east, south, north);
+                let ok = match direction {
+                    #[cfg(feature = "layout-vertical")]
+                    Direction::TopDown => {
+                        if clockwise {
+                            west
+                        } else {
+                            east
+                        }
+                    }
+                    #[cfg(feature = "layout-vertical")]
+                    Direction::BottomUp => {
+                        if clockwise {
+                            east
+                        } else {
+                            west
+                        }
+                    }
+                    #[cfg(feature = "layout-horizontal")]
+                    Direction::LeftRight => {
+                        if clockwise {
+                            south
+                        } else {
+                            north
+                        }
+                    }
+                    #[cfg(feature = "layout-horizontal")]
+                    Direction::RightLeft => {
+                        if clockwise {
+                            north
+                        } else {
+                            south
+                        }
+                    }
+                };
+                assert!(
+                    ok,
+                    "{direction:?} {side:?}: first turn {first:?} vs A {:?}\n{out}",
+                    (ax, ay, aw, ah)
+                );
+                assert_routing_invariants(&ir, "rotation");
+            }
+        }
+    }
+
+    /// No lane beside the named side (a neighbor packed at spacing 0)
+    /// means the end attaches head-on after all — the Auto drawing; so
+    /// does a trailing-side stub that would leave through a one-row
+    /// node's `↺` cell.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn side_faces_fall_back_head_on_without_a_lane() {
+        let build = |declare: bool| {
+            let mut g = Graph::new();
+            g.add_node(0usize, "Root");
+            g.add_node(1usize, "L");
+            g.add_node(2usize, "M");
+            g.add_node(3usize, "R");
+            g.add_node(4usize, "T");
+            g.add_edge(0usize, 1usize, None);
+            g.add_edge(0usize, 2usize, None);
+            g.add_edge(0usize, 3usize, None);
+            let h = g.add_edge(2usize, 4usize, None);
+            if declare {
+                h.from_port(PortSide::East);
+            }
+            let cfg = crate::algorithms::sugiyama::config::LayoutConfig {
+                node_spacing: 0,
+                ..crate::algorithms::sugiyama::config::LayoutConfig::standard()
+            };
+            g.compute_layout_with_config(&cfg)
+        };
+        assert_eq!(
+            build(true).render_string(&RenderOptions::plain()),
+            build(false).render_string(&RenderOptions::plain())
+        );
+        let build = |declare: bool| {
+            let mut g = Graph::new();
+            g.add_node(1usize, "A");
+            g.add_node(2usize, "B");
+            g.add_edge(1usize, 1usize, None);
+            let h = g.add_edge(1usize, 2usize, None);
+            if declare {
+                h.from_port(PortSide::East);
+            }
+            g.compute_layout()
+        };
+        assert_eq!(
+            build(true).render_string(&RenderOptions::plain()),
+            build(false).render_string(&RenderOptions::plain())
+        );
+    }
+
+    /// A lane-less end attaches head-on AFTER lanes are known and
+    /// BEFORE conflicts are settled: an east exit that finds no lane
+    /// (the `↺` cell on a one-row node) lands on the leave face's
+    /// center, and a bottom-face arrival that detours on the same node
+    /// must not share that cell.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn a_lane_less_end_is_head_on_before_conflicts_are_settled() {
+        let mut g = Graph::new();
+        g.add_node(0usize, "Root");
+        g.add_node(1usize, "M");
+        g.add_node(2usize, "T");
+        g.add_edge(0usize, 1usize, None)
+            .to_port(PortSide::Downstream);
+        g.add_edge(1usize, 1usize, None);
+        g.add_edge(1usize, 2usize, None).from_port(PortSide::East);
+        let ir = g.compute_layout();
+        let out = ir.render_string(&RenderOptions::plain());
+        // The east exit fell back (Direct or Corner); the arrival still
+        // detours; the two never share a cell.
+        let exit = ir.edges().iter().find(|e| e.edge_index == 2).unwrap();
+        assert!(!matches!(exit.path, EdgePath::Orthogonal { .. }), "{out}");
+        let arrival = ir.edges().iter().find(|e| e.edge_index == 0).unwrap();
+        assert!(matches!(arrival.path, EdgePath::Orthogonal { .. }), "{out}");
+        assert_ne!(
+            (exit.from_x, exit.from_y),
+            (arrival.to_x, arrival.to_y),
+            "{out}"
+        );
+        assert_routing_invariants(&ir, "lane-less east exit");
+    }
+
+    /// A `↺` cell blocks a trailing-side stub only on the node's top
+    /// row: a centered east exit on a three-row self-loop node routes.
+    #[cfg(feature = "layout-vertical")]
+    #[test]
+    fn a_marker_blocks_only_its_own_row() {
+        use crate::render::engine::CustomNode;
+        let mut g = Graph::new();
+        g.add_node(
+            1usize,
+            CustomNode {
+                label: "A",
+                width: 3,
+                height: 3,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_node(2usize, "B");
+        g.add_edge(1usize, 1usize, None);
+        g.add_edge(1usize, 2usize, None).from_port(PortSide::East);
+        let ir = g.compute_layout();
+        let out = ir.render_string(&RenderOptions::plain());
+        let (ax, ay, aw, _) = node_rect(&ir, 1);
+        let b = bends(&ir, 1);
+        assert_eq!(
+            b[0],
+            (ax + aw, ay + 1),
+            "centered stub beside the node:\n{out}"
+        );
+        let (mx, my) = ir.node_by_id(1).unwrap().self_loop_at.unwrap();
+        assert_eq!(cell_at(&out, mx, my), '↺', "{out}");
+        assert_routing_invariants(&ir, "marker row");
+    }
+
+    /// The leading cell a west port opens must stay representable: two
+    /// nodes at the coordinate type's width fail cleanly on the arena
+    /// backend instead of wrapping.
+    #[cfg(all(feature = "arena", feature = "layout-vertical"))]
+    #[test]
+    fn a_leading_cell_past_the_coordinate_type_is_an_error() {
+        use crate::algorithms::sugiyama::config::LayoutConfig;
+        use crate::algorithms::sugiyama::idx::MAX_COORD;
+        use crate::graph::arena::Arena;
+        use crate::render::engine::CustomNode;
+        let wide = |label: &'static str| CustomNode {
+            label,
+            width: MAX_COORD - 3,
+            height: 1,
+            painter: None,
+            payload: "",
+        };
+        let mut g = Graph::new();
+        g.add_node(1usize, wide("A"));
+        g.add_node(2usize, wide("B"));
+        g.add_edge(1usize, 2usize, None).from_port(PortSide::West);
+        let cfg = LayoutConfig::standard();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size()];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).expect("exact CSR estimate");
+        let bytes = g.estimate_layout_arena_size_with(&cfg);
+        let mut temp = vec![0u8; bytes];
+        let mut out = vec![0u8; bytes];
+        let mut ta = Arena::new(&mut temp);
+        let mut oa = Arena::new(&mut out);
+        match csr.compute_layout_arena(&cfg, &mut ta, &mut oa) {
+            Err(crate::GraphError::ExceedsMaxExtent { extent, max }) => {
+                assert!(extent > max, "{extent} vs {max}");
+            }
+            other => panic!(
+                "expected ExceedsMaxExtent, got {:?}",
+                other.map(|ir| ir.width())
+            ),
+        }
     }
 
     /// A self-loop node keeps its `↺` cell: the lane on that side sits

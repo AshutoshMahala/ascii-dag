@@ -81,6 +81,11 @@ pub(crate) trait Axis {
     /// face). Matches the IR center-field formulas exactly: Vertical
     /// `center_x = x + w/2`, Horizontal `center_y = y + (h − 1)/2`.
     fn cross_center(cross: usize, extent: usize) -> usize;
+    /// Level-axis CENTER line of a span — where a request on a LATERAL
+    /// face lands by the profile's own level rule, the IR center field
+    /// on that axis: Vertical `center_y = y + (h − 1)/2`, Horizontal
+    /// `center_x = x + w/2`.
+    fn level_center(level: usize, extent: usize) -> usize;
     /// Level-axis line of a source node's PORT. Vertical keeps the
     /// legacy band-trailing endpoint (the level's tallest node decides
     /// where every edge starts — byte-frozen behavior); Horizontal
@@ -199,6 +204,11 @@ impl Axis for Vertical {
     }
 
     #[inline]
+    fn level_center(level: usize, extent: usize) -> usize {
+        level + extent.saturating_sub(1) / 2
+    }
+
+    #[inline]
     fn source_port_level(band_start: usize, _node_extent: usize, band_extent: usize) -> usize {
         band_start + band_extent - 1
     }
@@ -265,6 +275,11 @@ impl Axis for Horizontal {
     #[inline]
     fn cross_center(cross: usize, extent: usize) -> usize {
         cross + extent.saturating_sub(1) / 2
+    }
+
+    #[inline]
+    fn level_center(level: usize, extent: usize) -> usize {
+        level + extent / 2
     }
 
     #[inline]

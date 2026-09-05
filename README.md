@@ -242,7 +242,7 @@ diagnostic code via `.code()` and an actionable `.hint()`:
 | `NodeNotFound` / `SubgraphNotFound` | `E.Graph.Node.021` / `E.Graph.Subgraph.021` | referenced id absent |
 | `CycleDetected` / `SubgraphCycle` | `E.Graph.Dag.003` / `E.Graph.Subgraph.003` | DAG / nesting constraint violated |
 | `ArenaOom` / `BuilderFailed` | `E.ArenaLayout.Alloc.026` / `…Builder.026` | arena too small — size with `estimate_layout_arena_size` |
-| `ExceedsMaxNodes` / `ExceedsMaxLevels` | `E.ArenaLayout.Node.004` / `…Level.004` | index-type capacity exceeded |
+| `ExceedsMaxNodes` / `ExceedsMaxLevels` / `ExceedsMaxExtent` | `E.ArenaLayout.Node.004` / `…Level.004` / `…Extent.004` | index-type or coordinate-type capacity exceeded |
 | `RenderPlanOom` / `RenderCanvasTooSmall` / `RenderOutputTooSmall` | `E.Render.{Plan,Canvas,Sink}.026` | render buffer too small — size with `estimate_render_*` |
 
 Non-fatal events are typed diagnostics: collect them with a
