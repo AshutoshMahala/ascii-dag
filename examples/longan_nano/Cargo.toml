@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 # arena-idx-u8 keeps index storage to one byte per node — this part has
-# 32 KB of SRAM, all of it stack (riscv-rt reserves the region), and the
-# demo's arenas take about 10 KB of it. No heap allocator anywhere.
+# 32 KB of SRAM. The demo's buffers take 7 KiB, with additional stack
+# needed by layout/render calls. No heap allocator anywhere.
 ascii-dag = { path = "../../", default-features = false, features = ["arena-idx-u8", "layout-horizontal"] }
 longan-nano = { git = "https://github.com/riscv-rust/longan-nano", features = ["lcd"] }
 riscv-rt = "0.11"

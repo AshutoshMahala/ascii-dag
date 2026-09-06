@@ -13,9 +13,9 @@ use longan_nano::{lcd, lcd_pins};
 use riscv_rt::entry;
 
 use ascii_dag::algorithms::sugiyama::config::LayoutConfig;
-use ascii_dag::graph::Direction;
 use ascii_dag::graph::arena::Arena;
 use ascii_dag::graph::csr::CsrGraphBuilder;
+use ascii_dag::graph::Direction;
 use ascii_dag::render::engine::RenderOptions;
 
 /// Render a DAG on the Longan Nano's 160×80 LCD.
@@ -71,18 +71,20 @@ fn main() -> ! {
         .build();
 
     // Title
-    Text::new("ascii-dag LR/ascii (no_alloc)", Point::new(2, 6), title_style)
-        .draw(&mut lcd)
-        .unwrap();
+    Text::new(
+        "ascii-dag LR/ascii (no_alloc)",
+        Point::new(2, 6),
+        title_style,
+    )
+    .draw(&mut lcd)
+    .unwrap();
 
     // ── Arena memory on stack ──────────────────────────────
+    // 7 KiB of buffers, plus the layout/render call stack. Layout
+    // scratch and render scratch/text are never needed together.
     let mut graph_buf = [0u8; 1024];
     let mut output_buf = [0u8; 2048];
-    let mut temp_buf = [0u8; 2048];
-    // The render engine carves its plan + band canvas from an arena of
-    // its own, and writes text into a plain byte buffer.
-    let mut render_buf = [0u8; 4096];
-    let mut text_buf = [0u8; 2048];
+    let mut workspace_buf = [0u8; 4096];
 
     // ── Build graph ────────────────────────────────────────
     let mut graph_arena = Arena::new(&mut graph_buf);
@@ -96,7 +98,7 @@ fn main() -> ! {
     builder.add_edge(n0, n1).unwrap();
     builder.add_edge(n1, n2).unwrap();
     builder.add_edge(n2, n3).unwrap();
-    builder.add_edge(n0, n2).unwrap(); // skip-level edgeascii-da
+    builder.add_edge(n0, n2).unwrap(); // skip-level edge
 
     let graph = builder.build().unwrap();
 
@@ -108,7 +110,7 @@ fn main() -> ! {
 
     let mut output_arena = Arena::new(&mut output_buf);
     let layout = {
-        let mut temp_arena = Arena::new(&mut temp_buf);
+        let mut temp_arena = Arena::new(&mut workspace_buf);
         graph.compute_layout_arena(&config, &mut temp_arena, &mut output_arena)
     };
 
@@ -116,19 +118,26 @@ fn main() -> ! {
         Ok(ir) => {
             // ASCII charset: FONT_4X6 has no box-drawing glyphs.
             let options = RenderOptions::ascii();
-            let render_arena = Arena::new(&mut render_buf);
+            // The IR borrows output_buf, not layout scratch. Reuse
+            // the workspace for the render arena and its text sink.
+            // Check the split so a larger graph reports OOM, not panic.
+            let text = workspace_buf
+                .split_at_mut_checked(ir.estimate_render_arena_size(&options))
+                .and_then(|(render_buf, text_buf)| {
+                    let render_arena = Arena::new(render_buf);
+                    let bytes = ir.render_to_bytes(&options, &render_arena, text_buf).ok()?;
+                    core::str::from_utf8(&text_buf[..bytes]).ok()
+                });
 
-            if let Ok(bytes) = ir.render_to_bytes(&options, &render_arena, &mut text_buf) {
-                if let Ok(text) = core::str::from_utf8(&text_buf[..bytes]) {
-                    // Draw DAG output line by line
-                    // Title at y=6, leave gap, start DAG at y=14
-                    let mut y = 14;
-                    for line in text.lines().take(11) {
-                        Text::new(line, Point::new(2, y), dag_style)
-                            .draw(&mut lcd)
-                            .unwrap();
-                        y += 6;
-                    }
+            if let Some(text) = text {
+                // Draw DAG output line by line
+                // Title at y=6, leave gap, start DAG at y=14
+                let mut y = 14;
+                for line in text.lines().take(11) {
+                    Text::new(line, Point::new(2, y), dag_style)
+                        .draw(&mut lcd)
+                        .unwrap();
+                    y += 6;
                 }
             } else {
                 Text::new("Render OOM", Point::new(2, 20), dag_style)

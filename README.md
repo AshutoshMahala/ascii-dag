@@ -2,7 +2,10 @@
 
 [![Crates.io](https://img.shields.io/crates/v/ascii-dag.svg)](https://crates.io/crates/ascii-dag)
 [![Documentation](https://docs.rs/ascii-dag/badge.svg)](https://docs.rs/ascii-dag)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
+This README describes the **unreleased 0.11** API on `main`.
+Requires Rust 1.92 or newer.
 
 A DAG layout engine that renders to text: Sugiyama-style layered
 layout (cycle breaking, layering, crossing reduction, edge routing)
@@ -30,11 +33,24 @@ and routed edges you can draw with Canvas, SVG, or your own widget.
 | For | drawing, in a terminal | graph algorithms | drawing, as an image |
 | Dependencies | none | a few | a C toolchain |
 | Layout engine | built in | none | built in, far richer |
-| WASM | ~94–200 KB | ~30 KB | 2 MB+ |
+| WASM | 154–298 KB (0.11, default features; 129–261 KB without `ports`; [details](BENCHMARK.md#bundle-size-wasm)) | ~30 KB | 2 MB+ |
 
 Reach for `petgraph` when you need shortest paths and flows, and
 Graphviz when you need publication-quality images. Reach for this when
 the output has to be text.
+
+## Installation (0.11 development)
+
+To try the API documented here before 0.11 is published:
+
+```toml
+[dependencies]
+ascii-dag = { git = "https://github.com/AshutoshMahala/ascii-dag", branch = "main" }
+```
+
+This follows the development branch, which can change. For the stable
+0.10 line, use `ascii-dag = "0.10"` and its
+[release documentation](https://github.com/AshutoshMahala/ascii-dag/tree/release/v0.10).
 
 ## Example
 
@@ -155,36 +171,18 @@ use ascii_dag::PortSide;
 
 g.add_edge(service, audit, Some("trail")).from_port(PortSide::Clockwise);
 g.add_edge(gateway, cache, None).to_port(PortSide::West);
-g.add_edge(client, store, None).to_port(PortSide::Downstream);
 ```
 
-Three vocabularies name a side: the compass (`North` / `East` /
-`South` / `West`, fixed on the page), the flow (`Upstream` is the face
-edges arrive on, `Downstream` the face they leave by), and rotations
-of the flow (`Clockwise` is the traveler's right hand facing
-downstream, `Counterclockwise` the left). Flow and rotation sides
-follow the direction, so a graph declared once reads the same way in
-`LR` as in `TB`:
+Compass sides (`North` / `East` / `South` / `West`) stay fixed on the
+page; `Upstream`, `Downstream`, `Clockwise` and `Counterclockwise`
+follow the layout direction. `Auto` (the default) leaves downstream
+and arrives upstream. Each face shares one port by default; graph-wide
+or per-node policies can choose paired, spread or custom placement.
 
-| Side | `TB` | `BT` | `LR` | `RL` |
-|---|:---:|:---:|:---:|:---:|
-| `Upstream` | N | S | W | E |
-| `Downstream` | S | N | E | W |
-| `Clockwise` | W | E | S | N |
-| `Counterclockwise` | E | W | N | S |
-
-`Auto` (the default) is the head-on rule: leave `Downstream`, arrive
-`Upstream`. A face has one port by default, shared by every edge
-declared on it — the drawing `Auto` fan-ins already have; a port
-policy (`set_port_policy` for the graph, `set_node_port_policy` for
-a node) chooses `Paired` (an arrival and a departure port), `Spread`
-(up to a bound) or `Custom` (your `fn`) instead. A node is never
-widened for its ports. Every IR edge reports
-the side each end asked for and the side it got (`from_port` /
-`to_port`), and a side that could not be honored is a warning on the
-run (see the table under *Errors and warnings*). The drawing rules and
-the no-alloc form: [docs/ports.md](docs/ports.md); runnable:
-`examples/ports.rs`.
+The IR records requested and resolved sides; diagnostic-aware layout
+reports sides it could not honor. See [the ports guide](docs/ports.md)
+for direction mappings, policies and the no-alloc API, or run
+[`examples/ports.rs`](examples/ports.rs).
 
 ### Render settings (`RenderOptions`)
 
@@ -211,11 +209,14 @@ Presets: `RenderOptions::plain()`, `::colored(palette)`, `::ascii()`,
 ### Layout settings
 
 ```rust
-g.set_direction(Direction::LeftRight);   // TB (default), BT, LR, RL
+use ascii_dag::{Direction, LayoutConfig};
+
 let mut config = LayoutConfig::standard();
+config.direction = Direction::LeftRight; // TB (default), BT, LR, RL
 config.node_spacing = 4;                 // gap between nodes within a level
 config.level_spacing = 1;                // extra gap between levels
 config.include_dummy_nodes = true;       // emit routing waypoints into the IR
+let ir = g.compute_layout_with_config(&config);
 ```
 
 All four directions lay out natively. `TB`/`BT` stack levels as rows;
@@ -281,11 +282,20 @@ their measured release and feature set; they are not 0.11 size promises.
 <img src="assets/longan_nano.jpg" alt="a Longan Nano board showing an ASCII graph on its LCD" width="620"/>
 
 *The arena pipeline on a Longan Nano (RISC-V, 32 KB RAM, no
-allocator): `LeftRight` and the ASCII charset, because the LCD font
-has no box-drawing glyphs. The graph costs ~10 KB of stack. It builds
-without the `ports` feature; see [BENCHMARK.md](BENCHMARK.md) for
-release-specific measurements and
-`examples/longan_nano`.*
+allocator) running 0.10.0: `LeftRight` and the ASCII charset, because
+the LCD font has no box-drawing glyphs. It builds without the `ports`
+feature; see `examples/longan_nano`.*
+
+The recorded 0.11 demo build exceeded SRAM with separate layout,
+render and text buffers. The earlier 0.10.x example's 2 KB layout
+temp buffer was also too small after the skip-level router increased
+the demo's requirement from 856 B to 3,340 B. These are limits of
+those demo configurations, not a blanket lack of board support.
+The current horizontal-only, no-ports example reuses its 4 KB layout
+workspace for rendering, but still needs a fresh hardware check.
+Layout scratch also consumes stack outside the arena buffers. See
+[the recorded measurements and stack-accounting caveats](BENCHMARK.md#embedded-longan-nano-gd32vf103-risc-v-128-kb-flash--32-kb-ram);
+the recorded firmware fits flash (116.8 KB of 128 KB).
 
 ## Errors and warnings
 
@@ -301,20 +311,23 @@ diagnostic code via `.code()` and an actionable `.hint()`:
 | `ExceedsMaxNodes` / `ExceedsMaxLevels` / `ExceedsMaxExtent` | `E.ArenaLayout.Node.004` / `…Level.004` / `…Extent.004` | index-type or coordinate-type capacity exceeded |
 | `RenderPlanOom` / `RenderCanvasTooSmall` / `RenderOutputTooSmall` | `E.Render.{Plan,Canvas,Sink}.026` | render buffer too small — size with `estimate_render_*` |
 
-Non-fatal events are typed diagnostics: collect them with a
-`DiagnosticRun` through the diagnostic-aware entry points
-(`graph.layout().compute(&mut cx)` / `.reported()`,
-`planner.plan(&ir, &opts).compute(&mut cx)`) — the library never
-writes to stderr:
+Non-fatal events are typed diagnostics. Opt in to a report to inspect
+them; the library never writes to stderr:
 
-| Code | Fires when | Channel |
-|---|---|---|
-| `W.Graph.Node.021` | the graph still holds implicit auto-created placeholders (a standing condition, reported per run until fixed) | diagnostics channel |
-| `W.Graph.Dag.003` | the current `crossing_reduction_passes` value was clamped (condition — cleared by a sane value) | diagnostics channel |
-| `W.Graph.Dag.033` | the current `crossing_reduction_passes` value is kept but past useful range | diagnostics channel |
-| `W.Render.Label.031` | an edge label fits nowhere inline and the legend is off — it will not be rendered | diagnostics channel |
-| `W.Graph.Port.034` | a declared side on a self-loop is not honored yet — the loop keeps its marker | diagnostics channel |
-| `W.Graph.Port.035` | a declared side could not be routed (no room beside the node) — the end attached head-on | diagnostics channel |
+```rust
+let report = g.layout().reported();
+for warning in report.warnings() {
+    eprintln!("{}: {warning}", warning.code());
+}
+let ir = report.outcome().unwrap();
+```
+
+Layout warnings cover implicit nodes, crossing-reduction settings and
+unhonored port sides. Render planning separately reports an unplaced
+label as `W.Render.Label.031` when `plan.label_policy.overflow` is
+`LabelOverflow::Omit`. To retain and print those labels, set overflow
+to `LabelOverflow::Legend` **and** `emit.render_legend = true`;
+enabling legend emission alone does not recover omitted labels.
 
 Point events are receipts at the call site instead: `add_edge` returns
 an `EdgeHandle` carrying an `EdgeInsertion` (did an endpoint get
@@ -372,7 +385,8 @@ branch per patch: `0.10.1`, `0.10.2` and so on are tags along
 `release/v0.10`, which is what makes it possible to ship a fix for
 0.10 after `main` has moved on to 0.11.
 
-Pin to a line and you get its fixes without surprises:
+For example, this selects the stable 0.10 line and its patch fixes,
+not the unreleased 0.11 API documented above:
 
 ```toml
 ascii-dag = "0.10"     # 0.10.x, including later patch fixes
