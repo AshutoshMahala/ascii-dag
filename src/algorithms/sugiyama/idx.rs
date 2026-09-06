@@ -5,13 +5,18 @@
 //!
 //! # Feature Flags
 //!
-//! | Feature | Index Type | Max Value | Memory per Index |
-//! |---------|-----------|-----------|------------------|
-//! | `arena-idx-u8` | `u8` | 255 | 1 byte |
-//! | `arena-idx-u16` | `u16` | 65,535 | 2 bytes |
-//! | `arena-idx-u32` | `u32` | 4,294,967,295 | 4 bytes |
+//! | Feature | Index Type | Max Value | Memory per Index | Coordinate Type |
+//! |---------|-----------|-----------|------------------|-----------------|
+//! | `arena-idx-u8` | `u8` | 255 | 1 byte | `u16` (a 65,535-cell canvas) |
+//! | `arena-idx-u16` | `u16` | 65,535 | 2 bytes | `u16` (a 65,535-cell canvas) |
+//! | `arena-idx-u32` | `u32` | 4,294,967,295 | 4 bytes | `u32` |
 //!
-//! If no index feature is selected, defaults to `u32`.
+//! If no index feature is selected, defaults to `u32`. The coordinate
+//! width follows the index width: the RAM-first targets keep 16-bit
+//! cells, the default lays out canvases wider than 65,535 cells (a
+//! level of 50,000 nodes is ~300,000) exactly as the heap pipeline
+//! does. A layout past the coordinate type is
+//! `GraphError::ExceedsMaxExtent`, never a wrapped position.
 
 /// The index type used for arena allocations.
 /// Configurable via feature flags for memory optimization.
@@ -51,9 +56,17 @@ pub const MAX_NODES: usize = Idx::MAX as usize;
 /// depth, not from this constant.
 pub const MAX_LEVELS: usize = MAX_NODES;
 
-/// Coordinate type - always needs full width for x/y positions.
-/// On embedded, x coordinates can exceed 255 easily with wide graphs.
+/// Coordinate type — a cell position along either axis. Follows the
+/// index width: `u16` with `arena-idx-u8` / `arena-idx-u16`, where a
+/// 65,535-cell canvas is the RAM-first trade, and `u32` otherwise.
+/// Always wider than `u8`: x coordinates exceed 255 on any wide graph.
+#[cfg(any(feature = "arena-idx-u8", feature = "arena-idx-u16"))]
 pub type Coord = u16;
+
+/// Coordinate type — `u32` under the default index width, so canvases
+/// past 65,535 cells lay out on the arena pipeline like on the heap.
+#[cfg(not(any(feature = "arena-idx-u8", feature = "arena-idx-u16")))]
+pub type Coord = u32;
 
 /// Maximum coordinate value.
 pub const MAX_COORD: usize = Coord::MAX as usize;

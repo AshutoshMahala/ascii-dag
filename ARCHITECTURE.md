@@ -301,10 +301,15 @@ direction: columns for TB/BT, rows for LR/RL (see §7).
 ### Index Types (Feature Flags)
 ```toml
 # Choose based on max graph size:
-arena-idx-u8   # Max 255 nodes, 1 byte per index
-arena-idx-u16  # Max 65,535 nodes, 2 bytes per index
-arena-idx-u32  # Max 4B nodes, 4 bytes per index (default)
+arena-idx-u8   # Max 255 nodes, 1 byte per index, 16-bit coordinates (65,535 cells)
+arena-idx-u16  # Max 65,535 nodes, 2 bytes per index, 16-bit coordinates
+arena-idx-u32  # Max 4B nodes, 4 bytes per index, 32-bit coordinates (default)
 ```
+
+The coordinate width follows the index width: the RAM-first targets
+keep 16-bit cells, the default lays out canvases past 65,535 cells
+like the heap pipeline. A layout past the coordinate type is
+`GraphError::ExceedsMaxExtent`, never a wrapped position.
 
 ### Arena Allocator
 - Bump allocation: O(1) alloc, no free; single caller-provided block

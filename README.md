@@ -256,7 +256,7 @@ reference: [docs.rs/ascii-dag](https://docs.rs/ascii-dag).
 | `alloc` | via `std` | heap `Graph` API on `no_std` (needs a global allocator) |
 | `generic` | ✓ | cycle detection / toposort / impact analysis over your own types |
 | `arena` | | CSR + arena layout pipeline (no-alloc capable) |
-| `arena-idx-u8` / `-u16` / `-u32` | | index width: 255 / 65,535 / 4B nodes (RAM tradeoff) |
+| `arena-idx-u8` / `-u16` / `-u32` | | index width: 255 / 65,535 / 4B nodes, with 16 / 16 / 32-bit cell coordinates (RAM tradeoff) |
 | `ports` | ✓ | side ports: declared attachment sides on edges (`from_port` / `to_port`); off, nothing of it is linked |
 
 Typical configurations: default (`ascii-dag = "0.10"`) for the heap

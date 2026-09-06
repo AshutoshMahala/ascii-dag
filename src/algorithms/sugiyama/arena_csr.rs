@@ -57,7 +57,19 @@ use super::idx::{Coord, Idx, MAX_NODES};
 #[cfg(not(feature = "arena"))]
 type Idx = u32;
 #[cfg(not(feature = "arena"))]
-type Coord = u16;
+type Coord = u32;
+
+/// `v` as a cross-axis coordinate, or the extent error: `Coord` is the
+/// canvas bound the arena backend chose, and a layout past it is an
+/// error — never a wrapped position (a debug build panicked here, a
+/// release build laid out garbage, before this check existed).
+#[inline]
+fn coord_of(v: usize) -> Result<Coord, GraphError> {
+    Coord::try_from(v).map_err(|_| GraphError::ExceedsMaxExtent {
+        extent: v,
+        max: Coord::MAX as usize,
+    })
+}
 /// One §4.7 DP cell: lexicographic cost + predecessor candidate index.
 type LaneDpEntry = ((usize, usize, usize, usize), usize);
 #[cfg(not(feature = "arena"))]
@@ -646,7 +658,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
         temps.widths,
         max_level,
         node_spacing,
-    );
+    )?;
 
     // Step 5b: Subgraph horizontal padding
     if graph.has_subgraphs() {
@@ -658,7 +670,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             temps.widths,
             max_level,
             node_spacing_usize,
-        );
+        )?;
     }
 
     // Step 5c: Refine x-coordinates and compact subgraphs (iterative).
@@ -690,7 +702,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
 
     // Compute max_width after refinement + compaction
     let mut max_width: Coord = {
-        let mut new_max: Coord = 0;
+        let mut new_max: usize = 0;
         for level in 0..=max_level as usize {
             if level + 1 >= temps.vlevel_offsets.len() {
                 break;
@@ -698,16 +710,14 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             let start = temps.vlevel_offsets[level] as usize;
             let end = temps.vlevel_offsets[level + 1] as usize;
             for pos in start..end {
-                let right = temps.x_coords[pos].saturating_add(temps.widths[pos]);
+                let right = temps.x_coords[pos] as usize + temps.widths[pos] as usize;
                 if right > new_max {
                     new_max = right;
                 }
             }
         }
         // Cross-axis safety margin — profile-decided (see the heap twin).
-        new_max.saturating_add(
-            A::cross_margin(graph.has_edge_labels(), graph.has_subgraphs()) as Coord,
-        )
+        coord_of(new_max + A::cross_margin(graph.has_edge_labels(), graph.has_subgraphs()))?
     };
 
     // Step 6: Build real node coordinates
@@ -731,7 +741,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             temps.sg_depths,
             temps.node_slots,
         );
-        max_width = max_width.saturating_add(extra as Coord);
+        max_width = coord_of((max_width as usize).saturating_add(extra))?;
 
         // Reclaim slack the sibling shifts left behind: pull nodes toward
         // their connected neighbors within current level bounds.
@@ -760,7 +770,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             temps.sg_frontier_b,
         );
 
-        max_width = max_width.saturating_add(pushed as Coord);
+        max_width = coord_of((max_width as usize).saturating_add(pushed))?;
 
         // Pull whole root clusters (and loose nodes) back together after
         // the overlap shifts — reclaims the empty gulfs between boxes.
@@ -792,7 +802,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
             node_spacing_usize,
             temps.positions,
         );
-        max_width = max_width.saturating_add(widened as Coord);
+        max_width = coord_of((max_width as usize).saturating_add(widened))?;
         // Waypoints must never cross node text (crossing a border renders
         // as a junction and is acceptable; crossing a node is not).
         nudge_dummies_off_nodes_csr::<A>(
@@ -3535,7 +3545,7 @@ fn subgraph_padding_csr<A: Axis>(
     widths: &[Coord],
     max_level: Idx,
     node_spacing: usize,
-) -> usize {
+) -> Result<usize, GraphError> {
     let mut global_max_width = 0usize;
 
     for level in 0..=max_level as usize {
@@ -3589,7 +3599,7 @@ fn subgraph_padding_csr<A: Axis>(
                 }
             }
             if pos < x_coords.len() {
-                x_coords[pos] = x as Coord;
+                x_coords[pos] = coord_of(x)?;
             }
             let w = widths.get(pos).copied().unwrap_or(3) as usize;
             x += w + node_spacing;
@@ -3624,7 +3634,7 @@ fn subgraph_padding_csr<A: Axis>(
         }
     }
 
-    global_max_width
+    Ok(global_max_width)
 }
 
 // ── X-refinement (CSR) ───────────────────────────────────────────────────
@@ -5783,6 +5793,12 @@ fn build_virtual_levels_csr(
     (total, max_size)
 }
 
+/// The initial cross-axis packing: every level's vnodes in order, each
+/// `node_spacing` past the previous, positions and extents into
+/// `x_coords` / `widths`. Returns the widest level's extent. A level
+/// wider than the coordinate type is [`GraphError::ExceedsMaxExtent`]
+/// naming that level's full width — sized in `usize` before anything
+/// is stored, so no position is ever wrapped.
 fn assign_x_coords_csr<A: Axis>(
     graph: &CsrGraph<'_>,
     vlevel_offsets: &[Idx],
@@ -5791,58 +5807,63 @@ fn assign_x_coords_csr<A: Axis>(
     widths: &mut [Coord],
     max_level: Idx,
     node_spacing: Coord,
-) -> Coord {
-    let mut max_width: Coord = 0;
+) -> Result<Coord, GraphError> {
+    let mut max_width: usize = 0;
     let max_pos = x_coords.len();
     let max_vnode_idx = vnode_data.len() / 2;
+    let spacing = node_spacing as usize;
+    // A vnode's cross-axis extent: the node's (plus its self-loop
+    // marker cell at `node_spacing == 0` — D5(ii), matches heap; inert
+    // otherwise), or the shared dummy clearance.
+    let extent_of = |pos: usize| -> usize {
+        let vnode_type = vnode_kind(vnode_data, pos);
+        let vnode_idx = vnode_payload(vnode_data, pos) as usize;
+        if vnode_type == 0 {
+            let ext = A::cross_extent(graph.node_width(vnode_idx), graph.node_height(vnode_idx));
+            if node_spacing == 0 && graph.children(vnode_idx).contains(&(vnode_idx as u32)) {
+                ext + 1
+            } else {
+                ext
+            }
+        } else {
+            A::DUMMY_CROSS
+        }
+    };
 
     for level in 0..=(max_level as usize) {
         let start = vlevel_offsets[level] as usize;
         let end = (vlevel_offsets[level + 1] as usize)
             .min(max_pos)
             .min(max_vnode_idx);
-        let mut x: Coord = 0;
-
+        if end <= start {
+            continue;
+        }
+        // Size the level first, in `usize`, so the error names its width.
+        let mut level_width: usize = 0;
         for pos in start..end {
-            // Bounds check
             if pos * 2 + 1 >= vnode_data.len() {
                 break;
             }
-            let vnode_type = vnode_kind(vnode_data, pos);
-            let vnode_idx = vnode_payload(vnode_data, pos) as usize;
-
-            let width: Coord = if vnode_type == 0 {
-                // Cross-axis extent (Vertical: the stored width).
-                let ext =
-                    A::cross_extent(graph.node_width(vnode_idx), graph.node_height(vnode_idx));
-                // D5(ii): reserve the self-loop marker cell at
-                // `node_spacing == 0` (matches heap; inert otherwise).
-                if node_spacing == 0 && graph.children(vnode_idx).contains(&(vnode_idx as u32)) {
-                    (ext + 1) as Coord
-                } else {
-                    ext as Coord
-                }
-            } else {
-                // Dummy clearance — shared constant, matches heap mode.
-                A::DUMMY_CROSS as Coord
-            };
-
-            if pos < x_coords.len() {
-                x_coords[pos] = x;
-                widths[pos] = width;
+            level_width = level_width.saturating_add(extent_of(pos));
+            if pos + 1 < end {
+                level_width = level_width.saturating_add(spacing);
             }
-            x += width + node_spacing;
         }
-
-        if end > start && end - 1 < x_coords.len() {
-            let last_x = x_coords[end - 1];
-            let last_width = widths[end - 1];
-            max_width = max_width.max(last_x + last_width);
+        coord_of(level_width)?;
+        let mut x: usize = 0;
+        for pos in start..end {
+            if pos * 2 + 1 >= vnode_data.len() {
+                break;
+            }
+            let width = extent_of(pos);
+            x_coords[pos] = coord_of(x)?;
+            widths[pos] = coord_of(width)?;
+            x += width + spacing;
         }
+        max_width = max_width.max(level_width);
     }
-    max_width
+    coord_of(max_width)
 }
-
 fn build_real_coords_csr(
     vlevel_offsets: &[Idx],
     vnode_data: &[Idx],
@@ -7672,6 +7693,84 @@ mod tests {
     use super::*;
     use crate::graph::arena::Arena;
     use crate::graph::csr::CsrGraphBuilder;
+
+    /// A level wider than the coordinate type is an error, never a
+    /// wrapped position: three 30,000-cell custom nodes on one level
+    /// ask for ~90,000 columns — past a `u16` canvas (`arena-idx-u8` /
+    /// `u16`), where the error names the width, and within a `u32`
+    /// one (the default), where the arena matches the heap. The heap
+    /// pipeline, with `usize` coordinates, lays the graph out either
+    /// way; the arena estimate stays callable.
+    #[cfg(all(feature = "std", feature = "layout-vertical"))]
+    #[test]
+    fn a_level_wider_than_the_coordinate_type_is_an_error() {
+        use crate::algorithms::sugiyama::config::LayoutConfig;
+        use crate::graph::Graph;
+        use crate::render::engine::CustomNode;
+        let mut g = Graph::new();
+        for id in 1usize..=3 {
+            g.add_node(
+                id,
+                CustomNode {
+                    label: "wide",
+                    width: 30_000,
+                    height: 1,
+                    painter: None,
+                    payload: "",
+                },
+            );
+        }
+        g.add_node(4usize, "sink");
+        for id in 1usize..=3 {
+            g.add_edge(id, 4usize, None);
+        }
+        assert!(g.compute_layout().width() >= 90_000, "the heap lays it out");
+        let config = LayoutConfig::standard();
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size()];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).unwrap();
+        let size = g.estimate_layout_arena_size_with(&config);
+        let (mut t, mut o) = (vec![0u8; size], vec![0u8; size]);
+        let (mut ta, mut oa) = (Arena::new(&mut t), Arena::new(&mut o));
+        let heap_width = g.compute_layout().width();
+        match csr.compute_layout_arena(&config, &mut ta, &mut oa) {
+            Err(GraphError::ExceedsMaxExtent { extent, max }) => {
+                assert!(
+                    heap_width > Coord::MAX as usize,
+                    "a canvas the type can hold"
+                );
+                assert_eq!(max, Coord::MAX as usize);
+                assert!(extent > max, "{extent} > {max}");
+            }
+            Ok(ir) => {
+                assert!(heap_width <= Coord::MAX as usize, "a canvas past the type");
+                assert_eq!(ir.width(), heap_width, "the arena matches the heap");
+            }
+            Err(other) => panic!("unexpected error {other:?}"),
+        }
+        // One node under the bound lays out on both backends.
+        let mut g = Graph::new();
+        g.add_node(
+            1usize,
+            CustomNode {
+                label: "wide",
+                width: 60_000,
+                height: 1,
+                painter: None,
+                payload: "",
+            },
+        );
+        g.add_node(2usize, "sink");
+        g.add_edge(1usize, 2usize, None);
+        let mut csr_buf = vec![0u8; g.estimate_csr_arena_size()];
+        let mut csr_arena = Arena::new(&mut csr_buf);
+        let csr = g.to_csr(&mut csr_arena).unwrap();
+        let size = g.estimate_layout_arena_size_with(&config);
+        let (mut t, mut o) = (vec![0u8; size], vec![0u8; size]);
+        let (mut ta, mut oa) = (Arena::new(&mut t), Arena::new(&mut o));
+        let ir = csr.compute_layout_arena(&config, &mut ta, &mut oa).unwrap();
+        assert_eq!(ir.width(), g.compute_layout().width());
+    }
 
     /// Helper: build a CsrGraph from edges (node labels auto-generated A, B, C, ...)
     fn build_csr_graph<'a>(

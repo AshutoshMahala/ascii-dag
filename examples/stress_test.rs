@@ -210,9 +210,11 @@ fn run_csr_test(name: &str, dag: &Graph) {
                 }
             }
             Err(e) => {
+                // The arena packs coordinates in `u16`: a level wider
+                // than 65,535 cells (the 50k fan is ~300,000) is
+                // reported, never laid out wrapped.
                 println!(
-                    "(CSR layout failed: {:?}, arena size: {} KB)",
-                    e,
+                    "(CSR layout not possible: {e}; arena size: {} KB)",
                     arena_size / 1024
                 );
                 0

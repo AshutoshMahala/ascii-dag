@@ -2264,8 +2264,14 @@ pub(crate) fn detour_budget(
 }
 
 /// The plan of edge `ei` in a table sorted by edge index, if any.
+/// Inlined with an empty-table fast path: the arena's per-edge loops
+/// ask for every edge, and a port-free layout has no table.
 #[cfg_attr(not(feature = "ports"), allow(dead_code))]
+#[inline]
 pub(crate) fn plan_lookup(plans: &[(usize, Detour)], ei: usize) -> Option<Detour> {
+    if plans.is_empty() {
+        return None;
+    }
     plans
         .binary_search_by_key(&ei, |p| p.0)
         .ok()
@@ -3129,8 +3135,13 @@ mod detour_tests {
 
     /// The leading cell a west port opens must stay representable: two
     /// nodes at the coordinate type's width fail cleanly on the arena
-    /// backend instead of wrapping.
-    #[cfg(all(feature = "arena", feature = "layout-vertical"))]
+    /// backend instead of wrapping. A 16-bit canvas only: with `u32`
+    /// coordinates the nodes would be four billion cells wide.
+    #[cfg(all(
+        feature = "arena",
+        feature = "layout-vertical",
+        any(feature = "arena-idx-u8", feature = "arena-idx-u16")
+    ))]
     #[test]
     fn a_leading_cell_past_the_coordinate_type_is_an_error() {
         use crate::algorithms::sugiyama::config::LayoutConfig;
