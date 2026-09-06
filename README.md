@@ -4,7 +4,6 @@
 [![Documentation](https://docs.rs/ascii-dag/badge.svg)](https://docs.rs/ascii-dag)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-This README describes the **unreleased 0.11** API on `main`.
 Requires Rust 1.92 or newer.
 
 A DAG layout engine that renders to text: Sugiyama-style layered
@@ -39,18 +38,16 @@ Reach for `petgraph` when you need shortest paths and flows, and
 Graphviz when you need publication-quality images. Reach for this when
 the output has to be text.
 
-## Installation (0.11 development)
-
-To try the API documented here before 0.11 is published:
+## Installation
 
 ```toml
 [dependencies]
-ascii-dag = { git = "https://github.com/AshutoshMahala/ascii-dag", branch = "main" }
+ascii-dag = "0.11"
 ```
 
-This follows the development branch, which can change. For the stable
-0.10 line, use `ascii-dag = "0.10"` and its
-[release documentation](https://github.com/AshutoshMahala/ascii-dag/tree/release/v0.10).
+Upgrading from 0.10: [docs/migrate-from-0.10.md](docs/migrate-from-0.10.md).
+The 0.10 line stays available as `ascii-dag = "0.10"` with its own
+[documentation](https://github.com/AshutoshMahala/ascii-dag/tree/release/v0.10).
 
 ## Example
 
@@ -286,16 +283,13 @@ allocator) running 0.10.0: `LeftRight` and the ASCII charset, because
 the LCD font has no box-drawing glyphs. It builds without the `ports`
 feature; see `examples/longan_nano`.*
 
-The recorded 0.11 demo build exceeded SRAM with separate layout,
-render and text buffers. The earlier 0.10.x example's 2 KB layout
-temp buffer was also too small after the skip-level router increased
-the demo's requirement from 856 B to 3,340 B. These are limits of
-those demo configurations, not a blanket lack of board support.
-The current horizontal-only, no-ports example reuses its 4 KB layout
-workspace for rendering, but still needs a fresh hardware check.
-Layout scratch also consumes stack outside the arena buffers. See
-[the recorded measurements and stack-accounting caveats](BENCHMARK.md#embedded-longan-nano-gd32vf103-risc-v-128-kb-flash--32-kb-ram);
-the recorded firmware fits flash (116.8 KB of 128 KB).
+The example runs 0.11 on this board, verified on hardware on
+2026-09-06: horizontal layout only, no `ports`, 7 KiB of stack buffers
+with the 4 KB layout workspace reused for rendering, firmware 117.4 KB
+of the 128 KB flash. The no-alloc layout also keeps about 16 KB of
+scratch on the stack outside the arena estimates; budget for that on
+32 KB parts. See
+[the recorded measurements](BENCHMARK.md#embedded-longan-nano-gd32vf103-risc-v-128-kb-flash--32-kb-ram).
 
 ## Errors and warnings
 
@@ -385,8 +379,8 @@ branch per patch: `0.10.1`, `0.10.2` and so on are tags along
 `release/v0.10`, which is what makes it possible to ship a fix for
 0.10 after `main` has moved on to 0.11.
 
-For example, this selects the stable 0.10 line and its patch fixes,
-not the unreleased 0.11 API documented above:
+For example, this selects the 0.10 line and its patch fixes rather
+than the 0.11 API documented above:
 
 ```toml
 ascii-dag = "0.10"     # 0.10.x, including later patch fixes

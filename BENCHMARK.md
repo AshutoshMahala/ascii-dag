@@ -25,11 +25,10 @@ the crates under `examples/` build and run on the boards named.
 
 ---
 
-# 0.11 (unreleased)
+# 0.11.0
 
-Measured on 2026-09-06 from the 0.11 development tree at `f36bbf1`
-(`main`, as identified by the changelog; the Cargo package version
-has not yet been bumped from `0.10.3`). Rust 1.94.0,
+Measured on 2026-09-06 from the 0.11 tree at `f36bbf1`, the last
+library-changing commit before the release. Rust 1.94.0,
 `aarch64-apple-darwin`, with the repository's release profile:
 `opt-level = "z"`, LTO, one codegen unit, stripped, `panic = "abort"`.
 
@@ -241,73 +240,52 @@ of the mid-size shapes' increases.
 
 ## Embedded: Longan Nano (GD32VF103, RISC-V, 128 KB flash / 32 KB RAM)
 
-**The measured 0.11 demo configuration did not complete on this board.**
-`examples/longan_nano` built and fit flash, but the firmware halted
-inside `compute_layout_arena` on the hardware: the title line drew,
-then nothing. Diagnosed with
-progress markers on the LCD and a frame scan of the ELF; the numbers
-below are from this tree at `f36bbf1` with the example's layout temp
-buffer raised to 4,096 B (it ships at 2,048 B in 0.10.x). That build
-used separate graph (1,024 B), layout output (2,048 B), layout temp
-(4,096 B), render (4,096 B) and text (2,048 B) buffers. These results
-predate the workspace-reuse update to the example; they are not
-measurements of that update.
+`examples/longan_nano` renders to the board's 160×80 LCD in
+`LeftRight` with the ASCII charset, no allocator anywhere. Built with
+`arena-idx-u8` and `layout-horizontal` only — no `ports` — under the
+example's size-first profile (`opt-level = "z"`, LTO, one codegen
+unit, `panic = "abort"`, stripped), flashed over DFU, and verified on
+hardware on 2026-09-06: the LCD shows the 33×6 graph the host-side
+render predicts.
 
-| Measure | v0.10.0 | v0.10.2 | 0.11 |
-| :--- | ---: | ---: | ---: |
-| Firmware `.text` | — | 112,870 B | 114,918 B |
-| Flashed image (`.bin`) | — | 114,828 B | 116,832 B (of 131,072) |
-| Layout temp arena needed, demo graph | 856 B | **3,340 B** | 3,340 B |
-| Layout output arena needed | 608 B | 608 B | 624 B |
-| Graph arena needed | 368 B | 368 B | 368 B |
-| Render arena estimate / output estimate | 1,360 / 912 B | 1,336 / 888 B | 1,304 / 888 B |
-| Layout function stack frame | — | 16,016 B | 16,160 B |
-| `main` stack frame (demo buffers + locals) | — | 11,744 B | 14,832 B |
+| Measure | Value |
+|---|---:|
+| Firmware `.text` | 115,430 B |
+| Flashed image | 117,392 B (of 131,072) |
+| Stack buffers | 7 KiB: graph 1,024 B, layout output 2,048 B, workspace 4,096 B |
+| Graph arena needed, demo graph | 368 B |
+| Layout output arena needed | 624 B |
+| Layout temp arena needed | 3,340 B |
+| Render arena estimate / output estimate | 1,304 B / 888 B |
+| Layout function local frame | 16,160 B (+256 B shared prologue) |
+| `main` local frame | 8,704 B (+256 B shared prologue) |
 
-Arena minimums are exact, found by bisection on a 32-bit build
-(`wasm32`, the same pointer width as the RISC-V target; a 64-bit host
-overstates them). The stack rows preserve the original frame-scan
-readings from the unstripped ELF, but those readings omitted shared
-outlined prologues and are partial frame sizes, not total stack use.
-The 92,530 B `.text` recorded in the 0.10.0
-section below does not reproduce at v0.10.2, which builds at
-112,870 B; that figure predates the 0.10.x patches.
+The 4 KB workspace is the layout temp arena and, once layout has
+returned, is split at `estimate_render_arena_size` into the render
+arena and the text sink; the IR borrows only the output arena, so the
+compiler enforces that the two uses never overlap. Arena minimums are
+exact, found by bisection on a 32-bit build (`wasm32`, the same
+pointer width as the RISC-V target; a 64-bit host overstates them).
+Stack rows are each function's own `sub sp` adjustment read from the
+unstripped ELF. Hart 0 has no per-hart stack offset, but `_start_rust`
+still holds a 16-byte frame while `main` runs. The table reports
+local frames, not a high-water measurement; callees (median
+reorder ~2 KB, sort helpers ~1.4 KB) sit on top, for roughly 27.4 KB
+on the path that runs.
 
-**Two limits in the measured demo configurations:**
+**Provisioning note.** The no-alloc layout keeps about 16 KB of
+scratch on the stack, outside the arena estimates: fixed 512-entry
+arrays in the cluster and subgraph compaction passes (`bodies`,
+`members`, `by_dist`), inlined into the layout function and the same
+size under `arena-idx-u8`, where the graph is capped at 255 nodes. On
+a part whose entire 32 KB of SRAM is the stack, that frame plus the
+caller's buffers is the budget; a stack overflow traps silently rather
+than reporting `ArenaOom`.
 
-- **The demo's arena budget was outgrown in 0.10.1.** The skip-level
-  edge router (chain-lane allocator, commit `665577e`, shipped in
-  0.10.1) raised the layout temp arena the demo graph needs from
-  856 B to 3,340 B; the demo has one skip-level edge. The example's
-  2,048 B buffer therefore returns `ArenaOom` on 0.10.1 and 0.10.2 —
-  reported cleanly, as the 0.10.1 changelog said it would, but the
-  board was not re-flashed after 0.10.0 and the demo's hardcoded size
-  was never re-run against the estimate.
-- **The no-alloc layout keeps ~16 KB of scratch on the stack.**
-  Fixed 512-entry arrays in the cluster and subgraph compaction passes
-  (`bodies`, `members`, `by_dist`) are inlined into the layout
-  function and sit outside the arena estimate. They are the same size
-  under `arena-idx-u8`, where the graph is capped at 255 nodes. On
-  this part almost all 32 KB of SRAM is available to the stack, but
-  the separate demo buffers, layout frame and nested callees together
-  exceed it. Stack exhaustion is outside the arena's `ArenaOom`
-  reporting contract.
-
-Stack-accounting correction: in the inspected 0.11 ELF, both `main`
-and layout also call a shared prologue that reserves stack before
-their local frame adjustments; nested callees must be counted too.
-The runtime's default per-hart stack allotment is not an additional
-startup frame on hart 0. The earlier derived totals and headroom
-claims therefore should not be used as stack high-water measurements.
-The recorded frame-scan values above remain unchanged for provenance.
-
-The current example keeps horizontal layout only, without `ports`,
-and reuses its layout temp workspace for render scratch and text once
-layout completes. It removes the separate render and text buffers;
-a fresh hardware run is still needed to validate the updated demo.
-
-Enabling `ports` in the measured configuration did not link: `.text`
-overflowed the flash region by 3,814 B.
+Enabling `ports` in the earlier, pre-workspace-reuse configuration
+did not link: `.text` overflowed the flash region by 3,814 B. This
+recorded result does not establish the overflow size for the updated
+example; its verified configuration keeps `ports` disabled.
 
 ---
 

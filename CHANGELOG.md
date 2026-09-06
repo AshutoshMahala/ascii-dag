@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] — 0.11
+## [0.11.0] - 2026-09-06
 
 Migration: [0.10 → 0.11](docs/migrate-from-0.10.md). Direct 0.9 upgrades
 apply [0.9 → 0.10](docs/migrate-from-0.9.md) first; no intermediate

@@ -45,7 +45,7 @@ box-drawing glyphs) and `Direction::LeftRight` (40 columns × 13 lines
 is wide and short, so levels-as-columns fits where top-down does not);
 it uses 7 KiB of stack buffers, reusing layout scratch for rendering,
 plus the layout/render call stack. No allocator or `ports` feature.
-The buffer-reuse update still needs a fresh hardware check; see the
+Verified on hardware with 0.11 on 2026-09-06; see the
 [recorded measurements and caveats](../BENCHMARK.md#embedded-longan-nano-gd32vf103-risc-v-128-kb-flash--32-kb-ram).
 
 [Nodes](../docs/nodes.md) covers node content;
