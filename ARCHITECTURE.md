@@ -93,7 +93,7 @@ chains, clustered deep graphs, 500+-edge late-skip graphs, and
 | `graph.rs` | Core graph representation | `Graph<'a>`, `Direction`, `RenderMode`, `Subgraph` |
 | `graph/csr.rs` | Compressed Sparse Row format | `CsrGraph<'a>`, `CsrGraphBuilder` |
 | `graph/arena.rs` | Bump allocator for no_std | `Arena<'a>` |
-| `diagnostics.rs` | Typed, run-scoped diagnostics: conditions and point events as data, never stderr | `Diagnostic`, `DiagnosticKind`, `DiagnosticRun`, `DiagnosticContext`, sinks (`VecDiagnostics`, `SliceDiagnostics`, …) |
+| `diagnostics.rs` | Typed, run-scoped condition diagnostics, never stderr; insertion point events stay on graph receipts | `Diagnostic`, `DiagnosticKind`, `DiagnosticRun`, `DiagnosticContext`, sinks (`VecDiagnostics`, `SliceDiagnostics`, …) |
 | `errors.rs` | Fatal outcomes and the stable `E.*`/`W.*` code vocabulary | `GraphError`, `ErrorChain` |
 | `validation.rs` | Requirements a graph must meet before an algorithm runs | `Requirements` |
 

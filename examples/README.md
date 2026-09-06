@@ -1,10 +1,13 @@
 # Examples
 
-Runnable learning code, roughly in reading order. Every rendering
-example accepts `--csr` to render through the arena/no-alloc pipeline
-(`--features arena`) — output is byte-identical to the heap path,
-except `Graph::render` conveniences (horizontal chains, cycle banners),
-which are heap-only.
+Runnable learning code, roughly in reading order. Many rendering
+examples accept `--csr` with `--features arena` to show the arena
+pipeline; check the individual example's flags. `ports` runs both
+pipelines automatically when `arena` is enabled; `lean_render` is
+direct no-alloc construction, and `svg_export` reads heap-backed scene
+views. Matching IR-rendering options produce byte-identical output
+across backends; `Graph::render` conveniences (horizontal chains,
+cycle banners) are heap-only.
 
 ```bash
 cargo run --example basic
@@ -42,5 +45,12 @@ box-drawing glyphs) and `Direction::LeftRight` (40 columns × 13 lines
 is wide and short, so levels-as-columns fits where top-down does not);
 its whole working set is ~10 KB of stack, no allocator.
 
-`docs/nodes.md` covers the node-content API; `docs/migrate-from-0.9.md`
-covers upgrading.
+[Nodes](../docs/nodes.md) covers node content;
+[diagnostics](../docs/diagnostics.md) has a complete multi-stage report
+recipe; [rendering](../docs/rendering.md#retain-cells-and-reuse-the-scene)
+shows retained semantic cells and fixed-workspace rendering. These are
+documentation recipes, not additional `cargo run --example` targets.
+
+For upgrades, use [0.9 → 0.10](../docs/migrate-from-0.9.md) and
+[0.10 → 0.11](../docs/migrate-from-0.10.md). Direct 0.9 → 0.11 upgrades
+apply both guides without an intermediate installation.

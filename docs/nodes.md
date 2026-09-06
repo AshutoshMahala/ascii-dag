@@ -65,9 +65,10 @@ rectangle something else will fill.
 
 ## Ids and handles
 
-`add_node(AUTO, …)` numbers nodes for you and returns a `NodeId`
-handle usable anywhere an id is accepted — the recommended style when
-the graph is built from scratch. Explicit ids (`add_node(7, …)`)
+`add_node(AUTO, …)` numbers nodes for you and returns a `NodeInsertion`
+receipt. Its `.node` is the `NodeId` handle; the receipt also converts
+into a handle for graph methods accepting ids. This is the recommended
+style when the graph is built from scratch. Explicit ids (`add_node(7, …)`)
 remain first-class for graphs built from external identities (package
 ids, task numbers): edges can then be added straight from external
 pairs, and `add_edge` auto-creates missing endpoints. Mixing is safe

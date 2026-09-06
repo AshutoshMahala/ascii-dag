@@ -38,6 +38,7 @@ fn stage_graph() -> Graph<'static> {
 const GOLDEN_PLAIN: &str = include_str!("golden/migration-plain.txt");
 const GOLDEN_COLORED: &str = include_str!("golden/migration-colored.txt");
 const GOLDEN_COLORED_LEGEND: &str = include_str!("golden/migration-colored-legend.txt");
+const GOLDEN_HIT_GRID: &str = include_str!("golden/migration-hit-test.txt");
 
 fn colored_no_legend() -> RenderOptions {
     // The 0.10 `render_scanline_colored(palette)` look: colored ink,
@@ -196,4 +197,37 @@ mod arena {
             assert_eq!(core::str::from_utf8(&out[..n]).unwrap(), golden);
         }
     }
+}
+
+/// The 0.10 introspection pair `ir.render_plan(&options)` +
+/// `ir.hit_test(&plan, x, y)` (and `y_index` / `items_at_line`) is
+/// replaced by `ScenePlanner::plan(..)` + `scene.hit_test(x, y)`. This
+/// grid — one char per cell of the plain render: a node's id, an
+/// edge's letter, `#` for the cluster, `.` for nothing — was FROZEN
+/// from 0.10.3's own `hit_test` answers over the stage graph before
+/// the legacy surface was deleted.
+#[test]
+fn scene_hit_test_reproduces_legacy_plan_hit_test() {
+    use ascii_dag::{HitResult, ScenePlanner};
+    let g = stage_graph();
+    let ir = g.compute_layout();
+    let options = RenderOptions::plain();
+    let text = ir.render_string(&options);
+    let mut planner = ScenePlanner::new();
+    let scene = planner.plan(&ir, &options.plan).quiet().unwrap();
+    let height = text.lines().count();
+    let width = text.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+    let mut grid = String::new();
+    for y in 0..height {
+        for x in 0..width {
+            grid.push(match scene.hit_test(x, y) {
+                HitResult::Node(id) => char::from_digit(id as u32, 10).unwrap_or('N'),
+                HitResult::Edge(i) => (b'a' + i as u8) as char,
+                HitResult::Subgraph(_) => '#',
+                _ => '.',
+            });
+        }
+        grid.push('\n');
+    }
+    assert_eq!(grid, GOLDEN_HIT_GRID, "\n{grid}");
 }

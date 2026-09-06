@@ -105,8 +105,9 @@ g.add_node(3, CustomNode {                        // your painter + data
 
 Ids: explicit (`add_node(7, …)`, for graphs built from external
 identities — edges auto-create missing endpoints) or `AUTO`
-(graph-assigned; returns a `NodeId` handle usable anywhere an id is
-accepted). Re-adding an existing id replaces that node.
+(graph-assigned; returns a `NodeInsertion` receipt whose `.node` is
+the `NodeId` handle). Receipts convert into handles for graph methods
+that accept ids. Re-adding an existing id replaces that node.
 Details: [docs/nodes.md](docs/nodes.md).
 
 ### Subgraphs (clusters)
@@ -202,7 +203,7 @@ semantics), `emit` (how they are written), `compose` (memory only).
 | `compose.band_rows_cap` | banded rendering: canvas memory = `width × cap` | 64 |
 
 Presets: `RenderOptions::plain()`, `::colored(palette)`, `::ascii()`,
-`::ascii_colored()`. Render surfaces on both IR types:
+`::ascii_colored(palette)`. Render surfaces on both IR types:
 `render_string`, `render_with(&options, &mut impl fmt::Write)`
 (streaming), `render_to_bytes` (no-alloc). Introspection lives on
 `Scene` (`ScenePlanner::plan` + `scene.hit_test(x, y)`).
@@ -255,23 +256,35 @@ reference: [docs.rs/ascii-dag](https://docs.rs/ascii-dag).
 | `std` | ✓ | standard library (implies `alloc`) |
 | `alloc` | via `std` | heap `Graph` API on `no_std` (needs a global allocator) |
 | `generic` | ✓ | cycle detection / toposort / impact analysis over your own types |
+| `layout-vertical` | ✓ | `TopDown` / `BottomUp` layout |
+| `layout-horizontal` | ✓ | `LeftRight` / `RightLeft` layout |
 | `arena` | | CSR + arena layout pipeline (no-alloc capable) |
 | `arena-idx-u8` / `-u16` / `-u32` | | index width: 255 / 65,535 / 4B nodes, with 16 / 16 / 32-bit cell coordinates (RAM tradeoff) |
 | `ports` | ✓ | side ports: declared attachment sides on edges (`from_port` / `to_port`); off, nothing of it is linked |
 
-Typical configurations: default (`ascii-dag = "0.10"`) for the heap
-API; `default-features = false, features = ["arena"]` for no-alloc
-embedded; add `arena` to defaults for the fast arena pipeline with
-the ergonomic `Graph` builder. For WASM, `arena` alone keeps the
-bundle around 94 KB (41 KB gzipped) against 200 KB for the default
-build — see [BENCHMARK.md](BENCHMARK.md) for how that is measured.
+Typical configurations: defaults for the heap API;
+`default-features = false, features = ["arena", "layout-vertical"]`
+for vertical no-alloc embedded use; or add `arena` to defaults for the
+arena pipeline with the ergonomic `Graph` builder. A `no_std` build
+with an allocator can select `alloc` plus its axis features instead.
+
+At least one axis is required when defaults are off. The default
+direction is `TopDown` if vertical is enabled, otherwise `LeftRight`.
+Feature unification can enable another axis and change this default;
+libraries should set direction explicitly. Disabled direction variants
+are unavailable; exhaustive matches need a wildcard arm. See
+[layout directions](docs/layout.md#directions).
+
+Bundle and firmware measurements in [BENCHMARK.md](BENCHMARK.md) name
+their measured release and feature set; they are not 0.11 size promises.
 
 <img src="assets/longan_nano.jpg" alt="a Longan Nano board showing an ASCII graph on its LCD" width="620"/>
 
 *The arena pipeline on a Longan Nano (RISC-V, 32 KB RAM, no
 allocator): `LeftRight` and the ASCII charset, because the LCD font
-has no box-drawing glyphs. Firmware is 92 KB; the graph costs ~10 KB
-of stack. It builds without the `ports` feature. See
+has no box-drawing glyphs. The graph costs ~10 KB of stack. It builds
+without the `ports` feature; see [BENCHMARK.md](BENCHMARK.md) for
+release-specific measurements and
 `examples/longan_nano`.*
 
 ## Errors and warnings
@@ -304,8 +317,16 @@ writes to stderr:
 | `W.Graph.Port.035` | a declared side could not be routed (no room beside the node) — the end attached head-on | diagnostics channel |
 
 Point events are receipts at the call site instead: `add_edge` returns
-`EdgeInsertion` (did an endpoint get auto-created?), `add_node` returns
-`NodeInsertion` (did this replace a node — with `AUTO` involved?).
+an `EdgeHandle` carrying an `EdgeInsertion` (did an endpoint get
+auto-created?); `.receipt()` detaches it from the graph borrow.
+`add_node` returns `NodeInsertion` (did this replace a node — with
+`AUTO` involved?).
+
+Layout and planning report at different stages. For one report covering
+both, share a run and emit the diagnosed scene with `TerminalRenderer`;
+the one-shot render conveniences discard planning warnings. See
+[the diagnostics guide](docs/diagnostics.md) for the complete recipe,
+including errors and bounded no-alloc collection.
 
 ## Documentation
 
@@ -313,10 +334,15 @@ Point events are receipts at the call site instead: `add_edge` returns
 - [docs/rendering.md](docs/rendering.md) — options, styling, streaming, no-alloc output, hit-testing
 - [docs/nodes.md](docs/nodes.md) — nodes as objects: painters, payloads, blank nodes
 - [docs/ports.md](docs/ports.md) — side ports: the side vocabulary, how a side is drawn, attachments, warnings
+- [docs/diagnostics.md](docs/diagnostics.md) — quiet/reported/context entry points, multi-stage reports, bounded sinks
+- [docs/migrate-from-0.10.md](docs/migrate-from-0.10.md) — upgrading to 0.11
 - [docs/migrate-from-0.9.md](docs/migrate-from-0.9.md) — upgrading to 0.10
-- [examples/README.md](examples/README.md) — 20 runnable examples; the rendering ones take `--csr` to show the arena pipeline
+- [examples/README.md](examples/README.md) — 20 runnable examples, including heap and arena rendering
 - [BENCHMARK.md](BENCHMARK.md) — measured performance, desktop and embedded
 - [ARCHITECTURE.md](ARCHITECTURE.md) — how the pipeline works
+
+Upgrading directly from 0.9 to 0.11? Apply both migration guides; no
+intermediate installation or release is needed.
 
 ## Limitations
 

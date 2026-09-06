@@ -3,6 +3,12 @@
 Most 0.9 code compiles and renders unchanged. Work through the
 sections that apply to you; skip the rest.
 
+This guide describes the **0.10** API. To upgrade directly to 0.11,
+apply these changes and then [the 0.10 → 0.11 guide](migrate-from-0.10.md).
+No intermediate installation or release is required. In particular,
+the flat render options and `NodeId` return type below describe 0.10;
+their 0.11 replacements are covered in the second guide.
+
 ## 1. Everyone: three breaks you might actually hit
 
 **`add_node` returns a handle now.** Statement-position calls are
@@ -60,7 +66,7 @@ See [nodes.md](nodes.md) for painters, `BoxedNode`, and blank nodes.
 
 The 0.9 renderers were replaced by one engine. The old names worked
 through 0.10.x (deprecated) and are removed in 0.11 — chain with
-migrate-from-0.10.md for the current equivalents:
+[migrate-from-0.10.md](migrate-from-0.10.md) for the current equivalents:
 
 | 0.9 call | 0.10 call |
 |---|---|
@@ -68,7 +74,7 @@ migrate-from-0.10.md for the current equivalents:
 | `ir.render_scanline_colored(p)` | `ir.render_string(&RenderOptions::colored(p))` (set `legend = false` to match) |
 | `ir.render_to_buffer(…)` (arena) | `ir.render_to_bytes(&options, &arena, &mut buf)` |
 | `estimate_render_size` | `estimate_render_arena_size` + `estimate_render_output_size` |
-| `ir.y_index()` / `items_at_line` | `ScenePlanner::new().plan(&ir, &options.plan).quiet()` + `scene.hit_test(x, y)` |
+| `ir.y_index()` / `items_at_line` | unchanged in 0.10; removed in 0.11 — see [migrate-from-0.10.md](migrate-from-0.10.md) §3 |
 
 **Output note:** the engine canonicalizes a few cases the two 0.9
 renderers disagreed on with each other — overlapping edge corners
@@ -78,9 +84,18 @@ Typical graphs are byte-identical.
 
 ## 4. If you build IRs or CSR graphs by hand
 
-- `LayoutNode { .. }` literals: add `content_tag: 0` (0 = simple).
-- `LayoutIRArenaBuilder::add_node(…)`: new final `content_tag: u8`
-  parameter — pass `0`.
+- `LayoutNode` / `LayoutNodeArena` literals: add `content_tag: 0`
+  (simple content), `edge_index` (`None` / `usize::MAX` for a real node),
+  and `self_loop_at` (`None` / `(usize::MAX, usize::MAX)` when absent).
+  For a dummy node, `edge_index` identifies its owning input edge.
+- `LayoutIRArenaBuilder::add_node(…)`: the trailing arguments after
+  `kind` are `edge_index: usize`, then `content_tag: u8`. Pass
+  `usize::MAX, 0` for a simple real node.
+- `LayoutEdge` / `LayoutEdgeArena` literals: add `flow_axis`
+  (`FlowAxis::Y` for vertical trunks, `FlowAxis::X` for horizontal).
+  The heap's `label_position: Option<(usize, usize)>` becomes
+  `label_x: usize` and `label_y: usize`, meaningful when `label` is
+  present; use zeroes when it is absent.
 - `LayoutIRArenaBuilder::new_with_subgraphs(…)` and
   `CsrGraphBuilder::new`/`new_with_subgraphs`: new trailing
   `max_custom` capacity — pass `0` for label-only graphs. (When you
@@ -89,6 +104,21 @@ Typical graphs are byte-identical.
 - `Arena`: `alloc_slice_zeroed`, `alloc_slice_uninit`, `reset`, and
   `restore_position` are `unsafe fn` now, with their caller
   obligations documented. `alloc_slice_default` is the safe path.
+
+Path fields were renamed on both `EdgePath` and `EdgePathArena`:
+
+| 0.9 field | 0.10 field |
+|---|---|
+| `Corner::horizontal_y` | `bend_at` |
+| `SideChannel::channel_x` | `channel_at` |
+| `SideChannel::start_y` / `end_y` | `span_start` / `span_end` |
+| `MultiSegment::start_y_offset` | `start_offset` |
+
+JSON schema `"1.2"` → `"1.3"` follows those path-key renames, adds
+`flow_axis: "y" | "x"` on edges, and includes `self_loop_at: [x, y]`
+on nodes with a marker. Interpret level-axis scalars such as `bend_at`
+using `flow_axis`; do not assume they always name a row. Node content
+is exported as `content_kind`, plus `payload` for custom nodes.
 
 ## 5. If you `match` exhaustively
 
@@ -99,11 +129,19 @@ once and future variants stop being breaking changes.
 
 ## 6. Worth adopting while you're here
 
-- `add_node(AUTO, …)` + `NodeId` handles — no hand-tracked ids, and
-  typo'd ids stop silently creating phantom nodes.
+- `add_node(AUTO, …)` + `NodeId` handles — no hand-tracked ids for
+  nodes built from scratch. Raw ids remain accepted; `add_edge` still
+  auto-creates missing endpoints, so handles do not validate arbitrary
+  external ids or guarantee graph provenance.
 - Node objects — `BoxedNode`, `CustomNode`, your own `NodeContent`
   impls ([nodes.md](nodes.md)).
 - `render_with(&options, &mut writer)` for streaming;
   `render_to_bytes` for no-alloc.
 - JSON export now carries `"content_kind"` on every node (and
   `"payload"` on custom nodes).
+
+Feature correction in 0.10: `generic` implies `std`, not merely
+`alloc`. Its algorithms did not compile without `std` in 0.9. A
+`no_std` application with an allocator can use `alloc` without
+`generic`; a direct move to 0.11 also needs an axis feature as described
+in the next guide.

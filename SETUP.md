@@ -38,7 +38,7 @@ git push -u origin main
 
 ## 3. Publishing Workflow
 
-### Manual Publishing (Recommended for v0.1.0)
+### Manual Publishing
 
 ```bash
 # Verify everything builds
@@ -55,14 +55,19 @@ cargo publish --dry-run
 cargo publish
 ```
 
-### Automated Publishing (Future Releases)
+### Automated Publishing (not configured in this checkout)
+
+There are currently no `.github/workflows` files in this checkout.
+Configure and verify a publishing workflow before relying on a tag to
+publish anything. The steps below describe the intended trigger, not an
+existing automation; substitute the release version being published.
 
 ```bash
 # Tag the release
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.11.0
+git push origin v0.11.0
 
-# GitHub Actions will automatically:
+# A configured workflow should:
 # - Run all tests
 # - Create a GitHub release
 # - Publish to crates.io (if CARGO_TOKEN is set)
@@ -76,7 +81,7 @@ Update badges in README.md (they'll work once published):
 
 ## GitHub Actions CI
 
-The CI will automatically run on every push and PR:
+Suggested CI coverage, not an installed workflow in this checkout:
 
 ✅ **Test on 3 OS**: Ubuntu, Windows, macOS  
 ✅ **Test on 2 Rust versions**: Stable, Beta  
@@ -89,20 +94,20 @@ The CI will automatically run on every push and PR:
 ## Quick Commands
 
 ```bash
-# Run all tests locally (same as CI)
+# Run all-feature tests locally (also run the feature matrix below)
 cargo test --all-features
 
 # Check formatting
 cargo fmt --check
 
-# Check clippy (with same settings as CI)
+# Check clippy
 cargo clippy --all-features -- -D warnings -A clippy::too-many-arguments -A clippy::type-complexity
 
 # Build all examples
 cargo build --examples
 
-# Test no-std build
-cargo build --no-default-features
+# Check a no-std/no-alloc build (an axis is required)
+cargo check --no-default-features --features arena,layout-vertical
 ```
 
 ## Troubleshooting
@@ -134,7 +139,7 @@ cargo clippy --fix --allow-dirty
 
 ## Feature power set (layout axes, 0.11+)
 
-Release validation runs every supported axis combination — the axis
+Release validation must run every supported axis combination — the axis
 features gate `Direction` variants and whole layout profiles, so each
 must build and test independently (plus the standing caution:
 `--all-features` unions `arena-idx-u8`, which gates off >255-node arena
@@ -149,3 +154,38 @@ cargo check --no-default-features --features arena,layout-horizontal
 cargo check --no-default-features --features alloc,layout-vertical
 cargo test --all-features
 ```
+
+These are useful smoke checks, not the full feature matrix. The following
+shell loop covers the supported library feature sets after accounting
+for implication (`std` implies `alloc`; `generic` implies `std`). It
+selects one of the three nonempty axis sets, one runtime capability set,
+one arena/index choice, and each value of `ports` and `serde` (240 checks).
+Select at most one index-width feature. The internal example marker
+`embedded_no_std` is not a library capability; build embedded crates
+separately with their own target/toolchain.
+
+```bash
+for phase6_axes in layout-vertical layout-horizontal layout-vertical,layout-horizontal; do
+  for phase6_runtime in "" alloc std generic; do
+    for phase6_arena in "" arena arena-idx-u8 arena-idx-u16 arena-idx-u32; do
+      for phase6_ports in "" ports; do
+        for phase6_serde in "" serde; do
+          phase6_features="$phase6_axes"
+          for phase6_extra in "$phase6_runtime" "$phase6_arena" "$phase6_ports" "$phase6_serde"; do
+            if [ -n "$phase6_extra" ]; then
+              phase6_features="$phase6_features,$phase6_extra"
+            fi
+          done
+          cargo check --lib --no-default-features --features "$phase6_features" || exit 1
+        done
+      done
+    done
+  done
+done
+```
+
+Wire this matrix into CI before counting it as a CI gate. An unrestricted
+`cargo hack --feature-powerset` also tries configurations with no axis,
+which intentionally fail; it needs equivalent supported-set filtering.
+Keep an expected-failure check for the no-axis configuration separate
+from the successful-build matrix.

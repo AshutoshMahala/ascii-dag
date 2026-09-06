@@ -23,7 +23,9 @@ feature: the convenience surfaces need somewhere to put their result.
 | What is at this cell | `scene.hit_test(x, y)` | no |
 | Repeated renders of one scene | `TerminalRenderer::new(&emit, req)` + `render(&scene, &mut out)` | no (`new_in`) |
 
-On a build with `default-features = false, features = ["arena"]`,
+On a build with
+`default-features = false, features = ["arena", "layout-vertical"]`
+(or `layout-horizontal` instead),
 `render_to_bytes` and the `new_in` planner are what you have — which
 is the whole no-allocation story, just spelled explicitly.
 
@@ -64,7 +66,7 @@ options.compose.band_rows_cap = 32;
 
 Four `const` presets cover the common combinations:
 `RenderOptions::plain()`, `::colored(palette)`, `::ascii()`,
-`::ascii_colored()`.
+`::ascii_colored(palette)`.
 
 Pick `Ascii` when the destination cannot render box-drawing glyphs —
 a log aggregator, a CI annotation, a small embedded font. Both
@@ -76,10 +78,10 @@ correct; it is just less expressive.
 
 ## Labels and the legend
 
-Edge labels are placed geometrically: the renderer puts each one where
-it fits without overwriting anything that carries meaning. When a
-label cannot be placed, it goes to the legend instead of being
-dropped:
+Edge labels are placed according to `plan.label_policy`. When a label
+cannot be placed inline, the default plain/ASCII policy omits it and
+diagnostic-aware planning reports the omission. To collect overflow in
+the legend and actually print that block:
 
 ```rust
 let mut options = RenderOptions::plain();
@@ -95,8 +97,15 @@ Users → DB: "read"
 
 The legend works in colored *and* plain output. In color, entries are
 tinted to match their edge; in plain they are self-keying, since each
-line names both endpoints. It is off by default, so enabling it never
-changes existing output.
+line names both endpoints. It is off in `plain()`/`ascii()` and on in
+`colored(palette)`/`ascii_colored(palette)`. The colored presets also use
+`AvoidNodeRows` placement. Collecting overflow and emitting the legend
+are separate choices; setting `emit.render_legend` alone does not
+change the plan's label slots.
+
+The one-shot render methods discard planning diagnostics. If missing
+labels matter to your application, use the
+[diagnostic-aware scene recipe](diagnostics.md#layout-planning-and-rendering-in-one-report).
 
 ## Styling
 
@@ -308,6 +317,60 @@ composer retains its workspace: steady-state repaint allocates
 nothing, and `SceneComposer::new_in` composes out of a caller-provided
 byte slice for no-alloc targets.
 
+### Retain cells and reuse the scene
+
+This complete default-feature example keeps a small semantic buffer
+without invoking a terminal emitter. Copy the fields you need:
+`CellView` itself is callback-scoped. `owner` is the hit-test owner,
+not paint provenance; even a blank cell inside a node can have an owner.
+
+```rust
+use ascii_dag::{
+    BoxedNode, CellColor, CellKind, Graph, HitResult, PortSide,
+    RenderOptions, SceneComposer, ScenePlanner,
+};
+
+let mut graph = Graph::new();
+graph.add_node(1, BoxedNode("Hub"));
+graph.add_node(2, "A");
+graph.add_node(3, "B");
+graph.add_edge(1, 2, None).from_port(PortSide::East);
+graph.add_edge(1, 3, None);
+let ir = graph.compute_layout();
+let options = RenderOptions::plain();
+let mut planner = ScenePlanner::new();
+let scene = planner.plan(&ir, &options.plan).quiet().expect("plan");
+let mut composer = SceneComposer::new(scene.composition_requirements(&options.compose));
+let width = scene.width();
+let cell_count = width.checked_mul(scene.height()).expect("canvas too large");
+let mut cells = vec![(CellKind::Empty, CellColor::DEFAULT, HitResult::None); cell_count];
+
+for _ in 0..2 {
+    let mut next = 0;
+    composer.visit_cells(&scene, |x, y, cell| {
+        let index = y * width + x;
+        assert_eq!(index, next); // row-major, including empty cells
+        // An integration-test check; a UI normally just uses cell.owner.
+        assert_eq!(cell.owner, scene.hit_test(x, y));
+        cells[index] = (cell.kind, cell.color, cell.owner);
+        next += 1;
+    }).expect("compose");
+    assert_eq!(next, cell_count);
+}
+```
+
+The buffer is an application choice and costs one full canvas; it is
+not required by the composer. A memory-constrained consumer can forward
+each cell to a device or process a viewport instead of retaining all
+cells. The composer still visits the full scene; filtering a viewport
+in the callback reduces what you store, not what it composes.
+
+This example deliberately discards diagnostics for brevity. To inspect
+port fallbacks as well as label omissions, use one run for layout and
+planning as shown in [diagnostics.md](diagnostics.md). The
+[SVG example](../examples/svg_export.rs) is a different integration:
+it reads element views, not `SceneComposer` cells.
+
 ### No-alloc sizing (three contracts)
 
 Every retained buffer in the scene pipeline has its own estimator, and
@@ -319,6 +382,43 @@ estimated size always suffices:
 | Scene storage | `ir.estimate_scene_size(&plan_options)` | `ScenePlanner::new_in` |
 | Composition workspace | `req.workspace_bytes()` (semantic) / `req.terminal_workspace_bytes(&emit)` (terminal) | `SceneComposer::new_in` / `TerminalRenderer::new_in` |
 | Output bytes | `scene.estimate_output_size(&emit)` | your buffer |
+
+The two workspace-byte methods on `req` return `Option<usize>`:
+`None` means the requirement overflowed and cannot be provisioned; it
+does not mean zero workspace. A terminal-only consumer needs the lean
+terminal workspace, not the semantic ownership workspace as well.
+
+Given caller-provisioned buffers sized by the table, this retained
+terminal path needs no allocator (enable `arena` and at least one axis):
+
+```rust
+use ascii_dag::{GraphError, RenderOptions, ScenePlanner, TerminalRenderer};
+use ascii_dag::ir::arena::LayoutIRArena;
+
+fn render_fixed(
+    ir: &LayoutIRArena<'_>,
+    options: &RenderOptions,
+    scene_storage: &mut [u8],
+    composition_storage: &mut [u8],
+    output: &mut [u8],
+) -> Result<usize, GraphError> {
+    let mut planner = ScenePlanner::new_in(scene_storage);
+    let scene = planner.plan(ir, &options.plan).quiet()?;
+    let requirements = scene.composition_requirements(&options.compose);
+    let mut renderer = TerminalRenderer::new_in(
+        &options.emit, requirements, composition_storage,
+    )?;
+    renderer.render_into(&scene, output)?;
+    // Same scene and buffers: no replanning or workspace allocation.
+    renderer.render_into(&scene, output)
+}
+```
+
+For semantic cells instead, construct
+`SceneComposer::new_in(req, composition_storage)?`, sizing that slice
+with `req.workspace_bytes()`. No encoded output buffer is required
+unless your consumer needs one. Scene storage lives as long as the
+scene; composition storage lives as long as its composer/renderer.
 
 (`req` is `scene.composition_requirements(&budget)`. The one-shot
 `render_to_bytes` keeps its combined

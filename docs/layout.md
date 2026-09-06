@@ -25,6 +25,19 @@ g.set_direction(Direction::LeftRight);
 | `LeftRight` | `"LR"` | columns, left → right | wide, shallow graphs |
 | `RightLeft` | `"RL"` | columns, right → left | mirrored pipelines |
 
+Both axis features are on by default. With defaults disabled, enable
+`layout-vertical` for `TopDown`/`BottomUp`, `layout-horizontal` for
+`LeftRight`/`RightLeft`, or both. Enabling neither is a compile error,
+including in layout-only and no-alloc builds. A disabled variant does
+not exist, and parsing its name returns an error rather than falling
+back to a different direction.
+
+The default above assumes vertical is enabled. Horizontal-only builds
+default to `LeftRight`; feature unification that also enables vertical
+changes the default to `TopDown`. Libraries should choose a direction
+explicitly instead of depending on this feature-sensitive default.
+`Direction` is `#[non_exhaustive]`: keep a wildcard arm in matches.
+
 ```text
 TopDown                 LeftRight
                                           ┌→[Store]
