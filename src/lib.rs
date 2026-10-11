@@ -212,6 +212,7 @@ pub mod errors;
 pub mod graph;
 pub mod ir;
 pub mod render;
+pub mod text;
 pub mod validation;
 
 // ── Convenience re-exports (alloc-dependent) ────────────────────────────

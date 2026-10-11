@@ -59,6 +59,12 @@ strokes meet); text via `set`/`write_str` passes through untranslated.
 
 For full control without a struct of your own, implement the
 `NodeContent` trait: `label()`, `size()`, `painter()`, `payload()`.
+`size()` is in display cells: measure text with
+`ascii_dag::text::display_width`, which counts a CJK, kana, Hangul or
+emoji glyph as two cells and a combining mark as none — the same rule
+the built-in nodes, the painters and `write_str` use, so a box sized
+this way stays aligned on a terminal. (Combining marks have no cell
+of their own and are not painted; prefer precomposed characters.)
 A `CustomNode` with `painter: None` is a **blank** node — the area is
 reserved (edges route around it) but nothing paints: a spacer, or a
 rectangle something else will fill.

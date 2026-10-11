@@ -2711,7 +2711,7 @@ pub(crate) fn compute_layout_arena_csr_axis<'b, A: Axis>(
                 // backend for non-ASCII labels) and the canvas clamp
                 // apply afterwards.
                 let (anchor_x, anchor_y) = A::materialize(l_y, edge_x_at_label);
-                let label_len_with_quotes = edge_label_text.chars().count() + 2;
+                let label_len_with_quotes = crate::text::display_width(edge_label_text) + 2;
                 let l_x = anchor_x.saturating_sub(label_len_with_quotes / 2);
                 let l_x = if l_x + label_len_with_quotes > canvas_width {
                     canvas_width.saturating_sub(label_len_with_quotes)

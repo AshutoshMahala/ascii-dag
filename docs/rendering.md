@@ -303,7 +303,7 @@ use ascii_dag::SceneComposer;
 let req = scene.composition_requirements(&options.compose);
 let mut composer = SceneComposer::new(req);
 composer.visit_cells(&scene, |x, y, cell| {
-    // cell.kind:  Empty / Text / Stroke { per-arm weights } / Marker
+    // cell.kind:  Empty / Text / Continuation / Stroke { per-arm weights } / Marker
     // cell.color: resolved color, whatever the emission mode
     // cell.owner: what hit_test reports for this cell
 })?;
@@ -312,6 +312,11 @@ composer.visit_cells(&scene, |x, y, cell| {
 Stroke cells carry per-arm weights instead of pre-picked glyphs —
 Unicode and ASCII terminal output are two projections of this same
 vocabulary, and an SVG consumer can draw real vector strokes from it.
+A two-column character (CJK, kana, most emoji; see `ascii_dag::text`)
+is a `Text` cell at its first column and a `Continuation` at its
+second: a consumer placing glyphs on its own grid skips the
+continuation, one painting cell backgrounds paints it like the lead,
+and the terminal emitters write nothing for it.
 `try_visit_cells` is the early-exit form for fallible sinks. The
 composer retains its workspace: steady-state repaint allocates
 nothing, and `SceneComposer::new_in` composes out of a caller-provided

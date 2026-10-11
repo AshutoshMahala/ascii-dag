@@ -50,11 +50,20 @@ pub enum CellKind {
     /// Nothing painted here.
     Empty,
     /// One character of node/label/legend text (passes through
-    /// untranslated — user content is never transliterated).
+    /// untranslated — user content is never transliterated). A
+    /// two-column character (see [`crate::text::char_width`]) is
+    /// reported here at its first column and as
+    /// [`Continuation`](Self::Continuation) at its second.
     Text {
         /// The character.
         ch: char,
     },
+    /// The second column of a two-column character: covered by the
+    /// [`Text`](Self::Text) glyph one column to the left. A terminal
+    /// emitter writes nothing here; a consumer placing glyphs on its
+    /// own grid skips it, a consumer painting cell backgrounds paints
+    /// it like the lead.
+    Continuation,
     /// A stroke junction: per-arm weights INSTEAD of a pre-decoded
     /// box-drawing character.
     Stroke {
@@ -139,6 +148,8 @@ impl CellKind {
     pub(crate) fn from_cell(cell: Cell) -> CellKind {
         if cell.is_empty() {
             CellKind::Empty
+        } else if cell.is_continuation() {
+            CellKind::Continuation
         } else if cell.is_text() {
             CellKind::Text {
                 ch: cell.text_char(),

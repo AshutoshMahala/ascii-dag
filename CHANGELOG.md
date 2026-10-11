@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased] — 0.12
+
+### Added
+- **Wide characters.** Text is measured in display cells: an East Asian Wide or Fullwidth character (CJK ideographs, kana, Hangul syllables, most emoji) is two cells, a nonspacing/enclosing mark or format character (combining accents, zero-width joiners, variation selectors) none, everything else one — per Unicode 16.0 scalar, the same rule everywhere a width is computed (`[label]` and boxed node sizes, cluster-label claims, edge-label spans, label clipping, `NodeRegion::write_str`). The canvas paints a two-column glyph as a lead cell plus a continuation cell that emits nothing, and every paint keeps the pair whole, so rows that hold CJK text stay column-aligned on a terminal; hit-testing covers both columns. `ascii_dag::text::{char_width, display_width}` are public so a `NodeContent::size()` of your own measures the same way, and the public cell vocabulary gains `CellKind::Continuation`. Per scalar, not per grapheme: ZWJ emoji sequences and flag pairs measure as their scalars, text-presentation symbols with a variation selector as one cell, ambiguous-width characters (box drawing included) as one; combining marks have no cell of their own and are not painted. Both backends, byte-identical.
+
+### Changed
+- Graphs whose labels contain wide or combining characters lay out differently: `[日本語]` is 8 cells wide (was 5 and misaligned), a combining mark no longer takes a cell, and a cluster label's claim is measured in cells rather than UTF-8 bytes (a non-ASCII cluster label reserved too much). ASCII and precomposed-Latin graphs are byte-identical — every golden and the migration corpus hold.
+
 ## [0.11.0] - 2026-09-06
 
 Migration: [0.10 → 0.11](docs/migrate-from-0.10.md). Direct 0.9 upgrades

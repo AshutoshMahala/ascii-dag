@@ -356,7 +356,7 @@ pub(crate) const SUBGRAPH_LABEL_BOX_CAP: usize = 40;
 /// reserved by the label-extras phase).
 #[inline]
 pub(crate) fn label_min_width(label: &str) -> usize {
-    (label.len() + 4).min(SUBGRAPH_LABEL_BOX_CAP)
+    (crate::text::display_width(label) + 4).min(SUBGRAPH_LABEL_BOX_CAP)
 }
 
 // ── Routing geometry (level-axis budgets; temp/08 slice 4) ──────────────

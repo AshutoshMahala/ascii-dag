@@ -2538,7 +2538,10 @@ mod lr_invariants {
             let (row, col) = out
                 .lines()
                 .enumerate()
-                .find_map(|(r, l)| l.find(&needle).map(|b| (r, l[..b].chars().count())))
+                .find_map(|(r, l)| {
+                    l.find(&needle)
+                        .map(|b| (r, crate::text::display_width(&l[..b])))
+                })
                 .unwrap_or_else(|| panic!("label {text:?} painted:\n{out}"));
             let e = &ir.edges()[idx];
             let (lo, hi) = (e.from_y.min(e.to_y), e.from_y.max(e.to_y));
@@ -2553,7 +2556,7 @@ mod lr_invariants {
             let crate::ir::EdgePath::Corner { bend_at } = e.path else {
                 panic!("fan edges route as corners; got {:?}", e.path);
             };
-            let span = needle.chars().count();
+            let span = crate::text::display_width(&needle);
             assert!(
                 bend_at >= col && bend_at < col + span,
                 "label {text:?} at cols {col}..{} covers its own bend column \
@@ -2930,7 +2933,7 @@ mod lr_invariants {
                     p.edge_index
                 );
                 if let Some(text) = p.label {
-                    let n = text.chars().count() + 2;
+                    let n = crate::text::display_width(text) + 2;
                     assert_eq!(
                         q.label_x,
                         span(p.label_x, n),
@@ -3179,7 +3182,7 @@ mod lr_invariants {
             g.add_node(3, "c");
             g.add_edge(1, 2, Some(text));
             g.add_edge(1, 3, None);
-            let len = text.chars().count() + 2;
+            let len = crate::text::display_width(text) + 2;
             let options = RenderOptions::plain();
 
             let lr_ir = lr_rl(&g, Direction::LeftRight);
@@ -3956,7 +3959,7 @@ mod quality {
             let mut want: alloc::vec::Vec<(String, usize, usize)> = find_labels(&lr)
                 .into_iter()
                 .map(|(l, r, c)| {
-                    let n = l.chars().count();
+                    let n = crate::text::display_width(&l);
                     (l, r, w - c - n)
                 })
                 .collect();
@@ -4540,7 +4543,7 @@ mod quality {
                 for le in 0..LayoutView::edge_count(&ir) {
                     let e = LayoutView::edge(&ir, le);
                     let Some(text) = e.label else { continue };
-                    let len = text.chars().count() + 2;
+                    let len = crate::text::display_width(text) + 2;
                     for row in 0..ir.height() {
                         let mut x0 = 0usize;
                         while x0 + len <= ir.width() {

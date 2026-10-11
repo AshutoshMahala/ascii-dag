@@ -545,7 +545,7 @@ mod tests {
     /// terminal emitter would print.
     fn glyph(kind: &CellKind) -> char {
         match *kind {
-            CellKind::Empty => ' ',
+            CellKind::Empty | CellKind::Continuation => ' ',
             CellKind::Text { ch } => ch,
             CellKind::Stroke { arms } => Charset::Unicode.decode(Cell::stroke(
                 to_weight(arms.up),
@@ -580,6 +580,7 @@ mod tests {
             ("clusters", clusters_graph),
             ("nested", nested_graph),
             ("self-loop (marker owned by the loop EDGE)", self_loop_graph),
+            ("wide text (two-column glyphs)", wide_text_graph),
         ];
         #[cfg_attr(not(feature = "layout-horizontal"), allow(unused_mut))]
         let mut directions = vec![
@@ -618,6 +619,23 @@ mod tests {
         }
     }
 
+    /// CJK node labels (plain and boxed), a CJK cluster label, a CJK
+    /// edge label, and a combining mark: every two-column glyph paints
+    /// a lead + continuation pair that the emitter collapses.
+    fn wide_text_graph() -> Graph<'static> {
+        let mut g = Graph::new();
+        g.add_node(1, "日本語");
+        g.add_node(2, crate::render::engine::BoxedNode("ノード"));
+        g.add_node(3, "e\u{301}tat");
+        g.add_node(4, "end");
+        g.add_edge(1, 2, Some("ラベル"));
+        g.add_edge(2, 4, None);
+        g.add_edge(3, 4, None);
+        let sg = g.add_subgraph("集合");
+        g.put_nodes(&[2, 3]).inside(sg).unwrap();
+        g
+    }
+
     pub(super) fn check_scene<L: super::super::scene::LayoutSource>(
         ir: &L,
         options: &PlanOptions,
@@ -637,7 +655,11 @@ mod tests {
                         scene.hit_test(x, y),
                         "{what} {dir:?} cap={cap}: owner vs hit_test at ({x},{y})"
                     );
-                    rows[y].push(glyph(&cell.kind));
+                    // A continuation column is covered by the glyph to
+                    // its left: the emitter writes nothing for it.
+                    if !matches!(cell.kind, CellKind::Continuation) {
+                        rows[y].push(glyph(&cell.kind));
+                    }
                 })
                 .unwrap();
             let assembled: Vec<&str> = rows.iter().map(|r| r.trim_end()).collect();

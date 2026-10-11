@@ -129,7 +129,7 @@ pub trait NodeContent<'a> {
     /// Reserved `(width, height)` in cells/rows. Layout routes edges
     /// around this area; the painter fills it.
     fn size(&self) -> (usize, usize) {
-        (self.label().chars().count() + 2, 1)
+        (crate::text::display_width(self.label()) + 2, 1)
     }
 
     /// The template fn that fills the reserved area, if any.
@@ -195,7 +195,7 @@ impl<'a> NodeContent<'a> for BoxedNode<'a> {
     }
 
     fn size(&self) -> (usize, usize) {
-        (self.0.chars().count() + 4, 3)
+        (crate::text::display_width(self.0) + 4, 3)
     }
 
     fn kind(&self) -> NodeKindTag {
@@ -318,7 +318,7 @@ mod tests {
         }
 
         fn size(&self) -> (usize, usize) {
-            (self.title.chars().count() + 4, 4)
+            (crate::text::display_width(self.title) + 4, 4)
         }
 
         fn painter(&self) -> Option<NodePaintFn> {

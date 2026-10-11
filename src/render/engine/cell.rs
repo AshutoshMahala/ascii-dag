@@ -92,6 +92,10 @@ const TAG_SHIFT: u32 = 30;
 const TAG_TEXT: u32 = 1;
 const TAG_STROKE: u32 = 2;
 const TAG_MARKER: u32 = 3;
+/// Text-tag flag: this cell is the second column of a wide character
+/// painted at the previous column. It carries no char and emits
+/// nothing — the lead glyph covers both columns.
+const TEXT_CONTINUATION_BIT: u32 = 1 << 21;
 
 const ARM_UP_SHIFT: u32 = 0;
 const ARM_DOWN_SHIFT: u32 = 3;
@@ -114,6 +118,12 @@ impl Cell {
     pub(crate) const fn text(ch: char) -> Cell {
         Cell((TAG_TEXT << TAG_SHIFT) | ch as u32)
     }
+
+    /// The second column of a wide character (see
+    /// [`crate::text::char_width`]): a text cell with no char that
+    /// emits nothing. Painted right after the wide lead; a canvas
+    /// invariant keeps the pair together (`BandCanvas::put`).
+    pub(crate) const CONTINUATION: Cell = Cell((TAG_TEXT << TAG_SHIFT) | TEXT_CONTINUATION_BIT);
 
     /// A stroke cell from per-arm weights.
     pub(crate) const fn stroke(up: Weight, down: Weight, left: Weight, right: Weight) -> Cell {
@@ -148,6 +158,21 @@ impl Cell {
         self.0 >> TAG_SHIFT == TAG_TEXT
     }
 
+    /// Whether this is the second column of a wide character.
+    #[inline]
+    pub(crate) fn is_continuation(self) -> bool {
+        self.is_text() && self.0 & TEXT_CONTINUATION_BIT != 0
+    }
+
+    /// Whether this is a text cell holding a two-column character —
+    /// the cell to its right must be its [`CONTINUATION`](Self::CONTINUATION).
+    #[inline]
+    pub(crate) fn is_wide_lead(self) -> bool {
+        self.is_text()
+            && self.0 & TEXT_CONTINUATION_BIT == 0
+            && crate::text::char_width(self.text_char()) == 2
+    }
+
     #[inline]
     pub(crate) fn is_stroke(self) -> bool {
         self.0 >> TAG_SHIFT == TAG_STROKE
@@ -158,9 +183,13 @@ impl Cell {
         self.0 >> TAG_SHIFT == TAG_MARKER
     }
 
-    /// The character of a text cell (undefined for other tags).
+    /// The character of a text cell (undefined for other tags; a
+    /// continuation cell reads as a space).
     #[inline]
     pub(crate) fn text_char(self) -> char {
+        if self.0 & TEXT_CONTINUATION_BIT != 0 {
+            return ' ';
+        }
         char::from_u32(self.0 & 0x001F_FFFF).unwrap_or(' ')
     }
 
@@ -311,6 +340,8 @@ impl core::fmt::Debug for Cell {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         if self.is_empty() {
             write!(f, "Cell::EMPTY")
+        } else if self.is_continuation() {
+            write!(f, "Cell::CONTINUATION")
         } else if self.is_text() {
             write!(f, "Cell::text({:?})", self.text_char())
         } else if self.is_stroke() {

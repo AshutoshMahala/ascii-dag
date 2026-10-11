@@ -1916,7 +1916,7 @@ pub(crate) fn compute_layout_cfg<'a, A: Axis>(
             //   to_y:            [target node]
             let (label_x, label_y) = label
                 .map(|lbl| {
-                    let label_len = lbl.chars().count() + 2; // +2 for quotes
+                    let label_len = crate::text::display_width(lbl) + 2; // +2 for quotes
 
                     // First row below the source level's routing block — shared
                     // with the CSR backend so label rows cannot drift.

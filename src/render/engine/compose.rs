@@ -95,6 +95,32 @@ impl<'a> BandCanvas<'a> {
         }
     }
 
+    /// Store `new` at `i`, keeping wide characters whole: a wide
+    /// character is a lead cell plus a continuation cell to its
+    /// right, and a terminal draws the lead across both columns. So
+    /// replacing a lead with anything else empties its orphaned
+    /// continuation, and replacing a continuation with anything else
+    /// blanks its lead (half a glyph cannot be drawn; a space keeps
+    /// the row's columns aligned). Every write goes through here.
+    #[inline]
+    fn put(&mut self, i: usize, new: Cell) {
+        let old = self.cells[i];
+        if old == new {
+            return;
+        }
+        let col = i % self.width;
+        if old.is_wide_lead() && col + 1 < self.width && self.cells[i + 1].is_continuation() {
+            self.cells[i + 1] = Cell::EMPTY;
+        }
+        if old.is_continuation() && !new.is_continuation() && col > 0 {
+            let lead = i - 1;
+            if self.cells[lead].is_wide_lead() {
+                self.cells[lead] = Cell::text(' ');
+            }
+        }
+        self.cells[i] = new;
+    }
+
     #[inline]
     pub(crate) fn stroke(
         &mut self,
@@ -107,7 +133,8 @@ impl<'a> BandCanvas<'a> {
         paint: Paint,
     ) {
         if let Some(i) = self.idx(x, y) {
-            self.cells[i] = self.cells[i].painted_stroke(up, down, left, right);
+            let cell = self.cells[i].painted_stroke(up, down, left, right);
+            self.put(i, cell);
             self.apply_paint(i, paint);
         }
     }
@@ -123,16 +150,44 @@ impl<'a> BandCanvas<'a> {
         paint: Paint,
     ) {
         if let Some(i) = self.idx(x, y) {
-            self.cells[i] = self.cells[i].painted_marker(kind, dir, dashed);
+            let cell = self.cells[i].painted_marker(kind, dir, dashed);
+            self.put(i, cell);
             self.apply_paint(i, paint);
         }
     }
 
+    /// Paint one character at `(x, y)` in display cells: a wide
+    /// character takes `x` and `x + 1` (lead + continuation); a
+    /// zero-width character (a combining mark, a joiner) has no cell
+    /// of its own and is not painted — callers advance by
+    /// [`crate::text::char_width`], so the next character lands where
+    /// it belongs. A wide character whose second column would fall
+    /// outside the canvas paints a space instead (layout sizes by
+    /// display width, so only a hand-built IR gets here).
     #[inline]
     pub(crate) fn text(&mut self, x: usize, y: usize, ch: char, paint: Paint) {
+        let w = crate::text::char_width(ch);
+        if w == 0 {
+            return;
+        }
         if let Some(i) = self.idx(x, y) {
-            self.cells[i] = self.cells[i].painted_text(ch);
-            self.apply_paint(i, paint);
+            if w == 2 {
+                if x + 1 >= self.width {
+                    let cell = self.cells[i].painted_text(' ');
+                    self.put(i, cell);
+                    self.apply_paint(i, paint);
+                    return;
+                }
+                let cell = self.cells[i].painted_text(ch);
+                self.put(i, cell);
+                self.apply_paint(i, paint);
+                self.put(i + 1, Cell::CONTINUATION);
+                self.apply_paint(i + 1, paint);
+            } else {
+                let cell = self.cells[i].painted_text(ch);
+                self.put(i, cell);
+                self.apply_paint(i, paint);
+            }
         }
     }
 
@@ -505,8 +560,8 @@ fn flush_row(
                 continue;
             };
             if let Some(ci) = canvas.idx(x, row) {
-                canvas.cells[ci] =
-                    canvas.cells[ci].painted_stroke(Weight::None, Weight::None, w, w);
+                let cell = canvas.cells[ci].painted_stroke(Weight::None, Weight::None, w, w);
+                canvas.put(ci, cell);
                 if colored {
                     while let Some(&(_, x1, _)) = heap.peek() {
                         if x1 < x {
@@ -1179,9 +1234,10 @@ fn paint_subgraph_label<V: LayoutView>(
     };
     let max_len = sg.width.saturating_sub(4);
     let mut x = sg.x + 2;
-    for ch in sg.label.chars().take(max_len) {
+    let (text, _) = crate::text::fit_prefix(sg.label, max_len);
+    for ch in text.chars() {
         canvas.text(x, label_y, ch, Paint::KeepColor);
-        x += 1;
+        x += crate::text::char_width(ch);
     }
 }
 
@@ -1278,11 +1334,12 @@ fn paint_node_simple(n: &super::view::NodeRef<'_>, canvas: &mut BandCanvas<'_>, 
     canvas.text(x, n.y, open, paint);
     x += 1;
     for ch in n.label.chars() {
-        if x >= close_x {
+        let w = crate::text::char_width(ch);
+        if x + w > close_x {
             break;
         }
         canvas.text(x, n.y, ch, paint);
-        x += 1;
+        x += w;
     }
     if n.width >= 2 {
         canvas.text(close_x, n.y, close, paint);
@@ -1334,9 +1391,10 @@ fn paint_node_boxed(n: &super::view::NodeRef<'_>, canvas: &mut BandCanvas<'_>, p
     if in_band(label_y) {
         let max_len = n.width.saturating_sub(4);
         let mut x = left + 2;
-        for ch in n.label.chars().take(max_len) {
+        let (text, _) = crate::text::fit_prefix(n.label, max_len);
+        for ch in text.chars() {
             canvas.text(x, label_y, ch, paint);
-            x += 1;
+            x += crate::text::char_width(ch);
         }
     }
 }
@@ -1355,7 +1413,7 @@ fn paint_edge_label<V: LayoutView>(
     x += 1;
     for ch in text.chars() {
         canvas.text(x, label.y, ch, paint);
-        x += 1;
+        x += crate::text::char_width(ch);
     }
     canvas.text(x, label.y, '"', paint);
 }
@@ -1381,6 +1439,55 @@ mod tests {
         let mut out = alloc::string::String::new();
         super::super::emit::emit_plain_band(&canvas, options.emit.charset, &mut out).unwrap();
         out
+    }
+
+    /// A wide character is a lead + continuation pair, and every write
+    /// keeps pairs whole: overwriting the continuation blanks the lead,
+    /// overwriting the lead empties the continuation, a wide character
+    /// at the canvas edge paints a space, a zero-width character paints
+    /// nothing, and emission writes the lead glyph once per pair.
+    #[test]
+    fn wide_characters_stay_whole_on_the_canvas() {
+        let mut cells = vec![Cell::EMPTY; 10];
+        let mut canvas = BandCanvas::new(&mut cells, None, 10, 0, 1);
+        canvas.text(0, 0, '日', Paint::KeepColor);
+        canvas.text(2, 0, 'b', Paint::KeepColor);
+        canvas.text(3, 0, '\u{301}', Paint::KeepColor); // combining: no cell
+        canvas.text(3, 0, '本', Paint::KeepColor);
+        canvas.text(9, 0, '語', Paint::KeepColor); // no room for its second column
+        let row = canvas.row(0).to_vec();
+        assert_eq!(row[0], Cell::text('日'));
+        assert_eq!(row[1], Cell::CONTINUATION);
+        assert_eq!(row[2], Cell::text('b'));
+        assert_eq!(row[3], Cell::text('本'));
+        assert_eq!(row[4], Cell::CONTINUATION);
+        assert_eq!(row[9], Cell::text(' '));
+        let mut out = alloc::string::String::new();
+        super::super::emit::emit_plain_band(&canvas, crate::Charset::Unicode, &mut out).unwrap();
+        assert_eq!(out, "日b本\n");
+        // Overwrite the continuation: the lead becomes a space.
+        canvas.text(1, 0, 'x', Paint::KeepColor);
+        assert_eq!(canvas.row(0)[0], Cell::text(' '));
+        assert_eq!(canvas.row(0)[1], Cell::text('x'));
+        // Overwrite the lead: the continuation is emptied.
+        canvas.text(3, 0, 'y', Paint::KeepColor);
+        assert_eq!(canvas.row(0)[3], Cell::text('y'));
+        assert_eq!(canvas.row(0)[4], Cell::EMPTY);
+        // A border stroke replaces text — and keeps the pair rule.
+        canvas.text(5, 0, '字', Paint::KeepColor);
+        let d = Weight::Double;
+        canvas.stroke(5, 0, d, d, Weight::None, Weight::None, Paint::KeepColor);
+        assert!(canvas.row(0)[5].is_stroke());
+        assert_eq!(canvas.row(0)[6], Cell::EMPTY);
+        // A light stroke loses to text, continuation included.
+        canvas.text(7, 0, '字', Paint::KeepColor);
+        let l = Weight::Light;
+        canvas.stroke(8, 0, l, l, Weight::None, Weight::None, Paint::KeepColor);
+        assert_eq!(canvas.row(0)[7], Cell::text('字'));
+        assert_eq!(canvas.row(0)[8], Cell::CONTINUATION);
+        let mut out = alloc::string::String::new();
+        super::super::emit::emit_plain_band(&canvas, crate::Charset::Unicode, &mut out).unwrap();
+        assert_eq!(out, " xby ║ 字\n");
     }
 
     /// The rolling sweep serves the driver loops' ascending band order

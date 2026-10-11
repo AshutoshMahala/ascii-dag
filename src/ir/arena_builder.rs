@@ -536,7 +536,7 @@ impl<'a> LayoutIRArenaBuilder<'a> {
             if edge.label_len > 0 {
                 let bytes = &self.labels[edge.label_offset..edge.label_offset + edge.label_len];
                 let chars = core::str::from_utf8(bytes)
-                    .map(|t| t.chars().count())
+                    .map(crate::text::display_width)
                     .unwrap_or(edge.label_len);
                 edge.label_x = w.saturating_sub(edge.label_x + chars + 2);
             }

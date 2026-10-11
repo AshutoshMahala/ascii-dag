@@ -1512,8 +1512,8 @@ impl<'a> Graph<'a> {
             // ⟨ID⟩ format
             2 + Self::count_digits(id) // ⟨ + digits + ⟩
         } else {
-            // [Label] format
-            2 + label.chars().count() // [ + label + ]
+            // [Label] format, in display cells
+            2 + crate::text::display_width(label) // [ + label + ]
         }
     }
 

@@ -573,7 +573,7 @@ impl<'buf> RenderPlan<'buf> {
         for i in 0..view.edge_count() {
             let e = view.edge(i);
             let Some(text) = e.label else { continue };
-            let len = text.chars().count() + 2;
+            let len = crate::text::display_width(text) + 2;
             let (mut x, mut y) = (e.label_x, e.label_y);
             let mut placeable = false;
             let is_x = matches!(e.flow_axis, crate::ir::FlowAxis::X);
@@ -1252,7 +1252,7 @@ impl<'buf> RenderPlan<'buf> {
                                         (sg.y + sg.height).saturating_sub(2)
                                     }
                                 };
-                                let len = sg.label.chars().count().min(sg.width - 4);
+                                let len = crate::text::fit_width(sg.label, sg.width - 4);
                                 if y == label_y && x >= sg.x + 2 && x < sg.x + 2 + len {
                                     hit_subgraph = HitResult::Subgraph(sg.id);
                                 }
@@ -2632,7 +2632,7 @@ pub(super) fn slide_blocked<V: LayoutView>(
     for si in 0..view.subgraph_count() {
         let sg = view.subgraph(si);
         if sg.height >= 3 && sg.width >= 4 && row == sg_label_row(si, &sg) {
-            let text_len = sg.label.chars().count().min(sg.width - 4);
+            let text_len = crate::text::fit_width(sg.label, sg.width - 4);
             let (lx0, lx1) = (sg.x + 2, sg.x + 2 + text_len);
             if lx0 < x1 && lx1 > x0 {
                 return true;

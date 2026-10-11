@@ -97,7 +97,8 @@ impl<'r, 'a> NodeRegion<'r, 'a> {
     }
 
     /// Put one character at node-local `(x, y)` in the node's text
-    /// color. Out-of-region coordinates are ignored.
+    /// color. Out-of-region coordinates are ignored. A wide character
+    /// also takes `x + 1`; a zero-width one paints nothing.
     pub fn set(&mut self, x: usize, y: usize, ch: char) {
         self.set_colored(x, y, ch, self.color);
     }
@@ -112,16 +113,22 @@ impl<'r, 'a> NodeRegion<'r, 'a> {
             .text(self.x0 + x, self.y0 + y, ch, Paint::Color(color));
     }
 
-    /// Write a string starting at node-local `(x, y)`; characters that
-    /// would leave the region are dropped, and a start outside the
-    /// region writes nothing (no arithmetic on out-of-range starts —
-    /// the iteration is bounded before any offset is computed).
+    /// Write a string starting at node-local `(x, y)`, measured in
+    /// display cells (a wide character takes two, a combining mark
+    /// none — see [`crate::text::display_width`]); characters that
+    /// would leave the region are dropped, a wide character that would
+    /// straddle the edge with them, and a start outside the region
+    /// writes nothing (no arithmetic on out-of-range starts — the
+    /// iteration is bounded before any offset is computed).
     pub fn write_str(&mut self, x: usize, y: usize, text: &str) {
         if x >= self.width || y >= self.height {
             return;
         }
-        for (i, ch) in text.chars().take(self.width - x).enumerate() {
-            self.set(x + i, y, ch);
+        let (text, _) = crate::text::fit_prefix(text, self.width - x);
+        let mut cx = x;
+        for ch in text.chars() {
+            self.set(cx, y, ch);
+            cx += crate::text::char_width(ch);
         }
     }
 }

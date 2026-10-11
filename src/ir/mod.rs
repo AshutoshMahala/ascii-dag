@@ -455,7 +455,7 @@ impl<'a> LayoutIR<'a> {
             // and only when it exists (an unlabeled edge's 0-default
             // must not become a right-edge coordinate).
             if let Some(text) = edge.label {
-                let span = text.chars().count() + 2;
+                let span = crate::text::display_width(text) + 2;
                 edge.label_x = w.saturating_sub(edge.label_x + span);
             }
             // `flow_axis` is mirror-invariant (D2) and copies verbatim;

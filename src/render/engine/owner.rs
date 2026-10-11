@@ -268,7 +268,7 @@ pub(crate) fn owner_rasterize_band<V: LayoutView>(
                         }
                     };
                     if label_y == y {
-                        let len = sg.label.chars().count().min(sg.width - 4);
+                        let len = crate::text::fit_width(sg.label, sg.width - 4);
                         for x in sg.x + 2..(sg.x + 2 + len).min(width) {
                             if plane[base + x] == OWNER_NONE {
                                 plane[base + x] = owner;

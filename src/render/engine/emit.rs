@@ -173,6 +173,11 @@ pub(crate) fn emit_plain_band<W: core::fmt::Write>(
             end -= 1;
         }
         for cell in &row[..end] {
+            // A wide character's second column: covered by the lead
+            // glyph, so it emits nothing.
+            if cell.is_continuation() {
+                continue;
+            }
             out.write_char(charset.decode(*cell))?;
         }
         out.write_char('\n')?;
@@ -200,6 +205,9 @@ pub(crate) fn emit_colored_band<W: core::fmt::Write>(
         }
         let mut last = CellColor::DEFAULT;
         for (i, cell) in row[..end].iter().enumerate() {
+            if cell.is_continuation() {
+                continue;
+            }
             let color = color_row.map_or(CellColor::DEFAULT, |cr| cr[i]);
             if color.is_set() && color != last {
                 write_fg(out, color, mode)?;

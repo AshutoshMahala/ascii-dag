@@ -353,9 +353,12 @@ intermediate installation or release is needed.
 
 ## Limitations
 
-Text-grid output: edges route orthogonally (no diagonals), wide
-Unicode in labels counts as one cell per `char`, and layouts optimize
-for readability rather than minimal area. Very dense graphs (hundreds
+Text-grid output: edges route orthogonally (no diagonals), text is
+measured per Unicode scalar (a CJK or emoji glyph is two cells, a
+combining mark none — see `ascii_dag::text`; ZWJ emoji sequences and
+flag pairs measure as their scalars, and combining marks are dropped
+from painted labels, so prefer precomposed forms), and layouts
+optimize for readability rather than minimal area. Very dense graphs (hundreds
 of edges crossing one level) reach a point where any text grid stops
 being readable — that is a property of the medium, not the layout.
 
